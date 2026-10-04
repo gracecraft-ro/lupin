@@ -32,6 +32,7 @@
             nativeCheckInputs = [ pkgs.python3Packages.pytestCheckHook pkgs.redis ];
             # `lupin serve` shells out to these fixed read-only probes and
             # runs them from PATH, so they belong on the wrapper's PATH.
+            # `systemd` is Linux-only and this flake builds for darwin too.
             # `omp` is deliberately absent: it is not in nixpkgs. The caller
             # puts it on PATH (ghostbook.nix's ai-skills-claude module ships
             # it), and the usage page already reports a row as unavailable
@@ -40,12 +41,14 @@
               "--prefix"
               "PATH"
               ":"
-              (nixpkgs.lib.makeBinPath [
-                pkgs.gh
-                pkgs.git
-                pkgs.tmux
-                pkgs.systemd
-              ])
+              (nixpkgs.lib.makeBinPath (
+                [
+                  pkgs.gh
+                  pkgs.git
+                  pkgs.tmux
+                ]
+                ++ nixpkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd ]
+              ))
             ];
             meta = {
               description = "Model routing and slot leases for multi-machine delegation loops";
