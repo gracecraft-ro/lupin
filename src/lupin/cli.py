@@ -2,23 +2,31 @@
 
 `route` and `classify` are the model-routing calls moved from
 hosts/jesus/loopgui/ (issue #203). `acquire`/`hold`/`release`/`status` are
-the slot-lease commands (issue #205), backed by lupin.slots' `local`
-backend. Both groups share one process so a caller only has one binary to
+the slot-lease commands (issue #205 for the `local` backend, #210 for
+`redis`). Both groups share one process so a caller only has one binary to
 find and one `lupin --help` to read; the two concerns (route decisions,
 lease state) stay as separate modules underneath, same as this project's
 other CLIs already split "decide" from "do" (see review_dispatch.py's
 docstring in the repo this was moved out of).
+
+Backend choice: `--backend local|redis` on each slot subcommand, default
+from the `LUPIN_BACKEND` env var, falling back to `local` if neither is
+set. An env var as the default (not a required flag) means a host's own
+config (a systemd `Environment=`, a shell profile) picks the backend once,
+and every call site -- `delegation-launch`, `loopctl`, an interactive
+`lupin status` -- doesn't need its own copy of that choice.
 
 Exit codes, by design (see #198's architecture plan):
   0  done
   2  busy/full (acquire, hold) -- skip and try again later, or a usage error
      from argparse itself (its own default for a bad flag; both meanings are
      "this invocation didn't produce a result", so sharing the code is fine)
-  3  reserved for "cannot reach the coordinator" -- the `local` backend's
-     coordinator is the filesystem, which this process always reaches once
-     the state root is writable, so nothing here actually returns 3 today.
-     It is reserved so a future `redis` backend can use it without changing
-     this contract.
+  3  cannot reach the coordinator, and this slot has no local fallback. The
+     `local` backend's coordinator is the filesystem, which it always
+     reaches once the state root is writable, so it never returns 3. The
+     `redis` backend returns 3 for any slot other than `bmo` when Redis is
+     unreachable -- `bmo` falls back to the `local` backend instead (see
+     `slots_redis.py`), so it does not reach this exit code.
   1  any other error (malformed lease id, bad JSON input, hold with neither
      --lease nor <slot>/--holder, etc.)
 """
@@ -27,11 +35,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from . import classify as classify_mod
 from . import route as route_mod
 from . import slots
+from . import slots_redis
 
 
 def _route_args(parser: argparse.ArgumentParser) -> None:
@@ -54,8 +64,28 @@ def _classify_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true")
 
 
-def _slot_common_args(parser: argparse.ArgumentParser) -> None:
+def _state_root_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--state-root", default=None, help="default: $LUPIN_STATE_ROOT or ~/.lupin/slots")
+
+
+def _backend_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--backend", choices=["local", "redis"], default=os.environ.get("LUPIN_BACKEND", "local"),
+        help="slot-lease backend (default: $LUPIN_BACKEND or local)",
+    )
+    parser.add_argument(
+        "--redis-host", default=os.environ.get("LUPIN_REDIS_HOST", "localhost"),
+        help="redis backend only (default: $LUPIN_REDIS_HOST or localhost)",
+    )
+    parser.add_argument(
+        "--redis-port", type=int, default=int(os.environ.get("LUPIN_REDIS_PORT", "6379")),
+        help="redis backend only (default: $LUPIN_REDIS_PORT or 6379)",
+    )
+
+
+def _slot_common_args(parser: argparse.ArgumentParser) -> None:
+    _state_root_arg(parser)
+    _backend_args(parser)
     parser.add_argument("--ttl", type=float, default=slots.DEFAULT_TTL, help="lease TTL in seconds")
 
 
@@ -81,12 +111,14 @@ def _hold_args(parser: argparse.ArgumentParser) -> None:
 
 def _release_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--lease", required=True)
-    parser.add_argument("--state-root", default=None)
+    _state_root_arg(parser)
+    _backend_args(parser)
 
 
 def _status_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true")
-    parser.add_argument("--state-root", default=None)
+    _state_root_arg(parser)
+    _backend_args(parser)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -130,19 +162,35 @@ def _cmd_classify(args: argparse.Namespace) -> int:
     return 0
 
 
+def _backend_module(args: argparse.Namespace):
+    return slots_redis if args.backend == "redis" else slots
+
+
+def _backend_kwargs(args: argparse.Namespace) -> dict:
+    """Extra kwargs the `redis` backend needs that `local` doesn't take."""
+    if args.backend == "redis":
+        return {"redis_host": args.redis_host, "redis_port": args.redis_port}
+    return {}
+
+
 def _cmd_acquire(args: argparse.Namespace) -> int:
+    backend = _backend_module(args)
     try:
-        lease = slots.acquire(
+        lease = backend.acquire(
             args.slot,
             args.holder,
             wait=args.wait,
             ttl=args.ttl,
             max_holders=args.max_holders,
             state_root=args.state_root,
+            **_backend_kwargs(args),
         )
     except slots.SlotFull:
         print(f"slot {args.slot!r} is full", file=sys.stderr)
         return 2
+    except slots.CoordinatorUnreachable:
+        print(f"cannot reach the {args.backend} coordinator for slot {args.slot!r}", file=sys.stderr)
+        return 3
     print(lease)
     return 0
 
@@ -157,8 +205,9 @@ def _cmd_hold(args: argparse.Namespace, command: list[str]) -> int:
     if not args.lease and not (args.slot and args.holder):
         print("hold needs either --lease ID, or <slot> --holder H", file=sys.stderr)
         return 1
+    backend = _backend_module(args)
     try:
-        return slots.hold(
+        return backend.hold(
             command,
             lease=args.lease,
             slot=args.slot,
@@ -167,23 +216,32 @@ def _cmd_hold(args: argparse.Namespace, command: list[str]) -> int:
             ttl=args.ttl,
             max_holders=args.max_holders,
             state_root=args.state_root,
+            **_backend_kwargs(args),
         )
     except slots.SlotFull:
         print(f"slot {args.slot!r} is full", file=sys.stderr)
         return 2
+    except slots.CoordinatorUnreachable:
+        print(f"cannot reach the {args.backend} coordinator for slot {args.slot!r}", file=sys.stderr)
+        return 3
 
 
 def _cmd_release(args: argparse.Namespace) -> int:
+    backend = _backend_module(args)
     try:
-        slots.release(args.lease, state_root=args.state_root)
+        backend.release(args.lease, state_root=args.state_root, **_backend_kwargs(args))
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 1
+    except slots.CoordinatorUnreachable:
+        print(f"cannot reach the {args.backend} coordinator for lease {args.lease!r}", file=sys.stderr)
+        return 3
     return 0
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
-    result = slots.status(state_root=args.state_root)
+    backend = _backend_module(args)
+    result = backend.status(state_root=args.state_root, **_backend_kwargs(args))
     if args.json:
         print(json.dumps(result))
     else:

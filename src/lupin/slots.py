@@ -27,11 +27,10 @@ import fcntl
 import json
 import os
 import secrets
-import signal
-import subprocess
-import threading
 import time
 from pathlib import Path
+
+from . import _lease_runtime
 
 
 class SlotFull(Exception):
@@ -159,11 +158,7 @@ def acquire(
         time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
 
 
-def _split_lease(lease: str) -> tuple[str, str]:
-    slot, sep, token = lease.partition(":")
-    if not sep or not slot or not token:
-        raise ValueError(f"malformed lease id: {lease!r}")
-    return slot, token
+_split_lease = _lease_runtime.split_lease
 
 
 def renew(lease: str, *, ttl: float = DEFAULT_TTL, state_root: str | Path | None = None) -> bool:
@@ -268,6 +263,10 @@ def hold(
     caught by anything, in any language, so that case is out of scope
     (nothing could run a release in that case regardless of how this
     function is written).
+
+    The subprocess/renew-timer/signal-forwarding mechanics live in
+    `_lease_runtime.run_with_lease`, shared with the `redis` backend's own
+    `hold` -- only the renew/release calls underneath differ per backend.
     """
     if lease is None:
         if slot is None or holder is None:
@@ -276,40 +275,10 @@ def hold(
             slot, holder, wait=wait, ttl=ttl, max_holders=max_holders, state_root=state_root
         )
 
-    renew_interval = max(ttl / 3, 0.1)
-    stop = threading.Event()
-
-    def _renew_loop() -> None:
-        while not stop.wait(renew_interval):
-            renew(lease, ttl=ttl, state_root=state_root)
-
-    renewer = threading.Thread(target=_renew_loop, daemon=True)
-    renewer.start()
-
-    proc = subprocess.Popen(command)
-
-    def _forward_sigterm(signum: int, _frame: object) -> None:
-        with contextlib.suppress(ProcessLookupError):
-            proc.send_signal(signum)
-
-    # signal.signal() only works from the main thread of the main
-    # interpreter -- skip installing the forwarding handler from any other
-    # thread (e.g. a test driving `hold` from a worker thread). The child
-    # still gets released in `finally` below no matter how it dies; this
-    # handler only covers the extra case of something sending SIGTERM to
-    # the `hold` process itself.
-    previous_handler = None
-    if threading.current_thread() is threading.main_thread():
-        previous_handler = signal.signal(signal.SIGTERM, _forward_sigterm)
-    try:
-        returncode = proc.wait()
-    finally:
-        stop.set()
-        renewer.join(timeout=renew_interval + 1)
-        if previous_handler is not None:
-            signal.signal(signal.SIGTERM, previous_handler)
-        release(lease, state_root=state_root)
-
-    if returncode < 0:
-        return 128 - returncode
-    return returncode
+    return _lease_runtime.run_with_lease(
+        command,
+        lease,
+        ttl=ttl,
+        renew=lambda lease_id: renew(lease_id, ttl=ttl, state_root=state_root),
+        release=lambda lease_id: release(lease_id, state_root=state_root),
+    )

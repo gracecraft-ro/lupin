@@ -24,10 +24,12 @@
             pyproject = true;
             src = self;
             build-system = [ pkgs.python3Packages.setuptools ];
-            # Standard library only -- no runtime dependencies yet. A later
-            # sub-issue adds python3Packages.redis for the `redis` backend.
-            dependencies = [ ];
-            nativeCheckInputs = [ pkgs.python3Packages.pytestCheckHook ];
+            # python3Packages.redis is the `redis` backend's only runtime
+            # dependency (issue #210).
+            dependencies = [ pkgs.python3Packages.redis ];
+            # pkgs.redis is the server binary -- tests spin up a real
+            # redis-server subprocess rather than mocking the client.
+            nativeCheckInputs = [ pkgs.python3Packages.pytestCheckHook pkgs.redis ];
             meta = {
               description = "Model routing and slot leases for multi-machine delegation loops";
               mainProgram = "lupin";
