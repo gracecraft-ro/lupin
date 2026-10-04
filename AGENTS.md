@@ -1,37 +1,41 @@
 # lupin
 
-`lupin` is a tool for multi-machine task loops. It does two jobs:
+`lupin` is a tool for multi-machine task loops. It does three jobs:
 
-1. It picks a model and effort level for a task. Commands: `route`, `classify`.
+1. It picks a model and effort level for a task. Commands: `route`,
+   `classify`, `review-route`.
 2. It controls slots. A slot is a resource with a limit on how many
    callers can use it at one time. Commands: `acquire`, `hold`, `release`,
    `status`.
+3. It serves a read-only dashboard for the loops. Command: `serve`.
 
 One program, `lupin`, with subcommands. Run `lupin --help` for the full list.
 
 ## Status of this repo
 
-This repo has no GitHub remote yet. It is prep work for a future repo,
-`gracecraft/lupin`. See `docs/delegation-loop.md` for the rule this implies.
+The repo is `gracecraft/lupin`. It is mounted into the jesus sandbox at
+`/code/lupin`. See `docs/delegation-loop.md` for the push rule.
 
 ## Commands
 
 ```
 lupin route <category> <size> [--no-bmo] [--primary-effort E] [--json]
 lupin classify --issue-json FILE [--diff-stat FILE] [--json]
+lupin review-route (--category C --size S | --issue-json FILE) [--mode M] [--json]
 lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
 lupin hold (--lease ID | <slot> --holder H --wait S) [--ttl SECONDS] -- <command>
 lupin release --lease ID
 lupin status [--json]
+lupin serve [--bind 127.0.0.1] [--port 8788] [--roadmap REPO]
 ```
 
 `route` and `classify` print a plain result by default (`model effort`, or
 `category size`). Add `--json` for a JSON object instead.
 
 `acquire` prints a lease ID on success. Exit code 2 means the slot is full
-— the caller should skip and try again later. Exit code 3 is reserved for a
-future backend that talks to a remote coordinator; the backend in this repo
-never returns it, since its coordinator is the local filesystem.
+— the caller should skip and try again later. Exit code 3 means the `redis`
+backend cannot reach the coordinator and the slot has no local fallback.
+The `local` backend's coordinator is the filesystem, so it never returns 3.
 
 `hold` acquires a lease (or reuses one from `--lease`), runs `<command>`,
 renews the lease while the command runs, and releases it when the command
@@ -50,8 +54,10 @@ a later call does nothing. `status` reads the same stored limit.
 The `local` backend stores slot state as files, under
 `$LUPIN_STATE_ROOT` or `~/.lupin/slots/` by default. Each slot is one
 directory; each active holder is one file inside it, holding a PID and an
-expiry time. A later backend (`redis`, not in this repo yet) will cover
-leases that need to be seen across machines.
+expiry time. The `redis` backend (`slots_redis.py`) covers leases that
+several machines must see. Its schema is in `docs/redis-schema.md`.
+
+The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 
 ## Code layout
 
@@ -59,7 +65,14 @@ leases that need to be seen across machines.
   — moved from `ghostbook.nix`. See the comments at the top of each file for
   the source commit.
 - `src/lupin/slots.py` — the `local` slot backend. New code.
-- `src/lupin/cli.py` — the `lupin` command. Wires the above into subcommands.
+- `src/lupin/slots_redis.py` — the `redis` slot backend, with a fallback to
+  `local` for the `bmo` slot.
+- `src/lupin/review_dispatch.py` — picks which lock a routed model needs.
+- `src/lupin/serve.py`, `src/lupin/roadmap.py` — the dashboard. Moved from
+  `ghostbook.nix`'s `hosts/jesus/loopgui/` (issue #204).
+- `src/lupin/cli.py` — the `lupin` command. It owns the argument parsing for
+  every subcommand; the modules above take an argument list instead of
+  parsing their own.
 - `tests/` — one test file per module above.
 
 ## Build and test

@@ -1,13 +1,13 @@
 """The `lupin` command-line entry point: one executable, subcommands.
 
-`route` and `classify` are the model-routing calls moved from
-hosts/jesus/loopgui/ (issue #203). `acquire`/`hold`/`release`/`status` are
-the slot-lease commands (issue #205 for the `local` backend, #210 for
-`redis`). Both groups share one process so a caller only has one binary to
-find and one `lupin --help` to read; the two concerns (route decisions,
-lease state) stay as separate modules underneath, same as this project's
-other CLIs already split "decide" from "do" (see review_dispatch.py's
-docstring in the repo this was moved out of).
+`route` and `classify` are the model-routing calls, moved out of
+ghostbook.nix in issue #203. `acquire`/`hold`/`release`/`status` are the
+slot-lease commands (issue #205 for the `local` backend, #210 for
+`redis`). `review-route` picks which lock a routed model needs (issue
+#185) and `serve` runs the read-only dashboard (issue #204). All of them
+share one process so a caller has one binary to find and one `lupin --help`
+to read; the concerns stay as separate modules underneath, same as this
+project's other CLIs split "decide" from "do" (see review_dispatch.py).
 
 Backend choice: `--backend local|redis` on each slot subcommand, default
 from the `LUPIN_BACKEND` env var, falling back to `local` if neither is
