@@ -1,0 +1,1643 @@
+"""Read and render one repository's open issue roadmap."""
+
+from __future__ import annotations
+
+import html
+import json
+import os
+import re
+import subprocess
+import tempfile
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+from urllib.parse import quote, urlsplit
+
+CODE_DIR = "/code"
+GITHUB_CACHE_SECONDS = 60 * 60
+LEDGER_CACHE_SECONDS = 5 * 60
+GRAPHQL = """query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){issues(first:100,after:$cursor,states:OPEN,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number comments(last:20){nodes{body createdAt url author{login}}}} pageInfo{hasNextPage endCursor}}}}"""
+IMAGE = re.compile(r"!\[([^\]]*)\]\((https://[^)\s]+)\)")
+ATTACHMENT_ID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+ATTACHMENT_PATH = "/user-attachments/assets/"
+
+LEDGER_STATUS_NOTE = (
+    "In-flight status comes from the last ledger action. It does not confirm that a process is running. "
+    "Parallel status is an estimate. Check the live issue and worktree before dispatch."
+)
+QUEUE_STAGE_NOTE = (
+    "Marked in flight means the ledger records a dispatch action. Eligible issues are not dispatched, "
+    "held, or waiting on an open dependency. Next batch starts with the first eligible issue and can "
+    "add one more only when both have known, non-overlapping files and do not touch bottleneck files. "
+    "Next up holds other eligible P0/P1 issues. Blocked or held means a decision, unresolved dependency, "
+    "or holding label prevents work, or the issue has an open dependency. All remaining issues are in "
+    "Later queue."
+)
+
+
+def github_attachment_id(url: str) -> str | None:
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return None
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "github.com"
+        or parsed.query
+        or parsed.fragment
+        or not parsed.path.startswith(ATTACHMENT_PATH)
+    ):
+        return None
+    attachment_id = parsed.path[len(ATTACHMENT_PATH) :]
+    return attachment_id if ATTACHMENT_ID.fullmatch(attachment_id) else None
+
+
+IMAGE_HOSTS = {
+    "github.com",
+    "images.githubusercontent.com",
+    "private-user-images.githubusercontent.com",
+    "user-images.githubusercontent.com",
+}
+LOS_ANGELES = ZoneInfo("America/Los_Angeles")
+
+
+def _parse_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _compact_time(value: str | None) -> str:
+    parsed = _parse_time(value)
+    if not parsed:
+        return str(value or "Time unknown")
+    return parsed.astimezone(LOS_ANGELES).strftime("%b %d, %I:%M %p %Z").replace(
+        " 0", " "
+    )
+
+
+def _activity_group(value: str | None, now: datetime) -> str:
+    parsed = _parse_time(value)
+    if not parsed:
+        return "Time unknown"
+    age = max(now - parsed, timedelta(0))
+    if age <= timedelta(hours=1):
+        return "Past hour"
+    if age <= timedelta(hours=6):
+        return "Past 6 hours"
+    if age <= timedelta(hours=24):
+        return "Past 24 hours"
+    if age <= timedelta(days=7):
+        return "Past 7 days"
+    return "Older than 7 days"
+SOURCE_PATH = re.compile(
+    r"\b(?:src|tests|scripts|site|infra|hosts|modules|docs)/[\w./-]+\.(?:ts|tsx|js|mjs|svelte|css|html|sql|py|sh|nix|rs|go|md|json|ya?ml|toml)\b"
+)
+BOTTLENECKS = {
+    "roundsmith": {"index.html", "src/ui/shell.ts", "src/styles/components.css"},
+}
+_GITHUB_CACHE = {}
+_LEDGER_CACHE = {}
+_CACHE_LOCK = threading.Lock()
+CACHE_FILE = "/home/ghosta/.local/state/lupin/cache.json"
+
+
+def _load_cache():
+    try:
+        with open(CACHE_FILE, encoding="utf-8") as handle:
+            saved = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(saved, dict):
+        return
+    now_wall = time.time()
+    now_monotonic = time.monotonic()
+    with _CACHE_LOCK:
+        for row in saved.get("github", []):
+            if isinstance(row, list) and len(row) == 4:
+                repo, state, timestamp, data = row
+                _GITHUB_CACHE[(repo, state)] = (
+                    now_monotonic - max(0, now_wall - timestamp),
+                    tuple(data),
+                )
+        for row in saved.get("ledger", []):
+            if isinstance(row, list) and len(row) == 3:
+                repo, timestamp, data = row
+                _LEDGER_CACHE[repo] = (
+                    now_monotonic - max(0, now_wall - timestamp),
+                    tuple(data),
+                )
+
+
+def _persist_cache():
+    now_monotonic = time.monotonic()
+    now_wall = time.time()
+    saved = {
+        "github": [
+            [repo, state, now_wall - max(0, now_monotonic - timestamp), data]
+            for (repo, state), (timestamp, data) in _GITHUB_CACHE.items()
+        ],
+        "ledger": [
+            [repo, now_wall - max(0, now_monotonic - timestamp), data]
+            for repo, (timestamp, data) in _LEDGER_CACHE.items()
+        ],
+    }
+    try:
+        directory = os.path.dirname(CACHE_FILE)
+        os.makedirs(directory, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=directory, delete=False
+        ) as handle:
+            json.dump(saved, handle)
+            temporary_path = handle.name
+        os.replace(temporary_path, CACHE_FILE)
+    except OSError:
+        try:
+            os.unlink(temporary_path)
+        except (OSError, UnboundLocalError):
+            pass
+
+
+_load_cache()
+
+
+def _run_json(argv: list[str], cwd: str, timeout: int = 60):
+    try:
+        result = subprocess.run(
+            argv,
+            cwd=cwd,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError:
+        return None, f"{argv[0]} is not installed"
+    except OSError as error:
+        return None, f"{argv[0]} could not start: {error}"
+    except subprocess.TimeoutExpired:
+        return None, f"{argv[0]} timed out after {timeout} seconds"
+    if result.returncode:
+        error = (result.stderr or result.stdout or f"{argv[0]} failed").strip()
+        error = re.sub(r"(?:gh[oprsu]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)", "[redacted]", error)
+        return None, error
+    try:
+        return json.loads(result.stdout), None
+    except json.JSONDecodeError as error:
+        return None, f"invalid JSON from {argv[0]}: {error}"
+
+
+def _read_ledger(repo_path: str):
+    path = os.path.join(repo_path, ".loop", "loop-state.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            ledger = json.load(handle)
+    except OSError as error:
+        return [], f"Could not read .loop/loop-state.json: {error.strerror or error}"
+    except json.JSONDecodeError as error:
+        return [], f"Could not parse .loop/loop-state.json: {error}"
+    if isinstance(ledger, list):
+        return ledger, None
+    if isinstance(ledger, dict) and isinstance(ledger.get("entries"), list):
+        return ledger["entries"], None
+    return [], ".loop/loop-state.json has an unsupported format"
+
+
+# A digest is the handoff summary split into four labelled bullet lists.
+# Old entries carry the same content as prose in `summary` and `followups`;
+# `_digest` reads those too, so a ledger written before the split still renders.
+DIGEST_FIELDS = (
+    ("highlights", "Highlights"),
+    ("evidence", "Evidence"),
+    ("decisions", "Decisions"),
+    ("next", "Next"),
+)
+DIGEST_HEADLINE_CHARS = 200
+
+
+def _bullets(value) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    lines = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        for part in item.splitlines():
+            part = re.sub(r"\s+", " ", part).strip().lstrip("-*• ").strip()
+            if part:
+                lines.append(part)
+    return lines
+
+
+def _digest(entry: dict) -> dict | None:
+    """Return a headline plus labelled bullet lists, or None when empty."""
+    if not isinstance(entry, dict):
+        return None
+    fields = []
+    for key, label in DIGEST_FIELDS:
+        value = entry.get(key)
+        if key == "next" and value is None:
+            value = entry.get("followups")
+        bullets = _bullets(value)
+        if bullets:
+            fields.append({"key": key, "label": label, "bullets": bullets})
+    headline = re.sub(r"\s+", " ", str(entry.get("summary") or "")).strip()
+    if not fields and not headline:
+        return None
+    return {
+        "headline": headline[:DIGEST_HEADLINE_CHARS]
+        + ("…" if len(headline) > DIGEST_HEADLINE_CHARS else ""),
+        "fields": fields,
+        "timestamp": entry.get("timestamp"),
+    }
+
+
+def render_digest(digest: dict | None) -> str:
+    if not digest:
+        return ""
+    parts = ["<div class='digest'>"]
+    if digest["headline"]:
+        parts.append(f"<p class='digest-headline'>{html.escape(digest['headline'])}</p>")
+    for field in digest["fields"]:
+        items = "".join(
+            f"<li>{html.escape(bullet)}</li>" for bullet in field["bullets"]
+        )
+        parts.append(
+            f"<div class='digest-field' data-digest-field='{_escape_attr(field['key'])}'>"
+            f"<span class='digest-label'>{html.escape(field['label'])}</span>"
+            f"<ul>{items}</ul></div>"
+        )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+DIGEST_CSS = """
+.digest{margin:.5rem 0;padding:.5rem .7rem;border-left:3px solid var(--line);background:var(--code);border-radius:0 6px 6px 0}
+.digest-headline{margin:0 0 .35rem;font-weight:600}
+.digest-field{display:grid;grid-template-columns:7.5rem minmax(0,1fr);gap:.5rem;align-items:start;margin:.2rem 0}
+.digest-label{font-size:.75rem;letter-spacing:.05em;text-transform:uppercase;color:var(--dim);padding-top:.15rem}
+.digest-field ul{margin:0;padding-left:1.1rem}
+.digest-field li{margin:.1rem 0;overflow-wrap:anywhere}
+"""
+
+
+def _read_comments(
+    repo_path: str, owner: str, name: str, state: str = "open",
+    max_issues: int | None = None,
+):
+    comments = {}
+    cursor = None
+    query = GRAPHQL.replace("states:OPEN", f"states:{state.upper()}")
+    while True:
+        args = [
+            "gh", "api", "graphql", "-f", f"query={query}",
+            "-F", f"owner={owner}", "-F", f"name={name}",
+        ]
+        if cursor:
+            args.extend(["-F", f"cursor={cursor}"])
+        data, error = _run_json(args, repo_path)
+        if error:
+            return comments, error
+        if not isinstance(data, dict):
+            return comments, "GitHub returned invalid comment data"
+        errors = data.get("errors") or []
+        if errors:
+            messages = [
+                str(item.get("message") or "GraphQL error")
+                for item in errors
+                if isinstance(item, dict)
+            ]
+            return comments, "; ".join(messages) or "GraphQL error"
+        response = data.get("data")
+        repository = response.get("repository") if isinstance(response, dict) else None
+        page = repository.get("issues") if isinstance(repository, dict) else None
+        if not isinstance(page, dict):
+            return comments, "GitHub returned no issue comments"
+        nodes = page.get("nodes")
+        page_info = page.get("pageInfo")
+        if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            return comments, "GitHub returned incomplete comment data"
+        for issue in nodes:
+            issue_comments = issue.get("comments") if isinstance(issue, dict) else None
+            comment_nodes = issue_comments.get("nodes") if isinstance(issue_comments, dict) else None
+            if not isinstance(issue, dict) or not isinstance(issue.get("number"), int):
+                return comments, "GitHub returned incomplete issue comments"
+            if not isinstance(comment_nodes, list):
+                return comments, "GitHub returned incomplete issue comments"
+            comments[issue["number"]] = [
+                {
+                    "body": str(comment.get("body") or ""),
+                    "createdAt": comment.get("createdAt"),
+                    "url": comment.get("url") or "",
+                    "author": (
+                        comment.get("author", {}).get("login", "")
+                        if isinstance(comment.get("author"), dict)
+                        else ""
+                    ),
+                }
+                for comment in comment_nodes
+                if isinstance(comment, dict)
+            ]
+            if max_issues is not None and len(comments) >= max_issues:
+                return comments, None
+        if not page_info.get("hasNextPage"):
+            return comments, None
+        cursor = page_info.get("endCursor")
+        if not cursor:
+            return comments, "GitHub returned incomplete pagination data"
+
+
+def _add_edge(edges: dict, issue_ids: set, source: int, target: int, kind: str) -> None:
+    if source != target and source in issue_ids and target in issue_ids:
+        edges[(source, target, kind)] = {"from": source, "to": target, "kind": kind}
+
+
+def _label_names(issue: dict) -> list[str]:
+    return sorted(
+        label.get("name", "") if isinstance(label, dict) else str(label)
+        for label in issue.get("labels", [])
+    )
+
+
+def _priority(labels: list[str]) -> str:
+    for label in labels:
+        match = re.fullmatch(r"(?:(?:prio|priority)/)?(P[0-3])", label, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+    return "P4"
+
+
+def _size(labels: list[str]) -> str:
+    for label in labels:
+        match = re.fullmatch(r"size[-/](XS|S|M|L|XL)", label, re.IGNORECASE)
+        if match:
+            return f"size-{match.group(1).lower()}"
+    return "size-?"
+
+
+def _acyclic(issue_ids: set, edges: list[dict]) -> bool:
+    outgoing = {number: [] for number in issue_ids}
+    incoming = {number: 0 for number in issue_ids}
+    for edge in edges:
+        outgoing[edge["from"]].append(edge["to"])
+        incoming[edge["to"]] += 1
+    ready = [number for number, count in incoming.items() if count == 0]
+    visited = 0
+    while ready:
+        number = ready.pop()
+        visited += 1
+        for target in outgoing[number]:
+            incoming[target] -= 1
+            if incoming[target] == 0:
+                ready.append(target)
+    return visited == len(issue_ids)
+
+
+def _comment_body(comment) -> str:
+    return str(comment.get("body") or "") if isinstance(comment, dict) else str(comment or "")
+
+
+def _comment_details(comment) -> dict:
+    body = _comment_body(comment)
+    if not isinstance(comment, dict):
+        comment = {}
+    return {
+        "body": body,
+        "createdAt": comment.get("createdAt"),
+        "url": comment.get("url") or "",
+        "author": comment.get("author") or "",
+    }
+
+def build_model(
+    issues: list[dict],
+    comments: dict,
+    ledger: list[dict],
+    warnings: list[str] | None = None,
+    repo: str = "",
+):
+    issue_ids = {int(issue["number"]) for issue in issues}
+
+    def inside_quote(text, position):
+        line_start = text.rfind("\n", 0, position) + 1
+        line = text[line_start : text.find("\n", line_start) if "\n" in text[line_start:] else len(text)]
+        if line.lstrip().startswith(">"):
+            return True
+        prefix = text[line_start:position]
+        return sum(prefix.count(quote) for quote in ('"', "“", "”")) % 2 == 1
+
+    ledger_latest = {}
+    for entry in ledger:
+        if isinstance(entry, dict) and isinstance(entry.get("issue"), int):
+            ledger_latest[entry["issue"]] = entry
+    handoff_entry = next(
+        (
+            entry
+            for entry in reversed(ledger)
+            if isinstance(entry, dict)
+            and (entry.get("event") == "handoff" or entry.get("action") == "handoff")
+        ),
+        None,
+    )
+    handoff_status = None
+    if handoff_entry:
+        handoff_status = re.sub(
+            r"\s+",
+            " ",
+            str(
+                handoff_entry.get("status")
+                or handoff_entry.get("note")
+                or handoff_entry.get("action")
+                or "handoff"
+            ),
+        ).strip()
+        if len(handoff_status) > 64:
+            handoff_status = handoff_status[:63].rstrip() + "…"
+
+    decision_blocks = {}
+    for issue in issues:
+        texts = [
+            issue.get("body") or "",
+            *(_comment_body(comment) for comment in comments.get(int(issue["number"]), [])),
+        ]
+        for text in texts:
+            for match in re.finditer(r"\bblocks\s+#(\d+)\b", text, re.IGNORECASE):
+                if inside_quote(text, match.start()):
+                    continue
+                line_start = text.rfind("\n", 0, match.start()) + 1
+                prefix = text[line_start : match.start()]
+                decision = re.search(r"\b(D\d+)\b[^()\n]*\([^()\n]*$", prefix)
+                if decision:
+                    decision_blocks[int(match.group(1))] = decision.group(1)
+
+
+    edges = {}
+    for issue in issues:
+        number = int(issue["number"])
+        issue_labels = _label_names(issue)
+        texts = [
+            issue.get("body") or "",
+            *(_comment_body(comment) for comment in comments.get(number, [])),
+        ]
+        parent_refs = set()
+        for text in texts:
+            for match in re.finditer(r"\b(?:part of|child of|split from)\s+#(\d+)\b", text, re.IGNORECASE):
+                if inside_quote(text, match.start()):
+                    continue
+                parent = int(match.group(1))
+                parent_refs.add(parent)
+                _add_edge(edges, issue_ids, parent, number, "parent")
+            for match in re.finditer(r"\b(?:blocked by|waits for|requires|prerequisite(?:d)? by|depends on)\s+#(\d+)\b", text, re.IGNORECASE):
+                if inside_quote(text, match.start()):
+                    continue
+                blocker = int(match.group(1))
+                tail = text[match.end() : match.end() + 32]
+                prefix = text[max(0, match.start() - 16) : match.start()]
+                negated = re.search(r"\b(?:not|isn'?t|doesn'?t|didn'?t|never)\s+$", prefix, re.IGNORECASE)
+                if (
+                    blocker not in parent_refs
+                    and not negated
+                    and not re.match(r"['’]s\s+(?:comment|thread|decision)", tail, re.IGNORECASE)
+                ):
+                    _add_edge(edges, issue_ids, blocker, number, "depends")
+            for match in re.finditer(r"\bblocks\s+#(\d+)\b", text, re.IGNORECASE):
+                if inside_quote(text, match.start()):
+                    continue
+                line_start = text.rfind("\n", 0, match.start()) + 1
+                prefix = text[line_start : match.start()]
+                if not re.search(r"\bD\d+\b[^()\n]*\([^()\n]*$", prefix):
+                    _add_edge(edges, issue_ids, number, int(match.group(1)), "depends")
+            for match in re.finditer(r"#(\d+)\s+unblocks after\s+#(\d+)\s+lands", text, re.IGNORECASE):
+                if inside_quote(text, match.start()):
+                    continue
+                _add_edge(edges, issue_ids, int(match.group(2)), int(match.group(1)), "depends")
+            for start in re.finditer(r"\b(?:depends on|requires)\b", text, re.IGNORECASE):
+                if inside_quote(text, start.start()):
+                    continue
+                sentence = re.split(r"[.!?\n]", text[start.start() :], maxsplit=1)[0]
+                for phrase_match in re.finditer(r"[\"“]([^\"”]+)[\"”]", sentence):
+                    phrase = phrase_match.group(1).casefold()
+                    matches = [
+                        candidate for candidate in issues
+                        if int(candidate["number"]) != number
+                        and phrase in candidate.get("title", "").casefold()
+                    ]
+                    if len(matches) == 1:
+                        candidate_number = int(matches[0]["number"])
+                        if not (number in decision_blocks and candidate_number in parent_refs):
+                            _add_edge(edges, issue_ids, candidate_number, number, "depends")
+            for line in text.splitlines():
+                if not any(char in line for char in "─←→"):
+                    continue
+                ids = [int(match.group(1)) for match in re.finditer(r"#(\d+)", line)]
+                if len(ids) < 2:
+                    continue
+                if "←" in line:
+                    _add_edge(edges, issue_ids, ids[-1], ids[0], "depends")
+                elif "+" in line[: line.rfind("─")]:
+                    for prerequisite in ids[:-1]:
+                        _add_edge(edges, issue_ids, prerequisite, ids[-1], "depends")
+                else:
+                    for index in range(1, len(ids)):
+                        _add_edge(edges, issue_ids, ids[index - 1], ids[index], "depends")
+            if any(label.casefold() == "epic" for label in issue_labels):
+                for match in re.finditer(r"^\s*[-*]\s+#(\d+)\s+[—–-]", text, re.MULTILINE):
+                    _add_edge(edges, issue_ids, number, int(match.group(1)), "parent")
+
+    for entry in ledger:
+        if not isinstance(entry, dict) or not isinstance(entry.get("issue"), int):
+            continue
+        children = entry.get("children")
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, int):
+                    _add_edge(edges, issue_ids, entry["issue"], child, "split")
+
+    unresolved = {}
+    for issue in issues:
+        body = issue.get("body") or ""
+        for match in re.finditer(
+            r"\b(?:depends on|blocked by)\s+(?:the\s+)?([^\.\n]{1,60}?)\s+(?:issue|task)\b",
+            body,
+            re.IGNORECASE,
+        ):
+            unresolved[int(issue["number"])] = match.group(1).strip()
+
+    nodes = []
+    for issue in issues:
+        number = int(issue["number"])
+        labels = _label_names(issue)
+        state = ledger_latest.get(number, {})
+        action = state.get("action") or state.get("event") or state.get("status")
+        sprint_match = next(
+            (re.fullmatch(r"sprint[-/](\d+)", label, re.IGNORECASE) for label in labels if re.fullmatch(r"sprint[-/](\d+)", label, re.IGNORECASE)),
+            None,
+        )
+        nodes.append(
+            {
+                "number": number,
+                "title": issue.get("title", ""),
+                "body": issue.get("body") or "",
+                "url": issue.get("url", ""),
+                "createdAt": issue.get("createdAt"),
+                "closedAt": issue.get("closedAt"),
+                "updatedAt": issue.get("updatedAt"),
+                "labels": labels,
+                "priority": _priority(labels),
+                "size": _size(labels),
+                "sprint": int(sprint_match.group(1)) if sprint_match else 999,
+                "loop": str(action)[:56] if action is not None else None,
+                "digest": _digest(state),
+                "dispatched": isinstance(action, str) and action.casefold() in {"dispatch", "dispatched", "running"},  # Ledger claims in-flight; see disclaimer below (not live-process verification).
+                "decision": decision_blocks.get(number),
+                "unresolvedDependency": unresolved.get(number),
+                "files": sorted(set(SOURCE_PATH.findall(issue.get("body") or ""))),
+                "comments": [
+                    _comment_details(comment)
+                    for comment in comments.get(number, [])[-20:]
+                ],
+            }
+        )
+
+    by_number = {node["number"]: node for node in nodes}
+    open_dependencies = {edge["to"] for edge in edges.values() if edge["kind"] == "depends"}
+
+    def held(node):
+        return node["decision"] or node["unresolvedDependency"] or any(
+            label.casefold() in {"owner-todo", "needs-decision", "completely-blocked-on-human", "epic"}
+            for label in node["labels"]
+        )
+
+    eligible = [
+        node for node in nodes
+        if not node["dispatched"] and not held(node) and node["number"] not in open_dependencies
+    ]
+    eligible.sort(key=lambda node: (int(node["priority"][1:]), node["sprint"], -node["number"]))
+    batch = []
+    bottlenecks = BOTTLENECKS.get(repo, set())
+    for candidate in eligible:
+        if not batch:
+            batch.append(candidate)
+            continue
+        if len(batch) == 2:
+            break
+        scopes_known = bool(candidate["files"]) and all(node["files"] for node in batch)
+        overlaps = any(set(node["files"]) & set(candidate["files"]) for node in batch)
+        paths = set(candidate["files"]) | {path for node in batch for path in node["files"]}
+        if scopes_known and not overlaps and not paths & bottlenecks:
+            batch.append(candidate)
+
+    batch_ids = {node["number"] for node in batch}
+    active_ids = {node["number"] for node in nodes if node["dispatched"]}
+    next_up_ids = {
+        node["number"] for node in eligible
+        if node["number"] not in batch_ids and node["priority"] in {"P0", "P1"}
+    }
+    waiting_ids = {
+        node["number"] for node in nodes
+        if held(node) or node["number"] in open_dependencies
+    }
+    later_ids = {
+        node["number"] for node in nodes
+        if node["number"] not in active_ids | batch_ids | next_up_ids | waiting_ids
+    }
+    owner_blocked_ids = {
+        node["number"] for node in nodes
+        if any(label.casefold() == "completely-blocked-on-human" for label in node["labels"])
+    }
+    waiting_ids -= owner_blocked_ids
+    groups = [
+        ("Marked in flight", active_ids),
+        ("Next batch", batch_ids),
+        ("Next up", next_up_ids),
+        ("Later queue", later_ids),
+        ("Blocked or held", waiting_ids),
+    ]
+    stage_order = []
+    assigned = set()
+    for name, numbers in groups:
+        selected = numbers - assigned
+        assigned.update(selected)
+        stage_order.append(
+            {
+                "name": name,
+                "numbers": sorted(
+                    selected,
+                    key=lambda number: (
+                        int(by_number[number]["priority"][1:]),
+                        by_number[number]["sprint"],
+                        -number,
+                    ),
+                ),
+            }
+        )
+    edge_list = list(edges.values())
+    owner_blocked_sorted = sorted(
+        owner_blocked_ids,
+        key=lambda number: (
+            int(by_number[number]["priority"][1:]),
+            by_number[number]["sprint"],
+            -number,
+        ),
+    )
+    return {
+        "nodes": [by_number[number] for stage in stage_order for number in stage["numbers"]]
+        + [by_number[number] for number in owner_blocked_sorted],
+        "edges": edge_list,
+        "stages": stage_order,
+        "ownerBlocked": owner_blocked_sorted,
+        "batch": [node["number"] for node in batch],
+        "activeCount": len(active_ids),
+        "targetDispatches": 2,
+        "handoffStatus": handoff_status,
+        "acyclic": _acyclic(issue_ids, edge_list),
+        "warnings": list(warnings or []),
+        "generatedAt": time.time(),
+    }
+
+
+def load_github(repo_path: str, state: str = "open"):
+    warnings = []
+    identity, error = _run_json(["gh", "repo", "view", "--json", "owner,name"], repo_path)
+    issues = []
+    comments = {}
+    if error:
+        warnings.append(f"GitHub repository data is unavailable: {error}")
+    elif not isinstance(identity, dict):
+        warnings.append("GitHub returned invalid repository data")
+    else:
+        owner_data = identity.get("owner")
+        owner = owner_data.get("login") if isinstance(owner_data, dict) else None
+        name = identity.get("name")
+        if not owner or not name:
+            warnings.append("GitHub returned no repository owner or name")
+        else:
+            issue_args = [
+                "gh", "issue", "list", "--state", state,
+                "--limit", "100" if state == "closed" else "1000",
+                "--json", "number,title,body,labels,url,createdAt,updatedAt,closedAt",
+            ]
+            max_issues = None
+            if state == "closed":
+                cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).date().isoformat()
+                issue_args.extend(["--search", f"closed:>={cutoff}"])
+                max_issues = 100
+            issues, error = _run_json(issue_args, repo_path)
+            if error:
+                warnings.append(f"GitHub issue data is unavailable: {error}")
+                issues = []
+            elif not isinstance(issues, list):
+                warnings.append("GitHub returned invalid issue data")
+                issues = []
+            else:
+                if max_issues is None:
+                    comments, error = _read_comments(
+                        repo_path, owner, name, state
+                    )
+                else:
+                    comments, error = _read_comments(
+                        repo_path, owner, name, state, max_issues
+                    )
+                if error:
+                    warnings.append(f"Recent GitHub comments are unavailable: {error}")
+    return issues, comments, warnings
+
+
+def load_model(repo: str, repo_path: str):
+    issues, comments, warnings = load_github(repo_path)
+    ledger, ledger_error = _read_ledger(repo_path)
+    if ledger_error:
+        warnings.append(ledger_error)
+    model = build_model(issues, comments, ledger, warnings, repo)
+    model["repo"] = repo
+    return model
+
+
+def cached_github(repo: str, repo_path: str, state: str = "open"):
+    now = time.monotonic()
+    key = (repo, state)
+    with _CACHE_LOCK:
+        cached = _GITHUB_CACHE.get(key)
+        if cached and now - cached[0] < GITHUB_CACHE_SECONDS:
+            return cached[1]
+        data = load_github(repo_path, state)
+        _GITHUB_CACHE[key] = (time.monotonic(), data)
+        _persist_cache()
+        return data
+
+
+def cached_ledger(repo: str, repo_path: str):
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        cached = _LEDGER_CACHE.get(repo)
+        if cached and now - cached[0] < LEDGER_CACHE_SECONDS:
+            return cached[1]
+        data = _read_ledger(repo_path)
+        _LEDGER_CACHE[repo] = (time.monotonic(), data)
+        _persist_cache()
+        return data
+
+
+def cached_model(repo: str, repo_path: str):
+    issues, comments, warnings = cached_github(repo, repo_path)
+    ledger, ledger_error = cached_ledger(repo, repo_path)
+    warnings = list(warnings)
+    if ledger_error:
+        warnings.append(ledger_error)
+    model = build_model(issues, comments, ledger, warnings, repo)
+    model["repo"] = repo
+    return model
+
+
+def cached_combined_model(repo: str, repo_path: str):
+    model = cached_model(repo, repo_path)
+    closed_issues, closed_comments, _warnings = cached_github(
+        repo, repo_path, "closed"
+    )
+    model["closedNodes"] = build_model(
+        closed_issues, closed_comments, [], repo=repo
+    )["nodes"]
+    return model
+
+
+
+
+def _escape_attr(value: str) -> str:
+    return html.escape(str(value), quote=True)
+
+
+
+def _render_body(body: str) -> str:
+    body = str(body or "")
+    if not body:
+        return "<p class='dim'>No description.</p>"
+    parts = []
+    offset = 0
+    for match in IMAGE.finditer(body):
+        url = match.group(2)
+        attachment_id = github_attachment_id(url)
+        if attachment_id:
+            parts.append(html.escape(body[offset : match.start()]))
+            parts.append(
+                f"<img class='image-attachment' src='/image?id={attachment_id}' "
+                f"alt='{_escape_attr(match.group(1) or 'image')}' loading='lazy'>"
+            )
+            offset = match.end()
+            continue
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            continue
+        if parsed.scheme != "https" or parsed.hostname not in IMAGE_HOSTS:
+            continue
+        parts.append(html.escape(body[offset : match.start()]))
+        parts.append(
+            f"<a class='image-attachment' href='{_escape_attr(url)}' "
+            f"target='_blank' rel='noopener'>View image attachment: "
+            f"{html.escape(match.group(1) or 'image')}</a>"
+        )
+        offset = match.end()
+    parts.append(html.escape(body[offset:]))
+    return f"<div class='issue-body'>{''.join(parts)}</div>"
+
+
+def render_issue_details(node: dict, include_comments: bool = True) -> str:
+    comments = (
+        sorted(
+            node["comments"],
+            key=lambda comment: comment.get("createdAt") or "",
+            reverse=True,
+        )
+        if include_comments
+        else []
+    )
+    comment_items = []
+    for comment in comments:
+        meta_parts = [
+            html.escape(str(comment["author"])) if comment.get("author") else "",
+            html.escape(_compact_time(comment["createdAt"]))
+            if comment.get("createdAt")
+            else "",
+        ]
+        meta = " · ".join(part for part in meta_parts if part)
+        url = comment.get("url") or ""
+        if url.startswith("https://github.com/"):
+            link = f"<a href='{_escape_attr(url)}' target='_blank' rel='noopener'>view comment</a>"
+            meta = f"{link} · {meta}" if meta else link
+        meta_html = f"<p class=dim>{meta}</p>" if meta else ""
+        comment_items.append(
+            f"<li>{meta_html}{_render_body(comment['body'])}</li>"
+        )
+    if include_comments:
+        if comment_items:
+            activity = (
+                f"<h4>Recent comments</h4>"
+                f"<ol class='activity-comments'>{''.join(comment_items)}</ol>"
+            )
+        else:
+            activity = "<h4>Recent comments</h4><p class='dim'>No comments yet.</p>"
+    else:
+        activity = ""
+    dates = " · ".join(
+        f"{label} {html.escape(_compact_time(node[key]))}"
+        for label, key in (("Created", "createdAt"), ("Updated", "updatedAt"))
+        if node.get(key)
+    )
+    date_html = f"<p class='dim'>{dates}</p>" if dates else ""
+    labels = ", ".join(node.get("labels", []))
+    labels_html = (
+        f"<p class='dim issue-labels'>Labels: {html.escape(labels)}</p>" if labels else ""
+    )
+    full_title = str(node["title"])
+    title = full_title[:80] + ("…" if len(full_title) > 80 else "")
+    issue_title = f"#{node['number']} {html.escape(title)}"
+    url = node.get("url") or ""
+    if url.startswith("https://github.com/"):
+        issue_title = (
+            f"<a href='{_escape_attr(url)}' title='{_escape_attr(full_title)}' "
+            f"target='_blank' rel='noopener'>{issue_title}</a>"
+        )
+    else:
+        issue_title = f"<span title='{_escape_attr(full_title)}'>{issue_title}</span>"
+    count = len(comments)
+    comment_label = "comment" if count == 1 else "comments"
+    details_label = (
+        f"Details and activity · {count} {comment_label}"
+        if include_comments
+        else "Description"
+    )
+    label_data = _escape_attr(json.dumps(node.get("labels", []), ensure_ascii=False))
+    digest_html = render_digest(node.get("digest"))
+    digest_note = "<p class='dim'>Digest from the last ledger handoff.</p>" if digest_html else ""
+    return (
+        f"<details class='issue-details' data-browse-item data-labels='{label_data}'>"
+        f"<summary>{issue_title} · "
+        f"{details_label}</summary>"
+        f"{digest_html}{digest_note}"
+        f"{date_html}{labels_html}<h4>Description</h4>{_render_body(node['body'])}{activity}</details>"
+    )
+
+def _title_lines(title: str, width: int = 34, count: int = 3) -> list[str]:
+    lines = []
+    line = ""
+    words = title.split()
+    while words and len(lines) < count:
+        word = words.pop(0)
+        if line and len(line) + len(word) + 1 > width:
+            lines.append(line)
+            line = word
+        else:
+            line = f"{line} {word}".strip()
+    if line and len(lines) < count:
+        lines.append(line)
+    if words and lines:
+        lines[-1] = lines[-1][: width - 1].rstrip() + "…"
+    return lines
+
+
+def _svg_text(x: int, y: int, text: str, size: int = 12, weight: int = 400) -> str:
+    return f"<text x='{x}' y='{y}' font-size='{size}' font-weight='{weight}'>{html.escape(text)}</text>"
+
+
+_QUEUE_GRAPH_CSS = """
+.queue-scroll{overflow-x:auto;margin:1rem 0}
+.queue-graph{display:block;max-width:none;color:var(--accent);font-family:inherit}
+.queue-graph .lane{fill:var(--bg);stroke:var(--line)}
+.queue-graph .card-node{fill:var(--card);stroke:var(--line)}
+.queue-graph .card-node.next{stroke:var(--accent);stroke-width:2}
+.queue-graph .dependency{fill:none;stroke:var(--accent);stroke-width:2;opacity:.75}
+.queue-graph .parent-link{fill:none;stroke:var(--dim);stroke-width:1.4;stroke-dasharray:5 5;opacity:.75}
+.queue-graph text{fill:var(--fg)}
+"""
+
+CROSS_REPO_EDGE_NOTE = (
+    "Dependency and parent-link lines only connect issues within the same repository. "
+    "Cross-repo references are not tracked."
+)
+
+
+def _render_queue_graph_svg(repo: str, model: dict) -> str:
+    """Build the per-repo dependency graph as an <svg> string."""
+    issue_map = {node["number"]: node for node in model["nodes"]}
+    positions = {}
+    lanes = []
+    lane_x = [18, 318, 618, 918, 1218]
+    card_w = 264
+    row_gap = 82
+    top = 64
+    for lane_index, stage in enumerate(model["stages"]):
+        lane_nodes = [issue_map[number] for number in stage["numbers"] if number in issue_map]
+        lanes.append(lane_nodes)
+        for row, node in enumerate(lane_nodes):
+            positions[node["number"]] = (lane_x[lane_index], top + row * row_gap)
+    height = max(460, max((top + len(lane) * row_gap + 25 for lane in lanes), default=460))
+    svg = [
+        f"<svg class='queue-graph' role='img' aria-label='Open issue roadmap for {html.escape(repo or '')}' viewBox='0 0 1510 {height}' width='1510' height='{height}'>"
+    ]
+    for edge in model["edges"]:
+        start = positions.get(edge["from"])
+        end = positions.get(edge["to"])
+        if not start or not end:
+            continue
+        x1, y1 = start[0] + card_w, start[1] + 34
+        x2, y2 = end[0], end[1] + 34
+        bend = max(28, abs(x2 - x1) * 0.45)
+        style = "dependency" if edge["kind"] == "depends" else "parent-link"
+        svg.append(
+            f"<path class='{style}' d='M{x1} {y1} C{x1 + bend} {y1}, {x2 - bend} {y2}, {x2} {y2}' marker-end='url(#arrow)'/>"
+        )
+    svg.append(
+        "<defs><marker id='arrow' viewBox='0 0 10 10' refX='8' refY='5' markerWidth='6' markerHeight='6' orient='auto'><path d='M0 0L10 5L0 10z' fill='currentColor'/></marker></defs>"
+    )
+    for lane_index, lane in enumerate(lanes):
+        x = lane_x[lane_index]
+        svg.append(f"<rect class='lane' x='{x - 6}' y='10' width='276' height='{height - 20}' rx='7'/>")
+        svg.append(_svg_text(x, 34, f"{model['stages'][lane_index]['name']} · {len(lane)}", 15, 700))
+    for lane in lanes:
+        for node in lane:
+            x, y = positions[node["number"]]
+            href = node["url"] if node["url"].startswith("https://github.com/") else "#"
+            label = f"Open issue {node['number']} {node['title']}"
+            svg.append(
+                f"<a href='{_escape_attr(href)}' target='_blank' rel='noopener' aria-label='{_escape_attr(label)}'>"
+            )
+            card_class = "card-node next" if node["number"] in model["batch"] else "card-node"
+            svg.append(f"<rect class='{card_class}' x='{x}' y='{y}' width='{card_w}' height='68' rx='6'/>")
+            badge = f"#{node['number']} · {node['priority']} · {node['size']}"
+            if node.get("loop"):
+                badge += f" · {node['loop'][:9]}"
+            if node.get("decision"):
+                badge += f" · {node['decision']}"
+            elif node.get("unresolvedDependency"):
+                badge += " · blocker unknown"
+            if any(label.casefold() == "needs-expert-decision" for label in node["labels"]):
+                badge += " · needs expert decision"
+            svg.append(_svg_text(x + 10, y + 17, badge, 11, 700))
+            for line_index, line in enumerate(_title_lines(node["title"])):
+                svg.append(_svg_text(x + 10, y + 35 + line_index * 13, line, 11))
+            svg.append("</a>")
+    svg.append("</svg>")
+    return "".join(svg)
+
+
+def _browse_script() -> str:
+    return """
+(function(){
+  const filterKey='lupin-roadmap-filter';
+  const orderKey='lupin-queue-order';
+  const params=new URLSearchParams(location.search);
+  const repo=document.getElementById('repo');
+  const labels=document.getElementById('roadmap-labels');
+  let saved={};
+  try{saved=JSON.parse(localStorage.getItem(filterKey)||'{}')||{};}catch(_){}
+  const explicitRepo=params.has('repo');
+  const explicitLabels=params.has('labels');
+  if(!explicitRepo&&saved.repo&&repo&&[...repo.options].some(o=>{
+    return o.value===saved.repo||
+      new URL(o.value,location.href).searchParams.get('repo')===saved.repo;
+  })){
+    if(repo.options[0].value.startsWith('/roadmap')){
+      location.href='/roadmap?repo='+encodeURIComponent(saved.repo);
+      return;
+    }
+    repo.value=saved.repo;
+    repo.form.submit();
+    return;
+  }
+  function currentLabels(){
+    return labels?[...labels.selectedOptions].map(option=>option.value):[];
+  }
+  if(labels&&!explicitLabels&&Array.isArray(saved.labels)){
+    [...labels.options].forEach(option=>option.selected=saved.labels.includes(option.value));
+  }else if(labels&&explicitLabels){
+    const selected=new Set(params.getAll('labels'));
+    [...labels.options].forEach(option=>option.selected=selected.has(option.value));
+  }
+  function selectedRepo(){
+    if(!repo)return '';
+    if(repo.value.startsWith('/roadmap')){
+      return new URL(repo.value,location.href).searchParams.get('repo')||'';
+    }
+    return repo.value;
+  }
+  function saveFilter(){
+    try{localStorage.setItem(filterKey,JSON.stringify({
+      repo:selectedRepo(),
+      labels:currentLabels()
+    }));}catch(_){}
+  }
+  if(repo)repo.addEventListener('change',saveFilter,true);
+  if(labels)labels.addEventListener('change',()=>{
+    saveFilter();
+    const url=new URL(location.href);
+    url.searchParams.delete('labels');
+    currentLabels().forEach(label=>url.searchParams.append('labels',label));
+    history.replaceState(null,'',url);
+    updateBrowse();
+  });
+  const chunk=20;
+  const input=document.getElementById('roadmap-search');
+  const graph=document.querySelector('.queue-scroll');
+  const browseLimits=new WeakMap();
+  function updateBrowse(){
+    const query=input?input.value.trim().toLocaleLowerCase():'';
+    const selected=new Set(currentLabels());
+    if(graph)graph.hidden=Boolean(query)||selected.size>0;
+    document.querySelectorAll('[data-browse-group]').forEach(group=>{
+      const items=[...group.querySelectorAll(':scope > [data-browse-item]')];
+      const more=group.querySelector(':scope > .browse-more')||
+        (group.nextElementSibling&&group.nextElementSibling.classList.contains('browse-more')
+          ?group.nextElementSibling:null);
+      if(!browseLimits.has(group)){
+        browseLimits.set(group,chunk);
+        if(more)more.addEventListener('click',()=>{
+          browseLimits.set(group,browseLimits.get(group)+chunk);
+          updateBrowse();
+        });
+      }
+      const limit=browseLimits.get(group);
+      let shown=0,total=0;
+      items.forEach(item=>{
+        let itemLabels=[];
+        try{itemLabels=JSON.parse(item.dataset.labels||'[]');}catch(_){}
+        const matchesLabels=[...selected].every(label=>itemLabels.includes(label));
+        const matchesSearch=!query||item.textContent.toLocaleLowerCase().includes(query);
+        if(!matchesLabels||!matchesSearch){item.hidden=true;return;}
+        total++;
+        const filtering=Boolean(query||selected.size);
+        item.hidden=filtering?false:shown>=limit;
+        if(!item.hidden)shown++;
+      });
+      const empty=(Boolean(query)||selected.size>0)&&total===0;
+      group.hidden=empty;
+      if(group.parentElement.classList.contains('activity-group'))
+        group.parentElement.hidden=empty;
+      if(more){
+        more.hidden=Boolean(query)||selected.size>0||shown>=total;
+        more.textContent='Show 20 more · '+(total-shown)+' remaining';
+      }
+    });
+    document.querySelectorAll('[data-queue-item]').forEach(item=>{
+      let itemLabels=[];
+      try{itemLabels=JSON.parse(item.dataset.labels||'[]');}catch(_){}
+      item.hidden=![...selected].every(label=>itemLabels.includes(label));
+    });
+  }
+  if(input)input.addEventListener('input',updateBrowse);
+  updateBrowse();
+  let savedOrders={};
+  try{savedOrders=JSON.parse(localStorage.getItem(orderKey)||'{}');}catch(_){}
+  if(!savedOrders||Array.isArray(savedOrders)||typeof savedOrders!=='object')savedOrders={};
+  document.querySelectorAll('[data-next-batch]').forEach(list=>{
+    const scope=list.dataset.nextBatch;
+    let queue=Array.isArray(savedOrders[scope])?savedOrders[scope]:[];
+    const items=[...list.querySelectorAll(':scope > [data-queue-item]')];
+    const eligible=new Set(items.map(item=>item.dataset.queueKey));
+    queue=queue.filter(key=>eligible.has(String(key)));
+    const savedOrder=new Map(queue.map((key,index)=>[String(key),index]));
+    items.sort((a,b)=>{
+      const ai=savedOrder.has(a.dataset.queueKey)?savedOrder.get(a.dataset.queueKey):Infinity;
+      const bi=savedOrder.has(b.dataset.queueKey)?savedOrder.get(b.dataset.queueKey):Infinity;
+      return ai-bi||Number(a.dataset.computedIndex)-Number(b.dataset.computedIndex);
+    }).forEach(item=>list.appendChild(item));
+    function persist(){
+      savedOrders[scope]=[...list.querySelectorAll(':scope > [data-queue-item]')]
+        .map(item=>item.dataset.queueKey);
+      try{localStorage.setItem(orderKey,JSON.stringify(savedOrders));}catch(_){}
+    }
+    list.addEventListener('dragstart',event=>{
+      const item=event.target.closest('[data-queue-item]');
+      if(item){event.dataTransfer.setData('text/plain',item.dataset.queueKey);event.dataTransfer.effectAllowed='move';}
+    });
+    list.addEventListener('dragover',event=>{if(event.target.closest('[data-queue-item]'))event.preventDefault();});
+    list.addEventListener('drop',event=>{
+      const target=event.target.closest('[data-queue-item]');
+      const dragged=items.find(item=>item.dataset.queueKey===event.dataTransfer.getData('text/plain'));
+      if(!target||!dragged||target===dragged)return;
+      event.preventDefault();
+      const bounds=target.getBoundingClientRect();
+      list.insertBefore(dragged,event.clientY<bounds.top+bounds.height/2?target:target.nextSibling);
+      persist();
+    });
+    items.forEach(item=>item.addEventListener('dragend',persist));
+    persist();
+  });
+  setTimeout(function(){location.reload()},305000);
+})();
+"""
+
+
+
+def render_combined_page(repos: list[str], models: dict, page_fn) -> bytes:
+    stage_names = [
+        stage["name"]
+        for model in models.values()
+        for stage in model["stages"]
+    ][:5]
+    stages = {name: [] for name in stage_names}
+    updates = []
+    warnings = []
+    open_count = active_count = batch_count = 0
+
+    recent_images = []
+    owner_blocked = []
+    for repo in repos:
+        model = models.get(repo)
+        if not model:
+            continue
+        for node in model["nodes"]:
+            sources = [
+                (
+                    node["body"],
+                    node.get("updatedAt") or node.get("createdAt"),
+                    node.get("url"),
+                )
+            ]
+            sources.extend(
+                (
+                    comment["body"],
+                    comment.get("createdAt"),
+                    comment.get("url") or node.get("url"),
+                )
+                for comment in node["comments"]
+            )
+            for text, timestamp, url in sources:
+                for match in IMAGE.finditer(text):
+                    attachment_id = github_attachment_id(match.group(2))
+                    if not attachment_id:
+                        continue
+                    context = " ".join(
+                        (text[:match.start()] + text[match.end():]).split()
+                    )
+                    recent_images.append(
+                        (timestamp, repo, node, url, attachment_id, context)
+                    )
+        nodes = {node["number"]: node for node in model["nodes"]}
+        owner_blocked.extend(
+            (repo, nodes[number]) for number in model.get("ownerBlocked", []) if number in nodes
+        )
+        open_count += len(nodes)
+        active_count += model["activeCount"]
+        batch_count += len(model["batch"])
+        warnings.extend(
+            f"{repo}: {warning}" for warning in model["warnings"]
+        )
+        for stage in model["stages"]:
+            for number in stage["numbers"]:
+                node = nodes.get(number)
+                if node:
+                    stages.setdefault(stage["name"], []).append((repo, node))
+                    comments = sorted(
+                        node.get("comments", []),
+                        key=lambda comment: comment.get("createdAt") or "",
+                        reverse=True,
+                    )
+                    newest_comment = comments[0] if comments else None
+                    issue_time = node.get("updatedAt") or node.get("createdAt")
+                    if newest_comment and (
+                        _parse_time(newest_comment.get("createdAt"))
+                        or datetime.min.replace(tzinfo=timezone.utc)
+                    ) > (
+                        _parse_time(issue_time)
+                        or datetime.min.replace(tzinfo=timezone.utc)
+                    ):
+                        timestamp = newest_comment.get("createdAt")
+                        event = "commented"
+                        preview = newest_comment.get("body") or ""
+                    else:
+                        timestamp = issue_time
+                        event = "opened"
+                        preview = node.get("body") or ""
+                    if timestamp:
+                        updates.append((timestamp, repo, node, event, preview))
+        for node in model.get("closedNodes", []):
+            timestamp = node.get("closedAt") or node.get("updatedAt")
+            if timestamp:
+                updates.append((timestamp, repo, node, "closed", node.get("body") or ""))
+
+    selector = [
+        "<option value='/roadmap'>All repositories</option>"
+    ]
+    selector.extend(
+        f"<option value='/roadmap?repo={quote(repo, safe='')}'>{html.escape(repo)}</option>"
+        for repo in repos
+    )
+    filter_labels = sorted({
+        label for model in models.values() for node in model["nodes"]
+        for label in node.get("labels", [])
+    })
+    label_options = "".join(
+        f"<option value='{_escape_attr(label)}'>{html.escape(label)}</option>"
+        for label in filter_labels
+    )
+    next_batch = []
+    for repo in repos:
+        model = models.get(repo)
+        if not model:
+            continue
+        nodes = {node["number"]: node for node in model["nodes"]}
+        for number in model["batch"]:
+            node = nodes.get(number)
+            if node:
+                key = f"{repo}#{number}"
+                index = len(next_batch)
+                next_batch.append(
+                    f"<li data-queue-item data-queue-key='{_escape_attr(key)}' "
+                    f"data-labels='{_escape_attr(json.dumps(node.get('labels', []), ensure_ascii=False))}' "
+                    f"data-computed-index='{index}' draggable='true'>"
+                    f"<a href='/roadmap?repo={quote(repo, safe='')}'>{html.escape(repo)}</a>"
+                    f" · #{number} {html.escape(node['title'])}</li>"
+                )
+    queue_html = (
+        "<h2>Next batch · computed order</h2><ol data-next-batch='all'>"
+        + "".join(next_batch)
+        + "</ol>"
+    )
+    board = []
+    for name, issues in stages.items():
+        cards = []
+        for repo, node in issues:
+            href = node["url"] if node["url"].startswith("https://github.com/") else "#"
+            detail = f"/roadmap?repo={quote(repo, safe='')}"
+            state = f" · {node['loop'][:20]}" if node.get("loop") else ""
+            cards.append(
+                "<article class='card board-issue' data-browse-item "
+                f"data-labels='{_escape_attr(json.dumps(node.get('labels', []), ensure_ascii=False))}'>"
+                f"<a class='repo-name' href='{detail}'>{html.escape(repo)}</a>"
+                f"<h3><a href='{_escape_attr(href)}' target='_blank' rel='noopener'>"
+                f"#{node['number']} {html.escape(node['title'])}</a></h3>"
+                f"<span class='pill'>{html.escape(node['priority'])} · "
+                f"{html.escape(node['size'])}{html.escape(state)}</span>"
+                f"{render_issue_details(node, include_comments=False)}"
+                "</article>"
+            )
+        if not cards:
+            cards.append("<p class='dim'>No issues.</p>")
+        board.append(
+            f"<section class='board-lane' data-browse-group><h2>{html.escape(name)} "
+            f"<span class='dim'>({len(issues)})</span></h2>{''.join(cards)}"
+            "<button class='browse-more' type='button' hidden></button></section>"
+        )
+
+    recent_images.sort(
+        key=lambda item: _parse_time(item[0])
+        or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+
+    image_items = []
+    for timestamp, repo, node, url, attachment_id, context in recent_images[:20]:
+        issue_url = node.get("url") or ""
+        href = url if url and url.startswith("https://github.com/") else issue_url
+        if not href.startswith("https://github.com/"):
+            href = "#"
+        excerpt = context[:200] + ("…" if len(context) > 200 else "")
+        image_items.append(
+            "<li>"
+            f"<img src='/image?id={attachment_id}' alt='Image attachment' loading='lazy'> "
+            f"<a href='{_escape_attr(href)}' target='_blank' rel='noopener'>"
+            f"{html.escape(repo)} · #{node['number']} {html.escape(node['title'])}</a>"
+            f"<p title='{_escape_attr(context)}'>{html.escape(excerpt)}</p></li>"
+        )
+    images = (
+        f"<ol class='recent-images'>{''.join(image_items)}</ol>"
+        if image_items
+        else "<p class='dim'>No images found</p>"
+    )
+    updates.sort(
+        key=lambda item: _parse_time(item[0])
+        or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    now = datetime.now(timezone.utc)
+    group_names = [
+        "Past hour",
+        "Past 6 hours",
+        "Past 24 hours",
+        "Past 7 days",
+        "Older than 7 days",
+        "Time unknown",
+    ]
+    recent_by_group = {name: [] for name in group_names}
+
+    for updated_at, repo, node, event, preview in updates[:20]:
+        label_data = _escape_attr(json.dumps(node.get("labels", []), ensure_ascii=False))
+        excerpt = " ".join(str(preview or "").split())
+        excerpt = excerpt[:200] + ("…" if len(excerpt) > 200 else "")
+        event_label = event.capitalize()
+        recent_by_group[_activity_group(updated_at, now)].append(
+            f"<li data-browse-item data-labels='{label_data}'>"
+            f"<time datetime='{_escape_attr(updated_at)}'>{html.escape(_compact_time(updated_at))}</time> · "
+            f"<span class='repo-name'>{html.escape(repo)}</span> · "
+            f"<span class='pill'>{event_label}</span> "
+            f"{render_issue_details(node)}"
+            f"<p class='update-preview'>{html.escape(excerpt) or '<span class=dim>No preview available.</span>'}</p></li>"
+        )
+    recent = []
+    for name in group_names:
+        items = recent_by_group[name]
+        if items:
+            recent.append(
+                f"<section class='activity-group'><h3>{name}</h3>"
+                f"<ol class='recent-updates' data-browse-group>{''.join(items)}</ol>"
+                "<button class='browse-more' type='button' hidden></button></section>"
+            )
+
+
+    warning_cards = "".join(
+        f"<div class='card warning'>{html.escape(message)}</div>"
+        for message in warnings
+    )
+    graphs = []
+    for repo in repos:
+        model = models.get(repo)
+        if not model or not model["nodes"]:
+            continue
+        svg = _render_queue_graph_svg(repo, model)
+        graphs.append(
+            f"<details><summary>{html.escape(repo)} · {len(model['nodes'])} open issues</summary>"
+            f"<div class='queue-scroll'>{svg}</div></details>"
+        )
+    dependency_graphs_html = (
+        "<h2>Dependency graphs</h2>"
+        f"<p class='dim'>{CROSS_REPO_EDGE_NOTE}</p>"
+        f"{''.join(graphs) or '<p class=dim>No open issues to graph.</p>'}"
+    )
+    owner_blocked_items = [
+        "<li>"
+        f"<a href='{_escape_attr(node['url'] if node['url'].startswith('https://github.com/') else '#')}' "
+        f"target='_blank' rel='noopener'>{html.escape(repo)} · #{node['number']} {html.escape(node['title'])}</a>"
+        "</li>"
+        for repo, node in owner_blocked
+    ]
+    owner_blocked_html = (
+        "<h2>Owner blocked</h2>"
+        "<p class='dim'>Needs the owner's decision. Nothing else to do until then.</p>"
+        f"<ul class='owner-blocked-list'>{''.join(owner_blocked_items)}</ul>"
+    ) if owner_blocked_items else ""
+    body = (
+        "<header><h1>Work across repositories</h1><span class='sp'></span>"
+        "<a href='/'>loopctl dashboard</a></header>"
+        "<form class='queue-filter'><label for='repo'>Repository</label>"
+        f"<select id='repo' onchange='location.href=this.value'>{''.join(selector)}</select>"
+        "<label for='roadmap-labels'>Labels</label>"
+        f"<select id='roadmap-labels' multiple>{label_options}</select></form>"
+        "<div class='browse-search'><label for='roadmap-search'>Search issues</label>"
+        "<input id='roadmap-search' type='search' placeholder='Titles, labels, descriptions, comments'></div>"
+        f"{queue_html}"
+        f"<p class='dim'>GitHub data refreshes hourly; ledger JSON and this page refresh every five minutes. "
+        f"{open_count} open issues · {active_count} marked in flight · "
+        f"{batch_count} suggested next-batch issues.</p>"
+        f"{warning_cards}<h2>Latest updates</h2>"
+        f"{''.join(recent) or '<p class=dim>No issue update times available.</p>'}"
+        f"<details class='recent-image-details'><summary>Recently added images</summary>{images}</details>"
+        "<h2>Work board</h2>"
+        f"<div class='board-grid'>{''.join(board) or '<p class=dim>No loopable repositories found.</p>'}</div>"
+        "<p class='dim'>The board groups each repository's open issues by its local queue stage. "
+        "Issue links open GitHub. Repository names open that repository's dependency roadmap.</p>"
+        f"{dependency_graphs_html}"
+        f"{owner_blocked_html}"
+        f"<p class='dim'>{QUEUE_STAGE_NOTE}</p>"
+        f"<p class='dim'>{LEDGER_STATUS_NOTE}</p>"
+        "<p><a href='/roadmap?state=closed'>View completed issues across repositories</a></p>"
+    )
+    css = """
+.queue-filter{display:flex;gap:.6rem;align-items:center;margin:1rem 0}
+.queue-filter select,.browse-search input{font:inherit;padding:.35rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}
+.browse-search{display:flex;gap:.6rem;align-items:center;margin:1rem 0}
+.browse-search input{flex:1;min-width:12rem}
+.browse-more{font:inherit;margin:.3rem 0;padding:.3rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}
+.activity-group{margin:.7rem 0}
+.activity-group h3{font-size:.95rem}
+.board-grid{display:grid;grid-template-columns:repeat(5,minmax(180px,1fr));gap:.7rem;overflow-x:auto;align-items:start}
+.board-lane{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:.65rem;min-height:10rem}
+.board-lane h2{margin:.2rem 0 .7rem}
+.board-issue{padding:.65rem;margin-bottom:.5rem}
+.board-issue h3{font-size:.9rem;line-height:1.35;margin:.4rem 0;overflow-wrap:anywhere}
+.repo-name{font-size:.8rem}
+.recent-updates{padding-left:1.5rem;max-height:20rem;overflow:auto}
+.recent-updates li{margin:.45rem 0}
+.recent-updates time{color:var(--dim);white-space:nowrap}
+.issue-body img.image-attachment{display:block;max-width:100%;max-height:640px;height:auto;object-fit:contain;margin:.6rem 0;border-radius:6px}
+.recent-images{list-style:none;padding:0;max-height:24rem;overflow:auto}
+.recent-images li{display:grid;grid-template-columns:minmax(5rem,8rem) 1fr;gap:.25rem .7rem;align-items:start;margin:.7rem 0}
+.recent-images img{grid-row:span 2;width:100%;max-height:6rem;object-fit:contain;border-radius:6px}
+.recent-images p{margin:0;color:var(--dim);overflow-wrap:anywhere}
+"""
+    css += _QUEUE_GRAPH_CSS
+    css += DIGEST_CSS
+    return page_fn(
+        "Work across repositories",
+        body,
+        css,
+        _browse_script(),
+    )
+
+def render_page(repo: str | None, repos: list[str], model: dict | None, page_fn) -> bytes:
+
+    options = ["<option value=''>All repositories</option>"]
+    for name in repos:
+        selected = " selected" if name == repo else ""
+        options.append(
+            f"<option value='{_escape_attr(name)}'{selected}>{html.escape(name)}</option>"
+        )
+    option_html = "".join(options)
+    title = f"Work queue roadmap: {repo}" if repo else "Choose a repository"
+    css = ".queue-filter{display:flex;gap:.6rem;align-items:center;margin:1rem 0}.queue-filter select{font:inherit;padding:.35rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}"
+    if model is None:
+        body = (
+            "<header><h1>Work queue roadmap</h1><span class='sp'></span><a href='/roadmap'>all repositories</a></header>"
+            "<form class='queue-filter' action='/roadmap' method='get'><label for='repo'>Repository</label>"
+            f"<select id='repo' name='repo'><option value=''>All repositories</option>{option_html}</select>"
+            "<button type='submit'>Open queue</button></form>"
+            "<p class='dim'>Select a loopable repository to view its open issue roadmap.</p>"
+        )
+        return page_fn(title, body, css, "")
+
+    issue_map = {node["number"]: node for node in model["nodes"]}
+    svg = _render_queue_graph_svg(repo, model)
+
+    warnings = "".join(
+        f"<div class='card warning'>{html.escape(message)}</div>"
+        for message in model["warnings"]
+    )
+    if not model["acyclic"]:
+        warnings += "<div class='card warning'>The dependency graph has a cycle. Check the issue links before dispatch.</div>"
+    handoff = model.get("handoffStatus")
+    handoff_fact = (
+        f"<span class='pill'>Latest handoff: {html.escape(handoff)}</span>"
+        if handoff
+        else ""
+    )
+    detail_nodes = sorted(
+        model["nodes"],
+        key=lambda node: _parse_time(node.get("updatedAt"))
+        or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    issue_details = [render_issue_details(node) for node in detail_nodes]
+    filter_labels = sorted({
+        label for node in model["nodes"] for label in node.get("labels", [])
+    })
+    label_options = "".join(
+        f"<option value='{_escape_attr(label)}'>{html.escape(label)}</option>"
+        for label in filter_labels
+    )
+    next_batch = []
+    for index, number in enumerate(model["batch"]):
+        node = issue_map.get(number)
+        if node:
+            next_batch.append(
+                f"<li data-queue-item data-queue-key='{number}' "
+                f"data-labels='{_escape_attr(json.dumps(node.get('labels', []), ensure_ascii=False))}' "
+                f"data-computed-index='{index}' draggable='true'>"
+                f"#{number} {html.escape(node['title'])}</li>"
+            )
+    queue_html = (
+        f"<h2>Next batch · computed order</h2><ol data-next-batch='{_escape_attr(repo or '')}'>"
+        + "".join(next_batch)
+        + "</ol>"
+    )
+    owner_blocked_items = []
+    for number in model.get("ownerBlocked", []):
+        node = issue_map.get(number)
+        if not node:
+            continue
+        href = node["url"] if node["url"].startswith("https://github.com/") else "#"
+        owner_blocked_items.append(
+            f"<li><a href='{_escape_attr(href)}' target='_blank' rel='noopener'>"
+            f"#{number} {html.escape(node['title'])}</a></li>"
+        )
+    owner_blocked_html = (
+        "<h2>Owner blocked</h2>"
+        "<p class='dim'>Needs the owner's decision. Nothing else to do until then.</p>"
+        f"<ul class='owner-blocked-list'>{''.join(owner_blocked_items)}</ul>"
+    ) if owner_blocked_items else ""
+    body = (
+        f"<header><h1>Work queue roadmap</h1><span class='sp'></span><a href='/roadmap'>all repositories</a> · "
+        f"<a href='/roadmap?repo={quote(repo or '', safe='')}&amp;state=closed'>completed issues</a></header>"
+        f"<form class='queue-filter' action='/roadmap' method='get'><label for='repo'>Repository</label>"
+        f"<select id='repo' name='repo' onchange='this.form.submit()'>{option_html}</select>"
+        "<label for='roadmap-labels'>Labels</label>"
+        f"<select id='roadmap-labels' multiple>{label_options}</select></form>"
+        "<div class='browse-search'><label for='roadmap-search'>Search issues</label>"
+        "<input id='roadmap-search' type='search' placeholder='Titles, labels, descriptions, comments'></div>"
+        f"{queue_html}"
+        f"<p class='dim'>GitHub data refreshes hourly. Ledger JSON and this page refresh every five minutes.</p>"
+        f"<div class='queue-facts'><span class='pill'>{len(model['nodes'])} open issues</span>"
+        f"<span class='pill'>{model['activeCount']} marked in flight</span>"
+        f"<span class='pill'>{len(model['batch'])} next batch</span>{handoff_fact}</div>"
+        f"{warnings}<h2>Issue roadmap</h2>"
+        "<p class='dim'>Line key: solid lines show dependencies; dashed lines show parent or split links. Cards link to GitHub.</p>"
+        f"<div class='queue-scroll'>{svg}</div>"
+        f"<p class='dim'>{QUEUE_STAGE_NOTE}</p>"
+        f"{owner_blocked_html}"
+        "<h2>Issue details and recent activity</h2>"
+        f"<div class='queue-comment-list' data-browse-group>{''.join(issue_details)}"
+        "<button class='browse-more' type='button' hidden></button></div>"
+        f"<p class='dim'>{LEDGER_STATUS_NOTE}</p>"
+    )
+    css += _QUEUE_GRAPH_CSS
+    css += """
+.queue-facts{display:flex;gap:.5rem;flex-wrap:wrap;margin:1rem 0}
+.queue-filter select,.browse-search input{font:inherit;padding:.35rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}
+.browse-search{display:flex;gap:.6rem;align-items:center;margin:1rem 0}
+.browse-search input{flex:1;min-width:12rem}
+.browse-more{font:inherit;margin:.3rem 0;padding:.3rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}
+.warning{border-color:var(--warn);color:var(--warn)}
+.queue-comment-list{display:grid;gap:.35rem}
+.issue-body img.image-attachment{display:block;max-width:100%;max-height:640px;height:auto;object-fit:contain;margin:.6rem 0;border-radius:6px}
+"""
+    css += DIGEST_CSS
+    return page_fn(title, body, css, _browse_script())
+
+def render_completed_page(repo: str | None, repos: list[str], issues_by_repo: dict, page_fn) -> bytes:
+    selected_repos = [repo] if repo else repos
+    groups = []
+    warnings = []
+    for name in selected_repos:
+        issues, comments, repo_warnings = issues_by_repo.get(name, ([], {}, []))
+        warnings.extend(f"{name}: {warning}" for warning in repo_warnings)
+        items = []
+        for issue in sorted(issues, key=lambda row: row.get("updatedAt") or "", reverse=True):
+            node = dict(issue)
+            node["labels"] = _label_names(issue)
+            node["comments"] = comments.get(issue["number"], [])
+            items.append(render_issue_details(node, include_comments=False))
+        groups.append(
+            f"<section><h2>{html.escape(name)} · {len(items)} completed issues</h2>"
+            f"<div class='queue-comment-list' data-browse-group>{''.join(items)}"
+            "<button class='browse-more' type='button' hidden></button></div></section>"
+        )
+    target = f"/roadmap?repo={quote(repo, safe='')}" if repo else "/roadmap"
+    heading = (
+        f"Completed issues: {html.escape(repo)}"
+        if repo
+        else "Completed issues across repositories"
+    )
+    warning_cards = "".join(
+        f"<div class='card warning'>{html.escape(warning)}</div>"
+        for warning in warnings
+    )
+    body = (
+        f"<header><h1>{heading}</h1><span class='sp'></span>"
+        "<a href='/roadmap'>all repositories</a></header>"
+        f"<p><a href='{target}'>Back to active queue</a></p>"
+        "<div class='browse-search'><label for='roadmap-search'>Search issues</label>"
+        "<input id='roadmap-search' type='search' placeholder='Titles, labels, descriptions'></div>"
+        f"{warning_cards}{''.join(groups) or '<p class=dim>No completed issues.</p>'}"
+    )
+    css = ".browse-search{display:flex;gap:.6rem;align-items:center;margin:1rem 0}.browse-search input{flex:1;min-width:12rem;font:inherit;padding:.35rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}.queue-comment-list{display:grid;gap:.35rem}.browse-more{font:inherit;margin:.3rem 0;padding:.3rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}"
+    return page_fn(heading, body, css, _browse_script())
+
+
+def repository_names(rows: list[dict]) -> list[str]:
+    return [row["repo"] for row in rows if row.get("loopable")]

@@ -39,7 +39,9 @@ import os
 import sys
 
 from . import classify as classify_mod
+from . import review_dispatch
 from . import route as route_mod
+from . import serve
 from . import slots
 from . import slots_redis
 
@@ -121,6 +123,40 @@ def _status_args(parser: argparse.ArgumentParser) -> None:
     _backend_args(parser)
 
 
+def _serve_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--bind", default="127.0.0.1", help="loopback address only")
+    parser.add_argument("--port", type=int, default=8788)
+    parser.add_argument("--peek-lines", type=int, default=25, help="tail lines shown per loop")
+    parser.add_argument("--roadmap", metavar="REPO", help="print a repository roadmap and exit")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("--json", action="store_true")
+
+
+def _review_route_args(parser: argparse.ArgumentParser) -> None:
+    """`lupin review-route` — route a pair and report which lock it needs."""
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--category", help="task category, with --size")
+    source.add_argument(
+        "--issue-json", help="path to a `gh issue view --json ...` file to classify"
+    )
+    parser.add_argument("--size", help="task size label, with --category")
+    parser.add_argument(
+        "--diff-stat", help="path to a `git diff --stat` file (refines --issue-json size)"
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("same-unit", "separate"),
+        default="same-unit",
+        help="same-unit (default): caller is already inside a loop-claude-* unit",
+    )
+    parser.add_argument(
+        "--bmo-unavailable",
+        action="store_true",
+        help="bmo's lock already timed out -- skip a bmo-dependent tier0 pick",
+    )
+    parser.add_argument("--primary-effort", default=None)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lupin", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -130,6 +166,10 @@ def _build_parser() -> argparse.ArgumentParser:
     _hold_args(sub.add_parser("hold", help="acquire (or reuse a lease), run a command, release on exit"))
     _release_args(sub.add_parser("release", help="give up a lease"))
     _status_args(sub.add_parser("status", help="list every slot's holder count and max"))
+    _review_route_args(
+        sub.add_parser("review-route", help="route a pair and report which lock it needs")
+    )
+    _serve_args(sub.add_parser("serve", help="run the read-only loopback dashboard"))
     return parser
 
 
@@ -262,6 +302,12 @@ def main(argv: list[str] | None = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(lupin_argv)
+
+    if args.cmd == "serve":
+        return serve.main(lupin_argv[1:])
+
+    if args.cmd == "review-route":
+        return review_dispatch.main(lupin_argv[1:])
 
     if args.cmd == "route":
         return _cmd_route(args)
