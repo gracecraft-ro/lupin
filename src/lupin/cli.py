@@ -81,6 +81,14 @@ def _backend_args(parser: argparse.ArgumentParser) -> None:
         "--redis-port", type=int, default=int(os.environ.get("LUPIN_REDIS_PORT", "6379")),
         help="redis backend only (default: $LUPIN_REDIS_PORT or 6379)",
     )
+    parser.add_argument(
+        "--redis-username", default=os.environ.get("LUPIN_REDIS_USERNAME"),
+        help="redis backend only (default: $LUPIN_REDIS_USERNAME, no auth if unset)",
+    )
+    parser.add_argument(
+        "--redis-password", default=os.environ.get("LUPIN_REDIS_PASSWORD"),
+        help="redis backend only (default: $LUPIN_REDIS_PASSWORD, no auth if unset)",
+    )
 
 
 def _slot_common_args(parser: argparse.ArgumentParser) -> None:
@@ -169,7 +177,12 @@ def _backend_module(args: argparse.Namespace):
 def _backend_kwargs(args: argparse.Namespace) -> dict:
     """Extra kwargs the `redis` backend needs that `local` doesn't take."""
     if args.backend == "redis":
-        return {"redis_host": args.redis_host, "redis_port": args.redis_port}
+        return {
+            "redis_host": args.redis_host,
+            "redis_port": args.redis_port,
+            "redis_username": args.redis_username,
+            "redis_password": args.redis_password,
+        }
     return {}
 
 

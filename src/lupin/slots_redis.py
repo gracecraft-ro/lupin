@@ -97,10 +97,17 @@ return 0
 """
 
 
-def _client(redis_host: str | None, redis_port: int | None) -> "redis.Redis":
+def _client(
+    redis_host: str | None,
+    redis_port: int | None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
+) -> "redis.Redis":
     return redis.Redis(
         host=redis_host or "localhost",
         port=redis_port or 6379,
+        username=redis_username,
+        password=redis_password,
         socket_connect_timeout=CONNECT_TIMEOUT,
         socket_timeout=CONNECT_TIMEOUT,
         decode_responses=True,
@@ -145,6 +152,8 @@ def acquire(
     max_holders: int | None = None,
     redis_host: str | None = None,
     redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
     state_root: str | Path | None = None,
 ) -> str:
     """Acquire a lease on `slot`, same contract as `slots.acquire` (blocks up
@@ -153,7 +162,7 @@ def acquire(
     Falls back to the `local` backend for `slot == "bmo"` if Redis is
     unreachable; raises `CoordinatorUnreachable` for any other slot.
     """
-    client = _client(redis_host, redis_port)
+    client = _client(redis_host, redis_port, redis_username, redis_password)
     key = f"{PREFIX}slot:{slot}"
     ttl_ms = int(ttl * 1000)
     deadline = time.monotonic() + wait
@@ -184,6 +193,8 @@ def renew(
     ttl: float = local_slots.DEFAULT_TTL,
     redis_host: str | None = None,
     redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
     state_root: str | Path | None = None,
 ) -> bool:
     """Push `lease`'s deadline out. Returns False if the lease is gone, or if
@@ -192,7 +203,7 @@ def renew(
     there is no caller left to catch an exception.
     """
     slot, holder = split_lease(lease)
-    client = _client(redis_host, redis_port)
+    client = _client(redis_host, redis_port, redis_username, redis_password)
     key = f"{PREFIX}slot:{slot}"
     try:
         result = _call_with_retry(
@@ -211,6 +222,8 @@ def release(
     *,
     redis_host: str | None = None,
     redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
     state_root: str | Path | None = None,
 ) -> bool:
     """Compare-and-delete release, same contract as `slots.release` (not an
@@ -218,7 +231,7 @@ def release(
     `bmo` slot if Redis is unreachable.
     """
     slot, holder = split_lease(lease)
-    client = _client(redis_host, redis_port)
+    client = _client(redis_host, redis_port, redis_username, redis_password)
     key = f"{PREFIX}slot:{slot}"
     try:
         result = _call_with_retry(lambda: client.eval(_RELEASE_SCRIPT, 1, key, holder))
@@ -234,6 +247,8 @@ def status(
     *,
     redis_host: str | None = None,
     redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
     state_root: str | Path | None = None,
 ) -> dict[str, dict]:
     """Return `{slot_name: {"holders": live_count, "max": max_or_None}}`,
@@ -251,7 +266,7 @@ def status(
     a local fallback, so there is nothing else this call could report that
     the local backend wouldn't also have a view of.
     """
-    client = _client(redis_host, redis_port)
+    client = _client(redis_host, redis_port, redis_username, redis_password)
     try:
         now = _now_ms()
         result: dict[str, dict] = {}
@@ -279,6 +294,8 @@ def hold(
     max_holders: int | None = None,
     redis_host: str | None = None,
     redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
     state_root: str | Path | None = None,
 ) -> int:
     """Same contract as `slots.hold`: acquire (unless `lease` is already
@@ -295,6 +312,8 @@ def hold(
             max_holders=max_holders,
             redis_host=redis_host,
             redis_port=redis_port,
+            redis_username=redis_username,
+            redis_password=redis_password,
             state_root=state_root,
         )
 
@@ -303,9 +322,20 @@ def hold(
         lease,
         ttl=ttl,
         renew=lambda lease_id: renew(
-            lease_id, ttl=ttl, redis_host=redis_host, redis_port=redis_port, state_root=state_root
+            lease_id,
+            ttl=ttl,
+            redis_host=redis_host,
+            redis_port=redis_port,
+            redis_username=redis_username,
+            redis_password=redis_password,
+            state_root=state_root,
         ),
         release=lambda lease_id: release(
-            lease_id, redis_host=redis_host, redis_port=redis_port, state_root=state_root
+            lease_id,
+            redis_host=redis_host,
+            redis_port=redis_port,
+            redis_username=redis_username,
+            redis_password=redis_password,
+            state_root=state_root,
         ),
     )
