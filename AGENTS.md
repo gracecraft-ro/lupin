@@ -9,10 +9,6 @@
 
 One program, `lupin`, with subcommands. Run `lupin --help` for the full list.
 
-## Status of this repo
-
-This repo has no GitHub remote yet. It is prep work for a future repo,
-`gracecraft/lupin`. See `docs/delegation-loop.md` for the rule this implies.
 
 ## Commands
 
