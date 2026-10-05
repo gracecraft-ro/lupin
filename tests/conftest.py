@@ -67,3 +67,43 @@ def flush_redis(redis_port):
 def closed_port() -> int:
     """A TCP port nothing listens on -- exercises the unreachable-redis path."""
     return _free_port()
+
+
+@pytest.fixture(scope="session")
+def auth_redis_port():
+    """A separate server from `redis_port`, with `requirepass` set -- tests
+    the username/password plumbing (jesus's real Redis needs ACL auth, see
+    docs/redis-schema.md), without adding auth to the shared no-auth server
+    every other test in this file relies on.
+    """
+    port = _free_port()
+    proc = subprocess.Popen(
+        [
+            "redis-server",
+            "--port", str(port),
+            "--bind", "127.0.0.1",
+            "--save", "",
+            "--appendonly", "no",
+            "--requirepass", "test-pass",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    client = redis_lib.Redis(host="127.0.0.1", port=port, password="test-pass")
+    deadline = time.monotonic() + 10
+    up = False
+    while time.monotonic() < deadline:
+        try:
+            up = client.ping()
+            break
+        except redis_lib.exceptions.ConnectionError:
+            time.sleep(0.05)
+    if not up:
+        proc.terminate()
+        proc.wait(timeout=5)
+        raise RuntimeError("redis-server did not come up in time")
+    try:
+        yield port
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)

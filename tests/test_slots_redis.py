@@ -85,3 +85,24 @@ def test_unreachable_redis_falls_back_to_local_for_bmo(closed_port, tmp_path, ca
 def test_unreachable_redis_raises_for_a_non_bmo_slot(closed_port):
     with pytest.raises(slots.CoordinatorUnreachable):
         slots_redis.acquire("not-bmo", "a", redis_host="127.0.0.1", redis_port=closed_port)
+
+
+def test_missing_password_against_a_requirepass_server_falls_back_like_unreachable(auth_redis_port, tmp_path):
+    # redis-py's AuthenticationError is a ConnectionError subclass, so a bad
+    # or missing password takes the same fallback path as an unreachable
+    # server -- bmo's warn-and-fall-back-to-local, not a distinct error.
+    root = str(tmp_path)
+    lease = slots_redis.acquire(
+        "bmo", "a", max_holders=1, redis_host="127.0.0.1", redis_port=auth_redis_port, state_root=root
+    )
+    assert lease.startswith("bmo:")
+    assert slots.status(state_root=root)["bmo"]["holders"] == 1
+
+
+def test_acquire_with_the_right_password_uses_redis_not_the_fallback(auth_redis_port):
+    kw = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, "redis_password": "test-pass"}
+    lease = slots_redis.acquire("bmo", "auth-holder", **kw)
+    assert lease == "bmo:auth-holder"
+    raw = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass", decode_responses=True)
+    assert raw.zcard("lupin:v1:slot:bmo") == 1
+    slots_redis.release(lease, **kw)
