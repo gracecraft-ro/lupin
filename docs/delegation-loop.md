@@ -3,16 +3,12 @@
 This file is the loop's entry point for this repo. Read the root
 `AGENTS.md` first.
 
-## Where this repo lives, now and later
+## Where this repo lives
 
-This repo has no GitHub remote yet. It was built at
-`/home/ghosta/jobs/lupin-prep`, ahead of `gracecraft/lupin` existing on
-GitHub (tracked in issue #201 of `gracecraft/nix`). Once the owner creates
-that GitHub repo and pushes this content to it, this repo gets mounted into
-the `jesus` sandbox at `/code/lupin`, the same way `ghostbook.nix` is
-mounted at `/code/ghostbook.nix`. The rule below is written for that later
-state. Until then, `origin` here points nowhere, so rule 1 has nothing to
-push to yet.
+This repo is `gracecraft/lupin`. The owner clones it to
+`~/Code/Projects/lupin` and OrbStack mounts it into the `jesus` sandbox at
+`/code/lupin`, the same way `ghostbook.nix` is mounted at
+`/code/ghostbook.nix`.
 
 ## Rule 1: do not push to GitHub from the sandbox
 
@@ -20,7 +16,7 @@ A sandbox agent's `gh` token cannot push code to GitHub. This holds for
 `lupin` the same way it holds for `ghostbook.nix` (see that repo's
 `docs/delegation-loop.md`, rule 1).
 
-Once `/code/lupin` exists as a mount:
+To work on an issue:
 
 1. Clone it to a task directory, and work on a branch there, not in the
    mount itself:
