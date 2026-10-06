@@ -1,11 +1,19 @@
-"""Read-only quest reporting (issue #11).
+"""Quest reporting (issue #11) and `quest start`/`stop` (issue #13).
 
 A quest is a GitHub issue labeled `quest`; its GitHub sub-issues are its
-tasks. This module finds quests, works out each task's done/not-done state,
-and (if Redis is reachable) reads which machine is focused on each quest.
+tasks. The reporting half of this module finds quests, works out each
+task's done/not-done state, and (if Redis is reachable) reads which
+machine is focused on each quest.
 
-It only reads and reports. `quest focus`/`release`/`start`/`stop` are
-separate commands (issues #12, #13) -- not built here.
+`start`/`stop` are a second kind of quest: a set of plain issue numbers the
+caller names directly with `--issue`, instead of a GitHub label. `start`
+validates them (not claimed, not closed, exists, no blocker outside the
+set, target machine not draining), claims them all, picks a machine
+(reusing `place.place`'s scoring unless `--machine` names one), and writes
+`quest:<id>` (see `docs/redis-schema.md`). `stop` releases whatever that
+quest still holds and deletes the record.
+
+`quest focus`/`release` are issue #12 -- not built here.
 """
 
 from __future__ import annotations
@@ -16,8 +24,9 @@ import re
 
 import redis
 
-from . import roadmap, slots_redis
+from . import claims, machines as machines_mod, place as place_mod, roadmap, slots_redis
 from .roadmap import CODE_DIR
+from .slots import CoordinatorUnreachable
 
 QUEST_LABEL = "quest"
 PREFIX = "lupin:v1:"
@@ -315,3 +324,342 @@ def render_list(quests: list[dict], focuses: dict[str, dict | None]) -> str:
             f"{quest['total']} tasks, {open_count} open   {focus_text}"
         )
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# quest start / stop (issue #13)
+# --------------------------------------------------------------------------
+
+
+class QuestError(Exception):
+    """A `quest start`/`stop` validation failure. `str(exc)` is the message
+    text as-is -- `cli.py` prints it as `error: {exc}` and exits with
+    `.exit_code`. Default 1 ("bad input"); `IssueClaimed`/`MachineDraining`
+    override it to 2 ("try again later"), the same code `claim` and `place`
+    already use for that same shape of failure.
+    """
+
+    exit_code = 1
+
+
+class IssueNotFound(QuestError):
+    def __init__(self, number: int):
+        super().__init__(f"#{number} does not exist in any enabled repo.")
+
+
+class IssueClosed(QuestError):
+    def __init__(self, number: int):
+        super().__init__(f"#{number} is closed. Remove --issue {number}.")
+
+
+class IssueClaimed(QuestError):
+    exit_code = 2
+
+    def __init__(self, number: int, session: str):
+        super().__init__(f"#{number} is claimed by {session}. Wait for it or stop that loop.")
+
+
+class IssueBlocked(QuestError):
+    def __init__(self, number: int, blocker: int):
+        super().__init__(
+            f"#{number} is blocked by #{blocker}, which is not in this quest. "
+            f"Add --issue {blocker} or wait for it."
+        )
+
+
+class MachineDraining(QuestError):
+    exit_code = 2
+
+    def __init__(self, machine: str):
+        super().__init__(f"{machine} is draining and takes no new work. Pick another machine.")
+
+
+class QuestNotFound(QuestError):
+    def __init__(self, quest_id: str):
+        super().__init__(f"no quest matches {quest_id!r}")
+
+
+def _locate_issue(number: int, repos: list[str], code_dir: str):
+    """Find which enabled repo holds issue `number`, open or closed.
+
+    Tries each repo's own checkout in turn (same ambient-`gh`-repo
+    convention as the rest of this codebase -- see `roadmap._run_json`).
+    Returns `(repo, "owner/name", issue-json)` for the first match, or
+    `None` if no enabled repo has it.
+    """
+    for repo in repos:
+        repo_path = os.path.join(code_dir, repo)
+        owner, name, error = roadmap._repo_identity(repo_path)
+        if error:
+            continue
+        issue, error = roadmap._run_json(
+            ["gh", "issue", "view", str(number), "--json", "number,state"], repo_path
+        )
+        if error or not isinstance(issue, dict):
+            continue
+        return repo, f"{owner}/{name}", issue
+    return None
+
+
+def _resolve_issues(issue_numbers: list[int], repos: list[str], code_dir: str) -> dict:
+    """Existence + closed checks for every issue, in `--issue` order.
+    Returns `{number: (repo, "owner/repo#number")}`. Raises `IssueNotFound`
+    or `IssueClosed` on the first problem found.
+    """
+    resolved = {}
+    for number in issue_numbers:
+        found = _locate_issue(number, repos, code_dir)
+        if found is None:
+            raise IssueNotFound(number)
+        repo, owner_repo, issue = found
+        if issue.get("state") == "CLOSED":
+            raise IssueClosed(number)
+        resolved[number] = (repo, f"{owner_repo}#{number}")
+    return resolved
+
+
+def _check_claims(resolved: dict, issue_numbers: list[int], connection: dict) -> None:
+    owner_repos = sorted({target.rpartition("#")[0] for _repo, target in resolved.values()})
+    existing = claims.claims_for(owner_repos, **connection)
+    for number in issue_numbers:
+        _repo, target = resolved[number]
+        held = existing.get(target)
+        if held:
+            raise IssueClaimed(number, held.get("session", "another loop"))
+
+
+def _check_blocked_by(resolved: dict, issue_numbers: list[int], repos: list[str], code_dir: str) -> dict:
+    """Raises `IssueBlocked` if any requested issue is blocked by an issue
+    outside the set. Returns the dependency DAG, so `_dependency_order`
+    below doesn't fetch it twice.
+    """
+    dag = roadmap.cached_dependency_dag(repos, code_dir)
+    requested = set(issue_numbers)
+    for number in issue_numbers:
+        repo, _target = resolved[number]
+        entries = {entry["number"]: entry for entry in dag.get("repos", {}).get(repo, [])}
+        entry = entries.get(number, {})
+        for blocker in entry.get("blockedBy", []):
+            if blocker["number"] not in requested:
+                raise IssueBlocked(number, blocker["number"])
+    return dag
+
+
+def _dependency_order(issue_numbers: list[int], resolved: dict, dag: dict) -> list[int]:
+    """Topological order among just the requested issues, across repos --
+    reuses `_task_order` above (the same sort `status_to_json` uses), fed a
+    blockedBy map restricted to this quest's own issues instead of one
+    repo's.
+    """
+    requested = set(issue_numbers)
+    blockers = {}
+    for number in issue_numbers:
+        repo, _target = resolved[number]
+        entries = {entry["number"]: entry for entry in dag.get("repos", {}).get(repo, [])}
+        entry = entries.get(number, {})
+        blockers[number] = {b["number"] for b in entry.get("blockedBy", []) if b["number"] in requested}
+    ordered = _task_order([{"number": number} for number in issue_numbers], blockers)
+    return [task["number"] for task in ordered]
+
+
+def _resolve_machine(machine: str | None, issue_numbers: list[int], connection: dict) -> str:
+    """`--machine` wins outright (checked only for draining). Otherwise
+    reuse `place.place`'s scoring on the first named issue -- `place` picks
+    one machine for one task, and a quest's issues are meant to run under
+    one dedicated loop, so the first issue's routing stands in for the
+    whole set.
+    """
+    if machine:
+        records = {record["name"]: record for record in machines_mod.machines(connection)}
+        record = records.get(machine)
+        if record is not None and record["state"] == "draining":
+            raise MachineDraining(machine)
+        return machine
+    placed = place_mod.place(str(issue_numbers[0]), connection)
+    pick = placed.get("pick")
+    if not pick:
+        raise QuestError("no online machine can take this quest right now.")
+    return pick
+
+
+def _claim_all(resolved: dict, issue_numbers: list[int], holder: str, connection: dict) -> None:
+    """Claim every issue in order. If any claim fails -- someone else got
+    there first (a race past the earlier `_check_claims` pre-check), or
+    Redis drops mid-way -- release everything this call already claimed,
+    so a quest never half-starts.
+    """
+    claimed_targets = []
+    try:
+        for number in issue_numbers:
+            _repo, target = resolved[number]
+            try:
+                claims.claim(target, holder, **connection)
+            except claims.ClaimHeld:
+                owner_repo = target.rpartition("#")[0]
+                existing = claims.claims_for([owner_repo], **connection)
+                held = existing.get(target, {})
+                raise IssueClaimed(number, held.get("session", "another loop")) from None
+            claimed_targets.append(target)
+    except Exception:
+        for target in claimed_targets:
+            try:
+                claims.release_claim(target, holder, **connection)
+            except CoordinatorUnreachable:
+                pass
+        raise
+
+
+_SEQ_KEY = f"{PREFIX}seq:quest"
+
+# KEYS[1] = seq:quest. `INCR` isn't on this project's Redis ACL command
+# list (see docs/redis-schema.md), so the counter is read and written with
+# plain GET/SET inside one EVAL instead.
+_SEQ_SCRIPT = """
+local n = tonumber(redis.call('GET', KEYS[1]) or '0') + 1
+redis.call('SET', KEYS[1], n)
+return n
+"""
+
+
+def _redis_client(connection: dict):
+    return slots_redis._client(
+        connection.get("redis_host"),
+        connection.get("redis_port"),
+        connection.get("redis_username"),
+        connection.get("redis_password"),
+    )
+
+
+def _next_quest_id(connection: dict) -> str:
+    client = _redis_client(connection)
+    try:
+        n = slots_redis._call_with_retry(lambda: client.eval(_SEQ_SCRIPT, 1, _SEQ_KEY))
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
+        raise CoordinatorUnreachable("quest id") from exc
+    return f"q{n}"
+
+
+def _quest_key(quest_id: str) -> str:
+    return f"{PREFIX}quest:{quest_id}"
+
+
+def _write_quest(quest_id: str, record: dict, connection: dict) -> None:
+    client = _redis_client(connection)
+    try:
+        slots_redis._call_with_retry(lambda: client.set(_quest_key(quest_id), json.dumps(record)))
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
+        raise CoordinatorUnreachable("quest record") from exc
+
+
+def read_quest(quest_id: str, connection: dict) -> dict | None:
+    """Read `quest:<id>`'s parsed JSON, or `None` if there is no such
+    quest. Raises `CoordinatorUnreachable` if Redis can't be reached --
+    unlike `read_focus`, a missing quest and an unreachable registry are
+    not the same thing here: `stop` needs to tell them apart to know
+    whether it has anything to release.
+    """
+    client = _redis_client(connection)
+    try:
+        raw = slots_redis._call_with_retry(lambda: client.get(_quest_key(quest_id)))
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
+        raise CoordinatorUnreachable("quest record") from exc
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _delete_quest(quest_id: str, connection: dict) -> None:
+    client = _redis_client(connection)
+    try:
+        slots_redis._call_with_retry(lambda: client.delete(_quest_key(quest_id)))
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
+        raise CoordinatorUnreachable("quest record") from exc
+
+
+def start(
+    issue_numbers: list[int],
+    repos: list[str],
+    *,
+    connection: dict,
+    machine: str | None = None,
+    platform: str | None = None,
+    note: str | None = None,
+    code_dir: str = CODE_DIR,
+) -> dict:
+    """Validate, claim, and register a quest for `issue_numbers`.
+
+    Raises a `QuestError` subclass (message ready to print as `error:
+    ...`) for any of the five documented validation failures, or
+    `CoordinatorUnreachable` if Redis can't be reached. On success, writes
+    `quest:<id>` (see docs/redis-schema.md) and returns its record plus
+    `"id"`.
+    """
+    seen: set[int] = set()
+    deduped = []
+    for number in issue_numbers:
+        if number not in seen:
+            seen.add(number)
+            deduped.append(number)
+    issue_numbers = deduped
+
+    resolved = _resolve_issues(issue_numbers, repos, code_dir)
+    _check_claims(resolved, issue_numbers, connection)
+    dag = _check_blocked_by(resolved, issue_numbers, repos, code_dir)
+    chosen_machine = _resolve_machine(machine, issue_numbers, connection)
+    order = _dependency_order(issue_numbers, resolved, dag)
+
+    quest_id = _next_quest_id(connection)
+    holder = f"quest:{quest_id}"
+    _claim_all(resolved, issue_numbers, holder, connection)
+
+    record = {
+        "issues": issue_numbers,
+        "targets": [resolved[number][1] for number in issue_numbers],
+        "order": order,
+        "machine": chosen_machine,
+        "state": "running",
+    }
+    if platform:
+        record["platform"] = platform
+    if note:
+        record["note"] = note
+    _write_quest(quest_id, record, connection)
+    return {"id": quest_id, **record}
+
+
+def render_start(result: dict) -> str:
+    issues_text = " ".join(f"#{n}" for n in result["issues"])
+    order_text = ", ".join(f"#{n}" for n in result["order"])
+    return (
+        f"quest {result['id']} started on {result['machine']} · "
+        f"{issues_text} claimed · order: {order_text}"
+    )
+
+
+def stop(quest_id: str, *, connection: dict) -> str:
+    """Release every issue this quest still holds (one already merged or
+    closed releases its own claim, so only what's still claimed needs
+    releasing here) and delete `quest:<id>`. Raises `QuestNotFound` if
+    `quest_id` doesn't match a running quest, or `CoordinatorUnreachable`
+    if Redis can't be reached.
+    """
+    record = read_quest(quest_id, connection)
+    if record is None:
+        raise QuestNotFound(quest_id)
+    holder = f"quest:{quest_id}"
+    issues = record.get("issues", [])
+    targets = record.get("targets", [])
+    released = [
+        number
+        for number, target in zip(issues, targets)
+        if claims.release_claim(target, holder, **connection)
+    ]
+    _delete_quest(quest_id, connection)
+    if not released:
+        return f"quest {quest_id} stopped · nothing left to release, branch kept"
+    issue_list = " ".join(f"#{n}" for n in released)
+    return f"quest {quest_id} stopped · {issue_list} released to the queue, branch kept"

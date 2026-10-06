@@ -83,11 +83,17 @@ and `lupin quest status`. No TTL — `quest stop` deletes the key.
 ```json
 {
   "issues": [11, 12, 13],
+  "targets": ["gracecraft/lupin#11", "gracecraft/lupin#12", "gracecraft/lupin#13"],
   "order": [11, 12, 13],
   "machine": "jesus",
   "state": "running"
 }
 ```
+
+`targets` is `issues` in the same order, each written as the `claim:<...>`
+key it maps to (`owner/repo#n`) -- a quest's issues can come from different
+repos, so `stop` needs this to find each one's claim. `platform`/`note`
+are optional, carried over as-is from `quest start`'s own flags.
 
 ### `seq:quest`
 

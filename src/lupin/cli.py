@@ -44,7 +44,10 @@ Exit codes, by design (see #198's architecture plan):
      when the caller isn't the claim's current holder.
 
 `claim` returns 2 when another holder already has the issue -- same "busy,
-skip and try again later" meaning as a full slot.
+skip and try again later" meaning as a full slot. `quest start` reuses the
+same two codes for its own validation failures: 2 for "claimed by another
+loop" or "target machine draining" (both "try again later"), 1 for
+anything else (closed, missing, or blocked by an issue outside the quest).
 """
 
 from __future__ import annotations
@@ -121,10 +124,24 @@ def _backend_args(parser: argparse.ArgumentParser) -> None:
 
 def _quest_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "mode", nargs="?", choices=["status"], default=None,
-        help="omit to list every quest; 'status' for one quest's task breakdown",
+        "mode", nargs="?", choices=["status", "start", "stop"], default=None,
+        help="omit to list every quest; 'status' for one quest's task breakdown, "
+             "'start' to claim --issue N as a quest, 'stop' to release one",
     )
-    parser.add_argument("id", nargs="?", default=None, help="quest name or issue number, with status")
+    parser.add_argument(
+        "id", nargs="?", default=None,
+        help="quest name or issue number (status); quest id (stop)",
+    )
+    parser.add_argument(
+        "--issue", dest="issues", type=int, action="append", default=None,
+        help="an issue to ship; repeat for each (start only)",
+    )
+    parser.add_argument(
+        "--machine", default=None,
+        help="run on this machine (start only); default: best fit from `place`",
+    )
+    parser.add_argument("--platform", default=None, help="force a provider (start only)")
+    parser.add_argument("--note", default=None, help="extra instruction for the loop (start only)")
     parser.add_argument("--json", action="store_true")
     _redis_args(parser)
 
@@ -630,13 +647,57 @@ def _cmd_place(args: argparse.Namespace) -> int:
 
 
 def _cmd_quest(args: argparse.Namespace) -> int:
-    repos = serve.enabled_repos()
     redis_kwargs = {
         "redis_host": args.redis_host,
         "redis_port": args.redis_port,
         "redis_username": args.redis_username,
         "redis_password": args.redis_password,
     }
+
+    if args.mode == "start":
+        if not args.issues:
+            print("quest start needs at least one --issue", file=sys.stderr)
+            return 1
+        try:
+            result = quest_mod.start(
+                args.issues,
+                serve.enabled_repos(),
+                connection=redis_kwargs,
+                machine=args.machine,
+                platform=args.platform,
+                note=args.note,
+            )
+        except quest_mod.QuestError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return exc.exit_code
+        except slots.CoordinatorUnreachable as exc:
+            print(f"cannot reach the redis coordinator for quest start: {exc}", file=sys.stderr)
+            return 3
+        if args.json:
+            print(json.dumps(result))
+        else:
+            print(quest_mod.render_start(result))
+        return 0
+
+    if args.mode == "stop":
+        if not args.id:
+            print("quest stop needs an id", file=sys.stderr)
+            return 1
+        try:
+            message = quest_mod.stop(args.id, connection=redis_kwargs)
+        except quest_mod.QuestError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return exc.exit_code
+        except slots.CoordinatorUnreachable as exc:
+            print(f"cannot reach the redis coordinator for quest stop: {exc}", file=sys.stderr)
+            return 3
+        if args.json:
+            print(json.dumps({"id": args.id, "message": message}))
+        else:
+            print(message)
+        return 0
+
+    repos = serve.enabled_repos()
     quests, warnings = quest_mod.load_quests(repos)
     for warning in warnings:
         print(f"lupin: {warning}", file=sys.stderr)
