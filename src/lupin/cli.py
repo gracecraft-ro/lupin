@@ -7,10 +7,11 @@ slot-lease commands (issue #205 for the `local` backend, #210 for
 #185) and `serve` runs the read-only dashboard (issue #204).
 `join`/`heartbeat`/`drain`/`undrain`/`machines` are the fleet machine
 registry (issue #7); see `machines.py` for the Redis record they read and
-write. All of them share one process so a caller has one binary to find
-and one `lupin --help` to read; the concerns stay as separate modules
-underneath, same as this project's other CLIs split "decide" from "do"
-(see review_dispatch.py).
+write. `place` picks which registered machine should run a task already
+routed to a model (issue #9; see `place.py`). All of them share one process
+so a caller has one binary to find and one `lupin --help` to read; the
+concerns stay as separate modules underneath, same as this project's other
+CLIs split "decide" from "do" (see review_dispatch.py).
 
 Backend choice: `--backend local|redis` on each slot subcommand, default
 from the `LUPIN_BACKEND` env var, falling back to `local` if neither is
@@ -23,7 +24,9 @@ Exit codes, by design (see #198's architecture plan):
   0  done
   2  busy/full (acquire, hold) -- skip and try again later, or a usage error
      from argparse itself (its own default for a bad flag; both meanings are
-     "this invocation didn't produce a result", so sharing the code is fine)
+     "this invocation didn't produce a result", so sharing the code is fine).
+     `place` reuses this code too: no online machine runs the routed
+     provider right now, which is the same "try again later" shape.
   3  cannot reach the coordinator, and this slot has no local fallback. The
      `local` backend's coordinator is the filesystem, which it always
      reaches once the state root is writable, so it never returns 3. The
@@ -40,9 +43,11 @@ import argparse
 import json
 import os
 import sys
+import time
 
 from . import classify as classify_mod
 from . import machines
+from . import place as place_mod
 from . import review_dispatch
 from . import route as route_mod
 from . import serve
@@ -205,6 +210,13 @@ def _machines_args(parser: argparse.ArgumentParser) -> None:
     _fleet_connection_args(parser)
 
 
+def _place_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("task", help="a GitHub issue number (e.g. 418 or #418) or free text")
+    parser.add_argument("--explain", action="store_true", help="show every candidate machine and why")
+    parser.add_argument("--json", action="store_true")
+    _fleet_connection_args(parser)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lupin", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -223,6 +235,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _fleet_connection_args(sub.add_parser("drain", help="mark this machine as draining"))
     _fleet_connection_args(sub.add_parser("undrain", help="mark this machine as online again"))
     _machines_args(sub.add_parser("machines", help="list every registered machine's state"))
+    _place_args(sub.add_parser("place", help="pick which machine should run a task"))
     return parser
 
 
@@ -420,6 +433,80 @@ def _cmd_machines(args: argparse.Namespace) -> int:
     return 0
 
 
+def _format_place_table(result: dict) -> str:
+    headers = ["machine", "state", "slots", "quest focus", "lupin", "result"]
+    rows = [
+        [
+            c["name"],
+            c["state"],
+            f"{c['slots_used']}/{c['slots_max']}",
+            c["quest_focus"] or "-",
+            c["version"] or "-",
+            c["result"],
+        ]
+        for c in result["candidates"]
+    ]
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, value in enumerate(row):
+            widths[i] = max(widths[i], len(value))
+
+    def fmt(cells: list[str]) -> str:
+        return "   ".join(cell.ljust(widths[i]) for i, cell in enumerate(cells)).rstrip()
+
+    return "\n".join([fmt(headers)] + [fmt(row) for row in rows])
+
+
+def _format_place_explain(result: dict) -> str:
+    lines = [
+        f"{result['task_label']} · {result['category_label']}, {result['size_label']}"
+        f" → {result['model']} {result['effort']} ({result['provider']})"
+    ]
+    quota = result["quota"]
+    if quota and quota.get("pct_left") is not None:
+        pct = f"{quota['pct_left']:.0f}%"
+        resets_at = quota.get("resets_at")
+        if resets_at:
+            resets_in = place_mod.format_duration(resets_at / 1000 - time.time())
+            lines.append(f"{result['provider']} quota {pct}, resets in {resets_in}")
+        else:
+            lines.append(f"{result['provider']} quota {pct}")
+    else:
+        lines.append(f"{result['provider']} quota: unknown")
+    lines.append("")
+    if result["candidates"]:
+        lines.append(_format_place_table(result))
+    skipped = result["skipped"]
+    total_skipped = skipped["offline"] + skipped["other_provider"]
+    if total_skipped:
+        reasons = []
+        if skipped["other_provider"]:
+            reasons.append(f"{skipped['other_provider']} run a different provider")
+        if skipped["offline"]:
+            reasons.append(f"{skipped['offline']} offline")
+        lines.append(f"{total_skipped} machine(s) skipped: {', '.join(reasons)}")
+    return "\n".join(lines)
+
+
+def _cmd_place(args: argparse.Namespace) -> int:
+    try:
+        result = place_mod.place(args.task, _fleet_connection(args))
+    except place_mod.CoordinatorUnreachable as exc:
+        print(f"cannot reach the {exc}", file=sys.stderr)
+        return 3
+    if args.json:
+        print(json.dumps(result))
+        return 0
+    if args.explain:
+        print(_format_place_explain(result))
+        return 0 if result["pick"] else 2
+    if not result["pick"]:
+        print(f"no online machine runs provider {result['provider']!r}", file=sys.stderr)
+        return 2
+    print(result["run_command"])
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = sys.argv[1:] if argv is None else argv
     if "--" in raw:
@@ -459,6 +546,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_undrain(args)
     if args.cmd == "machines":
         return _cmd_machines(args)
+    if args.cmd == "place":
+        return _cmd_place(args)
     parser.error(f"unknown command {args.cmd!r}")  # pragma: no cover
     return 1
 

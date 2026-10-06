@@ -234,12 +234,19 @@ def undrain(connection: dict) -> dict:
 
 def machines(connection: dict) -> list[dict]:
     """Every registered machine, each as:
-    `{"name", "state", "version", "heartbeat", "version_mismatch"}`.
+    `{"name", "state", "version", "heartbeat", "version_mismatch", "slots",
+    "providers", "quota"}`.
 
     `state` is the record's own `online`/`draining`, overridden to
     `offline` once `OFFLINE_AFTER` seconds have passed since `heartbeat`
     with no renewal -- see this module's docstring for why that is computed
     here rather than left to Redis's key TTL.
+
+    `slots`/`providers`/`quota` are carried straight through from the
+    record (see `_write_record`) -- added for `place` (issue #9), which
+    scores machines on exactly this data. Earlier callers only read
+    name/state/version/heartbeat, so this is a pure addition, not a change
+    to those fields.
     """
     client = slots_redis._client(
         connection.get("redis_host"),
@@ -269,6 +276,9 @@ def machines(connection: dict) -> list[dict]:
                     "version": record.get("version"),
                     "heartbeat": record.get("heartbeat"),
                     "version_mismatch": record.get("version") != local_version,
+                    "slots": record.get("slots", {}),
+                    "providers": record.get("providers", []),
+                    "quota": record.get("quota", {}),
                 }
             )
         return result
