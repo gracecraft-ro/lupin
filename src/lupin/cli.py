@@ -44,6 +44,7 @@ skip and try again later" meaning as a full slot.
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import sys
@@ -187,6 +188,11 @@ def _roadmap_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dag", action="store_true", help="draw dependencies between tasks")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--refresh", action="store_true", help="bypass the GitHub issue cache")
+    # `roadmap` marks claimed issues via claims.py's claims_for(), which needs
+    # the same Redis connection info as `claim`/`renew-claim`/`release-claim`
+    # -- without these, claims_for() always connects to localhost:6379 with
+    # no auth, so it silently misses every claim on a real deployment.
+    _redis_conn_args(parser)
 
 
 def _serve_args(parser: argparse.ArgumentParser) -> None:
@@ -422,7 +428,11 @@ def _cmd_release_claim(args: argparse.Namespace) -> int:
 
 
 def _cmd_roadmap(args: argparse.Namespace) -> int:
-    text, code = roadmap_cli.run(args.repo, args.limit, args.stage, args.dag, args.json, args.refresh)
+    claims_lookup = functools.partial(claims.claims_for, **_claim_kwargs(args))
+    text, code = roadmap_cli.run(
+        args.repo, args.limit, args.stage, args.dag, args.json, args.refresh,
+        claims_lookup=claims_lookup,
+    )
     print(text)
     return code
 
