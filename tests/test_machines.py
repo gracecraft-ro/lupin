@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 import pytest
 import redis as redis_lib
@@ -23,6 +24,19 @@ _AMBIENT_ENV_VARS = (
     "LUPIN_REDIS_HOST", "LUPIN_REDIS_PORT", "LUPIN_REDIS_USERNAME",
     "LUPIN_REDIS_PASSWORD", "LUPIN_FLEET_CONFIG", "LUPIN_BACKEND",
 )
+
+
+@pytest.fixture(autouse=True)
+def fake_quota_snapshot():
+    """`_write_record` (via `join`/`heartbeat`/`drain`/`undrain`) calls
+    `quota.snapshot()` for real otherwise -- on a box with real Claude
+    credentials and `omp` installed, that means a live network call and a
+    real subprocess on every test in this file. Fixed data stands in.
+    """
+    with mock.patch.object(
+        machines.quota, "snapshot", return_value={"claude": {"pct_left": 50, "resets_at": None, "source": "test"}}
+    ):
+        yield
 
 
 @pytest.fixture
@@ -91,6 +105,31 @@ def test_heartbeat_refreshes_fields_and_keeps_state(redis_port, flush_redis, tmp
 
     assert record["state"] == "draining"  # heartbeat does not clear drain
     assert record["heartbeat"] >= before["heartbeat"]
+
+
+def test_heartbeat_fills_quota_from_quota_snapshot(redis_port, flush_redis, tmp_path):
+    # `quota.snapshot()` itself is mocked (see `fake_quota_snapshot`) -- this
+    # only checks that `_write_record` calls it and stores what it returns.
+    kw = _kw(redis_port)
+    record = machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
+    assert record["quota"] == {"claude": {"pct_left": 50, "resets_at": None, "source": "test"}}
+
+
+def test_heartbeat_does_not_wipe_out_of_band_providers(redis_port, flush_redis, tmp_path):
+    # Nothing writes `providers` yet, but `_write_record` must not clobber
+    # it once something does -- same rule `heartbeat` already follows for
+    # `state`. Simulate that future writer directly in Redis.
+    kw = _kw(redis_port)
+    machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
+    client = _raw_client(redis_port)
+    key = f"{machines.PREFIX}machine:{machines.hostname()}"
+    record = json.loads(client.get(key))
+    record["providers"] = ["anthropic", "openai"]
+    client.set(key, json.dumps(record))
+
+    refreshed = machines.heartbeat(kw)
+
+    assert refreshed["providers"] == ["anthropic", "openai"]
 
 
 def test_drain_and_undrain_flip_state(redis_port, flush_redis, tmp_path):

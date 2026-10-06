@@ -19,9 +19,10 @@ as "offline" instead of silently vanishing. The Redis key itself gets a
 much longer TTL (`RECORD_TTL`, 20x `OFFLINE_AFTER`) purely as a janitor for
 machines retired long ago -- not the thing that decides online/offline.
 
-Quota is a stub (`{}`) and providers is a stub (`[]`) here on purpose --
-issue #8 ("quota snapshot module") owns populating both; this module only
-leaves the fields present so #8 has something to fill in.
+`quota` comes from `quota.snapshot()` (issue #8), recomputed on every
+write. `providers` is still a stub (`[]`) -- nothing populates it yet, but
+`_write_record` carries over whatever is already there instead of
+overwriting it, so a future writer's value survives the next heartbeat.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from pathlib import Path
 
 import redis
 
-from . import slots_redis
+from . import quota, slots_redis
 
 CoordinatorUnreachable = slots_redis.CoordinatorUnreachable
 
@@ -124,13 +125,21 @@ def _slot_summary(connection: dict) -> dict:
 
 
 def _write_record(client, name: str, *, state: str, connection: dict) -> dict:
+    """`providers` has no writer yet -- carry over whatever the existing
+    record has (same reason `heartbeat` carries over `state`), so a plain
+    heartbeat can't wipe it out once something does write it. `quota` is
+    the opposite: it is recomputed here every time, since this function is
+    the only writer of `machine:<name>` and a stale quota reading is worse
+    than the extra `quota.snapshot()` call.
+    """
+    existing = _read_record(client, name)
     record = {
         "version": package_version(),
         "heartbeat": _now_iso(),
         "state": state,
         "slots": _slot_summary(connection),
-        "providers": [],
-        "quota": {},
+        "providers": existing.get("providers", []) if existing else [],
+        "quota": quota.snapshot(),
     }
     client.set(_record_key(name), json.dumps(record), ex=RECORD_TTL)
     return record

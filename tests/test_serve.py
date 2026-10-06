@@ -4,12 +4,9 @@ import sys
 
 import json
 import os
-import sqlite3
 import tempfile
 import time
 import unittest
-from contextlib import closing
-from datetime import date, timedelta
 from importlib import resources
 from unittest import mock
 
@@ -159,142 +156,21 @@ class TimerTests(unittest.TestCase):
         self.assertNotIn("loopctl once repo-no-doc", page)
 
 
-class UsageTests(unittest.TestCase):
-    def setUp(self):
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tempdir.cleanup)
-        self.claude_path = os.path.join(self.tempdir.name, "stats-cache.json")
-        self.omp_path = os.path.join(self.tempdir.name, "stats.db")
-        self.real_claude_oauth_quota = serve.claude_oauth_quota
-        self.real_opencode_go_quota = serve.opencode_go_quota
-        # Default to unavailable local tools; quota API adapters are mocked
-        # so tests do not read credentials or contact providers.
-        run_patcher = mock.patch.object(serve, "run", return_value=(127, "not found: omp"))
-        run_patcher.start()
-        self.addCleanup(run_patcher.stop)
-        fallbacks = {
-            "claude_oauth_quota": "claude",
-            "opencode_go_quota": "opencode-go",
-        }
-        for name, provider in fallbacks.items():
-            patcher = mock.patch.object(
-                serve,
-                name,
-                return_value=[{"provider": provider, "note": "quota unavailable"}],
-            )
-            patcher.start()
-            self.addCleanup(patcher.stop)
-
-    def write_claude(self, data):
-        with open(self.claude_path, "w", encoding="utf-8") as stats_file:
-            json.dump(data, stats_file)
-
-    def write_omp(self, rows):
-        with closing(sqlite3.connect(self.omp_path)) as db:
-            db.execute(
-                "CREATE TABLE messages (provider TEXT, model TEXT, timestamp INTEGER, "
-                "input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, "
-                "cache_write_tokens INTEGER, cost_total REAL)"
-            )
-            db.executemany("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
-            db.commit()
-
-    def test_claude_totals_and_last_update_cover_seven_calendar_days(self):
-        # dailyModelTokens holds one flat token total per model per day --
-        # confirmed against the real ~/.claude/stats-cache.json on this box,
-        # not a nested input/output/cost breakdown. No daily cost exists at
-        # all; that only exists as an all-time total under modelUsage.
-        today = date.today()
-        self.write_claude({
-            "lastComputedDate": today.isoformat(),
-            "dailyModelTokens": [
-                {
-                    "date": (today - timedelta(days=6)).isoformat(),
-                    "tokensByModel": {"model-a": 100, "model-b": 30},
-                },
-                {
-                    "date": (today - timedelta(days=7)).isoformat(),
-                    "tokensByModel": {"old": 900},
-                },
-            ],
-        })
-        with mock.patch.object(serve, "CLAUDE_STATS_FILE", self.claude_path):
-            page = serve.render_usage().decode()
-
-        self.assertIn("<td>claude</td><td>130</td><td>-</td><td>not tracked</td>", page)
-        self.assertIn(f"<td>{today.isoformat()}</td>", page)
-        self.assertIn("last 7 days", page)
-        self.assertIn(self.claude_path, page)
-
-    def test_omp_shows_window_totals_and_whole_table_last_update(self):
-        now = 1_800_000_000
-        self.write_omp([
-            ("openai-codex", "m", int((now - 3600) * 1000), 12, 8, 0, 0, 0.4),
-            ("openai-codex", "m", int((now - 7200) * 1000), 3, 2, 0, 0, 0.1),
-            ("opencode-go", "m", int((now - 9 * 86400) * 1000), 700, 800, 0, 0, 5.0),
-        ])
-        with (
-            mock.patch.object(serve, "OMP_STATS_FILE", self.omp_path),
-            mock.patch.object(serve.time, "time", return_value=now),
-        ):
-            page = serve.render_usage().decode()
-
-        self.assertIn("<td>openai-codex</td><td>15</td><td>10</td><td>$0.50</td>", page)
-        self.assertIn("<td>opencode-go</td><td>0</td><td>0</td><td>$0.00</td>", page)
-        self.assertIn(
-            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime((now - 9 * 86400))),
-            page,
-        )
-        self.assertIn(self.omp_path, page)
-
-    def test_unavailable_sources_do_not_hide_the_other_source(self):
-        now = int(time.time() * 1000)
-        self.write_omp([("openai-codex", "m", now, 1, 2, 0, 0, 0.1)])
-        with (
-            mock.patch.object(serve, "CLAUDE_STATS_FILE", self.claude_path + ".missing"),
-            mock.patch.object(serve, "OMP_STATS_FILE", self.omp_path),
-        ):
-            page = serve.render_usage().decode()
-        self.assertIn("unavailable (FileNotFoundError)", page)
-        self.assertIn("<td>openai-codex</td>", page)
-
-        with (
-            mock.patch.object(serve, "CLAUDE_STATS_FILE", self.claude_path),
-            mock.patch.object(serve, "OMP_STATS_FILE", self.omp_path + ".missing"),
-        ):
-            page = serve.render_usage().decode()
-        self.assertIn("unavailable (FileNotFoundError)", page)
-        self.assertIn("<td>claude</td>", page)
-
-        self.write_claude({
-            "lastComputedDate": date.today().isoformat(),
-            "dailyModelTokens": [],
-        })
-        with open(self.claude_path, "w", encoding="utf-8") as stats_file:
-            stats_file.write("{")
-        with (
-            mock.patch.object(serve, "CLAUDE_STATS_FILE", self.claude_path),
-            mock.patch.object(serve, "OMP_STATS_FILE", self.omp_path),
-        ):
-            page = serve.render_usage().decode()
-        self.assertIn("unavailable (JSONDecodeError)", page)
-        self.assertIn("<td>openai-codex</td>", page)
-        empty_db_path = self.omp_path + ".empty"
-        with closing(sqlite3.connect(empty_db_path)):
-            pass
-        with (
-            mock.patch.object(serve, "CLAUDE_STATS_FILE", self.claude_path),
-            mock.patch.object(serve, "OMP_STATS_FILE", empty_db_path),
-        ):
-            page = serve.render_usage().decode()
-        self.assertIn("unavailable (OperationalError)", page)
-        self.assertIn("<td>claude</td>", page)
-
+class TimeFormattingTests(unittest.TestCase):
     def test_time_until_reset_formats_remaining_time(self):
         self.assertEqual(serve.time_until_reset(90_060_000, now_ms=0), "1d 1h 1m")
         self.assertEqual(serve.time_until_reset(30_000, now_ms=0), "<1m")
         self.assertEqual(serve.time_until_reset(0, now_ms=0), "now")
         self.assertEqual(serve.time_until_reset(None, now_ms=0), "-")
+
+
+class QuotaRenderingTests(unittest.TestCase):
+    """`/usage` rendering only. The real quota/usage readers moved to
+    `quota.py` (issue #8) and are tested in `test_quota.py` -- here,
+    `serve.quota_usage`/`claude_usage`/`omp_usage` (the names `serve.py`
+    imports from `quota.py`) are mocked, so these tests cover only how
+    `render_usage`/`render_quota_row` turn rows into HTML.
+    """
 
     def test_quota_bar_marks_window_time_and_quota_progress(self):
         row = {
@@ -312,35 +188,23 @@ class UsageTests(unittest.TestCase):
         self.assertIn("3d 12h", rendered)
         self.assertIn("42% used", rendered)
 
-
-    def test_quota_gauges_precede_totals_and_omit_ollama(self):
-        # Real-shaped omp usage --json: one provider with limits, one with
-        # only notes (no standalone quota API) -- confirmed against the
-        # live CLI on this box before writing the parser.
+    def test_quota_section_groups_by_provider_and_precedes_totals(self):
+        # Real-shaped row, as `quota.quota_usage()` would produce it --
+        # confirmed against that module's own tests.
         reset_at_ms = 1_790_547_474_348
-        generated_at_ms = 1_790_529_505_926
-        report = {
-            "generatedAt": generated_at_ms,
-            "reports": [
-                {
-                    "provider": "opencode-go",
-                    "limits": [
-                        {
-                            "id": "monthly",
-                            "label": "Monthly limit",
-                            "window": {"id": "monthly", "resetsAt": reset_at_ms},
-                            "amount": {"used": 64, "usedFraction": 0.64},
-                        }
-                    ],
-                },
-                {
-                    "provider": "ollama",
-                    "limits": [],
-                    "notes": ["Ollama does not expose a standalone quota usage API."],
-                },
-            ],
-        }
-        with mock.patch.object(serve, "run", return_value=(0, json.dumps(report))):
+        rows = [{
+            "provider": "opencode-go",
+            "duration": serve.QuotaDuration.MONTHLY,
+            "label": "Monthly limit",
+            "used_pct": 64.0,
+            "resets_at": reset_at_ms,
+            "generated_at": "2026-01-01 00:00:00",
+        }]
+        with (
+            mock.patch.object(serve, "quota_usage", return_value=rows),
+            mock.patch.object(serve, "claude_usage", return_value=[]),
+            mock.patch.object(serve, "omp_usage", return_value=[]),
+        ):
             page = serve.render_usage().decode()
 
         self.assertIn(
@@ -348,12 +212,6 @@ class UsageTests(unittest.TestCase):
             page,
         )
         self.assertIn("<h3>opencode-go</h3>", page)
-        self.assertIn(
-            f"<div class=quota-reset-at>"
-            f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(reset_at_ms / 1000))}"
-            f"</div>",
-            page,
-        )
         self.assertIn("<span><strong>36%</strong> available</span>", page)
         self.assertIn("64% used", page)
         self.assertIn("quota-meter-elapsed", page)
@@ -361,152 +219,73 @@ class UsageTests(unittest.TestCase):
         self.assertIn("Most used", page)
         self.assertIn("Next reset", page)
         self.assertLess(page.index("<h2>Quota</h2>"), page.index("<h2>7-day totals</h2>"))
-        quota_section = page.split("<h2>Quota</h2>", 1)[1].split("<h2>7-day totals</h2>", 1)[0]
-        self.assertNotIn("ollama", quota_section.lower())
-        self.assertIn(
-            f"Data timestamp: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(generated_at_ms / 1000))}",
-            page,
-        )
+        self.assertIn("Data timestamp: 2026-01-01 00:00:00", page)
 
-    def test_quota_uses_latest_codex_snapshot_when_omp_fails(self):
-        sessions = os.path.join(self.tempdir.name, "sessions")
-        session_dir = os.path.join(sessions, "2026", "10", "03")
-        os.makedirs(session_dir)
-        rollout = os.path.join(session_dir, "rollout-test.jsonl")
-        with open(rollout, "w", encoding="utf-8") as file:
-            file.write(json.dumps({
-                "payload": {
-                    "type": "token_count",
-                    "rate_limits": {
-                        "primary": {"used_percent": 42, "resets_at": 1_790_547_474},
-                        "secondary": {"used_percent": 75, "resets_at": 1_791_000_000},
-                    },
-                }
-            }) + "\n")
-        newer_rollout = os.path.join(session_dir, "rollout-newer.jsonl")
-        with open(newer_rollout, "w", encoding="utf-8") as file:
-            file.write(json.dumps({"payload": {"type": "session_meta"}}) + "\n")
-        newer_mtime = os.path.getmtime(rollout) + 1
-        os.utime(newer_rollout, (newer_mtime, newer_mtime))
-
-
+    def test_quota_note_and_error_rows_render_as_dim_text(self):
         with (
-            mock.patch.object(serve, "run", return_value=(1, "omp failed")),
-            mock.patch.object(serve, "CODEX_SESSIONS_DIR", sessions),
+            mock.patch.object(serve, "quota_usage", return_value=[
+                {"provider": "omp", "error": "unavailable (RuntimeError)"},
+            ]),
+            mock.patch.object(serve, "claude_usage", return_value=[]),
+            mock.patch.object(serve, "omp_usage", return_value=[]),
         ):
-            rows = serve.quota_usage()
-
-        codex_rows = [row for row in rows if row["provider"] == "openai"]
-        self.assertEqual(
-            [
-                (row["duration"], row["used_pct"])
-                for row in codex_rows
-            ],
-            [
-                (serve.QuotaDuration.FIVE_HOURS, 42),
-                (serve.QuotaDuration.WEEKLY, 75),
-            ],
-        )
-        self.assertEqual(codex_rows[0]["resets_at"], 1_790_547_474_000)
-
-    def test_quota_maps_omp_codex_provider_to_openai(self):
-        report = {
-            "generatedAt": 1_790_529_505_926,
-            "reports": [{
-                "provider": "openai-codex",
-                "limits": [{
-                    "label": "5 hours",
-                    "window": {"resetsAt": 1_790_547_474_348},
-                    "amount": {"usedFraction": 0.42},
-                }],
-            }],
-        }
-        with mock.patch.object(serve, "run", return_value=(0, json.dumps(report))):
-            rows = serve.quota_usage()
-
-        self.assertEqual(rows[0]["duration"], serve.QuotaDuration.FIVE_HOURS)
-        self.assertEqual(rows[0]["resets_at"], 1_790_547_474_348)
-
-    def test_opencode_go_fallback_reads_usage_api(self):
-        payload = {
-            "usage": {
-                "rolling": {"percent": 12, "resetsAt": "2030-01-01T00:00:00Z"},
-                "weekly": {"percent": 34, "resetsAt": "2030-01-02T00:00:00Z"},
-                "monthly": {"percent": 56, "resetsAt": "2030-01-03T00:00:00Z"},
-            }
-        }
-        with (
-            mock.patch.dict(os.environ, {"OPENCODE_API_KEY": ""}),
-            mock.patch.object(serve, "OPENCODE_GO_AUTH_FILE", self.omp_path),
-            mock.patch("builtins.open", mock.mock_open(read_data=json.dumps({
-                "opencode-go": {"type": "api", "key": "test-key"}
-            }))),
-            mock.patch.object(
-                serve.urllib.request,
-                "urlopen",
-                return_value=io.BytesIO(json.dumps(payload).encode()),
-            ) as fetch,
-        ):
-            rows = self.real_opencode_go_quota()
-
-        self.assertEqual(
-            [row["duration"] for row in rows],
-            [
-                serve.QuotaDuration.FIVE_HOURS,
-                serve.QuotaDuration.WEEKLY,
-                serve.QuotaDuration.MONTHLY,
-            ],
-        )
-        self.assertTrue(all(isinstance(row["resets_at"], int) for row in rows))
-        self.assertEqual(
-            fetch.call_args.args[0].get_header("Authorization"), "Bearer test-key"
-        )
-
-    def test_claude_oauth_fallback_reads_live_usage(self):
-        payload = {
-            "five_hour": {"utilization": 17, "resets_at": "2030-01-01T00:00:00Z"},
-            "seven_day": {"utilization": 61, "resets_at": 1_893_456_000},
-        }
-        with (
-            mock.patch(
-                "builtins.open",
-                mock.mock_open(read_data=json.dumps({
-                    "claudeAiOauth": {"accessToken": "test-token"}
-                })),
-            ),
-            mock.patch.object(
-                serve.urllib.request,
-                "urlopen",
-                return_value=io.BytesIO(json.dumps(payload).encode()),
-            ) as fetch,
-        ):
-            rows = self.real_claude_oauth_quota()
-
-        self.assertEqual(
-            [row["duration"] for row in rows],
-            [serve.QuotaDuration.FIVE_HOURS, serve.QuotaDuration.WEEKLY],
-        )
-        self.assertTrue(all(isinstance(row["resets_at"], int) for row in rows))
-        self.assertEqual(
-            fetch.call_args.args[0].get_header("Authorization"), "Bearer test-token"
-        )
-
-    def test_quota_unavailable_on_nonzero_exit_or_bad_json(self):
-        with mock.patch.object(serve, "run", return_value=(1, "boom")):
             page = serve.render_usage().decode()
         self.assertIn("<h3>omp</h3>", page)
         self.assertIn("<p class=dim>unavailable (RuntimeError)</p>", page)
 
-        with mock.patch.object(serve, "run", return_value=(0, "not json")):
+        with (
+            mock.patch.object(serve, "quota_usage", return_value=[
+                {"provider": "claude", "note": "quota unavailable"},
+            ]),
+            mock.patch.object(serve, "claude_usage", return_value=[]),
+            mock.patch.object(serve, "omp_usage", return_value=[]),
+        ):
             page = serve.render_usage().decode()
-        self.assertIn("<h3>omp</h3>", page)
-        self.assertIn("<p class=dim>unavailable (JSONDecodeError)</p>", page)
-
-    def test_claude_direct_quota_row_always_present(self):
-        page = serve.render_usage().decode()
         self.assertIn("<h3>claude</h3>", page)
         self.assertIn("quota unavailable", page)
 
+    def test_seven_day_totals_table_formats_rows_and_errors(self):
+        claude_rows = [{
+            "provider": "claude",
+            "input_tokens": 130,
+            "output_tokens": None,
+            "cost": None,
+            "period": "last 7 days",
+            "source": "/claude/stats.json",
+            "last_update": "2026-01-01",
+        }]
+        omp_rows = [
+            {
+                "provider": "openai-codex",
+                "input_tokens": 15,
+                "output_tokens": 10,
+                "cost": 0.5,
+                "period": "last 7 days",
+                "source": "/omp/stats.db",
+                "last_update": "2026-01-01 00:00:00",
+            },
+            {
+                "provider": "opencode-go",
+                "error": "unavailable (FileNotFoundError)",
+                "source": "/opencode/stats.db",
+            },
+        ]
+        with (
+            mock.patch.object(serve, "quota_usage", return_value=[]),
+            mock.patch.object(serve, "claude_usage", return_value=claude_rows),
+            mock.patch.object(serve, "omp_usage", return_value=omp_rows),
+        ):
+            page = serve.render_usage().decode()
+
+        self.assertIn("<td>claude</td><td>130</td><td>-</td><td>not tracked</td>", page)
+        self.assertIn("<td>openai-codex</td><td>15</td><td>10</td><td>$0.50</td>", page)
+        self.assertIn(
+            "<td>opencode-go</td><td colspan=3>unavailable (FileNotFoundError)</td>",
+            page,
+        )
+
+
+class DashboardRouteTests(unittest.TestCase):
     def test_usage_route_and_dashboard_link(self):
         state = {"sessions": [], "enabled": [], "timers": [], "timer_active": False, "repos": []}
         self.assertIn("href='/usage'", serve.render_dashboard(state).decode())
