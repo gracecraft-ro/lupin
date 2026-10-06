@@ -954,7 +954,7 @@ def build_dependency_dag(repo_links: dict[str, dict[int, dict]]) -> dict:
                 edge_set.add((node, (target["repo"], target["number"])))
             for blocker in links.get("blockedBy", []):
                 edge_set.add(((blocker["repo"], blocker["number"]), node))
-    edges = [(source, target) for source, target in edge_set if source != target]
+    edges = list(edge_set)
 
     repos_out = {
         repo: [
