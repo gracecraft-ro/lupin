@@ -38,9 +38,13 @@ These back the fleet CLI (`lupin join`, `heartbeat`, `drain`, `machines`,
 ### `machine:<name>`
 
 Written by `lupin join` and `lupin heartbeat`; read by `lupin machines` and
-`lupin place` when picking a machine. Renewed every 30s, 120s TTL — a
-machine that misses two renewals is offline (same convention as the `bmo`
-slot lease, see TTLs below).
+`lupin place` when picking a machine. Renewed every 30s; a machine that
+misses two renewals (120s since its `heartbeat` field) counts as offline —
+same convention as the `bmo` slot lease (see TTLs below), checked by
+comparing a stored timestamp to now, not by Redis expiring the key. The
+Redis key itself gets a longer TTL (40 min), only to clean up records for
+machines retired long ago — that longer TTL is not what decides
+online/offline.
 
 ```json
 {
