@@ -50,7 +50,7 @@ slot lease, see TTLs below).
   "slots": {"bmo": {"used": 1, "max": 1}},
   "providers": ["anthropic", "openai"],
   "quota": {
-    "anthropic": {"percent_left": 42, "reset": "2026-10-05T18:00:00Z"}
+    "anthropic": {"pct_left": 42, "resets_at": "2026-10-05T18:00:00Z"}
   }
 }
 ```
