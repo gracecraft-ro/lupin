@@ -145,10 +145,11 @@ def claim(
         result = _call_with_retry(
             lambda: client.eval(_CLAIM_SCRIPT, 1, _key(target), holder, value, int(ttl * 1000))
         )
+        if not result:
+            current = _call_with_retry(lambda: client.get(_key(target)))
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(target) from exc
     if not result:
-        current = _call_with_retry(lambda: client.get(_key(target)))
         raise ClaimHeld(target, current)
 
 
