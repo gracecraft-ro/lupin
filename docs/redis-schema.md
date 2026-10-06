@@ -48,9 +48,9 @@ slot lease, see TTLs below).
   "heartbeat": "2026-10-05T12:00:00Z",
   "state": "online",
   "slots": {"bmo": {"used": 1, "max": 1}},
-  "providers": ["anthropic", "openai"],
+  "providers": ["claude", "openai"],
   "quota": {
-    "anthropic": {"pct_left": 42, "resets_at": "2026-10-05T18:00:00Z"}
+    "claude": {"pct_left": 42, "resets_at": "2026-10-05T18:00:00Z"}
   }
 }
 ```

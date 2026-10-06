@@ -496,7 +496,7 @@ def _cmd_place(args: argparse.Namespace) -> int:
         return 3
     if args.json:
         print(json.dumps(result))
-        return 0
+        return 0 if result["pick"] else 2
     if args.explain:
         print(_format_place_explain(result))
         return 0 if result["pick"] else 2

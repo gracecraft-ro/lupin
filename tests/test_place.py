@@ -280,6 +280,23 @@ def test_cli_place_json_output(redis_port, flush_redis, tmp_path, capsys, clean_
     assert payload["provider"] == "claude"
 
 
+def test_cli_place_json_no_pick_exits_2(redis_port, flush_redis, tmp_path, capsys, clean_fleet_env):
+    """Same "try again later" contract as plain/--explain output (see
+    cli.py's exit-code docstring) -- --json must not silently report 0
+    just because it always has a body to print.
+    """
+    common = [
+        "--redis-host", "127.0.0.1", "--redis-port", str(redis_port),
+        "--config-path", str(tmp_path / "fleet.json"),
+    ]
+
+    code = cli.main(["place", "retry backoff", "--json", *common])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert json.loads(captured.out)["pick"] is None
+
+
 def test_cli_place_unreachable_redis_exits_3(closed_port, tmp_path, capsys, clean_fleet_env):
     common = [
         "--redis-host", "127.0.0.1", "--redis-port", str(closed_port),
