@@ -13,10 +13,13 @@ read and write. `place` picks which registered machine should run a task
 already routed to a model (issue #9; see `place.py`). `quest` lists quests
 (GitHub issues labeled `quest`) and their progress (issue #11, read-only);
 `quest focus`/`quest release` pin a quest to a machine (issue #12);
-`start`/`stop` claim and release a quest's issues (issue #13). All of them
-share one process so a caller has one binary to find and one `lupin --help`
-to read; the concerns stay as separate modules underneath, same as this
-project's other CLIs split "decide" from "do" (see review_dispatch.py).
+`start`/`stop` claim and release a quest's issues (issue #13). `reconcile`
+applies the automatic release rules -- a claim with no heartbeat, a quest
+focus that is done/closed/idle/down, a started quest that is done/down
+(issue #14; see `reconcile.py`). All of them share one process so a caller
+has one binary to find and one `lupin --help` to read; the concerns stay as
+separate modules underneath, same as this project's other CLIs split
+"decide" from "do" (see review_dispatch.py).
 
 Backend choice: `--backend local|redis` on each slot subcommand, default
 from the `LUPIN_BACKEND` env var, falling back to `local` if neither is
@@ -64,6 +67,7 @@ from . import classify as classify_mod
 from . import machines
 from . import place as place_mod
 from . import quest as quest_mod
+from . import reconcile as reconcile_mod
 from . import review_dispatch
 from . import roadmap
 from . import route as route_mod
@@ -148,6 +152,15 @@ def _quest_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--note", default=None, help="extra instruction for the loop (start only)")
     parser.add_argument(
         "--pin", action="store_true", help="with focus: keep the focus until explicitly released"
+    )
+    parser.add_argument("--json", action="store_true")
+    _redis_args(parser)
+
+
+def _reconcile_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--ttl", type=float, default=300.0,
+        help="how long this run may hold the fleet-wide reconcile slot, in seconds",
     )
     parser.add_argument("--json", action="store_true")
     _redis_args(parser)
@@ -328,6 +341,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _machines_args(sub.add_parser("machines", help="list every registered machine's state"))
     _place_args(sub.add_parser("place", help="pick which machine should run a task"))
     _quest_args(sub.add_parser("quest", help="list quests, their progress, and their focus machine"))
+    _reconcile_args(sub.add_parser("reconcile", help="apply the automatic release rules once"))
     return parser
 
 
@@ -792,6 +806,47 @@ def _cmd_quest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_reconcile(args: argparse.Namespace) -> int:
+    repos = serve.enabled_repos()
+    redis_kwargs = {
+        "redis_host": args.redis_host,
+        "redis_port": args.redis_port,
+        "redis_username": args.redis_username,
+        "redis_password": args.redis_password,
+    }
+    try:
+        lease = slots_redis.acquire("reconcile", machines.hostname(), wait=0.0, ttl=args.ttl, **redis_kwargs)
+    except slots.SlotFull:
+        print("reconcile is already running on another machine", file=sys.stderr)
+        return 2
+    except slots.CoordinatorUnreachable:
+        print("cannot reach the redis coordinator for the reconcile slot", file=sys.stderr)
+        return 3
+
+    try:
+        lines, warnings = reconcile_mod.reconcile(repos, redis_kwargs)
+    except reconcile_mod.CoordinatorUnreachable as exc:
+        print(f"cannot reach the {exc}", file=sys.stderr)
+        return 3
+    finally:
+        try:
+            slots_redis.release(lease, **redis_kwargs)
+        except slots.CoordinatorUnreachable:
+            pass
+
+    for warning in warnings:
+        print(f"lupin: {warning}", file=sys.stderr)
+    if args.json:
+        print(json.dumps({"released": lines}))
+        return 0
+    if not lines:
+        print("Nothing to release.")
+        return 0
+    for line in lines:
+        print(line)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = sys.argv[1:] if argv is None else argv
     if "--" in raw:
@@ -841,6 +896,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_place(args)
     if args.cmd == "quest":
         return _cmd_quest(args)
+    if args.cmd == "reconcile":
+        return _cmd_reconcile(args)
     parser.error(f"unknown command {args.cmd!r}")  # pragma: no cover
     return 1
 
