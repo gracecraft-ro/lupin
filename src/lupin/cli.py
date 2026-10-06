@@ -6,20 +6,21 @@ slot-lease commands (issue #205 for the `local` backend, #210 for
 `redis`). `claim`/`renew-claim`/`release-claim` mark a GitHub issue as one
 loop's own, so two loops never work the same task (issue #6; Redis only, no
 `--backend` choice -- see `claims.py`). `review-route` picks which lock a
-routed model needs (issue #185) and `serve` runs the read-only dashboard
-(issue #204). `join`/`heartbeat`/`drain`/`undrain`/`machines` are the fleet
-machine registry (issue #7); see `machines.py` for the Redis record they
-read and write. `place` picks which registered machine should run a task
-already routed to a model (issue #9; see `place.py`). `quest` lists quests
-(GitHub issues labeled `quest`) and their progress (issue #11, read-only);
-`quest focus`/`quest release` pin a quest to a machine (issue #12);
-`start`/`stop` claim and release a quest's issues (issue #13). `reconcile`
-applies the automatic release rules -- a claim with no heartbeat, a quest
-focus that is done/closed/idle/down, a started quest that is done/down
-(issue #14; see `reconcile.py`). All of them share one process so a caller
-has one binary to find and one `lupin --help` to read; the concerns stay as
-separate modules underneath, same as this project's other CLIs split
-"decide" from "do" (see review_dispatch.py).
+routed model needs (issue #185), `roadmap` prints prioritized open tasks
+from `roadmap.py`'s data plus claims (issue #10), and `serve` runs the
+read-only dashboard (issue #204). `join`/`heartbeat`/`drain`/`undrain`/
+`machines` are the fleet machine registry (issue #7); see `machines.py` for
+the Redis record they read and write. `place` picks which registered
+machine should run a task already routed to a model (issue #9; see
+`place.py`). `quest` lists quests (GitHub issues labeled `quest`) and their
+progress (issue #11, read-only); `quest focus`/`quest release` pin a quest
+to a machine (issue #12); `start`/`stop` claim and release a quest's issues
+(issue #13). `reconcile` applies the automatic release rules -- a claim
+with no heartbeat, a quest focus that is done/closed/idle/down, a started
+quest that is done/down (issue #14; see `reconcile.py`). All of them share
+one process so a caller has one binary to find and one `lupin --help` to
+read; the concerns stay as separate modules underneath, same as this
+project's other CLIs split "decide" from "do" (see review_dispatch.py).
 
 Backend choice: `--backend local|redis` on each slot subcommand, default
 from the `LUPIN_BACKEND` env var, falling back to `local` if neither is
@@ -57,6 +58,7 @@ anything else (closed, missing, or blocked by an issue outside the quest).
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import sys
@@ -70,6 +72,7 @@ from . import quest as quest_mod
 from . import reconcile as reconcile_mod
 from . import review_dispatch
 from . import roadmap
+from . import roadmap_cli
 from . import route as route_mod
 from . import serve
 from . import slots
@@ -241,6 +244,20 @@ def _release_claim_args(parser: argparse.ArgumentParser) -> None:
     _redis_conn_args(parser)
 
 
+def _roadmap_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--repo", default=None, help="only this repo (default: every enabled repo)")
+    parser.add_argument("--limit", type=int, default=10, help="show the top N (default: 10)")
+    parser.add_argument("--stage", choices=["ready", "blocked", "all"], default="ready")
+    parser.add_argument("--dag", action="store_true", help="draw dependencies between tasks")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--refresh", action="store_true", help="bypass the GitHub issue cache")
+    # `roadmap` marks claimed issues via claims.py's claims_for(), which needs
+    # the same Redis connection info as `claim`/`renew-claim`/`release-claim`
+    # -- without these, claims_for() always connects to localhost:6379 with
+    # no auth, so it silently misses every claim on a real deployment.
+    _redis_conn_args(parser)
+
+
 def _serve_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--bind", default="127.0.0.1", help="loopback address only")
     parser.add_argument("--port", type=int, default=8788)
@@ -333,6 +350,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _review_route_args(
         sub.add_parser("review-route", help="route a pair and report which lock it needs")
     )
+    _roadmap_args(sub.add_parser("roadmap", help="prioritized open tasks, across repos"))
     _serve_args(sub.add_parser("serve", help="run the read-only loopback dashboard"))
     _join_args(sub.add_parser("join", help="add this machine to the fleet"))
     _fleet_connection_args(sub.add_parser("heartbeat", help="refresh this machine's fleet record"))
@@ -847,6 +865,16 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_roadmap(args: argparse.Namespace) -> int:
+    claims_lookup = functools.partial(claims.claims_for, **_claim_kwargs(args))
+    text, code = roadmap_cli.run(
+        args.repo, args.limit, args.stage, args.dag, args.json, args.refresh,
+        claims_lookup=claims_lookup,
+    )
+    print(text)
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = sys.argv[1:] if argv is None else argv
     if "--" in raw:
@@ -898,6 +926,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_quest(args)
     if args.cmd == "reconcile":
         return _cmd_reconcile(args)
+    if args.cmd == "roadmap":
+        return _cmd_roadmap(args)
     parser.error(f"unknown command {args.cmd!r}")  # pragma: no cover
     return 1
 
