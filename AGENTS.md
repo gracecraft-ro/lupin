@@ -62,6 +62,8 @@ The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 - `src/lupin/slots.py` — the `local` slot backend. New code.
 - `src/lupin/slots_redis.py` — the `redis` slot backend, with a fallback to
   `local` for the `bmo` slot.
+- `src/lupin/_lease_runtime.py` — the `hold` subprocess/lease-renewal code
+  shared by both slot backends above.
 - `src/lupin/review_dispatch.py` — picks which lock a routed model needs.
 - `src/lupin/serve.py`, `src/lupin/roadmap.py` — the dashboard. Moved from
   `ghostbook.nix`'s `hosts/jesus/loopgui/` (issue #204).
