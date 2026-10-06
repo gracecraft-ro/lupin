@@ -18,16 +18,27 @@ Three plans, matching the three cases in #185:
   (a "bmo:" or "local:" model -- see the omp case's own comment in
   configuration.nix for why both share one lock). Take the blocking
   omp.lock, same as the omp dispatch path.
+
+`--prefetch` (issue #1) is a second, unrelated mode in the same command: it
+fetches issue/PR text up front so a delegation-loop orchestrator, and the
+subagent it dispatches, don't each spend a turn on their own `gh` calls. It
+does not route anything -- see `prefetch()` below.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
+import subprocess
 import sys
 
 from . import classify
 from . import route
+
+# Same redaction as roadmap.py's _run_json: a `gh` error can echo a token
+# back (e.g. in a URL) if auth is misconfigured.
+_TOKEN_RE = re.compile(r"(?:gh[oprsu]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)")
 
 
 def dispatch_plan(model: str, *, mode: str = "same-unit") -> str:
@@ -65,9 +76,77 @@ def decide(
     return {**choice, "plan": dispatch_plan(choice["model"], mode=mode)}
 
 
+def _run_gh_json(args: list[str], *, repo: str | None = None, timeout: int = 60):
+    """Run `gh <args> --json ...`, return (data, error).
+
+    Same shape as roadmap.py's `_run_json`: exactly one of the pair is not
+    None. Kept separate because this module takes no repo checkout path --
+    `gh` runs from the current directory, or against `--repo` if given.
+    """
+    argv = ["gh", *args]
+    if repo:
+        argv += ["--repo", repo]
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return None, "gh is not installed"
+    except OSError as error:
+        return None, f"gh could not start: {error}"
+    except subprocess.TimeoutExpired:
+        return None, f"gh timed out after {timeout} seconds"
+    if result.returncode:
+        error = (result.stderr or result.stdout or "gh failed").strip()
+        error = _TOKEN_RE.sub("[redacted]", error)
+        return None, error
+    try:
+        return json.loads(result.stdout), None
+    except json.JSONDecodeError as error:
+        return None, f"invalid JSON from gh: {error}"
+
+
+def _fetch_item(item: str, *, repo: str | None = None) -> dict:
+    """Fetch one issue or PR's text and (for a PR) its diff stat.
+
+    An issue and a PR share one number counter in a GitHub repo, so there is
+    no way to tell which an item is without asking. Try `gh issue view`
+    first; if that fails, it's either a PR or nothing. Diff stat only --
+    the changed-file list plus additions/deletions -- never the full diff
+    text (out of scope, see issue #1: same cost whether lupin or the
+    dispatched agent fetches it).
+    """
+    issue_data, issue_error = _run_gh_json(
+        ["issue", "view", item, "--json", "body,comments"], repo=repo
+    )
+    if issue_data is not None:
+        return {"kind": "issue", **issue_data}
+
+    pr_data, pr_error = _run_gh_json(
+        ["pr", "view", item, "--json", "body,comments,reviews,files"], repo=repo
+    )
+    if pr_data is None:
+        return {"error": f"not a fetchable issue or PR {item!r}: {issue_error}; {pr_error}"}
+
+    files = pr_data.pop("files", [])
+    pr_data["diff_stat"] = [
+        {"path": f["path"], "additions": f["additions"], "deletions": f["deletions"]}
+        for f in files
+    ]
+    return {"kind": "pr", **pr_data}
+
+
+def prefetch(items: list[str], *, repo: str | None = None) -> dict:
+    """Fetch issue/PR text for every item, keyed by its number (as given).
+
+    A bad item (neither an issue nor a PR) does not fail the whole batch --
+    its entry gets {"error": ...} instead, so one typo in an orchestrator's
+    list doesn't lose the rest of the prefetch.
+    """
+    return {item: _fetch_item(item, repo=repo) for item in items}
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    source = parser.add_mutually_exclusive_group(required=True)
+    source = parser.add_mutually_exclusive_group()
     source.add_argument("--category", help="task category, with --size")
     source.add_argument(
         "--issue-json", help="path to a `gh issue view --json ...` file to classify"
@@ -88,7 +167,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         help="bmo's lock already timed out -- skip a bmo-dependent tier0 pick",
     )
     parser.add_argument("--primary-effort", default=None)
+    parser.add_argument(
+        "--prefetch",
+        default=None,
+        help="comma-separated issue/PR numbers to fetch instead of routing",
+    )
+    parser.add_argument(
+        "--repo", default=None, help="OWNER/REPO for --prefetch (default: gh's own resolution)"
+    )
     args = parser.parse_args(argv)
+    if args.prefetch:
+        return args
+    if not args.category and not args.issue_json:
+        parser.error("one of --category or --issue-json is required (unless using --prefetch)")
     if args.category and not args.size:
         parser.error("--category needs --size")
     return args
@@ -96,6 +187,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
+    if args.prefetch:
+        items = [item.strip() for item in args.prefetch.split(",") if item.strip()]
+        print(json.dumps(prefetch(items, repo=args.repo)))
+        return 0
     if args.issue_json:
         with open(args.issue_json, encoding="utf-8") as handle:
             issue = json.load(handle)

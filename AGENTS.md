@@ -17,6 +17,7 @@ One program, `lupin`, with subcommands. Run `lupin --help` for the full list.
 lupin route <category> <size> [--no-bmo] [--primary-effort E] [--json]
 lupin classify --issue-json FILE [--diff-stat FILE] [--json]
 lupin review-route (--category C --size S | --issue-json FILE) [--mode M] [--json]
+lupin review-route --prefetch N[,N...] [--repo OWNER/REPO]
 lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
 lupin hold (--lease ID | <slot> --holder H --wait S) [--ttl SECONDS] -- <command>
 lupin release --lease ID
@@ -26,6 +27,13 @@ lupin serve [--bind 127.0.0.1] [--port 8788] [--roadmap REPO]
 
 `route` and `classify` print a plain result by default (`model effort`, or
 `category size`). Add `--json` for a JSON object instead.
+
+`review-route --prefetch` fetches issue/PR text up front -- body, comments,
+and (for a PR) reviews and a diff stat (changed files, additions/deletions,
+no diff text) -- one JSON blob keyed by number, always printed as JSON (no
+plain form; the output is nested data, not a one-line result). A number
+that is neither an issue nor a PR gets `{"error": ...}` in its own slot
+instead of failing the whole batch.
 
 `acquire` prints a lease ID on success. Exit code 2 means the slot is full
 — the caller should skip and try again later. Exit code 3 means the `redis`
