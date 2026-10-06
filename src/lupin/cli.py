@@ -6,11 +6,12 @@ slot-lease commands (issue #205 for the `local` backend, #210 for
 `redis`). `claim`/`renew-claim`/`release-claim` mark a GitHub issue as one
 loop's own, so two loops never work the same task (issue #6; Redis only, no
 `--backend` choice -- see `claims.py`). `review-route` picks which lock a
-routed model needs (issue #185) and `serve` runs the read-only dashboard
-(issue #204). All of them share one process so a caller has one binary to
-find and one `lupin --help` to read; the concerns stay as separate modules
-underneath, same as this project's other CLIs split "decide" from "do" (see
-review_dispatch.py).
+routed model needs (issue #185), `roadmap` prints prioritized open tasks
+from `roadmap.py`'s data plus claims (issue #10), and `serve` runs the
+read-only dashboard (issue #204). All of them share one process so a
+caller has one binary to find and one `lupin --help` to read; the
+concerns stay as separate modules underneath, same as this project's
+other CLIs split "decide" from "do" (see review_dispatch.py).
 
 Backend choice: `--backend local|redis` on each slot subcommand, default
 from the `LUPIN_BACKEND` env var, falling back to `local` if neither is
@@ -50,6 +51,7 @@ import sys
 from . import claims
 from . import classify as classify_mod
 from . import review_dispatch
+from . import roadmap_cli
 from . import route as route_mod
 from . import serve
 from . import slots
@@ -178,6 +180,15 @@ def _release_claim_args(parser: argparse.ArgumentParser) -> None:
     _redis_conn_args(parser)
 
 
+def _roadmap_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--repo", default=None, help="only this repo (default: every enabled repo)")
+    parser.add_argument("--limit", type=int, default=10, help="show the top N (default: 10)")
+    parser.add_argument("--stage", choices=["ready", "blocked", "all"], default="ready")
+    parser.add_argument("--dag", action="store_true", help="draw dependencies between tasks")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--refresh", action="store_true", help="bypass the GitHub issue cache")
+
+
 def _serve_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--bind", default="127.0.0.1", help="loopback address only")
     parser.add_argument("--port", type=int, default=8788)
@@ -227,6 +238,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _review_route_args(
         sub.add_parser("review-route", help="route a pair and report which lock it needs")
     )
+    _roadmap_args(sub.add_parser("roadmap", help="prioritized open tasks, across repos"))
     _serve_args(sub.add_parser("serve", help="run the read-only loopback dashboard"))
     return parser
 
@@ -409,6 +421,12 @@ def _cmd_release_claim(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_roadmap(args: argparse.Namespace) -> int:
+    text, code = roadmap_cli.run(args.repo, args.limit, args.stage, args.dag, args.json, args.refresh)
+    print(text)
+    return code
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = sys.argv[1:] if argv is None else argv
     if "--" in raw:
@@ -444,6 +462,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_renew_claim(args)
     if args.cmd == "release-claim":
         return _cmd_release_claim(args)
+    if args.cmd == "roadmap":
+        return _cmd_roadmap(args)
     parser.error(f"unknown command {args.cmd!r}")  # pragma: no cover
     return 1
 
