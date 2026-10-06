@@ -1,4 +1,6 @@
+import importlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -342,6 +344,17 @@ class RoadmapTests(unittest.TestCase):
 
         self.assertEqual(github.call_count, 1)
         self.assertEqual(ledger.call_count, 1)
+
+    def test_cache_file_is_derived_from_home_not_hardcoded(self):
+        # roadmap.py used to hardcode /home/ghosta here. CACHE_FILE must be
+        # computed from HOME at import time, so it works for any user.
+        with mock.patch.dict(os.environ, {"HOME": "/tmp/fake-home-for-test"}):
+            importlib.reload(roadmap)
+            self.addCleanup(importlib.reload, roadmap)
+            self.assertEqual(
+                roadmap.CACHE_FILE,
+                "/tmp/fake-home-for-test/.local/state/lupin/cache.json",
+            )
 
     def test_selected_roadmap_shows_handoff_and_five_minute_reload(self):
         model = roadmap.build_model(
@@ -1147,6 +1160,106 @@ class RoadmapTests(unittest.TestCase):
         for page in (per_repo, combined):
             self.assertIn("data-digest-field='highlights'", page)
             self.assertIn("One bullet.", page)
+
+class DependencyDagTests(unittest.TestCase):
+    """build_dependency_dag combines blockedBy/blocking links -- GitHub's
+    real issue-dependency feature, not a text search -- into one DAG that
+    can span repos.
+    """
+
+    def setUp(self):
+        roadmap._DEPENDENCY_CACHE.clear()
+
+    def test_cross_repo_edge_from_blocked_by_and_blocking(self):
+        # api#10 is blocked by core#3; core#3 reports the same link as
+        # "blocking" api#10. Both directions should produce one DAG.
+        repo_links = {
+            "api": {10: {"blockedBy": [{"repo": "core", "number": 3}], "blocking": []}},
+            "core": {3: {"blockedBy": [], "blocking": [{"repo": "api", "number": 10}]}},
+        }
+
+        dag = roadmap.build_dependency_dag(repo_links)
+
+        self.assertEqual(dag["cycles"], [])
+        self.assertEqual(
+            dag["repos"]["api"],
+            [{"number": 10, "blockedBy": [{"repo": "core", "number": 3}], "blocking": []}],
+        )
+        self.assertEqual(
+            dag["repos"]["core"],
+            [{"number": 3, "blockedBy": [], "blocking": [{"repo": "api", "number": 10}]}],
+        )
+
+    def test_cycle_across_repos_is_detected_and_reported_once(self):
+        # api#1 blocks core#2, core#2 blocks web#3, web#3 blocks api#1.
+        repo_links = {
+            "api": {1: {"blockedBy": [], "blocking": [{"repo": "core", "number": 2}]}},
+            "core": {2: {"blockedBy": [], "blocking": [{"repo": "web", "number": 3}]}},
+            "web": {3: {"blockedBy": [], "blocking": [{"repo": "api", "number": 1}]}},
+        }
+
+        dag = roadmap.build_dependency_dag(repo_links)
+
+        self.assertEqual(len(dag["cycles"]), 1)
+        cycle_keys = {(node["repo"], node["number"]) for node in dag["cycles"][0]}
+        self.assertEqual(cycle_keys, {("api", 1), ("core", 2), ("web", 3)})
+
+    def test_no_dependencies_is_an_empty_but_well_formed_dag(self):
+        repo_links = {"solo": {5: {"blockedBy": [], "blocking": []}}}
+
+        dag = roadmap.build_dependency_dag(repo_links)
+
+        self.assertEqual(dag["cycles"], [])
+        self.assertEqual(
+            dag["repos"]["solo"],
+            [{"number": 5, "blockedBy": [], "blocking": []}],
+        )
+
+    def test_read_dependencies_keeps_the_target_repo_name(self):
+        response = {
+            "data": {
+                "repository": {
+                    "issues": {
+                        "nodes": [
+                            {
+                                "number": 10,
+                                "blockedBy": {
+                                    "nodes": [{"number": 3, "repository": {"name": "core"}}]
+                                },
+                                "blocking": {"nodes": []},
+                            }
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        }
+
+        with mock.patch.object(roadmap, "_run_json", return_value=(response, None)):
+            links, error = roadmap._read_dependencies("/repo", "acme", "api")
+
+        self.assertIsNone(error)
+        self.assertEqual(
+            links, {10: {"blockedBy": [{"repo": "core", "number": 3}], "blocking": []}}
+        )
+
+    def test_cached_dependency_dag_combines_repos_and_surfaces_warnings(self):
+        with mock.patch.object(
+            roadmap,
+            "load_dependencies",
+            side_effect=[
+                ({1: {"blockedBy": [], "blocking": [{"repo": "core", "number": 2}]}}, []),
+                ({}, ["GitHub dependency links are unavailable: boom"]),
+            ],
+        ) as load:
+            dag = roadmap.cached_dependency_dag(["api", "core"], code_dir="/code")
+
+        self.assertEqual(dag["repos"]["api"][0]["number"], 1)
+        self.assertEqual(
+            dag["warnings"], {"core": ["GitHub dependency links are unavailable: boom"]}
+        )
+        self.assertEqual(load.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

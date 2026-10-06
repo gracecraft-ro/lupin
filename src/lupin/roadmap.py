@@ -106,7 +106,7 @@ BOTTLENECKS = {
 _GITHUB_CACHE = {}
 _LEDGER_CACHE = {}
 _CACHE_LOCK = threading.Lock()
-CACHE_FILE = "/home/ghosta/.local/state/lupin/cache.json"
+CACHE_FILE = os.path.expanduser("~/.local/state/lupin/cache.json")
 
 
 def _load_cache():
@@ -704,51 +704,292 @@ def build_model(
     }
 
 
+def _repo_identity(repo_path: str):
+    """Return (owner, name, warning) for the repo checked out at repo_path.
+
+    warning is None on success. On failure owner and name are None and
+    warning explains why.
+    """
+    identity, error = _run_json(["gh", "repo", "view", "--json", "owner,name"], repo_path)
+    if error:
+        return None, None, f"GitHub repository data is unavailable: {error}"
+    if not isinstance(identity, dict):
+        return None, None, "GitHub returned invalid repository data"
+    owner_data = identity.get("owner")
+    owner = owner_data.get("login") if isinstance(owner_data, dict) else None
+    name = identity.get("name")
+    if not owner or not name:
+        return None, None, "GitHub returned no repository owner or name"
+    return owner, name, None
+
+
 def load_github(repo_path: str, state: str = "open"):
     warnings = []
-    identity, error = _run_json(["gh", "repo", "view", "--json", "owner,name"], repo_path)
+    owner, name, error = _repo_identity(repo_path)
     issues = []
     comments = {}
     if error:
-        warnings.append(f"GitHub repository data is unavailable: {error}")
-    elif not isinstance(identity, dict):
-        warnings.append("GitHub returned invalid repository data")
+        warnings.append(error)
     else:
-        owner_data = identity.get("owner")
-        owner = owner_data.get("login") if isinstance(owner_data, dict) else None
-        name = identity.get("name")
-        if not owner or not name:
-            warnings.append("GitHub returned no repository owner or name")
+        issue_args = [
+            "gh", "issue", "list", "--state", state,
+            "--limit", "100" if state == "closed" else "1000",
+            "--json", "number,title,body,labels,url,createdAt,updatedAt,closedAt",
+        ]
+        max_issues = None
+        if state == "closed":
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).date().isoformat()
+            issue_args.extend(["--search", f"closed:>={cutoff}"])
+            max_issues = 100
+        issues, error = _run_json(issue_args, repo_path)
+        if error:
+            warnings.append(f"GitHub issue data is unavailable: {error}")
+            issues = []
+        elif not isinstance(issues, list):
+            warnings.append("GitHub returned invalid issue data")
+            issues = []
         else:
-            issue_args = [
-                "gh", "issue", "list", "--state", state,
-                "--limit", "100" if state == "closed" else "1000",
-                "--json", "number,title,body,labels,url,createdAt,updatedAt,closedAt",
-            ]
-            max_issues = None
-            if state == "closed":
-                cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).date().isoformat()
-                issue_args.extend(["--search", f"closed:>={cutoff}"])
-                max_issues = 100
-            issues, error = _run_json(issue_args, repo_path)
-            if error:
-                warnings.append(f"GitHub issue data is unavailable: {error}")
-                issues = []
-            elif not isinstance(issues, list):
-                warnings.append("GitHub returned invalid issue data")
-                issues = []
+            if max_issues is None:
+                comments, error = _read_comments(
+                    repo_path, owner, name, state
+                )
             else:
-                if max_issues is None:
-                    comments, error = _read_comments(
-                        repo_path, owner, name, state
-                    )
-                else:
-                    comments, error = _read_comments(
-                        repo_path, owner, name, state, max_issues
-                    )
-                if error:
-                    warnings.append(f"Recent GitHub comments are unavailable: {error}")
+                comments, error = _read_comments(
+                    repo_path, owner, name, state, max_issues
+                )
+            if error:
+                warnings.append(f"Recent GitHub comments are unavailable: {error}")
     return issues, comments, warnings
+
+
+# Dependency edges come from GitHub's own issue-dependency feature --
+# the `blockedBy`/`blocking` fields -- not a "Depends on #N" text search.
+# Confirmed by `gh issue view --json` (lists blockedBy/blocking as real
+# fields) and by GraphQL schema introspection on the Issue type. Other
+# fields that looked promising don't actually carry a blocking relationship:
+# `closedByPullRequestsReferences` only links an issue to the PR that closes
+# it (not to another issue), and a cross-reference timeline event just means
+# one issue mentioned another -- no more reliable than the text search this
+# was meant to replace. A raw query (not `gh issue list --json`, which does
+# not expose the linked issue's repo) confirms each blockedBy/blocking node
+# carries `repository{name}`, which is what makes cross-repo edges possible.
+DEPENDENCY_GRAPHQL = (
+    "query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){"
+    "issues(first:100,after:$cursor,states:OPEN,orderBy:{field:UPDATED_AT,direction:DESC}){"
+    "nodes{number "
+    "blockedBy(first:25){nodes{number repository{name}}} "
+    "blocking(first:25){nodes{number repository{name}}}"
+    "} pageInfo{hasNextPage endCursor}}}}"
+)
+
+
+def _dependency_targets(issue: dict, key: str) -> list[dict]:
+    connection = issue.get(key)
+    nodes = connection.get("nodes") if isinstance(connection, dict) else None
+    if not isinstance(nodes, list):
+        return []
+    targets = []
+    for target in nodes:
+        if not isinstance(target, dict) or not isinstance(target.get("number"), int):
+            continue
+        repository = target.get("repository")
+        repo_name = repository.get("name") if isinstance(repository, dict) else None
+        if repo_name:
+            targets.append({"repo": repo_name, "number": target["number"]})
+    return targets
+
+
+def _read_dependencies(repo_path: str, owner: str, name: str):
+    """Read every open issue's blockedBy/blocking links, with pagination.
+
+    Returns (links, error). links maps issue number -> {"blockedBy": [...],
+    "blocking": [...]}, each a list of {"repo", "number"} -- the repo name
+    travels with the link, so a target in another repo is still usable.
+    """
+    links = {}
+    cursor = None
+    while True:
+        args = [
+            "gh", "api", "graphql", "-f", f"query={DEPENDENCY_GRAPHQL}",
+            "-F", f"owner={owner}", "-F", f"name={name}",
+        ]
+        if cursor:
+            args.extend(["-F", f"cursor={cursor}"])
+        data, error = _run_json(args, repo_path)
+        if error:
+            return links, error
+        if not isinstance(data, dict):
+            return links, "GitHub returned invalid dependency data"
+        errors = data.get("errors") or []
+        if errors:
+            messages = [
+                str(item.get("message") or "GraphQL error")
+                for item in errors
+                if isinstance(item, dict)
+            ]
+            return links, "; ".join(messages) or "GraphQL error"
+        response = data.get("data")
+        repository = response.get("repository") if isinstance(response, dict) else None
+        page = repository.get("issues") if isinstance(repository, dict) else None
+        if not isinstance(page, dict):
+            return links, "GitHub returned no issue dependency data"
+        nodes = page.get("nodes")
+        page_info = page.get("pageInfo")
+        if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            return links, "GitHub returned incomplete dependency data"
+        for issue in nodes:
+            if not isinstance(issue, dict) or not isinstance(issue.get("number"), int):
+                return links, "GitHub returned incomplete issue dependency data"
+            links[issue["number"]] = {
+                "blockedBy": _dependency_targets(issue, "blockedBy"),
+                "blocking": _dependency_targets(issue, "blocking"),
+            }
+        if not page_info.get("hasNextPage"):
+            return links, None
+        cursor = page_info.get("endCursor")
+        if not cursor:
+            return links, "GitHub returned incomplete pagination data"
+
+
+def load_dependencies(repo_path: str):
+    """Return (links, warnings) -- links is `_read_dependencies`'s result
+    for the repo checked out at repo_path, or {} with a warning on failure.
+    """
+    warnings = []
+    owner, name, error = _repo_identity(repo_path)
+    links = {}
+    if error:
+        warnings.append(error)
+    else:
+        links, error = _read_dependencies(repo_path, owner, name)
+        if error:
+            warnings.append(f"GitHub dependency links are unavailable: {error}")
+    return links, warnings
+
+
+_DEPENDENCY_CACHE = {}
+
+
+def cached_dependencies(repo: str, repo_path: str):
+    """Cached `load_dependencies`, same lifetime as `cached_github`.
+
+    Kept in memory only (not written to the disk cache file): the disk
+    cache round-trips through JSON, which turns dict keys into strings,
+    and this cache is keyed by issue number -- not worth the mismatch risk
+    for data that is cheap to refetch within one `serve` run.
+    """
+    now = time.monotonic()
+    with _CACHE_LOCK:
+        cached = _DEPENDENCY_CACHE.get(repo)
+        if cached and now - cached[0] < GITHUB_CACHE_SECONDS:
+            return cached[1]
+        data = load_dependencies(repo_path)
+        _DEPENDENCY_CACHE[repo] = (time.monotonic(), data)
+        return data
+
+
+def _dependency_cycles(edges: list[tuple[tuple[str, int], tuple[str, int]]]) -> list[list[dict]]:
+    """Find cycles in the blocks graph (edge = blocker -> blocked issue).
+
+    Walks every node once with an iterative DFS (no recursion limit) and
+    reports a cycle the moment a back-edge closes one, so a bad link is
+    reported instead of looping forever. Returns one list of
+    {"repo", "number"} per distinct cycle; empty when the graph is a DAG.
+    """
+    outgoing: dict[tuple[str, int], list[tuple[str, int]]] = {}
+    for source, target in edges:
+        outgoing.setdefault(source, []).append(target)
+        outgoing.setdefault(target, [])
+    cycles = []
+    seen_signatures = set()
+    state = {}  # node -> 0 unvisited, 1 in progress, 2 done
+    sentinel = object()
+    for start in outgoing:
+        if state.get(start, 0):
+            continue
+        state[start] = 1
+        path = [start]
+        stack = [iter(outgoing[start])]
+        while stack:
+            target = next(stack[-1], sentinel)
+            if target is sentinel:
+                state[path.pop()] = 2
+                stack.pop()
+                continue
+            if state.get(target, 0) == 1:
+                cycle_nodes = path[path.index(target):] + [target]
+                signature = frozenset(cycle_nodes)
+                if signature not in seen_signatures:
+                    seen_signatures.add(signature)
+                    cycles.append([{"repo": repo, "number": number} for repo, number in cycle_nodes])
+                continue
+            if state.get(target, 0) == 0:
+                state[target] = 1
+                path.append(target)
+                stack.append(iter(outgoing[target]))
+    return cycles
+
+
+def build_dependency_dag(repo_links: dict[str, dict[int, dict]]) -> dict:
+    """Combine each repo's blockedBy/blocking links into one cross-repo DAG.
+
+    repo_links maps repo name -> cached_dependencies(repo, path)[0] for
+    every repo you want in the graph -- call that once per repo first.
+
+    Returns:
+      {
+        "repos": {repo: [{"number", "blockedBy", "blocking"}, ...]},
+        "cycles": [[{"repo", "number"}, ...], ...],   # empty if acyclic
+      }
+
+    An edge always runs blocker -> blocked (the blocker must close first).
+    A link that points at a repo lupin never fetched still shows up as an
+    edge target; it just has no entry of its own under "repos".
+    """
+    edge_set = set()
+    for repo, issues in repo_links.items():
+        for number, links in issues.items():
+            node = (repo, number)
+            for target in links.get("blocking", []):
+                edge_set.add((node, (target["repo"], target["number"])))
+            for blocker in links.get("blockedBy", []):
+                edge_set.add(((blocker["repo"], blocker["number"]), node))
+    edges = [(source, target) for source, target in edge_set if source != target]
+
+    repos_out = {
+        repo: [
+            {
+                "number": number,
+                "blockedBy": list(links.get("blockedBy", [])),
+                "blocking": list(links.get("blocking", [])),
+            }
+            for number, links in sorted(issues.items())
+        ]
+        for repo, issues in repo_links.items()
+    }
+    return {
+        "repos": repos_out,
+        "cycles": _dependency_cycles(edges),
+    }
+
+
+def cached_dependency_dag(repos: list[str], code_dir: str = CODE_DIR) -> dict:
+    """Fetch (cached) dependency links for every repo in `repos` and build
+    one combined DAG -- the one-call version of build_dependency_dag for a
+    caller (the `--dag` CLI output, a future `/roadmap` panel) that just
+    wants the combined result. Adds a "warnings" dict (repo -> messages)
+    for repos whose links could not be read.
+    """
+    repo_links = {}
+    warnings = {}
+    for repo in repos:
+        links, repo_warnings = cached_dependencies(repo, os.path.join(code_dir, repo))
+        repo_links[repo] = links
+        if repo_warnings:
+            warnings[repo] = repo_warnings
+    dag = build_dependency_dag(repo_links)
+    dag["warnings"] = warnings
+    return dag
 
 
 def load_model(repo: str, repo_path: str):

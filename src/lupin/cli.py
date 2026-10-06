@@ -10,10 +10,12 @@ routed model needs (issue #185) and `serve` runs the read-only dashboard
 (issue #204). `join`/`heartbeat`/`drain`/`undrain`/`machines` are the fleet
 machine registry (issue #7); see `machines.py` for the Redis record they
 read and write. `place` picks which registered machine should run a task
-already routed to a model (issue #9; see `place.py`). All of them share one
-process so a caller has one binary to find and one `lupin --help` to read;
-the concerns stay as separate modules underneath, same as this project's
-other CLIs split "decide" from "do" (see review_dispatch.py).
+already routed to a model (issue #9; see `place.py`). `quest` lists quests
+(GitHub issues labeled `quest`) and their progress (issue #11);
+`start`/`stop` claim and release a quest's issues (issue #13). All of them
+share one process so a caller has one binary to find and one `lupin --help`
+to read; the concerns stay as separate modules underneath, same as this
+project's other CLIs split "decide" from "do" (see review_dispatch.py).
 
 Backend choice: `--backend local|redis` on each slot subcommand, default
 from the `LUPIN_BACKEND` env var, falling back to `local` if neither is
@@ -57,7 +59,9 @@ from . import claims
 from . import classify as classify_mod
 from . import machines
 from . import place as place_mod
+from . import quest as quest_mod
 from . import review_dispatch
+from . import roadmap
 from . import route as route_mod
 from . import serve
 from . import slots
@@ -88,27 +92,41 @@ def _state_root_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--state-root", default=None, help="default: $LUPIN_STATE_ROOT or ~/.lupin/slots")
 
 
+def _redis_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--redis-host", default=os.environ.get("LUPIN_REDIS_HOST", "localhost"),
+        help="default: $LUPIN_REDIS_HOST or localhost",
+    )
+    parser.add_argument(
+        "--redis-port", type=int, default=int(os.environ.get("LUPIN_REDIS_PORT", "6379")),
+        help="default: $LUPIN_REDIS_PORT or 6379",
+    )
+    parser.add_argument(
+        "--redis-username", default=os.environ.get("LUPIN_REDIS_USERNAME"),
+        help="default: $LUPIN_REDIS_USERNAME, no auth if unset",
+    )
+    parser.add_argument(
+        "--redis-password", default=os.environ.get("LUPIN_REDIS_PASSWORD"),
+        help="default: $LUPIN_REDIS_PASSWORD, no auth if unset",
+    )
+
+
 def _backend_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--backend", choices=["local", "redis"], default=os.environ.get("LUPIN_BACKEND", "local"),
         help="slot-lease backend (default: $LUPIN_BACKEND or local)",
     )
+    _redis_args(parser)
+
+
+def _quest_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--redis-host", default=os.environ.get("LUPIN_REDIS_HOST", "localhost"),
-        help="redis backend only (default: $LUPIN_REDIS_HOST or localhost)",
+        "mode", nargs="?", choices=["status"], default=None,
+        help="omit to list every quest; 'status' for one quest's task breakdown",
     )
-    parser.add_argument(
-        "--redis-port", type=int, default=int(os.environ.get("LUPIN_REDIS_PORT", "6379")),
-        help="redis backend only (default: $LUPIN_REDIS_PORT or 6379)",
-    )
-    parser.add_argument(
-        "--redis-username", default=os.environ.get("LUPIN_REDIS_USERNAME"),
-        help="redis backend only (default: $LUPIN_REDIS_USERNAME, no auth if unset)",
-    )
-    parser.add_argument(
-        "--redis-password", default=os.environ.get("LUPIN_REDIS_PASSWORD"),
-        help="redis backend only (default: $LUPIN_REDIS_PASSWORD, no auth if unset)",
-    )
+    parser.add_argument("id", nargs="?", default=None, help="quest name or issue number, with status")
+    parser.add_argument("--json", action="store_true")
+    _redis_args(parser)
 
 
 def _slot_common_args(parser: argparse.ArgumentParser) -> None:
@@ -285,6 +303,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _fleet_connection_args(sub.add_parser("undrain", help="mark this machine as online again"))
     _machines_args(sub.add_parser("machines", help="list every registered machine's state"))
     _place_args(sub.add_parser("place", help="pick which machine should run a task"))
+    _quest_args(sub.add_parser("quest", help="list quests, their progress, and their focus machine"))
     return parser
 
 
@@ -610,6 +629,52 @@ def _cmd_place(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_quest(args: argparse.Namespace) -> int:
+    repos = serve.enabled_repos()
+    redis_kwargs = {
+        "redis_host": args.redis_host,
+        "redis_port": args.redis_port,
+        "redis_username": args.redis_username,
+        "redis_password": args.redis_password,
+    }
+    quests, warnings = quest_mod.load_quests(repos)
+    for warning in warnings:
+        print(f"lupin: {warning}", file=sys.stderr)
+
+    if args.mode == "status":
+        if args.id:
+            match = quest_mod.find_quest(quests, args.id)
+            if match is None:
+                print(f"no quest matches {args.id!r}", file=sys.stderr)
+                return 1
+            selected = [match]
+        else:
+            selected = quests
+        dag = roadmap.cached_dependency_dag(repos)
+        results = [
+            quest_mod.status_to_json(
+                one, dag, quest_mod.read_focus(one["name"], **redis_kwargs)
+            )
+            for one in selected
+        ]
+        if args.json:
+            print(json.dumps(results))
+        elif not results:
+            print("No quests found.")
+        else:
+            print("\n\n".join(quest_mod.render_status(result) for result in results))
+        return 0
+
+    focuses = {
+        one["name"]: quest_mod.read_focus(one["name"], **redis_kwargs) for one in quests
+    }
+    if args.json:
+        print(json.dumps([quest_mod.to_json(one, focuses[one["name"]]) for one in quests]))
+    else:
+        print(quest_mod.render_list(quests, focuses))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = sys.argv[1:] if argv is None else argv
     if "--" in raw:
@@ -657,6 +722,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_machines(args)
     if args.cmd == "place":
         return _cmd_place(args)
+    if args.cmd == "quest":
+        return _cmd_quest(args)
     parser.error(f"unknown command {args.cmd!r}")  # pragma: no cover
     return 1
 
