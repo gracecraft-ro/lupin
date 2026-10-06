@@ -113,10 +113,19 @@ def _backend_args(parser: argparse.ArgumentParser) -> None:
 
 def _quest_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "mode", nargs="?", choices=["status"], default=None,
-        help="omit to list every quest; 'status' for one quest's task breakdown",
+        "mode", nargs="?", choices=["status", "focus", "release"], default=None,
+        help=(
+            "omit to list every quest; 'status' for one quest's task breakdown; "
+            "'focus'/'release' to pin or unpin a quest's focus machine"
+        ),
     )
-    parser.add_argument("id", nargs="?", default=None, help="quest name or issue number, with status")
+    parser.add_argument("id", nargs="?", default=None, help="quest name or issue number")
+    parser.add_argument(
+        "--machine", default=None, help="with focus: target machine (default: most free slots)"
+    )
+    parser.add_argument(
+        "--pin", action="store_true", help="with focus: keep the focus until explicitly released"
+    )
     parser.add_argument("--json", action="store_true")
     _redis_args(parser)
 
@@ -527,6 +536,50 @@ def _cmd_place(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_quest_focus(args: argparse.Namespace, repos: list[str], redis_kwargs: dict) -> int:
+    if not args.id:
+        print("quest focus needs a quest name", file=sys.stderr)
+        return 1
+    try:
+        result = quest_mod.focus(args.id, redis_kwargs, repos, machine=args.machine, pin=args.pin)
+    except quest_mod.QuestNotFound as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except (quest_mod.MachineDraining, quest_mod.MachineNotFound, quest_mod.NoReadyTasks) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except quest_mod.NoMachineAvailable as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except quest_mod.CoordinatorUnreachable as exc:
+        print(f"cannot reach the {exc}", file=sys.stderr)
+        return 3
+    print(
+        f"focused {result['quest']} on {result['machine']} · "
+        f"{result['ready_count']} ready tasks will route there in order"
+    )
+    return 0
+
+
+def _cmd_quest_release(args: argparse.Namespace, repos: list[str], redis_kwargs: dict) -> int:
+    if not args.id:
+        print("quest release needs a quest name", file=sys.stderr)
+        return 1
+    try:
+        result = quest_mod.release(args.id, redis_kwargs, repos)
+    except quest_mod.QuestNotFound as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except quest_mod.NoFocus as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except quest_mod.CoordinatorUnreachable as exc:
+        print(f"cannot reach the {exc}", file=sys.stderr)
+        return 3
+    print(f"released {result['quest']} · {result['machine']} returns to normal routing")
+    return 0
+
+
 def _cmd_quest(args: argparse.Namespace) -> int:
     repos = serve.enabled_repos()
     redis_kwargs = {
@@ -535,6 +588,11 @@ def _cmd_quest(args: argparse.Namespace) -> int:
         "redis_username": args.redis_username,
         "redis_password": args.redis_password,
     }
+    if args.mode == "focus":
+        return _cmd_quest_focus(args, repos, redis_kwargs)
+    if args.mode == "release":
+        return _cmd_quest_release(args, repos, redis_kwargs)
+
     quests, warnings = quest_mod.load_quests(repos)
     for warning in warnings:
         print(f"lupin: {warning}", file=sys.stderr)

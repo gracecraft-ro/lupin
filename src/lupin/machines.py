@@ -77,6 +77,30 @@ def _record_key(name: str) -> str:
     return f"{PREFIX}machine:{name}"
 
 
+def _slot_totals(slots: dict) -> tuple[int, int]:
+    """(used, max) summed across every slot a `machines()` record reports.
+    Shared by `place.py` (ranking candidates) and `quest.py` (picking a
+    focus machine) -- one reading of a machine's free capacity, not two.
+    """
+    used = sum(int(entry.get("used", 0)) for entry in (slots or {}).values())
+    max_ = sum(int(entry.get("max", 0)) for entry in (slots or {}).values())
+    return used, max_
+
+
+def _heartbeat_age(record: dict, now: float) -> float:
+    """Seconds since a `machines()` record's own heartbeat. Shared the same
+    way `_slot_totals` is -- `place.py` and `quest.py` both break ranking
+    ties on heartbeat freshness.
+    """
+    stamp = record.get("heartbeat")
+    if not stamp:
+        return float("inf")
+    try:
+        return now - _parse_iso(stamp)
+    except ValueError:
+        return float("inf")
+
+
 def load_config(config_path: str | Path | None = None) -> dict:
     """What `lupin join` last wrote: `redis_host`, `redis_port`, and
     `redis_username` if one was given. `{}` if this machine hasn't joined.
