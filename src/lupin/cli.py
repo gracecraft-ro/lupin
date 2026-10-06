@@ -3,11 +3,14 @@
 `route` and `classify` are the model-routing calls, moved out of
 ghostbook.nix in issue #203. `acquire`/`hold`/`release`/`status` are the
 slot-lease commands (issue #205 for the `local` backend, #210 for
-`redis`). `review-route` picks which lock a routed model needs (issue
-#185) and `serve` runs the read-only dashboard (issue #204). All of them
-share one process so a caller has one binary to find and one `lupin --help`
-to read; the concerns stay as separate modules underneath, same as this
-project's other CLIs split "decide" from "do" (see review_dispatch.py).
+`redis`). `claim`/`renew-claim`/`release-claim` mark a GitHub issue as one
+loop's own, so two loops never work the same task (issue #6; Redis only, no
+`--backend` choice -- see `claims.py`). `review-route` picks which lock a
+routed model needs (issue #185) and `serve` runs the read-only dashboard
+(issue #204). All of them share one process so a caller has one binary to
+find and one `lupin --help` to read; the concerns stay as separate modules
+underneath, same as this project's other CLIs split "decide" from "do" (see
+review_dispatch.py).
 
 Backend choice: `--backend local|redis` on each slot subcommand, default
 from the `LUPIN_BACKEND` env var, falling back to `local` if neither is
@@ -26,9 +29,15 @@ Exit codes, by design (see #198's architecture plan):
      reaches once the state root is writable, so it never returns 3. The
      `redis` backend returns 3 for any slot other than `bmo` when Redis is
      unreachable -- `bmo` falls back to the `local` backend instead (see
-     `slots_redis.py`), so it does not reach this exit code.
+     `slots_redis.py`), so it does not reach this exit code. Claims have no
+     local fallback at all, so `claim`/`renew-claim`/`release-claim` return
+     3 for every unreachable-Redis case.
   1  any other error (malformed lease id, bad JSON input, hold with neither
-     --lease nor <slot>/--holder, etc.)
+     --lease nor <slot>/--holder, etc.) -- also `renew-claim`/`release-claim`
+     when the caller isn't the claim's current holder.
+
+`claim` returns 2 when another holder already has the issue -- same "busy,
+skip and try again later" meaning as a full slot.
 """
 
 from __future__ import annotations
@@ -38,6 +47,7 @@ import json
 import os
 import sys
 
+from . import claims
 from . import classify as classify_mod
 from . import review_dispatch
 from . import route as route_mod
@@ -131,6 +141,43 @@ def _status_args(parser: argparse.ArgumentParser) -> None:
     _backend_args(parser)
 
 
+def _redis_conn_args(parser: argparse.ArgumentParser) -> None:
+    """Connection flags for the claim subcommands -- same env-var defaults
+    as `_backend_args`, but no `--backend` choice: claims only ever live in
+    Redis, there is no `local` backend for them to pick (see `claims.py`).
+    """
+    parser.add_argument(
+        "--redis-host", default=os.environ.get("LUPIN_REDIS_HOST", "localhost"),
+        help="default: $LUPIN_REDIS_HOST or localhost",
+    )
+    parser.add_argument(
+        "--redis-port", type=int, default=int(os.environ.get("LUPIN_REDIS_PORT", "6379")),
+        help="default: $LUPIN_REDIS_PORT or 6379",
+    )
+    parser.add_argument(
+        "--redis-username", default=os.environ.get("LUPIN_REDIS_USERNAME"),
+        help="default: $LUPIN_REDIS_USERNAME, no auth if unset",
+    )
+    parser.add_argument(
+        "--redis-password", default=os.environ.get("LUPIN_REDIS_PASSWORD"),
+        help="default: $LUPIN_REDIS_PASSWORD, no auth if unset",
+    )
+
+
+def _claim_args(parser: argparse.ArgumentParser) -> None:
+    """Shared by `claim` and `renew-claim` -- both take a TTL."""
+    parser.add_argument("target", help="OWNER/REPO#N, e.g. gracecraft/lupin#6")
+    parser.add_argument("--holder", required=True)
+    parser.add_argument("--ttl", type=float, default=claims.DEFAULT_TTL, help="claim TTL in seconds")
+    _redis_conn_args(parser)
+
+
+def _release_claim_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("target", help="OWNER/REPO#N, e.g. gracecraft/lupin#6")
+    parser.add_argument("--holder", required=True)
+    _redis_conn_args(parser)
+
+
 def _serve_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--bind", default="127.0.0.1", help="loopback address only")
     parser.add_argument("--port", type=int, default=8788)
@@ -174,6 +221,9 @@ def _build_parser() -> argparse.ArgumentParser:
     _hold_args(sub.add_parser("hold", help="acquire (or reuse a lease), run a command, release on exit"))
     _release_args(sub.add_parser("release", help="give up a lease"))
     _status_args(sub.add_parser("status", help="list every slot's holder count and max"))
+    _claim_args(sub.add_parser("claim", help="atomically take a GitHub issue, so no other loop works it"))
+    _claim_args(sub.add_parser("renew-claim", help="push a claim's TTL back out"))
+    _release_claim_args(sub.add_parser("release-claim", help="give up a claim (compare-and-delete)"))
     _review_route_args(
         sub.add_parser("review-route", help="route a pair and report which lock it needs")
     )
@@ -305,6 +355,60 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _claim_kwargs(args: argparse.Namespace) -> dict:
+    return {
+        "redis_host": args.redis_host,
+        "redis_port": args.redis_port,
+        "redis_username": args.redis_username,
+        "redis_password": args.redis_password,
+    }
+
+
+def _cmd_claim(args: argparse.Namespace) -> int:
+    try:
+        claims.claim(args.target, args.holder, ttl=args.ttl, **_claim_kwargs(args))
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except claims.ClaimHeld as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    except slots.CoordinatorUnreachable:
+        print(f"cannot reach the redis coordinator for claim {args.target!r}", file=sys.stderr)
+        return 3
+    return 0
+
+
+def _cmd_renew_claim(args: argparse.Namespace) -> int:
+    try:
+        renewed = claims.renew_claim(args.target, args.holder, ttl=args.ttl, **_claim_kwargs(args))
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except slots.CoordinatorUnreachable:
+        print(f"cannot reach the redis coordinator for claim {args.target!r}", file=sys.stderr)
+        return 3
+    if not renewed:
+        print(f"{args.target!r} is not held by {args.holder!r}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _cmd_release_claim(args: argparse.Namespace) -> int:
+    try:
+        released = claims.release_claim(args.target, args.holder, **_claim_kwargs(args))
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except slots.CoordinatorUnreachable:
+        print(f"cannot reach the redis coordinator for claim {args.target!r}", file=sys.stderr)
+        return 3
+    if not released:
+        print(f"{args.target!r} is not held by {args.holder!r}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = sys.argv[1:] if argv is None else argv
     if "--" in raw:
@@ -334,6 +438,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_release(args)
     if args.cmd == "status":
         return _cmd_status(args)
+    if args.cmd == "claim":
+        return _cmd_claim(args)
+    if args.cmd == "renew-claim":
+        return _cmd_renew_claim(args)
+    if args.cmd == "release-claim":
+        return _cmd_release_claim(args)
     parser.error(f"unknown command {args.cmd!r}")  # pragma: no cover
     return 1
 
