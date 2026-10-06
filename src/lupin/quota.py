@@ -377,6 +377,11 @@ def quota_usage() -> list[dict]:
     except json.JSONDecodeError as error:
         rows = unavailable_usage("omp", "omp usage --json", error) + codex_session_quota()
         return add_quota_fallbacks(rows)
+    if not isinstance(data, dict):
+        rows = unavailable_usage(
+            "omp", "omp usage --json", ValueError("expected a JSON object")
+        ) + codex_session_quota()
+        return add_quota_fallbacks(rows)
 
     generated_at = epoch_ms_to_local(data.get("generatedAt"))
     rows = []
