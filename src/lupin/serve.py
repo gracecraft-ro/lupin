@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """lupin serve - a read-only web dashboard for the loopctl delegation loops.
 
-The server binds a loopback address. It refuses to start on any other
-address. There is no POST route and no code path that starts a process with
+The server binds a loopback or tailnet address (100.64.0.0/10); it refuses
+to start on any other address. A tailnet bind relies on the headscale ACL
+and the host firewall as its boundary (same model as this project's Redis
+deployment, docs/redis-schema.md) -- the DNS-rebinding check below still
+only accepts the Host header matching what was actually bound. There is no
+POST route and no code path that starts a process with
 arguments built from the browser. Read probes use fixed argv lists, run
 without a shell. GitHub attachment images use an authenticated, fixed-host
 proxy; it sends the GitHub token only to github.com and strips it before a
@@ -126,6 +130,17 @@ REPOS_FILE = os.path.join(STATE_DIR, "repos")
 CODE_DIR = "/code"
 LOOP_DOC = "docs/delegation-loop.md"
 SESSION_PREFIX = "loop-"
+
+# Tailscale's CGNAT range (100.64.0.0/10). A bind address in this range is a
+# tailnet interface, gated by the headscale ACL and the host firewall -- the
+# same trust boundary this project's Redis deployment already relies on
+# (docs/redis-schema.md). Any other non-loopback address is still refused.
+TAILNET_RANGE = ipaddress.ip_network("100.64.0.0/10")
+
+
+def bind_allowed(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Loopback, or a tailnet address -- see TAILNET_RANGE above."""
+    return addr.is_loopback or (addr.version == 4 and addr in TAILNET_RANGE)
 
 # model-tiers.json -- the same file route.py routes a (category, size) pair
 # with. It ships as package data, so read it the same way route.py does.
@@ -1302,7 +1317,7 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
 
     ap = argparse.ArgumentParser(prog="lupin serve", add_help=False)
-    ap.add_argument("--bind", default="127.0.0.1", help="loopback address only")
+    ap.add_argument("--bind", default="127.0.0.1", help="loopback or a tailnet address")
     ap.add_argument("--port", type=int, default=8788)
     ap.add_argument("--peek-lines", type=int, default=25, help="tail lines shown per loop")
     ap.add_argument("--roadmap", metavar="REPO", help="print a repository roadmap and exit")
@@ -1325,11 +1340,11 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError:
         print(f"lupin: --bind must be an IP address, got {args.bind!r}", file=sys.stderr)
         return 2
-    if not addr.is_loopback:
+    if not bind_allowed(addr):
         print(
             f"lupin: refusing to bind {args.bind}. This dashboard is meant "
-            "for loopback only. Use an SSH forward to reach it from another "
-            "machine.",
+            "for loopback or a tailnet address (100.64.0.0/10) only. Use an "
+            "SSH forward, or a tailnet ACL, to reach it from another machine.",
             file=sys.stderr,
         )
         return 2

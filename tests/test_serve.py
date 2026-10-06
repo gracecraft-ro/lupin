@@ -2,6 +2,7 @@ import contextlib
 import io
 import sys
 
+import ipaddress
 import json
 import os
 import tempfile
@@ -283,6 +284,26 @@ class QuotaRenderingTests(unittest.TestCase):
             "<td>opencode-go</td><td colspan=3>unavailable (FileNotFoundError)</td>",
             page,
         )
+
+
+class BindAddressTests(unittest.TestCase):
+    def test_allows_loopback(self):
+        self.assertTrue(serve.bind_allowed(ipaddress.ip_address("127.0.0.1")))
+
+    def test_allows_tailnet_range(self):
+        self.assertTrue(serve.bind_allowed(ipaddress.ip_address("100.64.0.11")))
+
+    def test_rejects_lan_address(self):
+        self.assertFalse(serve.bind_allowed(ipaddress.ip_address("192.168.1.5")))
+
+    def test_rejects_any_address(self):
+        self.assertFalse(serve.bind_allowed(ipaddress.ip_address("0.0.0.0")))
+
+    def test_rejects_tailnet_range_over_ipv6(self):
+        # TAILNET_RANGE is an IPv4 network; an IPv6 address never matches it
+        # even if its numeric value would overlap, so this must still be
+        # loopback-or-nothing for v6.
+        self.assertFalse(serve.bind_allowed(ipaddress.ip_address("::1:0:0:0")))
 
 
 class DashboardRouteTests(unittest.TestCase):
