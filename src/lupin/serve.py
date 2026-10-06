@@ -345,36 +345,115 @@ def gather(peek_lines: int) -> dict:
 # --------------------------------------------------------------------------
 
 CSS = """
-:root{--bg:#fbfbfa;--fg:#1a1a19;--dim:#6b6b68;--line:#e2e1dd;--card:#fff;
---accent:#2f6f4f;--warn:#8a4b12;--code:#f2f1ee}
-@media (prefers-color-scheme:dark){:root{--bg:#141413;--fg:#eeedeb;--dim:#9a9993;
---line:#2e2e2b;--card:#1c1c1a;--accent:#7fb894;--warn:#d99a5b;--code:#232321}}
+:root{
+--ok:#1f7a6a;--warn:#d2512e;--ink:#14201e;--bg:#f2f6f5;--surface:#ffffff;
+--side:#e4eeec;--ink2:#4a5b58;--ink3:#5f706d;--line:#d3e0dd;--line2:#e3ecea;
+--track:#dae6e3;--warnbg:#fff0ea;--warnline:#f6cdbd;--warnink:#a03c1a;
+--term:#10201e;--termink:#dfece9;--frame:#c3d3cf;--idle:#9fb0ac;
+--lav:#26636b;--lavbg:#dcebe8;--okbg:#e1f1ee;
+/* The mockup loads these two from Google Fonts. We don't load that file
+(CSP blocks it), so the names below are unused and every browser falls
+through to the system font right after them. */
+--sans:Nunito,"Segoe UI Rounded",ui-rounded,-apple-system,"Segoe UI",system-ui,sans-serif;
+--mono:"Geist Mono",ui-monospace,"SF Mono","Cascadia Code","Roboto Mono",monospace;
+/* legacy names: src/lupin/roadmap.py's own CSS still refers to these */
+--fg:var(--ink);--dim:var(--ink3);--card:var(--surface);--accent:var(--ok);--code:var(--track);
+}
+:root[data-theme="dark"]{
+--ok:#4cc2ad;--warn:#ef8a5c;--ink:#e8f1ef;--bg:#101615;--surface:#172120;
+--side:#0c1110;--ink2:#a9bcb8;--ink3:#8da29d;--line:#273532;--line2:#1e2927;
+--track:#222f2c;--warnbg:#35211a;--warnline:#5e3626;--warnink:#f5b394;
+--term:#0a100f;--termink:#dbe8e5;--frame:#2f3f3b;--idle:#72857f;
+--lav:#7fc7cf;--lavbg:#1c2c2c;--okbg:#18291f;
+}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);
-font:15px/1.5 ui-sans-serif,-apple-system,"Segoe UI",system-ui,sans-serif}
-main{max-width:1500px;margin:0 auto;padding:1.5rem 1rem 4rem}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:15px/1.5 var(--sans)}
+a{color:var(--ok);text-decoration:none}
+a:hover{color:var(--ink);text-decoration:underline}
+.shell{display:flex;min-height:100vh}
+.side{width:200px;flex:none;background:var(--side);border-right:1px solid var(--line);
+padding:22px 14px;display:flex;flex-direction:column;position:sticky;top:0;
+height:100vh;overflow:auto}
+.brand{font:700 19px var(--mono);padding:0 8px 22px 8px}
+.navlinks{display:grid;gap:2px}
+.navlink{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:10px;
+font-size:14px;color:var(--ink)}
+.navlink svg{color:var(--ink2)}
+.navlink:hover{background:var(--line2);text-decoration:none}
+.navlink.active{background:var(--lavbg);font-weight:600}
+.content{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{display:flex;align-items:center;gap:14px;padding:12px 28px;
+border-bottom:1px solid var(--line);font-size:13px;color:var(--ink2)}
+.topbar .sp{flex:1}
+.autolabel{display:flex;align-items:center;gap:6px;cursor:pointer}
+.iconbtn{width:32px;height:32px;flex:none;padding:0;display:flex;align-items:center;
+justify-content:center;border-radius:10px;border:1px solid var(--line);
+background:var(--surface);color:var(--ink);cursor:pointer}
+.iconbtn:hover{filter:brightness(.94)}
+.iconbtn:focus-visible{outline:2px solid var(--ok);outline-offset:2px}
+.iconbtn .icon-sun{display:none}
+:root[data-theme="dark"] .iconbtn .icon-sun{display:inline-flex}
+:root[data-theme="dark"] .iconbtn .icon-moon{display:none}
+main{max-width:1500px;padding:1.5rem 1.75rem 4rem;flex:1;min-width:0}
 h1{font-size:1.25rem;margin:0}
-h2{font-size:1rem;margin:2rem 0 .6rem;color:var(--dim);
+h2{font-size:.8rem;margin:2rem 0 .6rem;color:var(--ink2);font-family:var(--mono);
 text-transform:uppercase;letter-spacing:.06em}
-a{color:var(--accent)}
-header{display:flex;gap:1rem;align-items:baseline;flex-wrap:wrap;
-border-bottom:1px solid var(--line);padding-bottom:.8rem}
+header{display:flex;gap:1rem;align-items:center;flex-wrap:wrap;
+border-bottom:1px solid var(--line);padding-bottom:.8rem;margin-bottom:.2rem}
+header h1{display:flex;align-items:center;gap:10px;font:600 21px var(--mono)}
+header h1 svg{color:var(--ok)}
 header .sp{flex:1}
-.dim{color:var(--dim)}
-.card{background:var(--card);border:1px solid var(--line);border-radius:8px;
-padding:.9rem 1rem;margin-bottom:.7rem}
+header a{font-size:13px}
+.dim{color:var(--ink3)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:18px;
+box-shadow:0 3px 0 var(--line);padding:.9rem 1.1rem;margin-bottom:.7rem}
 .row{display:flex;gap:.8rem;align-items:center;flex-wrap:wrap}
-.pill{font-size:.75rem;padding:.1rem .5rem;border-radius:99px;
-border:1px solid var(--line);color:var(--dim)}
-.pill.on{color:var(--accent);border-color:var(--accent)}
+.pill{font-size:.75rem;padding:.15rem .6rem;border-radius:99px;
+border:1px solid var(--line);color:var(--ink2)}
+.pill.on{color:var(--ok);border-color:var(--ok)}
 .pill.off{color:var(--warn);border-color:var(--warn)}
 .big{font-size:1.05rem;font-weight:600}
-pre{background:var(--code);border:1px solid var(--line);border-radius:6px;
-padding:.6rem .7rem;overflow-x:auto;font-size:12px;line-height:1.45;margin:.6rem 0 0;
+pre{background:var(--term);color:var(--termink);border-radius:14px;
+padding:.6rem .7rem;overflow-x:auto;font:400 12px/1.5 var(--mono);margin:.6rem 0 0;
 max-height:16rem;white-space:pre}
 table{border-collapse:collapse;width:100%;font-size:14px}
-td,th{text-align:left;padding:.35rem .6rem;border-bottom:1px solid var(--line)}
-th{color:var(--dim);font-weight:500}
+td,th{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line2)}
+th{color:var(--ink3);font-weight:500;font-size:.72rem;letter-spacing:.04em;
+text-transform:uppercase}
+.section-head{display:flex;align-items:center;gap:7px;margin:1.8rem 0 .7rem}
+.section-head svg{color:var(--ink2)}
+.section-head h2{margin:0}
+.stat-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+.stat{display:flex;flex-direction:column;gap:5px}
+.stat svg{color:var(--ink2)}
+.stat-label{font-size:.72rem;letter-spacing:.06em;text-transform:uppercase;
+color:var(--ink3);font-family:var(--mono);display:flex;align-items:center;gap:6px}
+.stat-value{font-size:26px;font-weight:600}
+.stat-value.mono{font-family:var(--mono)}
+.stat-note{font-size:.8rem;color:var(--ink2)}
+.stat.warn{background:var(--warnbg);border-color:var(--warnline);box-shadow:none}
+.stat.warn .stat-label,.stat.warn .stat-value{color:var(--warnink)}
+.stat.ok .stat-value{color:var(--ok)}
+.loop-grid{display:grid;gap:10px}
+.loop-card{display:block;color:inherit}
+.loop-card:hover{border-color:var(--ink3);text-decoration:none}
+.loop-head{display:flex;align-items:center;gap:10px;font-size:13px;
+color:var(--ink2);flex-wrap:wrap}
+.loop-head b{font-size:15px;color:var(--ink);font-weight:600}
+.dot{width:8px;height:8px;border-radius:2px;background:var(--ok);flex:none}
+.dot.idle{background:var(--idle)}
+.loop-tail{margin:10px 0 0;max-height:4.6em}
+.loop-empty{display:flex;gap:14px;align-items:center}
+@media(max-width:860px){
+.shell{flex-direction:column}
+.side{width:auto;height:auto;position:static;flex-direction:row;align-items:center;
+gap:14px;padding:12px 16px;overflow-x:auto}
+.navlinks{display:flex;flex-direction:row;gap:4px}
+.navlink span{display:none}
+main{padding:1rem 1rem 3rem}
+.stat-row{grid-template-columns:1fr}
+}
 .quota-heading{display:flex;justify-content:space-between;align-items:baseline;
 gap:1rem;flex-wrap:wrap}
 .scroll{overflow-x:auto}
@@ -470,20 +549,90 @@ document.querySelectorAll("[data-once-repo]").forEach(function(row){
    }).then(function(){setTimeout(function(){status.textContent="";},2000);});
  });
 });
+var themeBtn=document.getElementById("theme-toggle");
+if(themeBtn){themeBtn.addEventListener("click",function(){
+  var root=document.documentElement;
+  var next=root.getAttribute("data-theme")==="dark"?"light":"dark";
+  root.setAttribute("data-theme",next);
+  try{localStorage.setItem("lupin-theme",next);}catch(e){}});}
 """
+
+# Runs before the stylesheet paints, so the page never flashes the wrong
+# theme. No network access, no state beyond one localStorage key.
+THEME_BOOTSTRAP = """<script>(function(){try{
+var t=localStorage.getItem("lupin-theme");
+if(!t){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
+document.documentElement.setAttribute("data-theme",t);
+}catch(e){}})();</script>"""
+
+# (nav key, path, label, icon path data) -- icon paths are the same ones the
+# design mockup uses for these pages, so the sidebar and page headers agree.
+NAV_ITEMS = [
+    ("overview", "/", "Overview", "M3 11l9-8 9 8M5 10v10h14V10"),
+    ("roadmap", "/roadmap", "Roadmap", "M5 21V4M5 4h12l-2 4 2 4H5"),
+    ("usage", "/usage", "Usage", "M5 20V10M12 20V4M19 20v-7"),
+    (
+        "models",
+        "/model-tiers",
+        "Models",
+        "M7 7h10v10H7zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3",
+    ),
+]
+SUN_ICON = "M12 8a4 4 0 100 8 4 4 0 000-8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+MOON_ICON = "M20 13.5A8.5 8.5 0 1110.5 4a6.5 6.5 0 009.5 9.5zM18 2v3M16.5 3.5h3"
 
 
 def esc(value) -> str:
     return html.escape(str(value), quote=True)
 
 
-def page(title: str, body: str, extra_css: str = "", extra_js: str = "") -> bytes:
+def icon(d: str, size: int = 16) -> str:
+    """A stroke-style icon, matching the mockup's svg icons. `d` is always
+    one of the fixed path strings above, never caller-supplied text."""
+    return (
+        f'<svg aria-hidden="true" width="{size}" height="{size}" viewBox="0 0 24 24" '
+        'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        f'stroke-linejoin="round" style="flex:none"><path d="{d}"></path></svg>'
+    )
+
+
+def render_nav(active: str) -> str:
+    links = "".join(
+        f"<a class='navlink{' active' if key == active else ''}' href='{href}'>"
+        f"{icon(path)}<span>{esc(label)}</span></a>"
+        for key, href, label, path in NAV_ITEMS
+    )
+    return (
+        "<nav class=side><div class=brand>lupin</div>"
+        f"<div class=navlinks>{links}</div><div style='flex:1'></div></nav>"
+    )
+
+
+def render_topbar() -> str:
+    return (
+        "<div class=topbar>"
+        "<label class=autolabel><input type=checkbox id=auto> auto-refresh</label>"
+        "<span class=sp></span>"
+        "<button type=button id=theme-toggle class=iconbtn aria-label='Toggle dark mode' "
+        "title='Toggle dark mode'>"
+        f"<span class=icon-sun>{icon(SUN_ICON, 17)}</span>"
+        f"<span class=icon-moon>{icon(MOON_ICON, 17)}</span>"
+        "</button></div>"
+    )
+
+
+def page(
+    title: str, body: str, extra_css: str = "", extra_js: str = "", active: str = ""
+) -> bytes:
     return (
         "<!doctype html><html lang=en><head><meta charset=utf-8>"
+        f"{THEME_BOOTSTRAP}"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         "<link rel=icon href='/favicon.ico' type='image/svg+xml'>"
         f"<title>{esc(title)}</title><style>{CSS}{extra_css}</style></head>"
-        f"<body><main>{body}</main><script>{JS}{extra_js}</script></body></html>"
+        f"<body><div class=shell>{render_nav(active)}<div class=content>"
+        f"{render_topbar()}<main>{body}</main></div></div>"
+        f"<script>{JS}{extra_js}</script></body></html>"
     ).encode("utf-8")
 
 
@@ -496,56 +645,86 @@ def render_dashboard(state: dict) -> bytes:
     oneoffs = [t for t in state["timers"] if t["unit"] != "delegation-loop.timer"]
     nxt = recurring[0]["next"] if recurring and recurring[0]["next"] else None
 
-    body = [
-        "<header><h1>loopctl dashboard</h1>",
-        f"<span class=dim>{esc(len(loops))} live &middot; "
-        f"{esc(len(enabled))} enabled</span><span class=sp></span>",
-        "<label class=dim><input type=checkbox id=auto> auto-refresh</label>",
-        "<a href='/roadmap'>all work</a><a href='/usage'>usage</a>"
-        "<a href='/model-tiers'>model tiers</a>"
-        "<a href='/'>reload</a></header>",
-    ]
+    no_doc = [r for r in state["repos"] if r["state"] == "no-doc"]
+    attention = []
+    if not state["timer_active"]:
+        attention.append("timer paused")
+    if no_doc:
+        attention.append(f"{len(no_doc)} repo(s) missing docs/delegation-loop.md")
 
-    # ---- the two questions the dashboard exists to answer -----------------
-    body.append("<h2>Right now</h2><div class=card><div class=row>")
-    if state["timer_active"]:
-        body.append("<span class='pill on'>timer running</span>")
-    else:
-        body.append("<span class='pill off'>timer paused</span>")
+    body = [f'<header><h1>{icon("M3 11l9-8 9 8M5 10v10h14V10")}Overview</h1></header>']
+
+    # ---- the three questions the overview exists to answer ---------------
+    body.append('<div class="stat-row">')
+    body.append(
+        '<div class="card stat">'
+        f'<div class="stat-label">{icon("M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3", 13)}Live loops</div>'
+        f'<div class="stat-value">{esc(len(loops))}</div>'
+        f'<div class="stat-note">{esc(len(enabled))} repos enabled</div></div>'
+    )
     if nxt:
         body.append(
-            f"<span class=big>next run <span data-until='{nxt:.0f}'></span></span>"
-            f"<span class=dim>{esc(time.strftime('%a %H:%M:%S %Z', time.localtime(nxt)))}</span>"
+            '<div class="card stat">'
+            f'<div class="stat-label">{icon("M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z", 13)}Next run</div>'
+            f'<div class="stat-value mono" data-until="{nxt:.0f}"></div>'
+            f'<div class="stat-note">{esc(time.strftime("%a %H:%M:%S %Z", time.localtime(nxt)))}</div></div>'
         )
     else:
-        body.append("<span class=big>no next run scheduled</span>")
-    body.append("</div></div>")
+        body.append(
+            '<div class="card stat">'
+            f'<div class="stat-label">{icon("M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z", 13)}Next run</div>'
+            '<div class="stat-value">None scheduled</div></div>'
+        )
+    body.append(
+        f'<div class="card stat {"warn" if attention else "ok"}">'
+        f'<div class="stat-label">{icon("M12 3l10 18H2zM12 10v5M12 18h.01", 13)}Needs attention</div>'
+        f'<div class="stat-value">{esc("; ".join(attention)) if attention else "All clear"}</div></div>'
+    )
+    body.append("</div>")
 
     # ---- live sessions ----------------------------------------------------
-    body.append("<h2>Live loops</h2>")
+    body.append(
+        f'<div class="section-head">{icon("M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3", 15)}<h2>Live loops</h2></div>'
+    )
     if not loops:
-        body.append("<div class='card dim'>No loop session is open.</div>")
+        body.append(
+            "<div class='card loop-empty dim'>No loop session is open."
+            + (
+                f" Next run <span data-until='{nxt:.0f}'></span>."
+                if nxt
+                else " No next run scheduled."
+            )
+            + "</div>"
+        )
+    body.append('<div class="loop-grid">')
     for s in loops:
-        body.append("<div class=card><div class=row>")
-        body.append(f"<span class=big>{esc(s['repo'])}</span>")
+        dot = "ok" if s["attached"] or s["activity"] else "idle"
+        body.append(
+            f"<a class='card loop-card' href='/peek?repo={esc(s['repo'])}&lines=400'>"
+        )
+        body.append('<div class="loop-head">')
+        body.append(f"<span class='dot {dot}'></span>")
+        body.append(f"<b>{esc(s['repo'])}</b>")
         body.append(f"<span class=dim>started <span data-since='{s['created']}'></span></span>")
         body.append(f"<span class=dim>output <span data-since='{s['activity']}'></span></span>")
         if s["attached"]:
             body.append("<span class='pill on'>attached</span>")
         if s["repo"] not in enabled:
             body.append("<span class='pill off'>not in the scheduled set</span>")
-        body.append("<span class=sp></span>")
-        body.append(f"<a href='/peek?repo={esc(s['repo'])}&lines=400'>full tail</a>")
         body.append("</div>")
-        body.append(f"<pre>{esc(s['tail'].rstrip() or '(no output)')}</pre>")
-        body.append("</div>")
+        body.append(f"<pre class=loop-tail>{esc(s['tail'].rstrip() or '(no output)')}</pre>")
+        body.append("</a>")
+    body.append("</div>")
 
     if others:
         names = ", ".join(esc(s["name"]) for s in others)
         body.append(f"<div class='card dim'>Other tmux sessions (not loops): {names}</div>")
 
     # ---- coming up --------------------------------------------------------
-    body.append("<h2>Coming up</h2><div class='card scroll'><table>")
+    body.append(
+        f'<div class="section-head">{icon("M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z", 15)}<h2>Coming up</h2></div>'
+    )
+    body.append("<div class='card scroll'><table>")
     body.append("<tr><th>repository</th><th>next</th><th>at</th><th>last</th></tr>")
     for t in recurring + oneoffs:
         when = f"<span data-until='{t['next']:.0f}'></span>" if t["next"] else "<span class=dim>-</span>"
@@ -558,7 +737,10 @@ def render_dashboard(state: dict) -> bytes:
     body.append("</table></div>")
 
     # ---- repos --------------------------------------------------------
-    body.append("<h2>Repos</h2><div class='card scroll'><table>")
+    body.append(
+        f'<div class="section-head">{icon("M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM18 9a9 9 0 01-9 9", 15)}<h2>Repos</h2></div>'
+    )
+    body.append("<div class='card scroll'><table>")
     body.append(
         "<tr><th>repo</th><th>state</th><th>session</th><th>roadmap</th>"
         "<th>one-off command</th></tr>"
@@ -596,9 +778,10 @@ def render_dashboard(state: dict) -> bytes:
         "<p class=dim style='margin-top:2rem'>Read-only. To change anything - "
         "start a loop, stop one, change the schedule - use "
         "<code>loopctl</code> over SSH. See docs/loopctl-gui-scope.md for "
-        "why writes are not here yet.</p>"
+        "why writes are not here yet. For recent issue activity across "
+        "repos, see <a href='/roadmap'>Roadmap</a>.</p>"
     )
-    return page("loopctl dashboard", "".join(body))
+    return page("Overview", "".join(body), active="overview")
 
 
 def unavailable_usage(provider: str, source: str, error: Exception) -> list[dict]:
@@ -1080,8 +1263,7 @@ def render_usage() -> bytes:
     now_ms = int(time.time() * 1000)
     fetched = next((row["generated_at"] for row in quota_rows if "generated_at" in row), None)
     body = [
-        "<header><h1>Agent usage</h1><span class=sp></span>"
-        "<a href='/'>back to dashboard</a></header>",
+        f'<header><h1>{icon("M5 20V10M12 20V4M19 20v-7")}Usage</h1></header>',
         "<div class=quota-heading><h2>Quota</h2>"
         f"<span class=dim>Data timestamp: {esc(fetched) if fetched else 'not available'}</span></div>",
         render_quota_summary(quota_rows, now_ms),
@@ -1142,7 +1324,9 @@ def render_usage() -> bytes:
             f"<td>{esc(row['source'])}</td><td>{esc(row['last_update'])}</td></tr>"
         )
     body.append("</table></div>")
-    return page("Agent usage", "".join(body), extra_css="main{max-width:none}")
+    return page(
+        "Agent usage", "".join(body), extra_css="main{max-width:none}", active="usage"
+    )
 
 
 def unavailable_tiers(error: Exception) -> list[dict]:
@@ -1204,8 +1388,7 @@ def render_tier_picks(tiers: dict) -> str:
 def render_model_tiers() -> bytes:
     rows = model_tiers()
     body = [
-        "<header><h1>Model tiers</h1><span class=sp></span>"
-        "<a href='/'>back to dashboard</a></header>",
+        f'<header><h1>{icon("M7 7h10v10H7zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3")}Models</h1></header>',
         "<h2>Routing by task category</h2>",
         "<p class=dim>Read from <code>"
         f"{esc(MODEL_TIERS_PATH)}</code>. Each tier is an ordered fallback "
@@ -1235,7 +1418,7 @@ def render_model_tiers() -> bytes:
     if not rows:
         body.append("<div class='card dim'>No task categories.</div>")
     body.append("</div>")
-    return page("Model tiers", "".join(body))
+    return page("Model tiers", "".join(body), active="models")
 
 
 def render_error(msg: str) -> bytes:
@@ -1244,6 +1427,7 @@ def render_error(msg: str) -> bytes:
         "<header><h1>Rejected</h1><span class=sp></span>"
         "<a href='/'>back</a></header>"
         f"<div class=card><p class=err>{esc(msg)}</p></div>",
+        active="overview",
     )
 
 
@@ -1310,6 +1494,12 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/":
             self.reply(render_dashboard(gather(self.peek_lines)))
         elif url.path == "/roadmap":
+            # roadmap.py owns this page's content; it only knows the shell's
+            # 4-argument page_fn contract, so pin the "Roadmap" nav entry
+            # here rather than changing that contract.
+            def roadmap_page(title, body, extra_css="", extra_js=""):
+                return page(title, body, extra_css, extra_js, active="roadmap")
+
             repos = roadmap.repository_names(code_repos())
             selected = query.get("repo", "").strip()
             if selected and selected not in repos:
@@ -1324,17 +1514,17 @@ class Handler(BaseHTTPRequestHandler):
                     for name in ([selected] if selected else repos)
                 }
                 body = roadmap.render_completed_page(
-                    selected, repos, issues_by_repo, page
+                    selected, repos, issues_by_repo, roadmap_page
                 )
             elif selected:
                 model = roadmap.cached_model(selected, os.path.join(CODE_DIR, selected))
-                body = roadmap.render_page(selected, repos, model, page)
+                body = roadmap.render_page(selected, repos, model, roadmap_page)
             else:
                 models = {
                     repo: roadmap.cached_combined_model(repo, os.path.join(CODE_DIR, repo))
                     for repo in repos
                 }
-                body = roadmap.render_combined_page(repos, models, page)
+                body = roadmap.render_combined_page(repos, models, roadmap_page)
             self.reply(body)
         elif url.path == "/usage":
             self.reply(render_usage())
@@ -1393,7 +1583,7 @@ class Handler(BaseHTTPRequestHandler):
             "<a href='/'>back to dashboard</a></header>"
             f"<pre style='max-height:none'>{esc(out.rstrip() or '(no output)')}</pre>"
         )
-        self.reply(page(f"peek {repo}", body))
+        self.reply(page(f"peek {repo}", body, active="overview"))
 
 
 def _roadmap_rows(model: dict) -> list[dict]:
