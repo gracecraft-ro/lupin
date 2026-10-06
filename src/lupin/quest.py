@@ -445,11 +445,18 @@ def _check_blocked_by(resolved: dict, issue_numbers: list[int], repos: list[str]
     return dag
 
 
-def _dependency_order(issue_numbers: list[int], resolved: dict, dag: dict) -> list[int]:
+def _dependency_order(
+    issue_numbers: list[int], resolved: dict, dag: dict
+) -> tuple[list[int], list[dict]]:
     """Topological order among just the requested issues, across repos --
     reuses `_task_order` above (the same sort `status_to_json` uses), fed a
     blockedBy map restricted to this quest's own issues instead of one
     repo's.
+
+    Also returns the within-quest blocking pairs (`[{"number", "blocker"}]`,
+    in `order`), so `render_start` can print the copy doc's "#25 waits on
+    #23 (blocked by)" line -- the order alone doesn't say *which* issue
+    blocks which.
     """
     requested = set(issue_numbers)
     blockers = {}
@@ -459,7 +466,13 @@ def _dependency_order(issue_numbers: list[int], resolved: dict, dag: dict) -> li
         entry = entries.get(number, {})
         blockers[number] = {b["number"] for b in entry.get("blockedBy", []) if b["number"] in requested}
     ordered = _task_order([{"number": number} for number in issue_numbers], blockers)
-    return [task["number"] for task in ordered]
+    order = [task["number"] for task in ordered]
+    waits_on = [
+        {"number": number, "blocker": blocker}
+        for number in order
+        for blocker in sorted(blockers[number])
+    ]
+    return order, waits_on
 
 
 def _resolve_machine(machine: str | None, issue_numbers: list[int], connection: dict) -> str:
@@ -610,7 +623,7 @@ def start(
     _check_claims(resolved, issue_numbers, connection)
     dag = _check_blocked_by(resolved, issue_numbers, repos, code_dir)
     chosen_machine = _resolve_machine(machine, issue_numbers, connection)
-    order = _dependency_order(issue_numbers, resolved, dag)
+    order, waits_on = _dependency_order(issue_numbers, resolved, dag)
 
     quest_id = _next_quest_id(connection)
     holder = f"quest:{quest_id}"
@@ -623,6 +636,8 @@ def start(
         "machine": chosen_machine,
         "state": "running",
     }
+    if waits_on:
+        record["waits_on"] = waits_on
     if platform:
         record["platform"] = platform
     if note:
@@ -634,10 +649,13 @@ def start(
 def render_start(result: dict) -> str:
     issues_text = " ".join(f"#{n}" for n in result["issues"])
     order_text = ", ".join(f"#{n}" for n in result["order"])
-    return (
+    lines = [
         f"quest {result['id']} started on {result['machine']} · "
         f"{issues_text} claimed · order: {order_text}"
-    )
+    ]
+    for pair in result.get("waits_on", []):
+        lines.append(f"  #{pair['number']} waits on #{pair['blocker']} (blocked by)")
+    return "\n".join(lines)
 
 
 def stop(quest_id: str, *, connection: dict) -> str:

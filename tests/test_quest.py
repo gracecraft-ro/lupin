@@ -507,8 +507,12 @@ def test_dependency_order_across_repos():
             ],
         }
     }
-    order = quest._dependency_order([23, 24, 25], resolved, dag)
+    order, waits_on = quest._dependency_order([23, 24, 25], resolved, dag)
     assert order == [23, 24, 25]
+    assert waits_on == [
+        {"number": 24, "blocker": 23},
+        {"number": 25, "blocker": 24},
+    ]
 
 
 # --- _resolve_machine ---
@@ -624,6 +628,9 @@ def test_start_writes_a_quest_record_and_claims_every_issue(redis_port, flush_re
     assert result["machine"] == "mac-studio"
     assert result["state"] == "running"
     assert result["note"] == "ship it"
+    # #24 is blocked by #23 in `dag` above -- the record carries that pair
+    # so `render_start` can print the copy doc's "waits on" line.
+    assert result["waits_on"] == [{"number": 24, "blocker": 23}]
 
     stored = quest.read_quest("q1", _kw(redis_port))
     assert stored == {k: v for k, v in result.items() if k != "id"}
@@ -631,6 +638,22 @@ def test_start_writes_a_quest_record_and_claims_every_issue(redis_port, flush_re
     held = claims.claims_for(["acme/repo-a", "acme/repo-b"], **_kw(redis_port))
     assert held["acme/repo-a#23"]["session"] == "quest:q1"
     assert held["acme/repo-b#24"]["session"] == "quest:q1"
+
+
+def test_render_start_adds_a_waits_on_line_per_in_quest_blocker():
+    result = {
+        "id": "q1", "issues": [23, 24], "machine": "mac-studio",
+        "order": [23, 24], "waits_on": [{"number": 24, "blocker": 23}],
+    }
+    assert quest.render_start(result) == (
+        "quest q1 started on mac-studio · #23 #24 claimed · order: #23, #24\n"
+        "  #24 waits on #23 (blocked by)"
+    )
+
+
+def test_render_start_omits_the_waits_on_line_when_nothing_blocks():
+    result = {"id": "q1", "issues": [23], "machine": "mac-studio", "order": [23]}
+    assert quest.render_start(result) == "quest q1 started on mac-studio · #23 claimed · order: #23"
 
 
 def test_start_dedupes_a_repeated_issue(redis_port, flush_redis, monkeypatch):
@@ -834,6 +857,42 @@ def test_cli_quest_start_success_prints_rendered_line(
 
     assert code == 0
     assert captured.out.strip() == "quest q1 started on mac-studio · #23 claimed · order: #23"
+
+
+def test_cli_quest_start_prints_waits_on_line_for_in_quest_blocker(
+    redis_port, flush_redis, clean_fleet_env, capsys, monkeypatch
+):
+    # Same shape as the copy doc's `quest start` example: #25 is blocked by
+    # #23, both in the quest, so the success output gets a second line.
+    monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo-a"])
+    monkeypatch.setattr(
+        cli.quest_mod, "_locate_issue",
+        _fake_locate({
+            23: ("repo-a", "acme/repo-a", _issue_json(23)),
+            25: ("repo-a", "acme/repo-a", _issue_json(25)),
+        }),
+    )
+    dag = {
+        "repos": {
+            "repo-a": [
+                {"number": 23, "blockedBy": [], "blocking": [{"repo": "repo-a", "number": 25}]},
+                {"number": 25, "blockedBy": [{"repo": "repo-a", "number": 23}], "blocking": []},
+            ]
+        }
+    }
+    monkeypatch.setattr(cli.quest_mod.roadmap, "cached_dependency_dag", lambda repos, code_dir: dag)
+
+    code = cli.main([
+        "quest", "start", "--issue", "23", "--issue", "25", "--machine", "mac-studio",
+        "--redis-host", "127.0.0.1", "--redis-port", str(redis_port),
+    ])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert captured.out.strip() == (
+        "quest q1 started on mac-studio · #23 #25 claimed · order: #23, #25\n"
+        "  #25 waits on #23 (blocked by)"
+    )
 
 
 def test_cli_quest_start_coordinator_unreachable_exits_3(closed_port, clean_fleet_env, capsys, monkeypatch):

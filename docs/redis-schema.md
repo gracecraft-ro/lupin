@@ -85,6 +85,7 @@ and `lupin quest status`. No TTL — `quest stop` deletes the key.
   "issues": [11, 12, 13],
   "targets": ["gracecraft/lupin#11", "gracecraft/lupin#12", "gracecraft/lupin#13"],
   "order": [11, 12, 13],
+  "waits_on": [{"number": 12, "blocker": 11}],
   "machine": "jesus",
   "state": "running"
 }
@@ -92,8 +93,11 @@ and `lupin quest status`. No TTL — `quest stop` deletes the key.
 
 `targets` is `issues` in the same order, each written as the `claim:<...>`
 key it maps to (`owner/repo#n`) -- a quest's issues can come from different
-repos, so `stop` needs this to find each one's claim. `platform`/`note`
-are optional, carried over as-is from `quest start`'s own flags.
+repos, so `stop` needs this to find each one's claim. `waits_on` lists each
+issue-blocker pair where both are in the quest -- `quest start` prints one
+"waits on" line per pair. Omitted when no issue in the quest blocks
+another. `platform`/`note` are optional, carried over as-is from `quest
+start`'s own flags.
 
 ### `seq:quest`
 
