@@ -268,8 +268,14 @@ def _serve_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _review_route_args(parser: argparse.ArgumentParser) -> None:
-    """`lupin review-route` — route a pair and report which lock it needs."""
-    source = parser.add_mutually_exclusive_group(required=True)
+    """`lupin review-route` — route a pair and report which lock it needs.
+
+    Or, with `--prefetch`, fetch issue/PR text instead of routing (#1) --
+    see review_dispatch.py's own `_parse_args` for this command's real
+    argument parsing; this copy is only for `--help` output, since `main()`
+    hands `review-route`'s raw argv to `review_dispatch.main()` directly.
+    """
+    source = parser.add_mutually_exclusive_group()
     source.add_argument("--category", help="task category, with --size")
     source.add_argument(
         "--issue-json", help="path to a `gh issue view --json ...` file to classify"
@@ -290,6 +296,14 @@ def _review_route_args(parser: argparse.ArgumentParser) -> None:
         help="bmo's lock already timed out -- skip a bmo-dependent tier0 pick",
     )
     parser.add_argument("--primary-effort", default=None)
+    parser.add_argument(
+        "--prefetch",
+        default=None,
+        help="comma-separated issue/PR numbers to fetch instead of routing",
+    )
+    parser.add_argument(
+        "--repo", default=None, help="OWNER/REPO for --prefetch (default: gh's own resolution)"
+    )
 
 
 def _fleet_connection_args(parser: argparse.ArgumentParser) -> None:
