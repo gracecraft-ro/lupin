@@ -120,6 +120,34 @@ def test_resolve_task_issue_number_falls_back_when_gh_fails(monkeypatch):
     assert label == "#418"
 
 
+# --- quest_focus_for: the hook `place()` fills in for issue #12 ---
+
+
+def test_quest_focus_for_returns_none_for_free_text():
+    assert place.quest_focus_for(None, {}) is None
+
+
+def test_quest_focus_for_returns_none_when_task_is_in_no_quest(monkeypatch):
+    monkeypatch.setattr(place.quest_mod, "load_quests", lambda repos: ([], []))
+    assert place.quest_focus_for("418", {}) is None
+
+
+def test_quest_focus_for_returns_none_when_quest_has_no_focus(monkeypatch):
+    quests = [{"name": "session-rewrite", "tasks": [{"number": 418, "title": "t", "done": False}]}]
+    monkeypatch.setattr(place.quest_mod, "load_quests", lambda repos: (quests, []))
+    monkeypatch.setattr(place.quest_mod, "read_focus", lambda name, **kw: None)
+    assert place.quest_focus_for("418", {}) is None
+
+
+def test_quest_focus_for_returns_the_quests_focus_machine(monkeypatch):
+    quests = [{"name": "session-rewrite", "tasks": [{"number": 418, "title": "t", "done": False}]}]
+    monkeypatch.setattr(place.quest_mod, "load_quests", lambda repos: (quests, []))
+    monkeypatch.setattr(
+        place.quest_mod, "read_focus", lambda name, **kw: {"machine": "mac-studio"} if name == "session-rewrite" else None
+    )
+    assert place.quest_focus_for("418", {}) == "mac-studio"
+
+
 # --- place(), against a real (throwaway) redis-server ---
 
 
@@ -196,6 +224,22 @@ def test_place_breaks_ties_on_heartbeat_freshness(redis_port, flush_redis):
     assert result["pick"] == "fresher"
     by_name = {c["name"]: c for c in result["candidates"]}
     assert by_name["staler"]["result"] == "staler heartbeat"
+
+
+def test_place_prefers_the_quest_focus_machine_over_more_free_slots(redis_port, flush_redis, monkeypatch):
+    _write_machine(redis_port, "mac-studio", slots={"bmo": {"used": 1, "max": 2}}, quota=_CLAUDE_QUOTA)
+    _write_machine(redis_port, "mini-2", slots={"bmo": {"used": 0, "max": 4}}, quota=_CLAUDE_QUOTA)
+    monkeypatch.setattr(place, "_fetch_issue", lambda number: ({"title": "retry backoff"}, None))
+    quests = [{"name": "session-rewrite", "tasks": [{"number": 418, "title": "t", "done": False}]}]
+    monkeypatch.setattr(place.quest_mod, "load_quests", lambda repos: (quests, []))
+    monkeypatch.setattr(place.quest_mod, "read_focus", lambda name, **kw: {"machine": "mac-studio"})
+
+    result = place.place("#418", _kw(redis_port))
+
+    assert result["pick"] == "mac-studio"
+    by_name = {c["name"]: c for c in result["candidates"]}
+    assert by_name["mac-studio"]["quest_focus"] == "mac-studio"
+    assert by_name["mini-2"]["result"] == "not quest focus"
 
 
 def test_place_quota_header_prefers_a_real_reading_over_unavailable(redis_port, flush_redis):

@@ -11,7 +11,8 @@ routed model needs (issue #185) and `serve` runs the read-only dashboard
 machine registry (issue #7); see `machines.py` for the Redis record they
 read and write. `place` picks which registered machine should run a task
 already routed to a model (issue #9; see `place.py`). `quest` lists quests
-(GitHub issues labeled `quest`) and their progress (issue #11);
+(GitHub issues labeled `quest`) and their progress (issue #11, read-only);
+`quest focus`/`quest release` pin a quest to a machine (issue #12);
 `start`/`stop` claim and release a quest's issues (issue #13). All of them
 share one process so a caller has one binary to find and one `lupin --help`
 to read; the concerns stay as separate modules underneath, same as this
@@ -124,13 +125,16 @@ def _backend_args(parser: argparse.ArgumentParser) -> None:
 
 def _quest_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "mode", nargs="?", choices=["status", "start", "stop"], default=None,
-        help="omit to list every quest; 'status' for one quest's task breakdown, "
-             "'start' to claim --issue N as a quest, 'stop' to release one",
+        "mode", nargs="?", choices=["status", "start", "stop", "focus", "release"], default=None,
+        help=(
+            "omit to list every quest; 'status' for one quest's task breakdown; "
+            "'start' to claim --issue N as a quest, 'stop' to release one; "
+            "'focus'/'release' to pin or unpin a quest's focus machine"
+        ),
     )
     parser.add_argument(
         "id", nargs="?", default=None,
-        help="quest name or issue number (status); quest id (stop)",
+        help="quest name or issue number (status, focus, release); quest id (stop)",
     )
     parser.add_argument(
         "--issue", dest="issues", type=int, action="append", default=None,
@@ -138,10 +142,13 @@ def _quest_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--machine", default=None,
-        help="run on this machine (start only); default: best fit from `place`",
+        help="run on this machine (start); target machine (focus, default: most free slots)",
     )
     parser.add_argument("--platform", default=None, help="force a provider (start only)")
     parser.add_argument("--note", default=None, help="extra instruction for the loop (start only)")
+    parser.add_argument(
+        "--pin", action="store_true", help="with focus: keep the focus until explicitly released"
+    )
     parser.add_argument("--json", action="store_true")
     _redis_args(parser)
 
@@ -646,7 +653,52 @@ def _cmd_place(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_quest_focus(args: argparse.Namespace, repos: list[str], redis_kwargs: dict) -> int:
+    if not args.id:
+        print("quest focus needs a quest name", file=sys.stderr)
+        return 1
+    try:
+        result = quest_mod.focus(args.id, redis_kwargs, repos, machine=args.machine, pin=args.pin)
+    except quest_mod.QuestNotFound as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except (quest_mod.MachineDraining, quest_mod.MachineNotFound, quest_mod.NoReadyTasks) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except quest_mod.NoMachineAvailable as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except quest_mod.CoordinatorUnreachable as exc:
+        print(f"cannot reach the {exc}", file=sys.stderr)
+        return 3
+    print(
+        f"focused {result['quest']} on {result['machine']} · "
+        f"{result['ready_count']} ready tasks will route there in order"
+    )
+    return 0
+
+
+def _cmd_quest_release(args: argparse.Namespace, repos: list[str], redis_kwargs: dict) -> int:
+    if not args.id:
+        print("quest release needs a quest name", file=sys.stderr)
+        return 1
+    try:
+        result = quest_mod.release(args.id, redis_kwargs, repos)
+    except quest_mod.QuestNotFound as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except quest_mod.NoFocus as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except quest_mod.CoordinatorUnreachable as exc:
+        print(f"cannot reach the {exc}", file=sys.stderr)
+        return 3
+    print(f"released {result['quest']} · {result['machine']} returns to normal routing")
+    return 0
+
+
 def _cmd_quest(args: argparse.Namespace) -> int:
+    repos = serve.enabled_repos()
     redis_kwargs = {
         "redis_host": args.redis_host,
         "redis_port": args.redis_port,
@@ -661,7 +713,7 @@ def _cmd_quest(args: argparse.Namespace) -> int:
         try:
             result = quest_mod.start(
                 args.issues,
-                serve.enabled_repos(),
+                repos,
                 connection=redis_kwargs,
                 machine=args.machine,
                 platform=args.platform,
@@ -697,7 +749,11 @@ def _cmd_quest(args: argparse.Namespace) -> int:
             print(message)
         return 0
 
-    repos = serve.enabled_repos()
+    if args.mode == "focus":
+        return _cmd_quest_focus(args, repos, redis_kwargs)
+    if args.mode == "release":
+        return _cmd_quest_release(args, repos, redis_kwargs)
+
     quests, warnings = quest_mod.load_quests(repos)
     for warning in warnings:
         print(f"lupin: {warning}", file=sys.stderr)

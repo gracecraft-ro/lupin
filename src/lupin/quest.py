@@ -1,9 +1,10 @@
-"""Quest reporting (issue #11) and `quest start`/`stop` (issue #13).
+"""Quest reporting (issue #11), quest focus/release (issue #12), and
+`quest start`/`stop` (issue #13).
 
 A quest is a GitHub issue labeled `quest`; its GitHub sub-issues are its
 tasks. The reporting half of this module finds quests, works out each
-task's done/not-done state, and (if Redis is reachable) reads which
-machine is focused on each quest.
+task's done/not-done state, and reads and writes which machine is focused
+on each quest (`focus:<quest>`, docs/redis-schema.md).
 
 `start`/`stop` are a second kind of quest: a set of plain issue numbers the
 caller names directly with `--issue`, instead of a GitHub label. `start`
@@ -12,8 +13,6 @@ set, target machine not draining), claims them all, picks a machine
 (reusing `place.place`'s scoring unless `--machine` names one), and writes
 `quest:<id>` (see `docs/redis-schema.md`). `stop` releases whatever that
 quest still holds and deletes the record.
-
-`quest focus`/`release` are issue #12 -- not built here.
 """
 
 from __future__ import annotations
@@ -21,15 +20,70 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 
 import redis
 
-from . import claims, machines as machines_mod, place as place_mod, roadmap, slots_redis
+from . import claims, machines, place as place_mod, roadmap, slots_redis
 from .roadmap import CODE_DIR
 from .slots import CoordinatorUnreachable
 
 QUEST_LABEL = "quest"
 PREFIX = "lupin:v1:"
+
+CoordinatorUnreachable = slots_redis.CoordinatorUnreachable
+_REDIS_ERRORS = (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)
+
+
+class QuestNotFound(Exception):
+    """No quest matches a given name or issue number."""
+
+    def __init__(self, quest_id: str):
+        self.quest_id = quest_id
+        super().__init__(f"no quest matches {quest_id!r}")
+
+
+class NoReadyTasks(Exception):
+    """A quest has no task ready to route to a focus machine."""
+
+    def __init__(self, quest_name: str, blocker: int | None):
+        if blocker is not None:
+            message = (
+                f"{quest_name} has no ready tasks to focus on. "
+                f"#{blocker} is blocking; see lupin roadmap --dag"
+            )
+        else:
+            message = f"{quest_name} has no ready tasks to focus on. All tasks are done."
+        super().__init__(message)
+
+
+class MachineNotFound(Exception):
+    """`--machine` named a machine that isn't registered."""
+
+    def __init__(self, machine: str):
+        super().__init__(f"no machine named {machine!r}")
+
+
+class MachineDraining(Exception):
+    """The target machine is draining and cannot take a focus."""
+
+    def __init__(self, machine: str):
+        super().__init__(f"{machine} is draining and cannot take a focus. Pick another machine.")
+
+
+class NoMachineAvailable(Exception):
+    """No online machine exists to auto-pick for a focus."""
+
+    def __init__(self):
+        super().__init__("no online machine can take a focus")
+
+
+class NoFocus(Exception):
+    """A quest has no focus to release."""
+
+    def __init__(self, quest_name: str):
+        super().__init__(f"{quest_name} has no focus to release")
+
 
 # Same query style as roadmap.py's DEPENDENCY_GRAPHQL: a literal connection
 # filter (labels:["quest"]) instead of a variable, same as that query's own
@@ -197,6 +251,237 @@ def read_focus(
     return parsed if isinstance(parsed, dict) else None
 
 
+def _run(op):
+    """Same convention as `machines.py`'s `_run`: a connection failure
+    becomes `CoordinatorUnreachable`. Only `focus`/`release` use this --
+    they write to Redis and have nothing to fall back to (same as the fleet
+    registry). `read_focus` above stays lenient on purpose: a read-only
+    report has nothing to retry either way, so it folds "unreachable" into
+    "no focus" instead.
+    """
+    try:
+        return slots_redis._call_with_retry(op)
+    except _REDIS_ERRORS as exc:
+        raise CoordinatorUnreachable("quest focus registry") from exc
+
+
+def _read_focus_strict(
+    quest_name: str,
+    *,
+    redis_host: str | None = None,
+    redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
+) -> dict | None:
+    """Same key `read_focus` reads, but raises `CoordinatorUnreachable`
+    instead of reporting "no focus" when Redis can't be reached. `release`
+    needs to tell the two apart -- it must not print "nothing to release"
+    just because the registry is down.
+    """
+    client = slots_redis._client(redis_host, redis_port, redis_username, redis_password)
+    raw = _run(lambda: client.get(f"{PREFIX}focus:{quest_name}"))
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _release_when_hook() -> str | None:
+    """`release_when` (docs/redis-schema.md) is a cached guess -- idle,
+    stalled, done -- that automatic release (#14) computes. `focus` has no
+    such logic yet, so every record it writes leaves this `None`; #14 fills
+    it in without anything else here needing to change.
+    """
+    return None
+
+
+def write_focus(
+    quest_name: str,
+    machine: str,
+    *,
+    pinned: bool,
+    redis_host: str | None = None,
+    redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
+) -> dict:
+    """Write `focus:<quest>` (docs/redis-schema.md). No TTL -- `release`
+    deletes the key outright instead of letting it expire.
+    """
+    client = slots_redis._client(redis_host, redis_port, redis_username, redis_password)
+    record = {
+        "machine": machine,
+        "pinned": pinned,
+        "since": machines._now_iso(),
+        "release_when": _release_when_hook(),
+    }
+    _run(lambda: client.set(f"{PREFIX}focus:{quest_name}", json.dumps(record)))
+    return record
+
+
+def delete_focus(
+    quest_name: str,
+    *,
+    redis_host: str | None = None,
+    redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
+) -> bool:
+    client = slots_redis._client(redis_host, redis_port, redis_username, redis_password)
+    return bool(_run(lambda: client.delete(f"{PREFIX}focus:{quest_name}")))
+
+
+def pick_focus_machine(records: list[dict], *, now: float | None = None) -> str | None:
+    """The online machine with the most free slots, ties broken by the
+    freshest heartbeat -- the same two dimensions `place.py`'s ranking uses
+    for "free slots" and "heartbeat age" (`machines._slot_totals`/
+    `_heartbeat_age`, shared rather than reimplemented). `place.py`'s third
+    dimension, machine state, doesn't need reuse here: this function only
+    ever considers `state == "online"` machines in the first place.
+    """
+    now = now if now is not None else time.time()
+    online = [record for record in records if record.get("state") == "online"]
+    if not online:
+        return None
+    ranked = sorted(
+        online,
+        key=lambda record: (
+            -(machines._slot_totals(record.get("slots"))[1] - machines._slot_totals(record.get("slots"))[0]),
+            machines._heartbeat_age(record, now),
+        ),
+    )
+    return ranked[0]["name"]
+
+
+def _blocker_resolved(blocker: dict, by_number: dict[int, dict]) -> bool:
+    """A blocker only drops out once it is one of this quest's own tasks
+    and that task is done. A blocker this module has no state for -- a
+    different quest, a different repo, or no quest at all -- counts as
+    still blocking instead of being guessed away (same "report it, don't
+    guess" rule `roadmap.py` follows for a broken dependency link).
+    """
+    task = by_number.get(blocker.get("number"))
+    return bool(task and task["done"])
+
+
+def ready_tasks(quest: dict, dag: dict) -> list[dict]:
+    """This quest's not-done tasks with no unresolved blocker, in
+    dependency order (ties keep GitHub's own order -- the same ordering
+    `status_to_json` uses, via `_task_order`/`_blockers_within_quest`).
+
+    Stricter than `status_to_json`'s per-task "waits on #N" label, which
+    only looks at blockers inside the same quest: `quest focus` needs to
+    know a task is genuinely runnable right now, including a blocker
+    outside the quest entirely (see `_blocker_resolved`).
+    """
+    in_quest_blockers = _blockers_within_quest(quest["tasks"], quest["repo"], dag)
+    ordered = _task_order(quest["tasks"], in_quest_blockers)
+    by_number = {task["number"]: task for task in quest["tasks"]}
+    entries = {entry["number"]: entry for entry in dag.get("repos", {}).get(quest["repo"], [])}
+    ready = []
+    for task in ordered:
+        if task["done"]:
+            continue
+        blockers = entries.get(task["number"], {}).get("blockedBy", [])
+        if any(not _blocker_resolved(blocker, by_number) for blocker in blockers):
+            continue
+        ready.append(task)
+    return ready
+
+
+def _first_blocker(quest: dict, dag: dict) -> int | None:
+    """The lowest-numbered unresolved blocker across this quest's not-done
+    tasks -- named in the "no ready tasks" error so a model knows what to
+    check next (an issue inside the quest or, just as often, outside it
+    entirely). `None` when every task is already done.
+    """
+    by_number = {task["number"]: task for task in quest["tasks"]}
+    entries = {entry["number"]: entry for entry in dag.get("repos", {}).get(quest["repo"], [])}
+    blocking_numbers = {
+        blocker["number"]
+        for task in quest["tasks"]
+        if not task["done"]
+        for blocker in entries.get(task["number"], {}).get("blockedBy", [])
+        if isinstance(blocker.get("number"), int) and not _blocker_resolved(blocker, by_number)
+    }
+    return min(blocking_numbers) if blocking_numbers else None
+
+
+def focus(
+    quest_name: str,
+    connection: dict,
+    repos: list[str],
+    *,
+    machine: str | None = None,
+    pin: bool = False,
+    code_dir: str = CODE_DIR,
+) -> dict:
+    """Pin `quest_name` to a machine so its ready tasks route there, in
+    dependency order. Without `machine`, picks the online machine with the
+    most free slots (`pick_focus_machine`).
+
+    Raises `QuestNotFound`, `NoReadyTasks`, `MachineNotFound`,
+    `MachineDraining`, `NoMachineAvailable`, or `CoordinatorUnreachable` --
+    `cli.py` turns each into the copy doc's exact text (lupin-ctl-copy.md
+    section 5).
+    """
+    quests, _warnings = load_quests(repos, code_dir=code_dir)
+    quest = find_quest(quests, quest_name)
+    if quest is None:
+        raise QuestNotFound(quest_name)
+
+    dag = roadmap.cached_dependency_dag(repos, code_dir=code_dir)
+    ready = ready_tasks(quest, dag)
+    if not ready:
+        raise NoReadyTasks(quest["name"], _first_blocker(quest, dag))
+
+    records = machines.machines(connection)
+    by_name = {record["name"]: record for record in records}
+
+    if machine:
+        record = by_name.get(machine)
+        if record is None:
+            raise MachineNotFound(machine)
+        if record["state"] == "draining":
+            raise MachineDraining(machine)
+        picked = machine
+    else:
+        picked = pick_focus_machine(records)
+        if picked is None:
+            raise NoMachineAvailable()
+
+    write_focus(quest["name"], picked, pinned=pin, **connection)
+    return {"quest": quest["name"], "machine": picked, "ready_count": len(ready)}
+
+
+def release(
+    quest_name: str,
+    connection: dict,
+    repos: list[str],
+    *,
+    code_dir: str = CODE_DIR,
+) -> dict:
+    """End `quest_name`'s focus.
+
+    Raises `QuestNotFound` if the name matches no quest, `NoFocus` if it
+    has none to release, or `CoordinatorUnreachable`.
+    """
+    quests, _warnings = load_quests(repos, code_dir=code_dir)
+    quest = find_quest(quests, quest_name)
+    if quest is None:
+        raise QuestNotFound(quest_name)
+
+    current = _read_focus_strict(quest["name"], **connection)
+    if not current or not current.get("machine"):
+        raise NoFocus(quest["name"])
+
+    delete_focus(quest["name"], **connection)
+    return {"quest": quest["name"], "machine": current["machine"]}
+
+
 def _focus_text(focus: dict | None) -> str:
     if not isinstance(focus, dict) or not focus.get("machine"):
         return "no focus"
@@ -334,7 +619,7 @@ def render_list(quests: list[dict], focuses: dict[str, dict | None]) -> str:
 class QuestError(Exception):
     """A `quest start`/`stop` validation failure. `str(exc)` is the message
     text as-is -- `cli.py` prints it as `error: {exc}` and exits with
-    `.exit_code`. Default 1 ("bad input"); `IssueClaimed`/`MachineDraining`
+    `.exit_code`. Default 1 ("bad input"); `IssueClaimed`/`StartMachineDraining`
     override it to 2 ("try again later"), the same code `claim` and `place`
     already use for that same shape of failure.
     """
@@ -367,14 +652,24 @@ class IssueBlocked(QuestError):
         )
 
 
-class MachineDraining(QuestError):
+class StartMachineDraining(QuestError):
+    """Separate from the `quest focus`/`release` `MachineDraining` above --
+    same trigger, different message text (section 4/5 of the copy doc give
+    each command its own wording), so they can't share one class name.
+    """
+
     exit_code = 2
 
     def __init__(self, machine: str):
         super().__init__(f"{machine} is draining and takes no new work. Pick another machine.")
 
 
-class QuestNotFound(QuestError):
+class StartQuestNotFound(QuestError):
+    """Separate from the `quest focus`/`release` `QuestNotFound` above --
+    this one means no `quest:<id>` record in Redis, not no matching GitHub
+    quest issue.
+    """
+
     def __init__(self, quest_id: str):
         super().__init__(f"no quest matches {quest_id!r}")
 
@@ -483,10 +778,10 @@ def _resolve_machine(machine: str | None, issue_numbers: list[int], connection: 
     whole set.
     """
     if machine:
-        records = {record["name"]: record for record in machines_mod.machines(connection)}
+        records = {record["name"]: record for record in machines.machines(connection)}
         record = records.get(machine)
         if record is not None and record["state"] == "draining":
-            raise MachineDraining(machine)
+            raise StartMachineDraining(machine)
         return machine
     placed = place_mod.place(str(issue_numbers[0]), connection)
     pick = placed.get("pick")
@@ -661,13 +956,13 @@ def render_start(result: dict) -> str:
 def stop(quest_id: str, *, connection: dict) -> str:
     """Release every issue this quest still holds (one already merged or
     closed releases its own claim, so only what's still claimed needs
-    releasing here) and delete `quest:<id>`. Raises `QuestNotFound` if
+    releasing here) and delete `quest:<id>`. Raises `StartQuestNotFound` if
     `quest_id` doesn't match a running quest, or `CoordinatorUnreachable`
     if Redis can't be reached.
     """
     record = read_quest(quest_id, connection)
     if record is None:
-        raise QuestNotFound(quest_id)
+        raise StartQuestNotFound(quest_id)
     holder = f"quest:{quest_id}"
     issues = record.get("issues", [])
     targets = record.get("targets", [])

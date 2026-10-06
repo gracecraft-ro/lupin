@@ -33,10 +33,15 @@ exactly (a draining machine always reads "draining"; an online machine
 beaten only on quest focus reads "not quest focus", even if it also has
 fewer free slots).
 
-Judgment call -- quest focus: C8/#12 (quest focus/release) has not landed.
-`quest_focus_for` below is the hook that issue will replace -- it always
-returns `None` (no quest concept exists yet), which makes every machine
-tie on that dimension, same as the issue's instructions ask for.
+Judgment call -- quest focus: `quest_focus_for` below maps a task's issue
+number to its quest (if `quest.load_quests` -- issue #11 -- finds one in
+the current repo whose sub-issues include it) and reads that quest's
+`focus:<quest>` machine (docs/redis-schema.md, written by `lupin quest
+focus`/`release`, issue #12). Free text has no issue number, an unresolved
+issue number has no quest membership to check, and an issue outside every
+quest's sub-issues matches nothing -- all three return `None`, same as an
+unfocused quest, so every machine ties on that dimension exactly like an
+ordinary (non-quest) task.
 
 Judgment call -- no `--repo` flag on `place`: `<task>` is just an issue
 number or free text, nothing else. A numeric task is looked up with
@@ -59,12 +64,14 @@ into its own invocation; this module does not execute anything.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import time
 
 from . import classify as classify_mod
 from . import machines
+from . import quest as quest_mod
 from . import route as route_mod
 
 CoordinatorUnreachable = machines.CoordinatorUnreachable
@@ -113,15 +120,27 @@ def provider_for_model(model: str) -> str:
     return _PROVIDER_BY_MODEL.get(model, model)
 
 
-def quest_focus_for(task_label: str) -> str | None:
+def quest_focus_for(issue_number: str | None, connection: dict) -> str | None:
     """Which machine, if any, is quest-focused for this task.
 
-    Stub for C8/#12 (quest focus hasn't landed). Always `None` today -- no
-    machine ever wins the quest-focus ranking tier, consistent with the
-    issue's instruction to treat quest focus as always absent for now.
-    Replace this function's body once `focus:<quest>` (docs/redis-schema.md)
-    has a reader; nothing else in this module needs to change.
+    `issue_number` is the task's bare issue number (e.g. `"418"`), or
+    `None` for a free-text task -- free text has nothing to match a quest's
+    sub-issues against, so it always returns `None`. The quest search is
+    over the current repo only (this module's docstring already resolves
+    `gh issue view` the same ambient way -- `place` takes no `--repo` flag).
     """
+    if not issue_number:
+        return None
+    try:
+        number = int(issue_number)
+    except ValueError:
+        return None
+    repo = os.path.basename(os.getcwd())
+    quests, _warnings = quest_mod.load_quests([repo])
+    for quest in quests:
+        if any(task["number"] == number for task in quest["tasks"]):
+            focus = quest_mod.read_focus(quest["name"], **connection)
+            return focus.get("machine") if focus else None
     return None
 
 
@@ -159,27 +178,11 @@ def _resolve_task(task: str) -> tuple[dict, str]:
     return issue or {}, label
 
 
-def _slot_totals(slots: dict) -> tuple[int, int]:
-    used = sum(int(entry.get("used", 0)) for entry in (slots or {}).values())
-    max_ = sum(int(entry.get("max", 0)) for entry in (slots or {}).values())
-    return used, max_
-
-
-def _heartbeat_age(record: dict, now: float) -> float:
-    stamp = record.get("heartbeat")
-    if not stamp:
-        return float("inf")
-    try:
-        return now - machines._parse_iso(stamp)
-    except ValueError:
-        return float("inf")
-
-
 def _rank_key(record: dict, quest_focus: str | None, now: float) -> tuple:
     state_rank = 0 if record["state"] == "online" else 1
     quest_rank = 0 if quest_focus and record["name"] == quest_focus else 1
-    used, max_ = _slot_totals(record.get("slots"))
-    return (state_rank, quest_rank, -(max_ - used), _heartbeat_age(record, now))
+    used, max_ = machines._slot_totals(record.get("slots"))
+    return (state_rank, quest_rank, -(max_ - used), machines._heartbeat_age(record, now))
 
 
 def _reason(record: dict, pick: dict | None, quest_focus: str | None) -> str:
@@ -191,8 +194,8 @@ def _reason(record: dict, pick: dict | None, quest_focus: str | None) -> str:
         return "draining"
     if quest_focus and pick["name"] == quest_focus and record["name"] != quest_focus:
         return "not quest focus"
-    used_r, max_r = _slot_totals(record.get("slots"))
-    used_p, max_p = _slot_totals(pick.get("slots"))
+    used_r, max_r = machines._slot_totals(record.get("slots"))
+    used_p, max_p = machines._slot_totals(pick.get("slots"))
     if (max_r - used_r) < (max_p - used_p):
         return "fewer slots free"
     return "staler heartbeat"
@@ -258,7 +261,10 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
             continue
         matched.append(record)
 
-    quest_focus = quest_focus_for(task_label)
+    issue_number_match = _ISSUE_NUMBER_RE.match(task.strip())
+    quest_focus = quest_focus_for(
+        issue_number_match.group(1) if issue_number_match else None, connection
+    )
     now = time.time()
     ranked = sorted(matched, key=lambda r: _rank_key(r, quest_focus, now))
     online = [r for r in ranked if r["state"] == "online"]
@@ -268,8 +274,8 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
         {
             "name": record["name"],
             "state": record["state"],
-            "slots_used": _slot_totals(record.get("slots"))[0],
-            "slots_max": _slot_totals(record.get("slots"))[1],
+            "slots_used": machines._slot_totals(record.get("slots"))[0],
+            "slots_max": machines._slot_totals(record.get("slots"))[1],
             "quest_focus": record["name"] if record["name"] == quest_focus else None,
             "version": record.get("version"),
             "result": _reason(record, pick, quest_focus),
