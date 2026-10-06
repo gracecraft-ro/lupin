@@ -4,10 +4,13 @@
 ghostbook.nix in issue #203. `acquire`/`hold`/`release`/`status` are the
 slot-lease commands (issue #205 for the `local` backend, #210 for
 `redis`). `review-route` picks which lock a routed model needs (issue
-#185) and `serve` runs the read-only dashboard (issue #204). All of them
-share one process so a caller has one binary to find and one `lupin --help`
-to read; the concerns stay as separate modules underneath, same as this
-project's other CLIs split "decide" from "do" (see review_dispatch.py).
+#185) and `serve` runs the read-only dashboard (issue #204).
+`join`/`heartbeat`/`drain`/`undrain`/`machines` are the fleet machine
+registry (issue #7); see `machines.py` for the Redis record they read and
+write. All of them share one process so a caller has one binary to find
+and one `lupin --help` to read; the concerns stay as separate modules
+underneath, same as this project's other CLIs split "decide" from "do"
+(see review_dispatch.py).
 
 Backend choice: `--backend local|redis` on each slot subcommand, default
 from the `LUPIN_BACKEND` env var, falling back to `local` if neither is
@@ -39,6 +42,7 @@ import os
 import sys
 
 from . import classify as classify_mod
+from . import machines
 from . import review_dispatch
 from . import route as route_mod
 from . import serve
@@ -165,6 +169,42 @@ def _review_route_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--primary-effort", default=None)
 
 
+def _fleet_connection_args(parser: argparse.ArgumentParser) -> None:
+    """Redis location overrides for `heartbeat`/`drain`/`undrain`/`machines`.
+
+    Unlike `_backend_args`, the default is `None`, not `"localhost"` --
+    these commands fall back to what `lupin join` already wrote to the
+    fleet config (`machines.resolve_connection`), and a `"localhost"`
+    default would mask that file every time.
+    """
+    parser.add_argument("--redis-host", default=os.environ.get("LUPIN_REDIS_HOST"))
+    parser.add_argument(
+        "--redis-port", type=int,
+        default=int(os.environ["LUPIN_REDIS_PORT"]) if os.environ.get("LUPIN_REDIS_PORT") else None,
+    )
+    parser.add_argument("--redis-username", default=os.environ.get("LUPIN_REDIS_USERNAME"))
+    parser.add_argument("--redis-password", default=os.environ.get("LUPIN_REDIS_PASSWORD"))
+    parser.add_argument(
+        "--config-path", default=os.environ.get("LUPIN_FLEET_CONFIG"),
+        help="fleet config file (default: $LUPIN_FLEET_CONFIG or ~/.config/lupin/fleet.json)",
+    )
+
+
+def _join_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("coordinator", help="redis host[:port] for this machine group")
+    parser.add_argument("--redis-username", default=os.environ.get("LUPIN_REDIS_USERNAME"))
+    parser.add_argument("--redis-password", default=os.environ.get("LUPIN_REDIS_PASSWORD"))
+    parser.add_argument(
+        "--config-path", default=os.environ.get("LUPIN_FLEET_CONFIG"),
+        help="fleet config file (default: $LUPIN_FLEET_CONFIG or ~/.config/lupin/fleet.json)",
+    )
+
+
+def _machines_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--json", action="store_true")
+    _fleet_connection_args(parser)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lupin", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -178,6 +218,11 @@ def _build_parser() -> argparse.ArgumentParser:
         sub.add_parser("review-route", help="route a pair and report which lock it needs")
     )
     _serve_args(sub.add_parser("serve", help="run the read-only loopback dashboard"))
+    _join_args(sub.add_parser("join", help="add this machine to the fleet"))
+    _fleet_connection_args(sub.add_parser("heartbeat", help="refresh this machine's fleet record"))
+    _fleet_connection_args(sub.add_parser("drain", help="mark this machine as draining"))
+    _fleet_connection_args(sub.add_parser("undrain", help="mark this machine as online again"))
+    _machines_args(sub.add_parser("machines", help="list every registered machine's state"))
     return parser
 
 
@@ -305,6 +350,76 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fleet_connection(args: argparse.Namespace) -> dict:
+    return machines.resolve_connection(
+        redis_host=args.redis_host,
+        redis_port=args.redis_port,
+        redis_username=args.redis_username,
+        redis_password=args.redis_password,
+        config_path=args.config_path,
+    )
+
+
+def _cmd_join(args: argparse.Namespace) -> int:
+    try:
+        record = machines.join(
+            args.coordinator,
+            redis_username=args.redis_username,
+            redis_password=args.redis_password,
+            config_path=args.config_path,
+        )
+    except machines.CoordinatorUnreachable as exc:
+        print(f"cannot reach the {exc}", file=sys.stderr)
+        return 3
+    print(json.dumps(record))
+    return 0
+
+
+def _cmd_heartbeat(args: argparse.Namespace) -> int:
+    try:
+        record = machines.heartbeat(_fleet_connection(args))
+    except machines.CoordinatorUnreachable as exc:
+        print(f"cannot reach the {exc}", file=sys.stderr)
+        return 3
+    print(json.dumps(record))
+    return 0
+
+
+def _cmd_drain(args: argparse.Namespace) -> int:
+    try:
+        record = machines.drain(_fleet_connection(args))
+    except machines.CoordinatorUnreachable as exc:
+        print(f"cannot reach the {exc}", file=sys.stderr)
+        return 3
+    print(json.dumps(record))
+    return 0
+
+
+def _cmd_undrain(args: argparse.Namespace) -> int:
+    try:
+        record = machines.undrain(_fleet_connection(args))
+    except machines.CoordinatorUnreachable as exc:
+        print(f"cannot reach the {exc}", file=sys.stderr)
+        return 3
+    print(json.dumps(record))
+    return 0
+
+
+def _cmd_machines(args: argparse.Namespace) -> int:
+    try:
+        result = machines.machines(_fleet_connection(args))
+    except machines.CoordinatorUnreachable as exc:
+        print(f"cannot reach the {exc}", file=sys.stderr)
+        return 3
+    if args.json:
+        print(json.dumps(result))
+    else:
+        for record in result:
+            note = " (version mismatch)" if record["version_mismatch"] else ""
+            print(f"{record['name']}: {record['state']}{note}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = sys.argv[1:] if argv is None else argv
     if "--" in raw:
@@ -334,6 +449,16 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_release(args)
     if args.cmd == "status":
         return _cmd_status(args)
+    if args.cmd == "join":
+        return _cmd_join(args)
+    if args.cmd == "heartbeat":
+        return _cmd_heartbeat(args)
+    if args.cmd == "drain":
+        return _cmd_drain(args)
+    if args.cmd == "undrain":
+        return _cmd_undrain(args)
+    if args.cmd == "machines":
+        return _cmd_machines(args)
     parser.error(f"unknown command {args.cmd!r}")  # pragma: no cover
     return 1
 
