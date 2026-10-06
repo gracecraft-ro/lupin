@@ -1204,6 +1204,19 @@ class DependencyDagTests(unittest.TestCase):
         cycle_keys = {(node["repo"], node["number"]) for node in dag["cycles"][0]}
         self.assertEqual(cycle_keys, {("api", 1), ("core", 2), ("web", 3)})
 
+    def test_self_blocking_issue_is_reported_as_a_cycle(self):
+        # Malformed data: an issue listed as blocking itself. This must
+        # still show up in "cycles" -- not get silently dropped.
+        repo_links = {
+            "lupin": {5: {"blockedBy": [], "blocking": [{"repo": "lupin", "number": 5}]}},
+        }
+
+        dag = roadmap.build_dependency_dag(repo_links)
+
+        self.assertEqual(len(dag["cycles"]), 1)
+        cycle_keys = [(node["repo"], node["number"]) for node in dag["cycles"][0]]
+        self.assertEqual(cycle_keys, [("lupin", 5), ("lupin", 5)])
+
     def test_no_dependencies_is_an_empty_but_well_formed_dag(self):
         repo_links = {"solo": {5: {"blockedBy": [], "blocking": []}}}
 
