@@ -1493,5 +1493,357 @@ class TestLoopsPageIntegration:
         assert len(queued) == 2
 
 
+def _schedule_handler(connection=None):
+    """A `Handler` for the `/schedule` routes -- same mocked reply/redirect
+    style `_loops_handler` uses: these tests check routing, validation, and
+    dispatch targets, not real I/O or a real fleet registry."""
+    handler = serve.Handler.__new__(serve.Handler)
+    handler.fleet_connection = connection if connection is not None else {}
+    handler.cmd_signing_key = None
+    handler.host_ok = mock.Mock(return_value=True)
+    handler.reply = mock.Mock()
+    handler.redirect = mock.Mock()
+    return handler
+
+
+class ScheduleHelperTests(unittest.TestCase):
+    """Pure functions `render_schedule`/the POST handlers build on --
+    exercised directly so the ranking/count rules are covered without
+    needing a full page render or request."""
+
+    def test_rank_candidates_orders_by_free_slots_then_name(self):
+        records = [
+            {"name": "jesus", "state": "online", "slots": {"bmo": {"used": 0, "max": 1}}},
+            {"name": "mini", "state": "online", "slots": {"bmo": {"used": 0, "max": 2}}},
+            {"name": "build-box", "state": "draining", "slots": {}},
+            {"name": "ghost", "state": "offline", "slots": {}},
+        ]
+        ranked = serve._rank_candidates(records, "pihome")
+        self.assertEqual(
+            [r["name"] for r in ranked],
+            ["mini", "jesus", "pihome"],
+        )
+
+    def test_rank_candidates_excludes_a_draining_local_host_not_just_remotes(self):
+        records = [{"name": "pihome", "state": "draining", "slots": {}}]
+        ranked = serve._rank_candidates(records, "pihome")
+        self.assertEqual(ranked, [])
+
+    def test_machine_available_accepts_unregistered_local_host_only(self):
+        records = [{"name": "jesus", "state": "online"}]
+        self.assertTrue(serve._machine_available("pihome", records, "pihome"))
+        self.assertFalse(serve._machine_available("someone-else", records, "pihome"))
+        self.assertTrue(serve._machine_available("jesus", records, "pihome"))
+
+    def test_machine_available_rejects_a_draining_or_offline_registered_machine(self):
+        records = [
+            {"name": "jesus", "state": "draining"},
+            {"name": "ghost", "state": "offline"},
+        ]
+        self.assertFalse(serve._machine_available("jesus", records, "pihome"))
+        self.assertFalse(serve._machine_available("ghost", records, "pihome"))
+
+    def test_timer_loop_count_counts_enabled_repos_for_the_recurring_timer(self):
+        self.assertEqual(
+            serve._timer_loop_count("delegation-loop.timer", "all enabled repos", ["a", "b", "c"]),
+            3,
+        )
+
+    def test_timer_loop_count_counts_parsed_repos_for_a_one_off_timer(self):
+        unit = "delegation-loop-once-abcd.timer"
+        self.assertEqual(serve._timer_loop_count(unit, "widgets, gizmos", []), 2)
+
+    def test_timer_loop_count_falls_back_to_one_when_unparsed(self):
+        unit = "delegation-loop-once-abcd.timer"
+        self.assertEqual(serve._timer_loop_count(unit, unit, []), 1)
+
+
+class ScheduleRenderTests(unittest.TestCase):
+    def _data(self, **overrides):
+        data = {
+            "now": 1_800_000_000.0,
+            "enabled": ["widgets"],
+            "timers": [
+                {
+                    "unit": "delegation-loop.timer",
+                    "activates": "x",
+                    "next": 1_800_000_600.0,
+                    "last": 1_799_000_000.0,
+                },
+            ],
+            "timer_active": True,
+            "machines": [],
+            "fleet_error": None,
+            "local_host": "pihome",
+        }
+        data.update(overrides)
+        return data
+
+    def test_renders_timer_card_table_and_run_now_form(self):
+        page = serve.render_schedule(self._data()).decode()
+        self.assertIn("delegation-loop.timer", page)
+        self.assertIn("<button type=submit>Stop</button>", page)
+        self.assertIn("Run now", page)
+        self.assertIn("<select name=repo>", page)
+        self.assertIn("<select name=place>", page)
+        self.assertIn("lupin once", page)
+        self.assertIn("does not exist yet", page)
+
+    def test_stopped_timer_shows_start_button(self):
+        page = serve.render_schedule(self._data(timer_active=False)).decode()
+        self.assertIn("<button type=submit>Start</button>", page)
+
+    def test_draining_machine_option_is_disabled(self):
+        data = self._data(machines=[{"name": "build-box", "state": "draining", "slots": {}}])
+        page = serve.render_schedule(data).decode()
+        self.assertIn("value='build-box' disabled", page)
+
+    def test_success_banner_shown_when_sent(self):
+        page = serve.render_schedule(self._data(), sent="Started 1 loop(s): widgets@pihome").decode()
+        self.assertIn("Started 1 loop(s)", page)
+
+    def test_nav_has_a_schedule_link(self):
+        self.assertIn("href='/schedule'", serve.render_nav("schedule"))
+
+
+class ScheduleTimerRouteTests(unittest.TestCase):
+    def test_rejects_bad_action(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/timer", {"action": "pause"})
+        handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+
+    def test_start_calls_systemctl_and_redirects(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/timer", {"action": "start"})
+        with mock.patch.object(serve, "run", return_value=(0, "")) as fake_run:
+            handler.do_POST()
+        fake_run.assert_called_once_with(["systemctl", "start", "delegation-loop.timer"], timeout=10.0)
+        handler.redirect.assert_called_once_with("/schedule")
+
+    def test_stop_calls_systemctl(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/timer", {"action": "stop"})
+        with mock.patch.object(serve, "run", return_value=(0, "")) as fake_run:
+            handler.do_POST()
+        fake_run.assert_called_once_with(["systemctl", "stop", "delegation-loop.timer"], timeout=10.0)
+
+    def test_systemctl_failure_is_502(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/timer", {"action": "stop"})
+        with mock.patch.object(serve, "run", return_value=(1, "boom")):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 502)
+        handler.redirect.assert_not_called()
+
+
+class ScheduleRunRouteUnitTests(unittest.TestCase):
+    """Routing/validation/dispatch-target logic only -- mocked
+    machines.machines()/run()/commands.enqueue, no real Redis or
+    subprocess. See TestSchedulePageIntegration below for the real-Redis
+    enqueue shape.
+    """
+
+    def test_missing_repo_is_400(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"place": "any"})
+        handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+
+    def test_missing_placement_is_400(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "all"})
+        with mock.patch.object(serve, "enabled_repos", return_value=["widgets"]):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+
+    def test_unknown_repo_is_400(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "nope", "place": "any"})
+        with mock.patch.object(serve, "enabled_repos", return_value=["widgets"]):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+
+    def test_bad_loop_count_is_400(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "all", "cnt": "9", "place": "any"})
+        with mock.patch.object(serve, "enabled_repos", return_value=["widgets"]):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+
+    def test_bad_placement_is_400(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "all", "place": "not-a-machine"})
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", return_value=[]),
+        ):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+
+    def test_local_dispatch_calls_loopctl_run_for_each_target_repo(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "all", "cnt": "2", "place": "any"})
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["b-repo", "a-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", return_value=[]),
+            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
+        ):
+            handler.do_POST()
+        self.assertEqual(
+            [call.args[0] for call in fake_run.call_args_list],
+            [["loopctl", "run", "a-repo"], ["loopctl", "run", "b-repo"]],
+        )
+        handler.redirect.assert_called_once()
+        self.assertTrue(handler.redirect.call_args.args[0].startswith("/schedule?sent="))
+
+    def test_single_repo_selection_ignores_the_loop_count_field(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "a-repo", "cnt": "4", "place": "any"})
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", return_value=[]),
+            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
+        ):
+            handler.do_POST()
+        fake_run.assert_called_once_with(["loopctl", "run", "a-repo"], timeout=20.0)
+
+    def test_remote_machine_without_signing_key_is_rejected(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "a-repo", "place": "jesus"})
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(
+                serve.machines, "machines",
+                return_value=[{"name": "jesus", "state": "online", "slots": {}}],
+            ),
+        ):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+        self.assertIn("signing-key", handler.reply.call_args.args[0].decode())
+
+    def test_draining_specific_machine_is_rejected(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "a-repo", "place": "jesus"})
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(
+                serve.machines, "machines",
+                return_value=[{"name": "jesus", "state": "draining", "slots": {}}],
+            ),
+        ):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+
+    def test_spread_round_robins_across_ranked_machines_including_local(self):
+        handler = _schedule_handler()
+        handler.cmd_signing_key = "secret"
+        _post_body(handler, "/schedule/run", {"repo": "all", "cnt": "4", "place": "spread"})
+        records = [
+            {"name": "mini", "state": "online", "slots": {"bmo": {"used": 0, "max": 2}}},
+            {"name": "jesus", "state": "online", "slots": {"bmo": {"used": 0, "max": 1}}},
+        ]
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["r1", "r2", "r3", "r4"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", return_value=records),
+            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
+            mock.patch.object(serve.commands, "enqueue") as fake_enqueue,
+        ):
+            handler.do_POST()
+        # Ranked by free slots desc then name: mini(2), jesus(1), h(0) --
+        # round-robin over 4 repos wraps back to mini for the 4th.
+        fake_run.assert_called_once_with(["loopctl", "run", "r3"], timeout=20.0)
+        self.assertEqual(
+            [(call.args[0], call.args[2]) for call in fake_enqueue.call_args_list],
+            [("mini", {"repo": "r1"}), ("jesus", {"repo": "r2"}), ("mini", {"repo": "r4"})],
+        )
+
+
+class TestSchedulePageIntegration:
+    """Real `redis-server` fixtures, same rule as TestLoopsPageIntegration
+    -- a wrong enqueue shape, or a ranking that doesn't actually read live
+    slot data, would be caught here, not just a call-was-made assertion.
+    """
+
+    def test_page_renders_real_machine_data(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        _write_machine_record(redis_port, "jesus", state="online")
+        with (
+            mock.patch.object(serve, "timers", return_value=[]),
+            mock.patch.object(serve, "timer_active", return_value=False),
+            mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            handler = _get_handler("/schedule", kw)
+            handler.do_GET()
+        body = handler.reply.call_args.args[0].decode()
+        assert "jesus" in body
+        assert "Run now" in body
+
+    def test_run_now_enqueues_loop_run_for_a_remote_machine(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        _write_machine_record(redis_port, "jesus", state="online")
+        handler = _post_handler("/schedule/run", b"repo=widgets&place=jesus", kw)
+        handler.cmd_signing_key = "secret"
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            handler.do_POST()
+
+        raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+        queued = raw.zrange("lupin:v1:cmdq:jesus", 0, -1)
+        assert len(queued) == 1
+        stored = json.loads(raw.get(f"lupin:v1:cmd:{queued[0]}"))
+        assert stored["action"] == "loop.run"
+        assert stored["params"] == {"repo": "widgets"}
+        assert stored["target"] == "jesus"
+        assert stored["issuer"] == "pihome"
+        assert commands.verify(stored, "secret") is True
+        handler.send_response.assert_called_once_with(303)
+
+    def test_run_now_rejects_a_draining_named_machine(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        _write_machine_record(redis_port, "jesus", state="draining")
+        handler = _post_handler("/schedule/run", b"repo=widgets&place=jesus", kw)
+        handler.cmd_signing_key = "secret"
+        handler.reply = mock.Mock()  # a rejection replies with a body; _post_handler has no wfile
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            handler.do_POST()
+        assert handler.reply.call_args.args[1] == 400
+
+        raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+        assert raw.zrange("lupin:v1:cmdq:jesus", 0, -1) == []
+
+    def test_spread_enqueues_across_every_online_machine(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        _write_machine_record(redis_port, "jesus", state="online")
+        _write_machine_record(redis_port, "mini", state="online")
+        handler = _post_handler(
+            "/schedule/run", b"repo=all&cnt=2&place=spread", kw
+        )
+        handler.cmd_signing_key = "secret"
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo", "b-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            handler.do_POST()
+
+        raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+        total_queued = sum(
+            len(raw.zrange(f"lupin:v1:cmdq:{name}", 0, -1)) for name in ("jesus", "mini")
+        )
+        assert total_queued == 2
+
+
 if __name__ == "__main__":
     unittest.main()

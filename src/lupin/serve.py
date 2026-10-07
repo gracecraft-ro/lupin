@@ -8,14 +8,18 @@ deployment, docs/redis-schema.md) -- the DNS-rebinding check below still
 only accepts the Host header matching what was actually bound. The POST
 routes are /quest/start, /quest/stop (both only write to Redis via
 quest.py), /machines/slot-max (changes one Redis slot's max holder count --
-a validated slot name and a positive integer, nothing else), and
-/loops/close, /loops/start (issue #21: stop or (re)start one loop). The
-last two run `loopctl stop|run <repo>` as a fixed argv list -- repo name
-checked against a strict pattern first, never a shell string -- but only
-when the loop is on this machine. For a loop on another fleet machine they
-enqueue a signed command instead (commands.py, issue #28); this process
-never touches another machine's loopctl directly. Read probes use fixed
-argv lists too, run without a shell. GitHub attachment images use an
+a validated slot name and a positive integer, nothing else), /loops/close,
+/loops/start (issue #21: stop or (re)start one loop), /schedule/timer
+(issue #22: start or stop delegation-loop.timer -- always local, this
+process never controls another machine's timer), and /schedule/run (issue
+#22: "Run now" -- dispatch one or more `loop.run`s to a chosen machine or
+spread of machines). /loops/start, /loops/close, and /schedule/run run
+`loopctl stop|run <repo>` as a fixed argv list -- repo name checked against
+a strict pattern first, never a shell string -- but only when the loop is
+on this machine. For a loop on another fleet machine they enqueue a signed
+command instead (commands.py, issue #28); this process never touches
+another machine's loopctl directly. Read probes use fixed argv lists too,
+run without a shell. GitHub attachment images use an
 authenticated, fixed-host proxy; it sends the GitHub token only to
 github.com and strips it before a validated storage redirect. None of
 these write routes carry auth of their own -- a reverse proxy in front of
@@ -472,6 +476,90 @@ def gather(peek_lines: int, connection: dict | None = None) -> dict:
     return state
 
 
+def gather_schedule(connection: dict) -> dict:
+    """Everything the Schedule page (issue #22) reads: the timer list (same
+    `timers()` the Overview page already uses), and the fleet machine list
+    for the "Run now" placement picker (same `fleet_state()` /machines and
+    /loops already read -- one reading of the registry, not a new one)."""
+    state = fleet_state(connection)
+    return {
+        "now": time.time(),
+        "enabled": enabled_repos(),
+        "timers": timers(),
+        "timer_active": timer_active(),
+        "machines": state.get("machines", []),
+        "fleet_error": state.get("fleet_error"),
+        "local_host": machines.hostname(),
+    }
+
+
+def _rank_candidates(records: list[dict], local_host: str) -> list[dict]:
+    """Online machines for "Run now" placement, most free loop capacity
+    first (ties broken by name, for a deterministic "spread out" rotation).
+
+    Judgment call -- not `place.py`'s `_rank_key`: that ranking scores one
+    quota-routed task against a provider's remaining quota (claude/opencode
+    usage windows). Starting a recurring loop has no such task to classify
+    or provider to route to -- a loop picks its own model per-task once it
+    is running. The only dimension that still applies here is free slot
+    capacity (`machines._slot_totals`, the same helper `place.py` itself
+    uses for its own free-slots tiebreak), so that is all this uses.
+
+    Includes `local_host` only when the registry has no record for it at
+    all (or can't be reached, in which case `records` is already `[]`) --
+    same "the local machine is always a valid target" rule `do_loops_start`
+    applies. If the registry *does* have a record for `local_host`, that
+    record's own state wins instead: a `local_host` that has drained itself
+    is excluded here exactly like any other draining machine, not silently
+    treated as available just because it happens to be where this process
+    runs.
+    """
+    online = [r for r in records if r["state"] == "online"]
+    if local_host not in {r["name"] for r in records}:
+        online.append({"name": local_host, "state": "online", "slots": {}})
+
+    def free_slots(record: dict) -> int:
+        used, max_ = machines._slot_totals(record.get("slots"))
+        return max_ - used
+
+    return sorted(online, key=lambda r: (-free_slots(r), r["name"]))
+
+
+def _machine_available(name: str, records: list[dict], local_host: str) -> bool:
+    """Whether `name` is a legal "Run now" placement target: a known
+    machine must report `state == "online"`; an unregistered name is only
+    accepted when it is `local_host` itself (same fallback `_rank_candidates`
+    uses). This is the single check both the placement <select> (via
+    `_rank_candidates`, for the generic "spread"/"any" choices) and a
+    user-pinned specific machine name go through -- a pinned name does not
+    get a looser rule than an automatic pick would.
+    """
+    record = next((r for r in records if r["name"] == name), None)
+    if record is None:
+        return name == local_host
+    return record["state"] == "online"
+
+
+def _timer_loop_count(unit: str, repo_label: str, enabled: list[str]) -> int:
+    """How many separate loops one timer's next firing starts -- the
+    Schedule table's "Loops" column. `delegation-loop.timer` runs every
+    enabled repo; a one-off timer runs whatever repos were passed on its
+    command line, already resolved into `repo_label` by
+    `timer_repository()`/`oneoff_repositories()`.
+
+    `repo_label == unit` is `oneoff_repositories()`'s own "could not parse
+    this unit's ExecStart" fallback (it returns the unit name itself) -- a
+    real repo list is never equal to its timer's unit name, so this is a
+    safe way to detect that case and report "at least one" instead of
+    guessing a count from an unparsed string.
+    """
+    if unit == "delegation-loop.timer":
+        return len(enabled)
+    if repo_label == unit:
+        return 1
+    return len([part for part in repo_label.split(", ") if part])
+
+
 # --------------------------------------------------------------------------
 # html
 # --------------------------------------------------------------------------
@@ -538,6 +626,7 @@ header h1 svg{color:var(--ok)}
 header .sp{flex:1}
 header a{font-size:13px}
 .dim{color:var(--ink3)}
+.mono{font-family:var(--mono)}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:18px;
 box-shadow:0 3px 0 var(--line);padding:.9rem 1.1rem;margin-bottom:.7rem}
 .row{display:flex;gap:.8rem;align-items:center;flex-wrap:wrap}
@@ -726,6 +815,12 @@ NAV_ITEMS = [
         "/machines",
         "Machines",
         "M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01",
+    ),
+    (
+        "schedule",
+        "/schedule",
+        "Schedule",
+        "M4 5h16v16H4zM4 10h16M8 3v4M16 3v4",
     ),
 ]
 SUN_ICON = "M12 8a4 4 0 100 8 4 4 0 000-8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
@@ -1372,6 +1467,150 @@ def render_machines(records: list[dict], slot_status: dict) -> bytes:
     return page("Machines", "".join(body), active="machines")
 
 
+TIMER_WINDOW_S = 4 * 3600  # the mockup's 4-hour timeline strip
+
+
+def render_schedule(data: dict, *, sent: str | None = None) -> bytes:
+    """The Schedule page (issue #22): the `delegation-loop.timer` status
+    card, a table of every timer (recurring + one-off), and a "Run now"
+    form that dispatches `loop.run` on demand.
+
+    `data` is `gather_schedule()`'s output -- same read-then-render split
+    the rest of this module uses.
+    """
+    now = data["now"]
+    enabled = data["enabled"]
+    timers_list = data["timers"]
+    recurring = [t for t in timers_list if t["unit"] == "delegation-loop.timer"]
+    fleet_machines = data.get("machines", [])
+    local_host = data["local_host"]
+
+    body = [f'<header><h1>{icon("M4 5h16v16H4zM4 10h16M8 3v4M16 3v4")}Schedule</h1></header>']
+
+    if sent:
+        body.append(f"<div class=card><span class='pill on'>{esc(sent)}</span></div>")
+
+    # ---- recurring timer card ---------------------------------------------
+    active = data["timer_active"]
+    recurring_next = recurring[0]["next"] if recurring and recurring[0]["next"] else None
+    status_text = (
+        f"Running - next at {esc(time.strftime('%a %H:%M', time.localtime(recurring_next)))}"
+        if active and recurring_next
+        else "Running - no upcoming run scheduled" if active else "Stopped - no automatic runs"
+    )
+    toggle_action, toggle_label = ("stop", "Stop") if active else ("start", "Start")
+
+    due = sorted(
+        (t for t in timers_list if t["next"] is not None and t["next"] - now <= TIMER_WINDOW_S),
+        key=lambda t: t["next"],
+    )
+    if due:
+        marks = "".join(
+            "<li>"
+            f"{esc(timer_repository(t['unit']))} "
+            f"<span class=dim>({'recurring' if t['unit'] == 'delegation-loop.timer' else 'one-off'})</span> "
+            f"<span class=mono data-until='{t['next']:.0f}'></span> "
+            f"<span class=dim>{esc(time.strftime('%H:%M', time.localtime(t['next'])))}</span></li>"
+            for t in due
+        )
+        marks_html = f"<ul style='margin:0;padding-left:1.1rem'>{marks}</ul>"
+    else:
+        marks_html = "<p class=dim style='margin:0'>No runs in the next 4 hours.</p>"
+
+    overall_next = next((t["next"] for t in timers_list if t["next"] is not None), None)
+    next_block = (
+        f"<div class=dim>Next</div><div class='big mono' data-until='{overall_next:.0f}'></div>"
+        f"<div class=dim>{esc(time.strftime('%a %H:%M', time.localtime(overall_next)))}</div>"
+        if overall_next
+        else "<div class=dim>Next</div><div class=big>None scheduled</div>"
+    )
+
+    body.append(
+        "<div class=card><div class=row style='justify-content:space-between;align-items:flex-start'>"
+        "<div><div class=dim>Recurring timer</div><div class=big>delegation-loop.timer</div>"
+        f"<div class=dim>{status_text}</div>"
+        f"<form method=post action=/schedule/timer style='margin-top:.5rem'>"
+        f"<input type=hidden name=action value={toggle_action}>"
+        f"<button type=submit>{toggle_label}</button></form></div>"
+        f"<div style='flex:1;min-width:220px'><div class=dim style='margin-bottom:.3rem'>Next 4 hours</div>{marks_html}</div>"
+        f"<div style='text-align:right'>{next_block}</div>"
+        "</div></div>"
+    )
+
+    # ---- timer table --------------------------------------------------
+    body.append("<div class=card><table>")
+    body.append("<tr><th>repository</th><th>loops</th><th>next</th><th>at</th><th>last run</th></tr>")
+    if not timers_list:
+        body.append("<tr><td colspan=5 class=dim>No timer found.</td></tr>")
+    for t in timers_list:
+        repo_label = timer_repository(t["unit"])
+        kind = "recurring" if t["unit"] == "delegation-loop.timer" else "one-off"
+        loops = _timer_loop_count(t["unit"], repo_label, enabled)
+        next_cell = (
+            f"<span class=mono data-until='{t['next']:.0f}'></span>" if t["next"] else "<span class=dim>-</span>"
+        )
+        at_cell = (
+            esc(time.strftime("%a %H:%M", time.localtime(t["next"]))) if t["next"] else "<span class=dim>-</span>"
+        )
+        last_cell = (
+            f"<span data-since='{t['last']:.0f}'></span>" if t["last"] else "<span class=dim>never</span>"
+        )
+        body.append(
+            f"<tr><td>{esc(repo_label)} <span class=pill>{esc(kind)}</span></td>"
+            f"<td>{esc(loops)}</td><td>{next_cell}</td><td>{at_cell}</td><td>{last_cell}</td></tr>"
+        )
+    body.append("</table></div>")
+
+    # ---- run now --------------------------------------------------------
+    repo_options = "".join(f"<option value='{esc(r)}'>{esc(r)}</option>" for r in sorted(enabled))
+    cnt_options = "".join(f"<option value={n}>{n} loop{'s' if n != 1 else ''}</option>" for n in range(1, 5))
+    place_options = ["<option value=spread>spread out</option>", "<option value=any>any machine</option>"]
+    # The registry's own record for `local_host` wins when there is one (a
+    # draining local machine must show as draining here too, not as a
+    # synthetic always-available entry) -- same rule `_machine_available`
+    # enforces on the POST side.
+    by_name = {m["name"]: m for m in fleet_machines}
+    by_name.setdefault(local_host, {"name": local_host, "state": "online"})
+    for m in sorted(by_name.values(), key=lambda m: m["name"]):
+        if m["state"] == "offline":
+            continue
+        disabled = " disabled" if m["state"] == "draining" else ""
+        label = f"{m['name']} (draining)" if m["state"] == "draining" else m["name"]
+        place_options.append(f"<option value='{esc(m['name'])}'{disabled}>{esc(label)}</option>")
+
+    fleet_error = data.get("fleet_error")
+    error_note = (
+        f"<p class=dim>Fleet registry unreachable: {esc(fleet_error)} "
+        "(placement choices below are limited to this machine).</p>"
+        if fleet_error
+        else ""
+    )
+
+    body.append(
+        '<div class=card><div class=row style="margin-bottom:.4rem">'
+        "<b>Run now</b><span class=dim>Starts loops on free machines. "
+        "The note is kept with the request but is not yet passed into the loop "
+        "-- loopctl has no way to receive one today.</span></div>"
+        f"{error_note}"
+        "<form method=post action=/schedule/run class=row>"
+        f"<select name=repo><option value=all>all enabled repos</option>{repo_options}</select>"
+        f"<select name=cnt>{cnt_options}</select>"
+        f"<select name=place>{''.join(place_options)}</select>"
+        "<input type=text name=note placeholder='note for the loop (optional)' style='flex:1;min-width:180px'>"
+        "<button type=submit>Start run</button>"
+        "</form></div>"
+    )
+
+    body.append(
+        "<p class=dim>To schedule a one-off run: "
+        "<code>lupin once &lt;when&gt; [repo...] [--note TEXT] [--platform P]</code> "
+        "-- this command does not exist yet, this line only names the intended "
+        "shape.</p>"
+    )
+
+    return page("Schedule", "".join(body), active="schedule")
+
+
 LOOP_STATUS_DOT = {"running": "ok", "remote": "ok", "stopped": "idle"}
 LOOP_STATUS_LABEL = {"running": "running", "remote": "running elsewhere", "stopped": "stopped"}
 
@@ -1676,6 +1915,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply_json(gather(self.peek_lines, self.fleet_connection))
         elif url.path == "/loops":
             self.do_loops(query)
+        elif url.path == "/schedule":
+            self.reply(render_schedule(gather_schedule(self.fleet_connection), sent=query.get("sent")))
         elif url.path == "/peek":
             self.do_peek(query)
         elif url.path == "/image":
@@ -1837,6 +2078,125 @@ class Handler(BaseHTTPRequestHandler):
                 return
         self.redirect(f"/loops?repo={quote(repo, safe='')}")
 
+    def do_schedule_timer(self, form: dict) -> None:
+        """Start or stop `delegation-loop.timer` -- always on this machine.
+        Issue #22's scope call: the timer card controls the timer on
+        whatever host `lupin serve` itself runs on, same as `timers()`/
+        `timer_active()` already read it; there is no cross-machine timer
+        control to wire up here.
+        """
+        action = (form.get("action") or [None])[0]
+        if action not in ("start", "stop"):
+            self.reply(render_error("bad timer action"), 400)
+            return
+        rc, out = run(["systemctl", action, "delegation-loop.timer"], timeout=10.0)
+        if rc != 0:
+            self.reply(render_error(f"systemctl {action} failed: {out.strip()}"), 502)
+            return
+        self.redirect("/schedule")
+
+    def do_schedule_run(self, form: dict) -> None:
+        """"Run now": start one `loop.run` per target repo, on a machine
+        chosen by `place` -- "spread" (round-robin across ranked online
+        machines), "any" (the single best-ranked one), or a user-pinned
+        machine name. See `_rank_candidates`'s docstring for why this does
+        not call `place.py`'s `place()`: there is no task here to classify
+        or quota-routed provider to pick a machine for, just free loop
+        capacity.
+        """
+        enabled = enabled_repos()
+        repo_choice = (form.get("repo") or [None])[0]
+        if not repo_choice:
+            self.reply(render_error("missing repo"), 400)
+            return
+        if repo_choice == "all":
+            if not enabled:
+                self.reply(render_error("no enabled repos to run"), 400)
+                return
+            cnt_raw = (form.get("cnt") or ["1"])[0].strip()
+            try:
+                cnt = int(cnt_raw)
+            except ValueError:
+                cnt = None
+            if cnt is None or not (1 <= cnt <= 4):
+                self.reply(render_error("loop count must be 1-4"), 400)
+                return
+            targets_repos = sorted(enabled)[:cnt]
+        else:
+            # A specific repo always means exactly one loop -- loopctl runs
+            # one tmux session per repo, so "N loops" of the same repo has
+            # nothing to mean; the loop-count field only matters for "all
+            # enabled repos", where it picks how many distinct repos to
+            # start. See this handler's issue report for the full reasoning.
+            if not _valid_repo_name(repo_choice) or repo_choice not in enabled:
+                self.reply(render_error("unknown or non-enabled repository"), 400)
+                return
+            targets_repos = [repo_choice]
+
+        place_choice = (form.get("place") or [None])[0]
+        if not place_choice:
+            self.reply(render_error("missing placement"), 400)
+            return
+
+        note = (form.get("note") or [""])[0].strip()
+        if len(note) > 500:
+            self.reply(render_error("note is too long"), 400)
+            return
+
+        local_host = machines.hostname()
+        try:
+            records = machines.machines(self.fleet_connection)
+        except CoordinatorUnreachable:
+            records = []
+
+        if place_choice in ("spread", "any"):
+            ranked = _rank_candidates(records, local_host)
+            if not ranked:
+                self.reply(render_error("no machine is available to place a run on"), 400)
+                return
+            if place_choice == "spread":
+                assigned = [ranked[i % len(ranked)]["name"] for i in range(len(targets_repos))]
+            else:
+                assigned = [ranked[0]["name"]] * len(targets_repos)
+        elif _machine_available(place_choice, records, local_host):
+            assigned = [place_choice] * len(targets_repos)
+        else:
+            self.reply(render_error("bad placement"), 400)
+            return
+
+        if any(m != local_host for m in assigned) and not self.cmd_signing_key:
+            self.reply(
+                render_error(
+                    "starting a loop on another machine needs --cmd-signing-key "
+                    "or $LUPIN_CMD_SIGNING_KEY"
+                ),
+                400,
+            )
+            return
+
+        errors = []
+        for repo, machine in zip(targets_repos, assigned):
+            if machine == local_host:
+                rc, out = self._loopctl_local("run", repo)
+                if rc != 0:
+                    errors.append(f"{repo}@{machine}: {out.strip()}")
+            else:
+                try:
+                    commands.enqueue(
+                        machine, "loop.run", {"repo": repo},
+                        key=self.cmd_signing_key, actor="lupin-dashboard", issuer=local_host,
+                        **self.fleet_connection,
+                    )
+                except CoordinatorUnreachable:
+                    errors.append(f"{repo}@{machine}: cannot reach the redis coordinator")
+        if errors:
+            self.reply(render_error("run now failed:\n" + "\n".join(errors)), 502)
+            return
+
+        summary = ", ".join(f"{r}@{m}" for r, m in zip(targets_repos, assigned))
+        sent = f"Started {len(targets_repos)} loop(s): {summary}"
+        self.redirect(f"/schedule?sent={quote(sent, safe='')}")
+
     def do_peek(self, query: dict) -> None:
         repo = query.get("repo", "").strip()
         if not repo or "/" in repo or repo in (".", ".."):
@@ -1920,6 +2280,10 @@ class Handler(BaseHTTPRequestHandler):
             self.do_loops_close(form)
         elif url.path == "/loops/start":
             self.do_loops_start(form)
+        elif url.path == "/schedule/timer":
+            self.do_schedule_timer(form)
+        elif url.path == "/schedule/run":
+            self.do_schedule_run(form)
         else:
             self.reply(render_error("no such page"), 404)
 
