@@ -1386,9 +1386,17 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("bad Host header"), 421)
             return
         url = urlparse(self.path)
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self.reply(render_error("bad Content-Length header"), 400)
+            return
         raw = self.rfile.read(length) if length else b""
-        form = parse_qs(raw.decode("utf-8"))
+        try:
+            form = parse_qs(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            self.reply(render_error("request body must be utf-8"), 400)
+            return
 
         if url.path == "/quest/start":
             self.do_quest_start(form)

@@ -919,6 +919,64 @@ def test_do_post_quest_stop_unknown_id_errors_without_redirect(redis_port, flush
     handler.reply.assert_called_once()
 
 
+def _raw_post(port: int, path: str, headers: dict, body: bytes) -> bytes:
+    """Send a hand-built POST request over a real socket -- `urllib` would
+    always compute a correct, numeric `Content-Length` and a valid utf-8
+    body itself, so it can't reproduce the malformed requests below.
+    Returns everything read back before the server closes the connection.
+    """
+    header_lines = "".join(f"{key}: {value}\r\n" for key, value in headers.items())
+    request = (
+        f"POST {path} HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{port}\r\n"
+        f"{header_lines}"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii") + body
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(10)
+        sock.connect(("127.0.0.1", port))
+        sock.sendall(request)
+        chunks = []
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except socket.timeout:
+            pass
+    return b"".join(chunks)
+
+
+def test_do_post_non_numeric_content_length_returns_clean_400(redis_port, flush_redis):
+    """A malformed `Content-Length` must not crash do_POST -- it used to
+    raise an unhandled ValueError inside `int(...)`, dropping the
+    connection with no HTTP response at all instead of a 400.
+    """
+    connection = _kw(redis_port)
+    with _live_dashboard(connection) as port:
+        response = _raw_post(
+            port, "/quest/stop", {"Content-Length": "bogus"}, b""
+        )
+
+    assert response.startswith(b"HTTP/1.0 400") or response.startswith(b"HTTP/1.1 400")
+
+
+def test_do_post_non_utf8_body_returns_clean_400(redis_port, flush_redis):
+    """A body that isn't valid utf-8 must not crash do_POST -- it used to
+    raise an unhandled UnicodeDecodeError inside `raw.decode("utf-8")`,
+    dropping the connection with no HTTP response at all instead of a 400.
+    """
+    body = b"\xff\xfe\xfd"
+    connection = _kw(redis_port)
+    with _live_dashboard(connection) as port:
+        response = _raw_post(
+            port, "/quest/stop", {"Content-Length": str(len(body))}, body
+        )
+
+    assert response.startswith(b"HTTP/1.0 400") or response.startswith(b"HTTP/1.1 400")
+
+
 def test_quest_state_partitions_pending_and_done(redis_port, flush_redis, monkeypatch):
     locate_table = {
         31: ("repo-a", "acme/repo-a", _issue_json(31)),
