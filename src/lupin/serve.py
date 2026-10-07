@@ -11,15 +11,22 @@ quest.py), /machines/slot-max (changes one Redis slot's max holder count --
 a validated slot name and a positive integer, nothing else), /loops/close,
 /loops/start (issue #21: stop or (re)start one loop), /schedule/timer
 (issue #22: start or stop delegation-loop.timer -- always local, this
-process never controls another machine's timer), and /schedule/run (issue
-#22: "Run now" -- dispatch one or more `loop.run`s to a chosen machine or
-spread of machines). /loops/start, /loops/close, and /schedule/run run
-`loopctl stop|run <repo>` as a fixed argv list -- repo name checked against
-a strict pattern first, never a shell string -- but only when the loop is
-on this machine. For a loop on another fleet machine they enqueue a signed
-command instead (commands.py, issue #28); this process never touches
-another machine's loopctl directly. Read probes use fixed argv lists too,
-run without a shell. GitHub attachment images use an
+process never controls another machine's timer), /schedule/run (issue #22:
+"Run now" -- dispatch one or more `loop.run`s to a chosen machine or spread
+of machines), and /repos/add, /repos/generate-docs, /repos/remove,
+/repos/doc/save, /repos/slot-max, /repos/schedule (issue #23: the Repos
+page -- add or remove a repo from the local schedule file, view or edit
+its delegation doc, raise or lower its loop concurrency cap, and run
+`loopctl once` for a one-off, local-only schedule). /loops/start,
+/loops/close, /schedule/run, and /repos/schedule run `loopctl
+stop|run|once <repo>` as a fixed argv list -- repo name checked against a
+strict pattern first, never a shell string -- but only when the loop is on
+this machine. For a loop on another fleet machine /loops/start,
+/loops/close, and /schedule/run enqueue a signed command instead
+(commands.py, issue #28); /repos/schedule has no remote form (agent.py's
+ACTIONS table has no `loop.once`) and always runs locally. This process
+never touches another machine's loopctl directly. Read probes use fixed
+argv lists too, run without a shell. GitHub attachment images use an
 authenticated, fixed-host proxy; it sends the GitHub token only to
 github.com and strips it before a validated storage redirect. None of
 these write routes carry auth of their own -- a reverse proxy in front of
@@ -201,6 +208,53 @@ def enabled_repos() -> list[str]:
             return [line.strip() for line in fh if line.strip()]
     except OSError:
         return []
+
+
+def write_enabled_repos(names: list[str]) -> None:
+    """Replace REPOS_FILE's contents -- the one write path for the
+    schedule `enabled_repos()` reads (issue #23; before this, nothing in
+    `serve.py` ever wrote this file). One name per line, same format
+    `enabled_repos()` already parses.
+    """
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(REPOS_FILE, "w", encoding="utf-8") as fh:
+        fh.writelines(f"{name}\n" for name in names)
+
+
+# A per-repo loop concurrency cap (the Repos page's "Loops - max" stepper,
+# issue #23) is new ground: docs/redis-schema.md's only slot today is
+# `bmo`, fleet-wide, not per repo. slots_redis.py already supports any slot
+# name (`status()` reports whichever `slot:<name>:max` keys exist), so this
+# reuses that mechanism under a new name instead of inventing a second
+# schema -- `repo:<repo>`, not a bare repo name, so it can never collide
+# with `bmo` or a future machine-scoped slot. Nothing acquires this slot
+# yet (loopctl does not check it before starting a loop), so the number is
+# a declared cap only, not an enforced one -- the same kind of gap issue
+# #22 documented for "Run now"'s note field.
+REPO_SLOT_PREFIX = "repo:"
+
+
+def _repo_slot_name(repo: str) -> str:
+    return f"{REPO_SLOT_PREFIX}{repo}"
+
+
+def _delegation_doc_template(repo: str) -> str:
+    """A minimal starting doc for a repo that has none yet ("Generate docs
+    and add", issue #23). No existing doc generator was found in this repo
+    (grepped for "generate"/"scaffold"/LOOP_DOC outside serve.py and
+    docs/) -- this is a plain fill-in-the-blanks skeleton, not a smart
+    generator.
+    """
+    return (
+        f"# {repo} -- the delegation loop\n\n"
+        "This file is the loop's entry point for this repo. Fill it in\n"
+        "before the first loop runs.\n\n"
+        "## What this repo is for\n\n"
+        "TODO: say what this repo does, and what the first loops should build.\n\n"
+        "## Rules\n\n"
+        "TODO: anything a loop must know before it starts -- how to test,\n"
+        "what not to touch, where to push its work.\n"
+    )
 
 
 def code_repos() -> list[dict]:
@@ -474,6 +528,37 @@ def gather(peek_lines: int, connection: dict | None = None) -> dict:
     }
     state.update(fleet_state(connection or {}))
     return state
+
+
+def gather_repos(connection: dict) -> dict:
+    """Everything the Repos page (issue #23) reads: every /code directory
+    tagged enabled/disabled/no-doc (`code_repos()`), each one's live loop
+    status folded in from `gather_loops()` (one fleet read, not a second
+    one), and each loopable repo's concurrency cap from the generic slot
+    registry (see `_repo_slot_name`'s docstring for why that's a new slot
+    name, not a new schema).
+    """
+    loops = gather_loops(connection)
+    by_repo = {e["repo"]: e for e in loops["entries"]}
+    slot_status = slots_redis.status(**connection)
+    repos = []
+    for r in code_repos():
+        entry = by_repo.get(r["repo"])
+        slot = slot_status.get(_repo_slot_name(r["repo"]), {})
+        repos.append(
+            {
+                **r,
+                "running": entry is not None and entry["status"] in ("running", "remote"),
+                "machine": entry["machine"] if entry else loops["local_host"],
+                "max": slot.get("max"),
+            }
+        )
+    return {
+        "repos": repos,
+        "machines": loops["machines"],
+        "fleet_error": loops["fleet_error"],
+        "local_host": loops["local_host"],
+    }
 
 
 def gather_schedule(connection: dict) -> dict:
@@ -796,6 +881,12 @@ document.documentElement.setAttribute("data-theme",t);
 # design mockup uses for these pages, so the sidebar and page headers agree.
 NAV_ITEMS = [
     ("overview", "/", "Overview", "M3 11l9-8 9 8M5 10v10h14V10"),
+    (
+        "repos",
+        "/repos",
+        "Repos",
+        "M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM18 9a9 9 0 01-9 9",
+    ),
     (
         "loops",
         "/loops",
@@ -1467,6 +1558,286 @@ def render_machines(records: list[dict], slot_status: dict) -> bytes:
     return page("Machines", "".join(body), active="machines")
 
 
+STATE_PILL = {
+    "enabled": "<span class='pill on'>enabled</span>",
+    "disabled": "<span class=pill>disabled</span>",
+    "no-doc": "<span class='pill off'>no doc</span>",
+}
+REPOS_ICON = "M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM18 9a9 9 0 01-9 9"
+
+
+def _repo_slot_controls(repo: str, current_max: int) -> str:
+    """Same fewer/more button-pair shape `_slot_controls` uses on the
+    Machines page, but the form only ever posts `repo` -- `do_repos_slot_max`
+    derives the actual slot name (`_repo_slot_name`) itself, so a request
+    can only ever change the one slot that belongs to the repo it named,
+    never an arbitrary slot string chosen by the browser.
+    """
+    fewer = max(1, current_max - 1)
+    more = current_max + 1
+    fewer_disabled = " disabled" if current_max <= 1 else ""
+    return (
+        "<form method=post action=/repos/slot-max style='display:inline'>"
+        f"<input type=hidden name=repo value='{esc(repo)}'>"
+        f"<input type=hidden name=max value='{fewer}'>"
+        f"<button type=submit{fewer_disabled} aria-label='Lower max'>&minus;</button></form> "
+        f"<span class=mono>{current_max}</span> "
+        "<form method=post action=/repos/slot-max style='display:inline'>"
+        f"<input type=hidden name=repo value='{esc(repo)}'>"
+        f"<input type=hidden name=max value='{more}'>"
+        "<button type=submit aria-label='Raise max'>+</button></form>"
+    )
+
+
+def _render_add_panel(tab: str, repos: list[dict]) -> str:
+    """The "Add repo" card. "Existing repo" (issue #23) is fully wired:
+    a repo with a doc gets an "add to schedule" button, one without gets
+    "generate docs and add". "Clone from Git" and "Create new" are shown
+    but inert -- see this issue's report for why: both are real
+    filesystem/git-network operations (an arbitrary clone URL, process
+    spawning, file generation) with a bigger security surface than
+    anything else on this page, and landing them safely didn't fit this
+    pass.
+    """
+    tab = "new" if tab == "new" else "existing"
+
+    def tab_link(value: str, label: str) -> str:
+        active = value == tab
+        text = f"<b>{esc(label)}</b>" if active else esc(label)
+        return f"<a href='/repos?add={value}'>{text}</a>"
+
+    tabs = f"<div class=row style='margin-bottom:.6rem'>{tab_link('existing', 'Existing repo')} {tab_link('new', 'Create new')}</div>"
+
+    if tab == "new":
+        body = (
+            "<input type=text disabled placeholder='repo name, e.g. payments-sync' "
+            "style='display:block;width:100%;max-width:420px;margin-bottom:.5rem'>"
+            "<textarea disabled placeholder='message for the loop (optional)' "
+            "style='display:block;width:100%;max-width:420px;height:80px;margin-bottom:.5rem'></textarea>"
+            "<button type=button disabled>Create repo</button>"
+            "<p class=dim>Not implemented yet -- scaffolding a new repo and generating its "
+            "delegation doc is a bigger surface than this pass takes on.</p>"
+        )
+        return f"<div class=card>{tabs}{body}</div>"
+
+    clone = (
+        "<div style='font-size:12px;color:var(--ink3);margin-bottom:6px'>Clone from Git</div>"
+        "<input type=text disabled placeholder='git@github.com:owner/name.git or https URL' "
+        "style='width:100%;max-width:420px'> "
+        "<button type=button disabled>Clone and add</button>"
+        "<p class=dim>Not implemented yet.</p>"
+    )
+    rows = []
+    for r in repos:
+        if r["state"] == "enabled":
+            continue
+        repo = r["repo"]
+        if r["loopable"]:
+            rows.append(
+                "<div class=row style='justify-content:space-between;border-top:1px solid var(--line2);padding:.4rem 0'>"
+                f"<span><b>{esc(repo)}</b> <span class=dim>has {esc(LOOP_DOC)}</span></span>"
+                "<form method=post action=/repos/add style='display:inline'>"
+                f"<input type=hidden name=repo value='{esc(repo)}'>"
+                "<button type=submit>Add to schedule</button></form></div>"
+            )
+        else:
+            rows.append(
+                "<div class=row style='justify-content:space-between;border-top:1px solid var(--line2);padding:.4rem 0'>"
+                f"<span><b>{esc(repo)}</b> <span class=dim>missing {esc(LOOP_DOC)}</span></span>"
+                "<form method=post action=/repos/generate-docs style='display:inline'>"
+                f"<input type=hidden name=repo value='{esc(repo)}'>"
+                "<button type=submit>Generate docs and add</button></form></div>"
+            )
+    picker = "".join(rows) or "<p class=dim>Every repo under /code is already on the schedule.</p>"
+    body = (
+        f"{clone}"
+        f"<div style='font-size:12px;color:var(--ink3);margin:14px 0 6px'>Or pick a directory in /code</div>"
+        f"{picker}"
+    )
+    return f"<div class=card>{tabs}{body}</div>"
+
+
+def _render_doc_panel(repo: str, text: str, edit: bool) -> str:
+    view_href = f"/repos?doc={quote(repo, safe='')}"
+    edit_href = f"/repos?doc={quote(repo, safe='')}&edit=1"
+    if edit:
+        inner = (
+            "<form method=post action=/repos/doc/save>"
+            f"<input type=hidden name=repo value='{esc(repo)}'>"
+            f"<textarea name=text spellcheck=false "
+            "style='width:100%;height:230px;font-family:monospace;box-sizing:border-box'>"
+            f"{esc(text)}</textarea>"
+            "<div class=row style='margin-top:.4rem'><button type=submit>Save</button>"
+            f"<a href='{view_href}'>cancel</a></div></form>"
+        )
+    else:
+        inner = f"<pre style='max-height:230px'>{esc(text)}</pre>"
+    view_label = "View" if edit else "<b>View</b>"
+    edit_label = "<b>Edit</b>" if edit else "Edit"
+    return (
+        "<div class=card>"
+        f"<div class=row><b class=mono>{esc(repo)}/{esc(LOOP_DOC)}</b><span class=sp></span>"
+        f"<a href='{view_href}'>{view_label}</a> <a href='{edit_href}'>{edit_label}</a> "
+        "<a href='/repos'>Close</a></div>"
+        f"{inner}"
+        "<p class=dim>Loops pick up changes at the start of their next run.</p>"
+        "</div>"
+    )
+
+
+def _render_schedule_panel(repo: str) -> str:
+    """A one-off run, via `loopctl once` -- a real command, already used
+    the same way by the Overview page's own "one-off command" widget. Not
+    `lupin once`: `lupin`'s own `cli.py` has no such subcommand (see this
+    issue's report), but `loopctl once <when> [repo...]` already exists and
+    does the same job, so this dispatches it for real instead of inventing
+    a fake success path -- see `do_repos_schedule`'s docstring for why it's
+    local-machine only.
+    """
+    return (
+        "<div class=card>"
+        "<form method=post action=/repos/schedule class=row>"
+        f"<b>Schedule a one-off run for {esc(repo)}</b>"
+        f"<input type=hidden name=repo value='{esc(repo)}'>"
+        "<input type=text name=when placeholder='15:00, +2h, tomorrow 09:00' required>"
+        "<button type=submit>Schedule</button>"
+        "<a href='/repos'>Cancel</a>"
+        "</form>"
+        "<p class=dim>Runs once, in addition to the recurring schedule. Same as "
+        f"<code>loopctl once &lt;when&gt; {esc(repo)}</code>.</p>"
+        "</div>"
+    )
+
+
+def _render_remove_panel(repo: str) -> str:
+    return (
+        "<div class=card style='border-color:var(--warnline);background:var(--warnbg)'>"
+        "<form method=post action=/repos/remove class=row>"
+        f"<div><b>Remove {esc(repo)} from the schedule?</b>"
+        "<div class=dim>Stops scheduled and one-off runs. A live session keeps "
+        "running. Files in /code are untouched. Type the repo name to confirm.</div></div>"
+        f"<input type=hidden name=repo value='{esc(repo)}'>"
+        f"<input type=text name=confirm placeholder='{esc(repo)}' required>"
+        "<button type=submit>Remove repo</button>"
+        "<a href='/repos'>Cancel</a>"
+        "</form></div>"
+    )
+
+
+def _render_repo_table(repos: list[dict], local_host: str) -> str:
+    rows = [
+        "<tr><th>repo</th><th>state</th><th>loops &middot; max</th>"
+        "<th>machine</th><th>roadmap</th><th>actions</th></tr>"
+    ]
+    for r in repos:
+        repo = r["repo"]
+        pill = STATE_PILL[r["state"]]
+        if not r["loopable"]:
+            rows.append(
+                f"<tr><td><b>{esc(repo)}</b></td><td>{pill}</td>"
+                "<td class=dim>-</td><td class=dim>-</td><td class=dim>-</td>"
+                '<td class=dim>generate docs via "Add repo" to enable</td></tr>'
+            )
+            continue
+        dot = "ok" if r["running"] else "idle"
+        sess_label = "running" if r["running"] else "stopped"
+        current_max = r["max"] if r["max"] is not None else 1
+        stepper = _repo_slot_controls(repo, current_max)
+        roadmap_link = f"<a href='/roadmap?repo={quote(repo, safe='')}'>Roadmap</a>"
+        doc_link = f"<a href='/repos?doc={quote(repo, safe='')}'>doc</a>"
+        schedule_link = f"<a href='/repos?schedule={quote(repo, safe='')}'>Schedule&hellip;</a>"
+        if r["state"] == "enabled":
+            # Posts straight to the existing, tested /schedule/run route --
+            # no new dispatch code. place=local_host is the only option
+            # here (unlike Schedule's own "Run now" card, a repo row has no
+            # machine picker in the mockup either).
+            run_form = (
+                "<form method=post action=/schedule/run style='display:inline'>"
+                f"<input type=hidden name=repo value='{esc(repo)}'>"
+                "<input type=hidden name=cnt value=1>"
+                f"<input type=hidden name=place value='{esc(local_host)}'>"
+                "<button type=submit>Run now</button></form>"
+            )
+            remove_link = f"<a href='/repos?remove={quote(repo, safe='')}'>Remove</a>"
+            actions = f"{run_form} {schedule_link} &middot; {doc_link} &middot; {remove_link}"
+        else:
+            add_btn = (
+                "<form method=post action=/repos/add style='display:inline'>"
+                f"<input type=hidden name=repo value='{esc(repo)}'>"
+                "<button type=submit>Add to schedule</button></form>"
+            )
+            actions = f"{add_btn} {schedule_link} &middot; {doc_link}"
+        rows.append(
+            f"<tr><td><b>{esc(repo)}</b></td><td>{pill}</td>"
+            f"<td><span class='dot {dot}'></span> {esc(sess_label)} {stepper}</td>"
+            f"<td>{esc(r['machine'])}</td><td>{roadmap_link}</td><td>{actions}</td></tr>"
+        )
+    return "<div class=card><table>" + "".join(rows) + "</table></div>"
+
+
+def render_repos(
+    data: dict,
+    *,
+    add: str | None = None,
+    doc_repo: str | None = None,
+    doc_text: str | None = None,
+    doc_edit: bool = False,
+    schedule_repo: str | None = None,
+    remove_repo: str | None = None,
+    sent: str | None = None,
+) -> bytes:
+    """The Repos page (issue #23): add/remove a repo from the local
+    schedule, view or edit its delegation doc, raise/lower its loop
+    concurrency cap, and run or one-off-schedule a loop.
+
+    `data` is `gather_repos()`'s output. Query-string flags (`add`, `doc`,
+    `schedule`, `remove`) open the matching panel -- the same convention
+    `/roadmap`'s `state=closed` and `/loops`'s `group=`/`repo=` already use:
+    a plain link, no client-side state.
+
+    The mockup's filter pills ("All/Enabled/Disabled/No doc") are not
+    built here -- they only narrow which rows of an already-read table are
+    shown, no state to mutate, and this page's scope is already large
+    (add/remove/doc/run/schedule/slot-max). Left out, not silently cut.
+    """
+    repos = data["repos"]
+    local_host = data["local_host"]
+    body = [f'<header><h1>{icon(REPOS_ICON)}Repos</h1></header>']
+
+    if sent:
+        body.append(f"<div class=card><span class='pill on'>{esc(sent)}</span></div>")
+
+    add_href = "/repos" if add else "/repos?add=existing"
+    add_label = "Close" if add else "Add repo"
+    body.append(f"<div class=row style='margin-bottom:.6rem'><span class=sp></span><a href='{add_href}'>{esc(add_label)}</a></div>")
+
+    if add:
+        body.append(_render_add_panel(add, repos))
+    if doc_repo:
+        body.append(_render_doc_panel(doc_repo, doc_text or "", doc_edit))
+    if schedule_repo:
+        body.append(_render_schedule_panel(schedule_repo))
+    if remove_repo:
+        body.append(_render_remove_panel(remove_repo))
+
+    if not repos:
+        body.append(
+            "<div class=card><p class=dim>No repos yet. Add one to start scheduling loops.</p>"
+            "<a href='/repos?add=existing'>Add your first repo</a></div>"
+        )
+    else:
+        body.append(_render_repo_table(repos, local_host))
+
+    fleet_error = data.get("fleet_error")
+    if fleet_error:
+        body.append(
+            f"<p class=dim>Fleet registry unreachable: {esc(fleet_error)} "
+            "(loop status and concurrency caps below are limited to this machine).</p>"
+        )
+
+    return page("Repos", "".join(body), active="repos")
+
+
 TIMER_WINDOW_S = 4 * 3600  # the mockup's 4-hour timeline strip
 
 
@@ -1913,6 +2284,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_machines(records, slot_status))
         elif url.path == "/api/state":
             self.reply_json(gather(self.peek_lines, self.fleet_connection))
+        elif url.path == "/repos":
+            self.do_repos(query)
         elif url.path == "/loops":
             self.do_loops(query)
         elif url.path == "/schedule":
@@ -1951,6 +2324,139 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(data)
+
+    def _repo_loopable(self, repo: str) -> bool:
+        """A repo name that is both well-formed and actually has a
+        delegation doc on this machine -- the one check every `/repos/*`
+        write route that touches a repo starts with."""
+        return bool(repo) and _valid_repo_name(repo) and os.path.isfile(os.path.join(CODE_DIR, repo, LOOP_DOC))
+
+    def do_repos(self, query: dict) -> None:
+        doc_repo = (query.get("doc") or "").strip()
+        doc_text = None
+        if doc_repo:
+            if not self._repo_loopable(doc_repo):
+                self.reply(render_error("unknown or non-loopable repository"), 404)
+                return
+            try:
+                with open(os.path.join(CODE_DIR, doc_repo, LOOP_DOC), encoding="utf-8") as fh:
+                    doc_text = fh.read()
+            except OSError as exc:
+                self.reply(render_error(f"could not read doc: {exc}"), 500)
+                return
+
+        data = gather_repos(self.fleet_connection)
+        self.reply(
+            render_repos(
+                data,
+                add=query.get("add"),
+                doc_repo=doc_repo or None,
+                doc_text=doc_text,
+                doc_edit=query.get("edit") == "1",
+                schedule_repo=(query.get("schedule") or "").strip() or None,
+                remove_repo=(query.get("remove") or "").strip() or None,
+                sent=query.get("sent"),
+            )
+        )
+
+    def do_repos_add(self, form: dict) -> None:
+        repo = form.get("repo", [""])[0].strip()
+        if not self._repo_loopable(repo):
+            self.reply(render_error("unknown or non-loopable repository"), 400)
+            return
+        enabled = enabled_repos()
+        if repo not in enabled:
+            write_enabled_repos(sorted(set(enabled) | {repo}))
+        self.redirect(f"/repos?sent={quote(f'{repo} added to the schedule', safe='')}")
+
+    def do_repos_generate_docs(self, form: dict) -> None:
+        repo = form.get("repo", [""])[0].strip()
+        if not repo or not _valid_repo_name(repo) or not os.path.isdir(os.path.join(CODE_DIR, repo)):
+            self.reply(render_error("unknown repository"), 400)
+            return
+        doc_path = os.path.join(CODE_DIR, repo, LOOP_DOC)
+        if os.path.exists(doc_path):
+            self.reply(render_error(f"{repo} already has {LOOP_DOC}"), 400)
+            return
+        try:
+            os.makedirs(os.path.dirname(doc_path), exist_ok=True)
+            with open(doc_path, "w", encoding="utf-8") as fh:
+                fh.write(_delegation_doc_template(repo))
+        except OSError as exc:
+            self.reply(render_error(f"could not write doc: {exc}"), 500)
+            return
+        write_enabled_repos(sorted(set(enabled_repos()) | {repo}))
+        self.redirect(f"/repos?sent={quote(f'generated docs and added {repo}', safe='')}")
+
+    def do_repos_remove(self, form: dict) -> None:
+        repo = form.get("repo", [""])[0].strip()
+        confirm = form.get("confirm", [""])[0].strip()
+        enabled = enabled_repos()
+        if not repo or repo not in enabled:
+            self.reply(render_error("unknown or not-scheduled repository"), 400)
+            return
+        if confirm != repo:
+            self.reply(render_error("type the repo name to confirm removal"), 400)
+            return
+        write_enabled_repos([r for r in enabled if r != repo])
+        self.redirect(f"/repos?sent={quote(f'{repo} removed from the schedule', safe='')}")
+
+    def do_repos_doc_save(self, form: dict) -> None:
+        repo = form.get("repo", [""])[0].strip()
+        text = form.get("text", [""])[0]
+        if not self._repo_loopable(repo):
+            self.reply(render_error("unknown or non-loopable repository"), 400)
+            return
+        if len(text) > 200_000:
+            self.reply(render_error("doc is too long"), 400)
+            return
+        try:
+            with open(os.path.join(CODE_DIR, repo, LOOP_DOC), "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError as exc:
+            self.reply(render_error(f"could not save doc: {exc}"), 500)
+            return
+        self.redirect(f"/repos?doc={quote(repo, safe='')}&sent=saved")
+
+    def do_repos_slot_max(self, form: dict) -> None:
+        repo = form.get("repo", [""])[0].strip()
+        raw_max = form.get("max", [""])[0].strip()
+        try:
+            max_value = int(raw_max)
+        except ValueError:
+            max_value = None
+        if not self._repo_loopable(repo) or max_value is None or max_value < 1:
+            self.reply(render_error("bad slot-max request"), 400)
+            return
+        try:
+            slots_redis.set_max(_repo_slot_name(repo), max_value, **self.fleet_connection)
+        except CoordinatorUnreachable:
+            self.reply(render_error("cannot reach the machine registry"), 502)
+            return
+        self.redirect("/repos")
+
+    def do_repos_schedule(self, form: dict) -> None:
+        """One-off run via `loopctl once <when> <repo>` -- a real command
+        (see `_render_schedule_panel`'s docstring for why this is not the
+        fake-success path issue #22 avoided for `lupin once`). Local
+        machine only: `agent.py`'s ACTIONS table has no `loop.once`, so
+        there is no way to enqueue this for another fleet machine, the same
+        scope call `do_schedule_timer` makes for the recurring timer.
+        """
+        repo = form.get("repo", [""])[0].strip()
+        when = form.get("when", [""])[0].strip()
+        if not self._repo_loopable(repo):
+            self.reply(render_error("unknown or non-loopable repository"), 400)
+            return
+        if not when or len(when) > 200:
+            self.reply(render_error("missing or too-long schedule time"), 400)
+            return
+        rc, out = run(["loopctl", "once", when, repo], timeout=20.0)
+        if rc != 0:
+            self.reply(render_error(f"loopctl once failed: {out.strip()}"), 502)
+            return
+        sent = f"scheduled a one-off run for {repo} at {when}"
+        self.redirect(f"/repos?sent={quote(sent, safe='')}")
 
     def do_loops(self, query: dict) -> None:
         group = "machine" if query.get("group") == "machine" else "repo"
@@ -2284,6 +2790,18 @@ class Handler(BaseHTTPRequestHandler):
             self.do_schedule_timer(form)
         elif url.path == "/schedule/run":
             self.do_schedule_run(form)
+        elif url.path == "/repos/add":
+            self.do_repos_add(form)
+        elif url.path == "/repos/generate-docs":
+            self.do_repos_generate_docs(form)
+        elif url.path == "/repos/remove":
+            self.do_repos_remove(form)
+        elif url.path == "/repos/doc/save":
+            self.do_repos_doc_save(form)
+        elif url.path == "/repos/slot-max":
+            self.do_repos_slot_max(form)
+        elif url.path == "/repos/schedule":
+            self.do_repos_schedule(form)
         else:
             self.reply(render_error("no such page"), 404)
 
