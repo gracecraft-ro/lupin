@@ -397,7 +397,7 @@ class MachinesRouteUnitTests(unittest.TestCase):
     def test_machines_route_renders_records(self):
         handler = serve.Handler.__new__(serve.Handler)
         handler.path = "/machines"
-        handler.redis_connection = {"redis_host": "127.0.0.1"}
+        handler.fleet_connection = {"redis_host": "127.0.0.1"}
         handler.host_ok = mock.Mock(return_value=True)
         handler.reply = mock.Mock()
         with (
@@ -411,7 +411,7 @@ class MachinesRouteUnitTests(unittest.TestCase):
     def test_machines_route_unreachable_coordinator_is_502(self):
         handler = serve.Handler.__new__(serve.Handler)
         handler.path = "/machines"
-        handler.redis_connection = {}
+        handler.fleet_connection = {}
         handler.host_ok = mock.Mock(return_value=True)
         handler.reply = mock.Mock()
         with mock.patch.object(
@@ -453,7 +453,7 @@ class MachinesRouteUnitTests(unittest.TestCase):
         handler.path = "/machines/slot-max"
         handler.headers = {"Content-Length": str(len(body))}
         handler.rfile = io.BytesIO(body)
-        handler.redis_connection = {"redis_host": "127.0.0.1"}
+        handler.fleet_connection = {"redis_host": "127.0.0.1"}
         handler.host_ok = mock.Mock(return_value=True)
         handler.send_response = mock.Mock()
         handler.send_header = mock.Mock()
