@@ -136,6 +136,47 @@ class RouteTests(unittest.TestCase):
 
         self.assertEqual(result, {"model": "opus", "effort": "high"})
 
+    def test_quota_exhausted_falls_back_to_tier1(self):
+        # Same shape as the bmo timeout fallback: a confirmed-exhausted
+        # tier0 provider drops to tier1, one tier down.
+        result = route.route("coding", "size-xs", quota_exhausted=True, tiers=_TIERS)
+
+        self.assertEqual(result, {"model": "sonnet", "effort": "medium"})
+
+    def test_quota_exhausted_on_tier1_falls_back_to_tier2(self):
+        # The drop applies to whichever tier the pick actually resolved to,
+        # not just tier0.
+        result = route.route("coding", "size-m", quota_exhausted=True, tiers=_TIERS)
+
+        self.assertEqual(result, {"model": "opus", "effort": "high"})
+
+    def test_quota_exhausted_on_lowest_tier_does_not_drop_further(self):
+        # tier2 is the floor -- quota_exhausted has nowhere left to go, so
+        # it must not raise or wrap around.
+        result = route.route("coding", "size-l", quota_exhausted=True, tiers=_TIERS)
+
+        self.assertEqual(result, {"model": "opus", "effort": "high"})
+
+    def test_quota_exhausted_false_is_a_no_op(self):
+        result = route.route("coding", "size-xs", quota_exhausted=False, tiers=_TIERS)
+
+        self.assertEqual(result, {"model": "bmo:qwen3.8-flash-next", "effort": "low"})
+
+    def test_bmo_unavailable_and_quota_exhausted_drop_one_tier_each(self):
+        # Both flags true on a tier0 pick: bmo_available=False drops tier0
+        # to tier1, then quota_exhausted drops that tier1 result to tier2.
+        # Each condition drops exactly one tier -- not a double-skip of
+        # tier1 entirely, and not stuck on tier1 either.
+        result = route.route(
+            "coding",
+            "size-xs",
+            bmo_available=False,
+            quota_exhausted=True,
+            tiers=_TIERS,
+        )
+
+        self.assertEqual(result, {"model": "opus", "effort": "high"})
+
     def test_unknown_size_defaults_to_tier2(self):
         # Unknown is the least certain case -- it gets the most capable
         # model, not the cheapest. This was a bug (silently landed on tier1)
