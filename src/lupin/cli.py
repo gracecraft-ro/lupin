@@ -1,7 +1,9 @@
 """The `lupin` command-line entry point: one executable, subcommands.
 
 `route` and `classify` are the model-routing calls, moved out of
-ghostbook.nix in issue #203. `acquire`/`hold`/`release`/`status` are the
+ghostbook.nix in issue #203. `fetch-models` fetches a daily snapshot of
+which model IDs each subscription can call today and what they cost
+(issue #16; see `model_fetch.py`). `acquire`/`hold`/`release`/`status` are the
 slot-lease commands (issue #205 for the `local` backend, #210 for
 `redis`). `claim`/`renew-claim`/`release-claim` mark a GitHub issue as one
 loop's own, so two loops never work the same task (issue #6; Redis only, no
@@ -73,6 +75,7 @@ from . import claims
 from . import classify as classify_mod
 from . import commands
 from . import machines
+from . import model_fetch
 from . import place as place_mod
 from . import quest as quest_mod
 from . import reconcile as reconcile_mod
@@ -102,6 +105,15 @@ def _route_args(parser: argparse.ArgumentParser) -> None:
 def _classify_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--issue-json", required=True, help="path to a `gh issue view --json ...` file")
     parser.add_argument("--diff-stat", default=None, help="path to a `git diff --stat` file")
+    parser.add_argument("--json", action="store_true")
+
+
+def _fetch_models_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--snapshot-file", default=model_fetch.SNAPSHOT_FILE,
+        help="where to save the fetched snapshot (default: ~/.local/state/lupin/model-snapshot.json)",
+    )
+    parser.add_argument("--no-write", action="store_true", help="print the snapshot without saving it")
     parser.add_argument("--json", action="store_true")
 
 
@@ -422,6 +434,9 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True)
     _route_args(sub.add_parser("route", help="pick a {model, effort} for a (category, size) pair"))
     _classify_args(sub.add_parser("classify", help="sort an issue into (category, size)"))
+    _fetch_models_args(
+        sub.add_parser("fetch-models", help="fetch today's live model list and prices per subscription")
+    )
     _acquire_args(sub.add_parser("acquire", help="take a lease on a slot"))
     _hold_args(sub.add_parser("hold", help="acquire (or reuse a lease), run a command, release on exit"))
     _release_args(sub.add_parser("release", help="give up a lease"))
@@ -473,6 +488,19 @@ def _cmd_classify(args: argparse.Namespace) -> int:
         print(json.dumps({"category": category, "size": size}))
     else:
         print(f"{category} {size}")
+    return 0
+
+
+def _cmd_fetch_models(args: argparse.Namespace) -> int:
+    data = model_fetch.snapshot()
+    if not args.no_write:
+        model_fetch.save_snapshot(data, path=args.snapshot_file)
+    if args.json:
+        print(json.dumps(data))
+    else:
+        for name, sub in data["subscriptions"].items():
+            tag = "live" if sub.get("live") else "stale/unavailable"
+            print(f"{name}: {len(sub['models'])} models ({tag})")
     return 0
 
 
@@ -1078,6 +1106,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_route(args)
     if args.cmd == "classify":
         return _cmd_classify(args)
+    if args.cmd == "fetch-models":
+        return _cmd_fetch_models(args)
     if args.cmd == "acquire":
         return _cmd_acquire(args)
     if args.cmd == "hold":

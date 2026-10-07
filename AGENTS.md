@@ -3,7 +3,8 @@
 `lupin` is a tool for multi-machine task loops. It does four jobs:
 
 1. It picks a model and effort level for a task. Commands: `route`,
-   `classify`, `review-route`.
+   `classify`, `review-route`. `fetch-models` fetches a daily snapshot of
+   which models each subscription can call today, and their prices.
 2. It controls slots. A slot is a resource with a limit on how many
    callers can use it at one time. Commands: `acquire`, `hold`, `release`,
    `status`.
@@ -22,6 +23,7 @@ One program, `lupin`, with subcommands. Run `lupin --help` for the full list.
 ```
 lupin route <category> <size> [--no-bmo] [--primary-effort E] [--json]
 lupin classify --issue-json FILE [--diff-stat FILE] [--json]
+lupin fetch-models [--snapshot-file FILE] [--no-write] [--json]
 lupin review-route (--category C --size S | --issue-json FILE) [--mode M] [--json]
 lupin review-route --prefetch N[,N...] [--repo OWNER/REPO]
 lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
@@ -50,6 +52,18 @@ The `local` backend's coordinator is the filesystem, so it never returns 3.
 renews the lease while the command runs, and releases it when the command
 ends — on a normal exit, a non-zero exit, or the command being killed by a
 signal.
+
+`fetch-models` checks, per subscription (opencode-go, claude, codex), which
+model IDs it can call today and what each one costs. It saves the result to
+`--snapshot-file` (default: `~/.local/state/lupin/model-snapshot.json`)
+unless `--no-write` is given. Model lists for opencode-go and claude come
+from a live call to each provider; codex has no live source reachable from
+this tool, so it falls back to a public catalog (models.dev) and is marked
+`live: false`. Prices come from that same public catalog for all three,
+matched by model ID — a model with no match gets `price: null`, never a
+guessed number. Promo pricing (a free or discounted period with its own
+start and end) has no live source yet either; the `promo` field stays
+`null` until issue #18 adds one.
 
 ## How a slot's limit (`max`) works
 
@@ -83,6 +97,8 @@ The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
   `ghostbook.nix`'s `hosts/jesus/loopgui/` (issue #204).
 - `src/lupin/quota.py` — the `/usage` page's quota reads, split out of
   `serve.py`.
+- `src/lupin/model_fetch.py` — `fetch-models`: a daily snapshot of model
+  IDs and prices per subscription.
 - `src/lupin/claims.py` — `claim`/`renew-claim`/`release-claim`: one GitHub
   issue claimed by one host at a time.
 - `src/lupin/machines.py` — `join`/`heartbeat`/`drain`/`undrain`/`machines`:
