@@ -35,6 +35,7 @@ import os
 import re
 
 from . import claims
+from . import gh_cache
 from . import roadmap
 from .slots import CoordinatorUnreachable
 
@@ -61,11 +62,26 @@ def _blocked_by_targets(dag_repos: dict, repo: str, number: int) -> list[tuple[s
     return []
 
 
-def _issue_state(repo_path: str, number: int) -> str | None:
+def _issue_state(
+    repo_path: str, number: int, owner: str, name: str, *, connection: dict | None = None
+) -> str | None:
     """OPEN, CLOSED, or None (lookup failed -- most likely the issue is a
     broken link and doesn't exist at all).
+
+    Goes through `gh_cache.cached_gh_json` (issue #35) -- only
+    `gh_cache.CANONICAL_GH_FETCHER` runs `gh issue view` on a cache miss.
+    `owner`/`name` are the blocker's repo identity, already known by
+    `build_roadmap`'s caller -- passed in rather than re-looked-up here.
     """
-    data, error = roadmap._run_json(["gh", "issue", "view", str(number), "--json", "state"], repo_path)
+    data, error = gh_cache.cached_gh_json(
+        owner,
+        name,
+        f"issue-state:{number}",
+        lambda: roadmap._run_json(
+            ["gh", "issue", "view", str(number), "--json", "state"], repo_path
+        ),
+        connection=connection,
+    )
     if error or not isinstance(data, dict):
         return None
     state = data.get("state")
@@ -94,11 +110,13 @@ def build_roadmap(
     issues_by_repo: dict[str, dict[int, dict]] = {}
     open_numbers: dict[str, set[int]] = {}
     owners: dict[str, str | None] = {}
+    names: dict[str, str | None] = {}
 
     for repo in repos:
         path = os.path.join(code_dir, repo)
-        owner, _name, identity_error = roadmap._repo_identity(path)
+        owner, name, identity_error = roadmap._repo_identity(path)
         owners[repo] = owner
+        names[repo] = name
         if identity_error:
             warnings.append(f"{repo}: {identity_error}")
         if refresh:
@@ -151,7 +169,12 @@ def build_roadmap(
                     continue
                 key = (blocker_repo, blocker_number)
                 if key not in existence_cache:
-                    existence_cache[key] = _issue_state(os.path.join(code_dir, blocker_repo), blocker_number)
+                    existence_cache[key] = _issue_state(
+                        os.path.join(code_dir, blocker_repo),
+                        blocker_number,
+                        owners[blocker_repo],
+                        names[blocker_repo],
+                    )
                 if existence_cache[key] is None:
                     warnings.append(
                         f"#{number} depends on #{blocker_number}, which does not exist. Treated as unblocked."

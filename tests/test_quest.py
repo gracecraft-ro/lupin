@@ -69,7 +69,12 @@ def test_load_quests_counts_done_and_open_tasks():
         ({"owner": {"login": "acme"}, "name": "repo"}, None),
         (_graphql_page([quest_issue]), None),
     ]
-    with mock.patch.object(roadmap, "_run_json", side_effect=responses):
+    # Bypass the issue #35 cache/gate -- this test is about pagination and
+    # task counting, not caching; test_gh_cache.py covers the cache itself.
+    with (
+        mock.patch.object(roadmap, "_run_json", side_effect=responses),
+        mock.patch.object(quest.gh_cache, "cached_gh_json", side_effect=lambda *a, **kw: a[3]()),
+    ):
         quests, warnings = quest.load_quests(["repo"], code_dir="/code")
 
     assert warnings == []
@@ -86,7 +91,10 @@ def test_no_quests_anywhere_is_an_empty_list_not_an_error():
         ({"owner": {"login": "acme"}, "name": "repo"}, None),
         (_graphql_page([]), None),
     ]
-    with mock.patch.object(roadmap, "_run_json", side_effect=responses):
+    with (
+        mock.patch.object(roadmap, "_run_json", side_effect=responses),
+        mock.patch.object(quest.gh_cache, "cached_gh_json", side_effect=lambda *a, **kw: a[3]()),
+    ):
         quests, warnings = quest.load_quests(["repo"], code_dir="/code")
 
     assert quests == []
@@ -354,7 +362,7 @@ def _fake_locate(table):
     found in any enabled repo".
     """
 
-    def _locate(number, repos, code_dir):
+    def _locate(number, repos, code_dir, **kw):
         return table.get(number)
 
     return _locate
@@ -409,7 +417,10 @@ def test_locate_issue_tries_each_repo_in_turn():
         ({"owner": {"login": "acme"}, "name": "repo-b"}, None),
         (_issue_json(24), None),
     ]
-    with mock.patch.object(roadmap, "_run_json", side_effect=responses):
+    with (
+        mock.patch.object(roadmap, "_run_json", side_effect=responses),
+        mock.patch.object(quest.gh_cache, "cached_gh_json", side_effect=lambda *a, **kw: a[3]()),
+    ):
         found = quest._locate_issue(24, ["repo-a", "repo-b"], "/code")
     assert found == ("repo-b", "acme/repo-b", _issue_json(24))
 
@@ -419,7 +430,10 @@ def test_locate_issue_returns_none_when_no_repo_has_it():
         ({"owner": {"login": "acme"}, "name": "repo-a"}, None),
         (None, "gh: no such issue"),
     ]
-    with mock.patch.object(roadmap, "_run_json", side_effect=responses):
+    with (
+        mock.patch.object(roadmap, "_run_json", side_effect=responses),
+        mock.patch.object(quest.gh_cache, "cached_gh_json", side_effect=lambda *a, **kw: a[3]()),
+    ):
         found = quest._locate_issue(31, ["repo-a"], "/code")
     assert found is None
 

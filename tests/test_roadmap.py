@@ -109,6 +109,10 @@ class RoadmapTests(unittest.TestCase):
             with (
                 mock.patch.object(roadmap, "_run_json", side_effect=responses),
                 mock.patch.object(roadmap, "_read_comments", return_value=({}, None)),
+                # Bypass the issue #35 cache/gate -- test_gh_cache.py covers it.
+                mock.patch.object(
+                    roadmap.gh_cache, "cached_gh_json", side_effect=lambda *a, **kw: a[3]()
+                ),
             ):
                 model = roadmap.load_model("bodysmith", directory)
 
@@ -184,6 +188,9 @@ class RoadmapTests(unittest.TestCase):
         with (
             mock.patch.object(roadmap, "_run_json", side_effect=response) as run_json,
             mock.patch.object(roadmap, "_read_comments", return_value=({}, None)) as comments,
+            mock.patch.object(
+                roadmap.gh_cache, "cached_gh_json", side_effect=lambda *a, **kw: a[3]()
+            ),
         ):
             roadmap.load_github("/repo", "closed")
 
@@ -192,7 +199,7 @@ class RoadmapTests(unittest.TestCase):
         self.assertEqual(issue_args[issue_args.index("--limit") + 1], "100")
         search = issue_args[issue_args.index("--search") + 1]
         self.assertTrue(search.startswith("closed:>="))
-        comments.assert_called_once_with("/repo", "acme", "repo", "closed", 100)
+        comments.assert_called_once_with("/repo", "acme", "repo", "closed", 100, connection=None)
 
     def test_closed_graphql_query_filters_closed_issues(self):
         response = {
@@ -200,7 +207,12 @@ class RoadmapTests(unittest.TestCase):
                 "nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}
             }}}
         }
-        with mock.patch.object(roadmap, "_run_json", return_value=(response, None)) as run_json:
+        with (
+            mock.patch.object(roadmap, "_run_json", return_value=(response, None)) as run_json,
+            mock.patch.object(
+                roadmap.gh_cache, "cached_gh_json", side_effect=lambda *a, **kw: a[3]()
+            ),
+        ):
             roadmap._read_comments("/repo", "acme", "repo", "closed")
 
         query = run_json.call_args.args[0][4]
@@ -416,7 +428,12 @@ class RoadmapTests(unittest.TestCase):
         )
 
     def test_invalid_graphql_data_returns_warning(self):
-        with mock.patch.object(roadmap, "_run_json", return_value=([], None)):
+        with (
+            mock.patch.object(roadmap, "_run_json", return_value=([], None)),
+            mock.patch.object(
+                roadmap.gh_cache, "cached_gh_json", side_effect=lambda *a, **kw: a[3]()
+            ),
+        ):
             comments, error = roadmap._read_comments("/repo", "owner", "repo")
 
         self.assertEqual(comments, {})
@@ -447,7 +464,12 @@ class RoadmapTests(unittest.TestCase):
                 }
             }
         }
-        with mock.patch.object(roadmap, "_run_json", return_value=(response, None)):
+        with (
+            mock.patch.object(roadmap, "_run_json", return_value=(response, None)),
+            mock.patch.object(
+                roadmap.gh_cache, "cached_gh_json", side_effect=lambda *a, **kw: a[3]()
+            ),
+        ):
             comments, error = roadmap._read_comments("/repo", "owner", "repo")
 
         self.assertIsNone(error)
@@ -1409,7 +1431,12 @@ class DependencyDagTests(unittest.TestCase):
             }
         }
 
-        with mock.patch.object(roadmap, "_run_json", return_value=(response, None)):
+        with (
+            mock.patch.object(roadmap, "_run_json", return_value=(response, None)),
+            mock.patch.object(
+                roadmap.gh_cache, "cached_gh_json", side_effect=lambda *a, **kw: a[3]()
+            ),
+        ):
             links, error = roadmap._read_dependencies("/repo", "acme", "api")
 
         self.assertIsNone(error)

@@ -107,7 +107,7 @@ def test_resolve_task_free_text_is_classified_as_is():
 
 def test_resolve_task_issue_number_uses_gh_title(monkeypatch):
     monkeypatch.setattr(
-        place, "_fetch_issue", lambda number: ({"title": "retry backoff"}, None)
+        place, "_fetch_issue", lambda number, connection=None: ({"title": "retry backoff"}, None)
     )
     issue, label = place._resolve_task("#418")
     assert issue == {"title": "retry backoff"}
@@ -115,7 +115,9 @@ def test_resolve_task_issue_number_uses_gh_title(monkeypatch):
 
 
 def test_resolve_task_issue_number_falls_back_when_gh_fails(monkeypatch):
-    monkeypatch.setattr(place, "_fetch_issue", lambda number: ({}, "gh: not found"))
+    monkeypatch.setattr(
+        place, "_fetch_issue", lambda number, connection=None: ({}, "gh: not found")
+    )
     issue, label = place._resolve_task("418")
     assert issue == {}
     assert label == "#418"
@@ -129,20 +131,20 @@ def test_quest_focus_for_returns_none_for_free_text():
 
 
 def test_quest_focus_for_returns_none_when_task_is_in_no_quest(monkeypatch):
-    monkeypatch.setattr(place.quest_mod, "load_quests", lambda repos: ([], []))
+    monkeypatch.setattr(place.quest_mod, "load_quests", lambda repos, **kw: ([], []))
     assert place.quest_focus_for("418", {}) is None
 
 
 def test_quest_focus_for_returns_none_when_quest_has_no_focus(monkeypatch):
     quests = [{"name": "session-rewrite", "tasks": [{"number": 418, "title": "t", "done": False}]}]
-    monkeypatch.setattr(place.quest_mod, "load_quests", lambda repos: (quests, []))
+    monkeypatch.setattr(place.quest_mod, "load_quests", lambda repos, **kw: (quests, []))
     monkeypatch.setattr(place.quest_mod, "read_focus", lambda name, **kw: None)
     assert place.quest_focus_for("418", {}) is None
 
 
 def test_quest_focus_for_returns_the_quests_focus_machine(monkeypatch):
     quests = [{"name": "session-rewrite", "tasks": [{"number": 418, "title": "t", "done": False}]}]
-    monkeypatch.setattr(place.quest_mod, "load_quests", lambda repos: (quests, []))
+    monkeypatch.setattr(place.quest_mod, "load_quests", lambda repos, **kw: (quests, []))
     monkeypatch.setattr(
         place.quest_mod, "read_focus", lambda name, **kw: {"machine": "mac-studio"} if name == "session-rewrite" else None
     )
@@ -297,9 +299,11 @@ def test_place_missing_resets_at_sorts_after_a_real_margin(redis_port, flush_red
 def test_place_prefers_the_quest_focus_machine_over_more_free_slots(redis_port, flush_redis, monkeypatch):
     _write_machine(redis_port, "mac-studio", slots={"bmo": {"used": 1, "max": 2}}, quota=_CLAUDE_QUOTA)
     _write_machine(redis_port, "mini-2", slots={"bmo": {"used": 0, "max": 4}}, quota=_CLAUDE_QUOTA)
-    monkeypatch.setattr(place, "_fetch_issue", lambda number: ({"title": "retry backoff"}, None))
+    monkeypatch.setattr(
+        place, "_fetch_issue", lambda number, connection=None: ({"title": "retry backoff"}, None)
+    )
     quests = [{"name": "session-rewrite", "tasks": [{"number": 418, "title": "t", "done": False}]}]
-    monkeypatch.setattr(place.quest_mod, "load_quests", lambda repos: (quests, []))
+    monkeypatch.setattr(place.quest_mod, "load_quests", lambda repos, **kw: (quests, []))
     monkeypatch.setattr(place.quest_mod, "read_focus", lambda name, **kw: {"machine": "mac-studio"})
 
     result = place.place("#418", _kw(redis_port))

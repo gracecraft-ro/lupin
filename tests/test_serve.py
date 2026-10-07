@@ -33,7 +33,7 @@ def _fake_locate(table):
     """Stand-in for `quest._locate_issue` -- see test_quest.py's copy of
     this same helper for the full contract."""
 
-    def _locate(number, repos, code_dir):
+    def _locate(number, repos, code_dir, **kw):
         return table.get(number)
 
     return _locate
