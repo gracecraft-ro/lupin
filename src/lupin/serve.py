@@ -188,11 +188,14 @@ def run(argv: list[str], timeout: float = 10.0) -> tuple[int, str]:
 
 
 def enabled_repos() -> list[str]:
-    try:
-        with open(REPOS_FILE, encoding="utf-8") as fh:
-            return [line.strip() for line in fh if line.strip()]
-    except OSError:
-        return []
+    """Repo names enabled for the schedule -- the first whitespace-
+    separated field of each line in `REPOS_FILE`. `loopctl enable` writes
+    `"<repo> <platform>"` (two fields); the dashboard's own `/repos/add`
+    writes a bare name (one field). Reuses `_repo_platforms()`'s parsing
+    of that same file so the two-field format is only handled in one
+    place.
+    """
+    return list(_repo_platforms().keys())
 
 
 def write_enabled_repos(names: list[str]) -> None:
@@ -296,9 +299,8 @@ def session_tail(session: str, lines: int) -> str:
 def _repo_platforms() -> dict[str, str]:
     """repo -> platform, read straight from `REPOS_FILE` -- the same file
     loopctl.nix's own `repo_platform` reads, second whitespace-separated
-    token per line (`"claude"` if a line has none). Not `enabled_repos()`,
-    which only keeps the first token -- this is a separate, narrow read of
-    the same file, for the one new field that needs the second column.
+    token per line (`"claude"` if a line has none). `enabled_repos()`
+    reuses this for its own list of repo names (the dict's keys).
     """
     result: dict[str, str] = {}
     try:
@@ -1912,7 +1914,12 @@ def _render_add_panel(tab: str, repos: list[dict]) -> str:
                 f"<input type=hidden name=repo value='{esc(repo)}'>"
                 "<button type=submit>Generate docs and add</button></form></div>"
             )
-    picker = "".join(rows) or "<p class=dim>Every repo under /code is already on the schedule.</p>"
+    if rows:
+        picker = "".join(rows)
+    elif repos:
+        picker = "<p class=dim>Every repo under /code is already on the schedule.</p>"
+    else:
+        picker = "<p class=dim>No repos found under /code.</p>"
     body = (
         f"{clone}"
         f"<div style='font-size:12px;color:var(--ink3);margin:14px 0 6px'>Or pick a directory in /code</div>"

@@ -2302,6 +2302,24 @@ class RepoHelperTests(unittest.TestCase):
                 serve.write_enabled_repos(["b-repo", "a-repo"])
                 self.assertEqual(serve.enabled_repos(), ["b-repo", "a-repo"])
 
+    def test_enabled_repos_recognizes_a_bare_name_line(self):
+        """The dashboard's own `/repos/add` writes one name per line."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repos_file = os.path.join(tmp, "repos")
+            with open(repos_file, "w", encoding="utf-8") as fh:
+                fh.write("widgets\n")
+            with mock.patch.object(serve, "REPOS_FILE", repos_file):
+                self.assertEqual(serve.enabled_repos(), ["widgets"])
+
+    def test_enabled_repos_recognizes_a_loopctl_two_field_line(self):
+        """`loopctl enable <repo> [--platform P]` writes `"<repo> <platform>"`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repos_file = os.path.join(tmp, "repos")
+            with open(repos_file, "w", encoding="utf-8") as fh:
+                fh.write("widgets claude\n")
+            with mock.patch.object(serve, "REPOS_FILE", repos_file):
+                self.assertEqual(serve.enabled_repos(), ["widgets"])
+
     def test_slot_controls_disable_the_lower_button_at_the_minimum(self):
         html = serve._repo_slot_controls("widgets", 1)
         self.assertIn("disabled", html)
@@ -2435,6 +2453,21 @@ class RepoRenderTests(unittest.TestCase):
         page = serve.render_repos(self._data(), add="new").decode()
         self.assertIn("Not implemented yet", page)
         self.assertIn("disabled", page)
+
+    def test_add_panel_says_no_repos_found_when_code_repos_is_empty(self):
+        """`repos=[]` means `code_repos()` found nothing under /code (e.g.
+        pihome, with no local clones) -- a different case from every repo
+        being already enabled."""
+        page = serve.render_repos(self._data(repos=[]), add="existing").decode()
+        self.assertIn("No repos found under /code", page)
+        self.assertNotIn("already on the schedule", page)
+
+    def test_add_panel_says_every_repo_already_enabled_when_none_are_left_to_add(self):
+        repos = [{"repo": "widgets", "state": "enabled", "loopable": True,
+                   "running": False, "machine": "pihome", "max": 2}]
+        page = serve.render_repos(self._data(repos=repos), add="existing").decode()
+        self.assertIn("Every repo under /code is already on the schedule", page)
+        self.assertNotIn("No repos found", page)
 
     def test_doc_panel_view_mode_shows_the_text(self):
         page = serve.render_repos(self._data(), doc_repo="widgets", doc_text="hello doc").decode()
