@@ -32,7 +32,9 @@ exists yet.
 
 ## Current Step
 
-Done. Ready to merge and report.
+Done. Merged locally into `issue-28-cmd-queue-agent` (off `main` at
+4e614ce). Commits: 153737f (implementation), e476112 (merge commit).
+Reported to the issue.
 
 ## Files Changed
 
@@ -52,13 +54,16 @@ Done. Ready to merge and report.
   `test_quest.py::test_cli_quest_release_no_focus_error`,
   `test_slots_redis.py::test_status_json_matches_real_sorted_set_contents`.
   Same 4 failures, same assertions, reproduced identically on baseline.
-- On this branch: same 4 pre-existing failures + 350 passed (all new
-  tests in `test_commands.py`/`test_agent.py` pass).
+- On this branch (`issue-28-cmd-queue-agent`, after merge): same 4
+  pre-existing failures + 360 passed, 0 errors (all new
+  `test_commands.py`/`test_agent.py` tests pass). One earlier run on this
+  branch hit 26 `ConnectionError`s against the session Redis fixture;
+  re-ran clean (360 passed, same 4 known failures, 0 errors) -- a one-off
+  sandbox flake, not reproducible, not related to this change.
 
 ## Next Action
 
-Merge locally into a named branch off current `main`, comment the issue
-with evidence.
+None. Shipped: merged locally, reported to the issue.
 
 ## Known Blockers
 
