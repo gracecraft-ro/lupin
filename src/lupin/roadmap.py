@@ -109,7 +109,11 @@ BOTTLENECKS = {
 _GITHUB_CACHE = {}
 _LEDGER_CACHE = {}
 _CACHE_LOCK = threading.Lock()
-CACHE_FILE = os.path.expanduser("~/.local/state/lupin/cache.json")
+CACHE_FILE = os.path.join(
+    os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+    "lupin",
+    "cache.json",
+)
 
 
 def _load_cache():

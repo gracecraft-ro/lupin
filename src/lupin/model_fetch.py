@@ -61,7 +61,11 @@ ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
 OPENCODE_GO_MODELS_URL = "https://opencode.ai/zen/go/v1/models"
 MODELS_DEV_CATALOG_URL = "https://models.dev/api.json"
 
-SNAPSHOT_FILE = os.path.expanduser("~/.local/state/lupin/model-snapshot.json")
+SNAPSHOT_FILE = os.path.join(
+    os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+    "lupin",
+    "model-snapshot.json",
+)
 
 _USER_AGENT = "lupin-model-fetch/1.0"
 _PRICE_FIELDS = ("input", "output", "cache_read", "cache_write")
