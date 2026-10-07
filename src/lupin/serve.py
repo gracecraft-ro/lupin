@@ -179,22 +179,7 @@ MODEL_TIER_ORDER = ("tier0", "tier1", "tier2")
 
 def run(argv: list[str], timeout: float = 10.0) -> tuple[int, str]:
     """Run a fixed read-only probe. Never a shell, never browser input."""
-    try:
-        proc = subprocess.run(
-            argv,
-            shell=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except FileNotFoundError:
-        return 127, f"not found: {argv[0]}"
-    except subprocess.TimeoutExpired:
-        return 124, f"timed out after {timeout}s: {' '.join(argv)}"
-    out = proc.stdout
-    if proc.stderr:
-        out = out + ("\n" if out and not out.endswith("\n") else "") + proc.stderr
-    return proc.returncode, out
+    return loops.run_subprocess(argv, timeout=timeout)
 
 
 # --------------------------------------------------------------------------
@@ -496,12 +481,12 @@ def remote_loop_hosts(claims_data: dict, full_names: dict[str, str], local_host:
     """repo -> host, for a repo whose issue is claimed by a machine other
     than this one.
 
-    Fallback only (issue #2 phase A): `gather_loops` now prefers
-    `_loop_hosts_from_heartbeat`, the real signal from each machine's own
-    heartbeat `loops` field. This guess-from-claims stays in use only for a
-    machine whose `lupin` is old enough to not publish `loops` yet -- a
-    claim's own `host` field is not proof a loop is still running there,
-    just the best guess available before that field existed.
+    This is a guess, not a real signal (issue #2 phase A): a claim's
+    `host` field is not proof a loop is still running there, just the
+    best guess available before `_loop_hosts_from_heartbeat`'s real
+    signal existed. `gather_loops` merges this result with that one --
+    for a repo `_loop_hosts_from_heartbeat` already has an answer for,
+    this guess is ignored; for any other repo, this guess fills in.
     """
     hosts: dict[str, str] = {}
     for repo, owner_repo in full_names.items():
@@ -517,9 +502,11 @@ def remote_loop_hosts(claims_data: dict, full_names: dict[str, str], local_host:
 
 def _loop_hosts_from_heartbeat(machine_records: list[dict], local_host: str) -> dict[str, str]:
     """repo -> host, read straight from every other machine's own
-    heartbeat `loops` list (issue #2 phase A) -- the real signal, once
-    every machine runs a build that publishes it. Empty until then, in
-    which case `gather_loops` falls back to `remote_loop_hosts`'s guess.
+    heartbeat `loops` list (issue #2 phase A). This is the real signal,
+    once a machine runs a build that publishes `loops`. A machine that
+    doesn't publish it yet contributes nothing here -- `gather_loops`
+    merges this result with `remote_loop_hosts`'s guess to cover those
+    repos too.
     """
     hosts: dict[str, str] = {}
     for record in machine_records:
@@ -546,9 +533,13 @@ def gather_loops(connection: dict) -> dict:
     sessions_by_repo = {s["repo"]: s for s in tmux_sessions() if s["repo"]}
     enabled = set(enabled_repos())
     state = fleet_state(connection)
-    remote_hosts = _loop_hosts_from_heartbeat(state.get("machines", []), local_host) or remote_loop_hosts(
-        state.get("claims", {}), _repo_full_names(), local_host
-    )
+    # Merge, not all-or-nothing: a heartbeat-reported loop wins for the
+    # repo it names, but a repo the heartbeat set says nothing about still
+    # falls back to the claims-based guess (e.g. a machine running an
+    # older `lupin` that doesn't publish `loops` yet).
+    claims_hosts = remote_loop_hosts(state.get("claims", {}), _repo_full_names(), local_host)
+    heartbeat_hosts = _loop_hosts_from_heartbeat(state.get("machines", []), local_host)
+    remote_hosts = {**claims_hosts, **heartbeat_hosts}
 
     entries = []
     for r in code_repos():

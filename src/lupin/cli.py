@@ -24,11 +24,12 @@ checks, or lists signed cross-machine commands; `agent` is the
 long-running process that polls its own queue and runs them through a
 fixed action table (issue #28, implementing #27's design; see
 `commands.py`/`agent.py`). `stop`/`peek`/`schedule`/`pause`/`resume`/
-`attach` (issue #2 phase A) control a loop from any fleet machine --
-`loopctl` directly if the target is this machine, else the signed queue,
-via `loops.py`'s shared dispatch; `attach` is the one exception, since it
-execs a live terminal instead of a one-shot command (see `loops.py`'s
-`ssh_target_for` for the mapping file a remote `attach` reads). All of
+`attach` (issue #2 phase A) control a loop from any fleet machine. If the
+target is this machine, they run `loopctl` directly. If not, they send
+the action through the signed queue, using `loops.py`'s shared dispatch
+code. `attach` is the one exception -- it opens a live terminal instead
+of running a one-shot command. See `loops.py`'s `ssh_target_for` for the
+file that maps a remote machine to its ssh target. All of
 them share one process so a caller has one binary to find and one `lupin
 --help` to read; the concerns stay as separate modules underneath, same
 as this project's other CLIs split "decide" from "do" (see
@@ -67,14 +68,15 @@ loop" or "target machine draining" (both "try again later"), 1 for
 anything else (closed, missing, or blocked by an issue outside the quest).
 
 `stop`/`peek`/`schedule`/`pause`/`resume` (issue #2 phase A) add two more
-exit codes, for a remote target over the signed command queue:
-  4  sent, but the result is unknown -- the command was enqueued, but no
-     terminal state (`ok`/`failed`/`rejected`/`expired`) landed within
-     `--wait` seconds. It may still be running; `lupin cmd status <id>`
-     can be checked later.
-  5  the repo matched zero or more than one machine in the fleet
-     registry's `loops` field (`stop`/`peek` only, when `--machine` isn't
-     given) -- ambiguous, pass `--machine` instead of guessing.
+exit codes. Both apply only to a remote target, sent through the signed
+command queue:
+  4  sent, but the result is unknown. The command was queued, but no
+     final state (`ok`/`failed`/`rejected`/`expired`) arrived within
+     `--wait` seconds. It may still be running -- check
+     `lupin cmd status <id>` later.
+  5  the repo's loop matched zero machines, or more than one, in the
+     fleet registry's `loops` field (`stop`/`peek` only, and only when
+     `--machine` isn't given). Pass `--machine` instead of guessing.
 """
 
 from __future__ import annotations
@@ -106,10 +108,10 @@ from . import slots
 from . import slots_redis
 
 DEFAULT_RESULT_WAIT_S = 20.0  # how long stop/peek/schedule/pause/resume
-# wait for a remote result before reporting exit code 4 ("sent, result
-# unknown") -- not how long the command itself is allowed to run (that's
-# agent.py's own EXEC_TIMEOUT_S, 120s); a caller who wants to wait longer
-# than this passes --wait.
+# wait, by default, for a remote result before they report exit code 4
+# ("sent, result unknown"). This is not how long the action itself is
+# allowed to run -- that limit is agent.py's own EXEC_TIMEOUT_S (120s). A
+# caller who wants to wait longer than 20 seconds passes --wait.
 
 
 def _route_args(parser: argparse.ArgumentParser) -> None:
@@ -495,11 +497,14 @@ def _schedule_common_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _schedule_args(parser: argparse.ArgumentParser) -> None:
-    """`lupin schedule [--machine M] [show | first <when> every <interval>
-    | cal "<expr>"]` -- nested subcommands, same reason as `_cmd_group_args`
-    (each mode takes a different positional shape). Bare `lupin schedule`
-    (no mode) means `show`, so the flags are repeated on the parent parser
-    too, not only on the `show` subparser.
+    """Build the parser for:
+    `lupin schedule [--machine M] [show | first <when> every <interval> | cal "<expr>"]`
+
+    This uses nested subcommands, for the same reason as
+    `_cmd_group_args`: each mode takes different positional arguments.
+    Plain `lupin schedule`, with no mode given, means `show`. That is why
+    the flags are added to the parent parser too, not only to the `show`
+    subparser.
     """
     sub = parser.add_subparsers(dest="schedule_mode", required=False)
 
@@ -1191,10 +1196,12 @@ def _cmd_agent(args: argparse.Namespace) -> int:
 
 
 def _exit_for_dispatch(result: dict) -> tuple[int, dict]:
-    """Shared exit-code mapping for `stop`/`peek`/`schedule`/`pause`/
-    `resume`'s `loops.dispatch_loop_action()` result -- see cli.py's module
-    docstring for what 0/1/4 mean here (`attach` and `AmbiguousMachine`'s 5
-    are handled separately, before dispatch is even attempted).
+    """Turn a `loops.dispatch_loop_action()` result into an exit code and
+    a result dict. Shared by `stop`/`peek`/`schedule`/`pause`/`resume`.
+
+    See cli.py's module docstring for what 0, 1, and 4 mean. Exit code 5
+    (`AmbiguousMachine`) and `attach` are handled elsewhere, before
+    dispatch is even tried.
     """
     if result["mode"] == "local":
         rc = result["returncode"]
@@ -1229,6 +1236,9 @@ def _cmd_stop(args: argparse.Namespace) -> int:
         except loops_mod.AmbiguousMachine as exc:
             print(str(exc), file=sys.stderr)
             return 5
+        except machines.CoordinatorUnreachable as exc:
+            print(f"cannot reach the {exc}", file=sys.stderr)
+            return 3
     try:
         result = loops_mod.dispatch_loop_action(
             machine=machine, local_host=local_host,
@@ -1259,6 +1269,9 @@ def _cmd_peek(args: argparse.Namespace) -> int:
         except loops_mod.AmbiguousMachine as exc:
             print(str(exc), file=sys.stderr)
             return 5
+        except machines.CoordinatorUnreachable as exc:
+            print(f"cannot reach the {exc}", file=sys.stderr)
+            return 3
     try:
         result = loops_mod.dispatch_loop_action(
             machine=machine, local_host=local_host,
@@ -1293,6 +1306,9 @@ def _cmd_attach(args: argparse.Namespace) -> int:
         except loops_mod.AmbiguousMachine as exc:
             print(str(exc), file=sys.stderr)
             return 5
+        except machines.CoordinatorUnreachable as exc:
+            print(f"cannot reach the {exc}", file=sys.stderr)
+            return 3
 
     if machine == local_host:
         argv = ["loopctl", "attach", args.repo]
@@ -1322,8 +1338,15 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         local_argv = ["loopctl", "schedule"]
         queue_action, queue_params = "schedule.show", {}
     elif mode == "first":
-        when = agent_mod.validate_schedule_token("when", args.when)
-        interval = agent_mod.validate_schedule_token("interval", args.interval)
+        if args.every_literal != "every":
+            print(f"schedule first: expected the word 'every', got {args.every_literal!r}", file=sys.stderr)
+            return 1
+        try:
+            when = agent_mod.validate_schedule_token("when", args.when)
+            interval = agent_mod.validate_schedule_token("interval", args.interval)
+        except agent_mod.RejectedCommand as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
         local_argv = ["loopctl", "schedule", "first", when, "every", interval]
         queue_action, queue_params = "schedule.set", {"mode": "first", "when": when, "interval": interval}
     else:  # cal
@@ -1353,9 +1376,22 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     return code
 
 
+# How bad each per-machine result is, worst last. This ranks the exit
+# codes `_cmd_pause_resume` can see for one machine: 0 (ok) is least bad.
+# 4 (sent, result unknown) is next -- the action may still turn out fine.
+# 1 (a real failure happened) is worse than an unknown result. 3 (could
+# not even reach the coordinator for that machine) is the worst, since it
+# means this command has no information at all about that machine.
+# `--all`'s overall exit code is the worst of these, by this order -- not
+# "whichever machine came first" -- so the same set of per-machine results
+# always gives the same overall code, no matter what order they ran in.
+_PAUSE_RESUME_SEVERITY = {0: 0, 4: 1, 1: 2, 3: 3}
+
+
 def _cmd_pause_resume(args: argparse.Namespace, verb: str) -> int:
-    """Shared by `_cmd_pause`/`_cmd_resume` -- same shape (`--machine` or
-    `--all`), same `schedule.<verb>` queue action."""
+    """Shared by `_cmd_pause` and `_cmd_resume`. Both take the same
+    `--machine`/`--all` shape, and both send a `schedule.<verb>` queue
+    action."""
     connection = _fleet_connection(args)
     local_host = machines.hostname()
     if args.all:
@@ -1382,20 +1418,25 @@ def _cmd_pause_resume(args: argparse.Namespace, verb: str) -> int:
             )
         except slots.CoordinatorUnreachable:
             print(f"cannot reach the redis coordinator to {verb} {machine!r}", file=sys.stderr)
-            return 3
+            results[machine] = {"machine": machine, "error": "cannot reach the redis coordinator"}
+            code = 3
         except loops_mod.MissingSigningKey:
             print(f"{verb} needs --signing-key or $LUPIN_CMD_SIGNING_KEY to reach another machine", file=sys.stderr)
-            return 1
-        code, payload = _exit_for_dispatch(result)
-        results[machine] = payload
-        if worst == 0:
+            results[machine] = {"machine": machine, "error": "missing signing key"}
+            code = 1
+        else:
+            code, payload = _exit_for_dispatch(result)
+            results[machine] = payload
+        if _PAUSE_RESUME_SEVERITY[code] > _PAUSE_RESUME_SEVERITY[worst]:
             worst = code
 
     if args.json:
         print(json.dumps(results))
     else:
         for machine, payload in results.items():
-            if payload["mode"] == "local":
+            if "error" in payload:
+                state = f"error: {payload['error']}"
+            elif payload["mode"] == "local":
                 state = "ok" if payload["returncode"] == 0 else "failed"
             else:
                 state = payload.get("state", "queued")

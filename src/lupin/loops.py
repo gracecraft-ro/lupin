@@ -1,14 +1,20 @@
-"""Shared local-or-remote dispatch for loop-control actions (issue #2,
-phase A): given a target machine, either run `loopctl` directly (the
-target is this machine) or enqueue a signed command on the Redis queue
-from `commands.py` for that machine's `lupin agent` to run. One decision,
-used by both `cli.py`'s `stop`/`peek`/`schedule`/`pause`/`resume` verbs and
-`serve.py`'s dashboard loop controls, so the two surfaces can't drift.
+"""Run a loop-control action on the machine that should run it (issue
+#2, phase A).
 
-`attach` is not here -- it execs a terminal directly (local `loopctl
-attach`, or `ssh -t <target> loopctl attach`), never through the Redis
-queue (see `ssh_target_for`'s docstring below for the mapping file
-`attach` reads to find a remote target).
+If the target is this machine, this module runs `loopctl` directly. If
+the target is another machine, it sends a signed command on the Redis
+queue from `commands.py`. That machine's `lupin agent` picks the command
+up and runs it.
+
+Both `cli.py`'s `stop`/`peek`/`schedule`/`pause`/`resume` commands and
+`serve.py`'s dashboard use this one module to make that decision, so the
+two places can't drift apart.
+
+`attach` does not use this module. It opens a terminal directly instead
+-- either `loopctl attach` on this machine, or `ssh -t <target> loopctl
+attach` on another one. It never goes through the Redis queue. See
+`ssh_target_for` below for the file that maps a machine name to its ssh
+target.
 """
 
 from __future__ import annotations
@@ -22,14 +28,16 @@ from . import commands, machines
 
 SSH_TARGETS_PATH = Path.home() / ".config" / "lupin" / "ssh-targets"
 
-# A command's terminal states -- same set `commands.py`'s `STATES` defines,
-# minus "queued"/"running" (still in flight, not terminal).
+# A command's terminal states. Same set as `commands.py`'s `STATES`, minus
+# "queued" and "running" -- those two mean the command is still in flight,
+# not finished.
 _TERMINAL_STATES = {"ok", "failed", "rejected", "expired"}
 
 
 class AmbiguousMachine(Exception):
-    """A repo's running machine couldn't be resolved to exactly one --
-    `cli.py` turns this into exit code 5 ("use --machine")."""
+    """Raised when a repo's loop does not resolve to exactly one machine
+    -- zero matches, or more than one. `cli.py` turns this into exit code
+    5 ("use --machine")."""
 
     def __init__(self, repo: str, candidates: list[str]):
         self.repo = repo
@@ -38,8 +46,9 @@ class AmbiguousMachine(Exception):
 
 
 class MissingSigningKey(Exception):
-    """A remote action was asked for, but no signing key was given --
-    `commands.enqueue` needs one for every target."""
+    """Raised when an action targets another machine, but no signing key
+    was given. `commands.enqueue` needs a signing key for every remote
+    target."""
 
     def __init__(self, machine: str):
         self.machine = machine
@@ -47,15 +56,19 @@ class MissingSigningKey(Exception):
 
 
 def resolve_machine_for_repo(repo: str, connection: dict) -> str:
-    """The one machine whose heartbeat says it is running `repo`'s loop
-    right now. Raises `AmbiguousMachine` for 0 or more than 1 match --
-    `machines.py`'s heartbeat `loops` field (issue #2 phase A) is the
-    single source of truth here, not a guess.
+    """Find the one machine whose heartbeat says it is running `repo`'s
+    loop right now.
+
+    This reads `machines.py`'s heartbeat `loops` field (issue #2 phase
+    A). That field is the single source of truth here -- this function
+    does not guess.
+
+    Raises `AmbiguousMachine` if zero machines match, or more than one
+    does. Raises `machines.CoordinatorUnreachable` if the machine
+    registry itself cannot be reached -- that is a different problem
+    from "no match found", so this function does not swallow it.
     """
-    try:
-        records = machines.machines(connection)
-    except machines.CoordinatorUnreachable:
-        records = []
+    records = machines.machines(connection)
     candidates = [
         record["name"]
         for record in records
@@ -66,10 +79,12 @@ def resolve_machine_for_repo(repo: str, connection: dict) -> str:
     return candidates[0]
 
 
-def _default_run_local(argv: list[str], timeout: float = 20.0) -> tuple[int, str]:
-    """`subprocess.run(argv)`, never a shell -- the default local runner for
-    a caller that doesn't already have its own (`serve.py` passes its own
-    `run()` instead, so the dashboard's existing behavior doesn't change).
+def run_subprocess(argv: list[str], timeout: float = 20.0) -> tuple[int, str]:
+    """Run `argv` as a real subprocess. Never go through a shell.
+
+    `serve.py`'s `run()` calls this too, with its own default timeout, so
+    there is one copy of this subprocess-running code, not two that can
+    drift apart.
     """
     try:
         proc = subprocess.run(argv, shell=False, capture_output=True, text=True, timeout=timeout)
@@ -99,25 +114,27 @@ def dispatch_loop_action(
 ) -> dict:
     """Run one loop-control action on `machine`.
 
-    `machine == local_host`: runs `local_argv` directly (`run_local`, or
-    `_default_run_local` if not given) and returns
-    `{"mode": "local", "returncode": int, "output": str}`.
+    If `machine` is this machine (`local_host`), this runs `local_argv`
+    directly. It uses `run_local` if given, or `run_subprocess` otherwise.
+    It returns `{"mode": "local", "returncode": int, "output": str}`.
 
-    Otherwise: enqueues `queue_action`/`queue_params` on the Redis queue for
-    `machine`'s `lupin agent` to run, and returns
-    `{"mode": "queued", "id": str, "result": dict | None}`. `result` is
-    `None` if `wait_s` wasn't given (fire-and-forget -- `serve.py`'s
-    dashboard doesn't block an HTTP reply on a remote machine) or if it was
-    given but no terminal state (`ok`/`failed`/`rejected`/`expired`) landed
-    before the deadline (`cli.py`'s synchronous verbs treat that as "sent,
-    result unknown" -- exit code 4).
+    Otherwise, this sends `queue_action`/`queue_params` on the Redis
+    queue, for `machine`'s `lupin agent` to run. It returns
+    `{"mode": "queued", "id": str, "result": dict | None}`.
 
-    Raises `MissingSigningKey` if `machine != local_host` and no
-    `signing_key` was given, and `commands.enqueue`'s own
-    `CoordinatorUnreachable` if Redis can't be reached.
+    `result` is `None` in two cases: `wait_s` was not given at all (this
+    is fire-and-forget -- `serve.py`'s dashboard does not want to block
+    an HTTP reply on a remote machine), or `wait_s` was given but no
+    terminal state (`ok`/`failed`/`rejected`/`expired`) showed up before
+    the deadline. `cli.py`'s own commands treat that second case as
+    "sent, but the result is unknown" -- exit code 4.
+
+    Raises `MissingSigningKey` if `machine` is not `local_host` and no
+    `signing_key` was given. Raises `commands.enqueue`'s own
+    `CoordinatorUnreachable` if Redis cannot be reached.
     """
     if machine == local_host:
-        runner = run_local or _default_run_local
+        runner = run_local or run_subprocess
         returncode, output = runner(local_argv)
         return {"mode": "local", "returncode": returncode, "output": output}
 
@@ -143,16 +160,19 @@ def dispatch_loop_action(
 
 
 def ssh_target_for(machine: str, path: Path | str | None = None) -> str | None:
-    """`machine`'s ssh target (a `user@host`, or an ssh_config alias), read
-    from a plain text file -- one line per machine, `<machine> <target>`;
-    blank lines and `#` comments are ignored. `None` if the file is
-    missing or has no line for `machine`.
+    """Look up `machine`'s ssh target -- a `user@host` string, or an
+    ssh_config alias.
 
-    Default path: `~/.config/lupin/ssh-targets`. This is local, per-machine
-    config (in practice, written by Nix on each caller), not fleet state
-    -- unlike the Redis command queue, `attach` needs this before it can
-    even open a connection, so it can't itself come from the far side of
-    that connection.
+    Reads it from a plain text file, one line per machine:
+    `<machine> <target>`. Blank lines and `#` comments are skipped.
+    Returns `None` if the file is missing, or has no line for `machine`.
+
+    Default path: `~/.config/lupin/ssh-targets`. This file lives on the
+    local machine (in practice, Nix writes it on each machine). It is not
+    fleet state read from Redis. `attach` needs this mapping before it
+    can even open a connection to the other machine, so the mapping
+    cannot come from the far side of a connection that does not exist
+    yet.
     """
     p = Path(path) if path else SSH_TARGETS_PATH
     try:

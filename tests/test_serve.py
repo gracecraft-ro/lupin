@@ -1520,6 +1520,37 @@ class GatherLoopsTests(unittest.TestCase):
         self.assertEqual(data["entries"][0]["status"], "stopped")
         self.assertEqual(data["entries"][0]["machine"], "pihome")
 
+    def test_gather_loops_merges_heartbeat_and_claims_fallback_per_repo(self):
+        """A non-empty heartbeat `loops` list must not drop the
+        claims-based fallback for a repo the heartbeat set says nothing
+        about -- e.g. a repo still running on a machine whose `lupin` is
+        too old to publish `loops` yet. Heartbeat wins for "a" (it has an
+        answer); claims fills in "b" (heartbeat has none)."""
+        with (
+            mock.patch.object(
+                serve, "code_repos",
+                return_value=[{"repo": "a", "loopable": True}, {"repo": "b", "loopable": True}],
+            ),
+            mock.patch.object(serve, "tmux_sessions", return_value=[]),
+            mock.patch.object(serve, "enabled_repos", return_value=["a", "b"]),
+            mock.patch.object(
+                serve, "fleet_state",
+                return_value={
+                    "claims": {"acme/a#1": {"host": "stale-claim-host"}, "acme/b#2": {"host": "mini"}},
+                    "machines": [{"name": "jesus", "loops": [{"repo": "a"}]}],
+                    "fleet_error": None,
+                },
+            ),
+            mock.patch.object(serve, "_repo_full_names", return_value={"a": "acme/a", "b": "acme/b"}),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            data = serve.gather_loops({})
+        entries = {e["repo"]: e for e in data["entries"]}
+        self.assertEqual(entries["a"]["status"], "remote")
+        self.assertEqual(entries["a"]["machine"], "jesus")  # heartbeat wins over the stale claim
+        self.assertEqual(entries["b"]["status"], "remote")
+        self.assertEqual(entries["b"]["machine"], "mini")  # claims fills in what heartbeat didn't cover
+
 
 class LoopsRouteUnitTests(unittest.TestCase):
     """Routing/validation logic only -- mocked gather_loops/tmux/loopctl,

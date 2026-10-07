@@ -46,11 +46,13 @@ def test_resolve_machine_for_repo_raises_on_multiple_matches():
     assert sorted(exc.value.candidates) == ["jesus", "mini"]
 
 
-def test_resolve_machine_for_repo_treats_unreachable_coordinator_as_zero_matches():
+def test_resolve_machine_for_repo_lets_coordinator_unreachable_propagate():
+    """A Redis outage must surface as "cannot reach the coordinator" (exit
+    code 3), not get reported as "pick a different machine" (exit code 5,
+    `AmbiguousMachine`) -- that advice wouldn't fix anything."""
     with mock.patch.object(machines, "machines", side_effect=machines.CoordinatorUnreachable("x")):
-        with pytest.raises(loops.AmbiguousMachine) as exc:
+        with pytest.raises(machines.CoordinatorUnreachable):
             loops.resolve_machine_for_repo("widgets", {})
-    assert exc.value.candidates == []
 
 
 # --------------------------------------------------------------------------
@@ -75,7 +77,7 @@ def test_dispatch_local_runs_local_argv_and_never_touches_the_queue():
 
 
 def test_dispatch_local_uses_default_runner_when_none_given(monkeypatch):
-    monkeypatch.setattr(loops, "_default_run_local", lambda argv: (1, "boom"))
+    monkeypatch.setattr(loops, "run_subprocess", lambda argv: (1, "boom"))
     result = loops.dispatch_loop_action(
         machine="h", local_host="h", local_argv=["loopctl", "stop", "widgets"],
         queue_action="loop.stop", queue_params={"repo": "widgets"}, connection={},

@@ -87,6 +87,17 @@ def test_stop_missing_signing_key_exits_one(capsys):
     assert "signing-key" in captured.err
 
 
+def test_stop_coordinator_unreachable_while_resolving_machine_exits_three(capsys):
+    """A Redis outage while resolving which machine runs the repo must
+    exit 3 ("cannot reach"), not 5 ("use --machine") -- picking a
+    different machine would not fix an unreachable coordinator."""
+    with mock.patch.object(loops, "resolve_machine_for_repo", side_effect=machines.CoordinatorUnreachable("x")):
+        code = cli.main(["stop", "widgets"])
+    captured = capsys.readouterr()
+    assert code == 3
+    assert "cannot reach" in captured.err
+
+
 def test_stop_remote_ok_exits_zero():
     with mock.patch.object(
         loops, "dispatch_loop_action",
@@ -185,6 +196,14 @@ def test_attach_ambiguous_machine_exits_five(capsys):
     assert code == 5
 
 
+def test_attach_coordinator_unreachable_while_resolving_machine_exits_three(capsys):
+    with mock.patch.object(loops, "resolve_machine_for_repo", side_effect=machines.CoordinatorUnreachable("x")):
+        code = cli.main(["attach", "widgets", "--print"])
+    captured = capsys.readouterr()
+    assert code == 3
+    assert "cannot reach" in captured.err
+
+
 def test_attach_execs_when_not_print(monkeypatch):
     # Real `os.execvp` replaces this process and never returns -- `_cmd_attach`
     # has no `return` after that call (see its `# pragma: no cover` line), so
@@ -239,6 +258,28 @@ def test_schedule_first_builds_expected_argv():
     assert code == 0
     assert dispatch.call_args.kwargs["local_argv"] == ["loopctl", "schedule", "first", "+2h5m", "every", "5h15m"]
     assert dispatch.call_args.kwargs["queue_params"] == {"mode": "first", "when": "+2h5m", "interval": "5h15m"}
+
+
+def test_schedule_first_with_newline_is_rejected_before_dispatch(capsys):
+    """`validate_schedule_token` rejects a newline in `when`/`interval` --
+    the "first" branch must catch that `RejectedCommand` itself, the same
+    way the "cal" branch already does, instead of letting it crash out
+    of `cli.main` uncaught."""
+    with mock.patch.object(loops, "dispatch_loop_action") as dispatch:
+        code = cli.main(["schedule", "--machine", "h", "first", "bad\nwhen", "every", "5h"])
+    assert code == 1
+    dispatch.assert_not_called()
+    assert capsys.readouterr().err
+
+
+def test_schedule_first_rejects_wrong_every_literal(capsys):
+    """The middle token must be the literal word "every" -- anything else
+    is a malformed invocation, not a stand-in for the keyword."""
+    with mock.patch.object(loops, "dispatch_loop_action") as dispatch:
+        code = cli.main(["schedule", "--machine", "h", "first", "+2h5m", "xyz", "5h15m"])
+    assert code == 1
+    dispatch.assert_not_called()
+    assert capsys.readouterr().err
 
 
 def test_schedule_defaults_machine_to_local_host():
@@ -304,3 +345,87 @@ def test_pause_all_worst_exit_code_wins(capsys):
     ):
         code = cli.main(["pause", "--all"])
     assert code == 1
+
+
+def test_pause_all_continues_past_one_machines_unreachable_coordinator(capsys):
+    """One machine's `CoordinatorUnreachable` must not abort the whole
+    `--all` fan-out -- the other machines still get tried, and their
+    results (plus the failing machine's own) are still reported."""
+    records = [{"name": "jesus"}, {"name": "mini"}]
+
+    def fake_dispatch(*, machine, **kwargs):
+        if machine == "jesus":
+            raise slots.CoordinatorUnreachable("x")
+        return {"mode": "local", "returncode": 0, "output": ""}
+
+    with (
+        mock.patch.object(machines, "machines", return_value=records),
+        mock.patch.object(loops, "dispatch_loop_action", side_effect=fake_dispatch) as dispatch,
+    ):
+        code = cli.main(["pause", "--all", "--json"])
+    assert sorted(call.kwargs["machine"] for call in dispatch.call_args_list) == ["jesus", "mini"]
+    assert code == 3
+    payload = json.loads(capsys.readouterr().out)
+    assert set(payload) == {"jesus", "mini"}
+    assert "error" in payload["jesus"]
+
+
+def test_pause_all_worst_exit_code_is_order_independent():
+    """The same set of per-machine outcomes must give the same overall
+    exit code no matter which machine's result came back first -- not
+    "whichever non-zero code showed up first"."""
+    records = [{"name": "jesus"}, {"name": "mini"}]
+
+    def dispatch_unreachable_then_failed(*, machine, **kwargs):
+        if machine == "jesus":
+            raise slots.CoordinatorUnreachable("x")
+        return {"mode": "local", "returncode": 1, "output": "boom"}
+
+    def dispatch_failed_then_unreachable(*, machine, **kwargs):
+        if machine == "jesus":
+            return {"mode": "local", "returncode": 1, "output": "boom"}
+        raise slots.CoordinatorUnreachable("x")
+
+    with (
+        mock.patch.object(machines, "machines", return_value=records),
+        mock.patch.object(loops, "dispatch_loop_action", side_effect=dispatch_unreachable_then_failed),
+    ):
+        code_a = cli.main(["pause", "--all", "--json"])
+
+    with (
+        mock.patch.object(machines, "machines", return_value=records),
+        mock.patch.object(loops, "dispatch_loop_action", side_effect=dispatch_failed_then_unreachable),
+    ):
+        code_b = cli.main(["pause", "--all", "--json"])
+
+    assert code_a == code_b == 3
+
+
+def test_pause_all_severity_beats_first_non_zero_wins():
+    """Exit 1 (a real failure) must outrank exit 4 (result unknown) no
+    matter which machine reports which -- the old "first non-zero wins"
+    rule would have given 4 in one of these two orderings and 1 in the
+    other, for the exact same two outcomes."""
+    records = [{"name": "jesus"}, {"name": "mini"}]
+    unknown = {"mode": "queued", "id": "x", "result": {"id": "x", "state": "running"}}
+    failed = {"mode": "local", "returncode": 1, "output": "boom"}
+
+    def jesus_unknown_mini_failed(*, machine, **kwargs):
+        return unknown if machine == "jesus" else failed
+
+    def jesus_failed_mini_unknown(*, machine, **kwargs):
+        return failed if machine == "jesus" else unknown
+
+    with (
+        mock.patch.object(machines, "machines", return_value=records),
+        mock.patch.object(loops, "dispatch_loop_action", side_effect=jesus_unknown_mini_failed),
+    ):
+        code_a = cli.main(["pause", "--all"])
+
+    with (
+        mock.patch.object(machines, "machines", return_value=records),
+        mock.patch.object(loops, "dispatch_loop_action", side_effect=jesus_failed_mini_unknown),
+    ):
+        code_b = cli.main(["pause", "--all"])
+
+    assert code_a == code_b == 1
