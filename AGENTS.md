@@ -136,6 +136,8 @@ The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 - `src/lupin/_lease_runtime.py` — the `hold` subprocess/lease-renewal code
   shared by both slot backends above.
 - `src/lupin/review_dispatch.py` — picks which lock a routed model needs.
+- `src/lupin/free_gate.py` — routes, then reserves the fleet `bmo` Redis
+  slot for a `bmo:` pick before calling it final (issue #37).
 - `src/lupin/serve.py`, `src/lupin/roadmap.py` — the dashboard. Moved from
   `ghostbook.nix`'s `hosts/jesus/loopgui/` (issue #204).
 - `src/lupin/quota.py` — the `/usage` page's quota reads, split out of
