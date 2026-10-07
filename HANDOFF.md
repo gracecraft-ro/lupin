@@ -89,46 +89,76 @@ means `hostname()` on that box is already confirmed to return exactly
 that string in this fleet's convention — but nothing enforces it stays
 true.
 
+## Review round 2: double-fetch bug (fixed)
+
+An independent reviewer found a real bug with two real threads against a
+real `redis-server`: `cached_gh_json` only re-checked the cache in the
+`except SlotFull` branch. When `acquire()` succeeded *after waiting* (the
+normal case — the first caller finishes inside `LOCK_WAIT` and the second
+gets the lock once it's released), the code fell straight through to
+`fetch_fn()` again instead of checking whether the first caller's result
+was already cached. Two calls a few hundred ms apart double-fetched `gh`.
+
+Fix: added an `else` clause on the `try/except` around `acquire()` that
+re-reads the cache on a *successful* acquire too, releasing the lease and
+returning the cached value if the holder waited behind already finished.
+
+While building a real-concurrency test for this (two actual threads, not
+a pre-held lease for the whole test), found a second, deeper, pre-existing
+bug underneath it: the lock's slot name was `f"gh-fetch:{owner}/{name}"`
+— a colon inside the slot name. `_lease_runtime.split_lease` rebuilds
+`(slot, holder)` from the lease string by splitting on the *first* colon
+only, so that slot name was parsed wrong by `release()`/`renew()`, which
+silently acted on the wrong key — the real lock entry was never released
+and just sat until `LOCK_TTL` (2 min) expired. This meant any second
+caller would always hit `SlotFull` and only ever reach the `except`
+branch's cache re-check, masking the first bug in any test that didn't
+control timing precisely. Fixed by changing the slot name's separator
+from `:` to `/` (`gh-fetch/{owner}/{name}`). Also found and fixed a third,
+related issue: the lock's `holder` was just `cache_key`, so two different
+real callers for the *same* cache_key shared one holder identity —
+`_ACQUIRE_SCRIPT` treats a repeat acquire from the same holder as a renew
+(no contention), so the lock gave no real mutual exclusion for exactly the
+race it exists to prevent. Fixed by making `holder` unique per call
+(`f"{cache_key}:{uuid4().hex[:8]}"`).
+
+New test: `tests/test_gh_cache.py::
+test_concurrent_caller_that_waits_reuses_the_result_instead_of_refetching`
+— two real `threading.Thread`s, synchronized with an `Event` (not a sleep)
+so the second thread's `acquire()` is guaranteed to find the lock already
+held, not racing to get it first. Verified by hand that it fails against
+each of the three bugs above (reverted the `else` branch alone: fails in
+0.4s calling `fetch_fn()` directly; the colon-separator alone, without the
+`else` fix: fails after the full 2s `SlotFull` wait instead of the fast
+path) before restoring the fix.
+
 ## Verification Status
 
-Baseline (before any of my changes, this session, from this worktree):
-`nix shell nixpkgs#python3Packages.pytest` run (pytest at the repo root,
-`PYTHONPATH` pointed at a nix-built `redis` package — see Known Blockers
-for why `nix shell` alone doesn't work) gave **551 passed, 1 failed**
+Project gate (`nix flake check -L`, this worktree, aarch64-linux):
+**before** any of my changes, 551 passed / 1 failed; **after** the
+original implementation, 561 passed / 1 failed; **after** this review
+round's fix, confirmed 562 passed / 1 failed (one more test than before:
+the new concurrency test). Same single pre-existing failure throughout
 (`test_serve.py::TestLoopsPageIntegration::
-test_claimed_elsewhere_shows_up_as_remote_in_by_machine_grouping`), not
-matching the issue's claimed "4 known pre-existing failures (test_quest.py
-x3, test_slots_redis.py x1)".
+test_claimed_elsewhere_shows_up_as_remote_in_by_machine_grouping`),
+confirmed pre-existing because it already failed in the very first,
+unmodified-code baseline run.
 
-After implementing + fixing test mocks (same command, same worktree):
-9 failed, 553 passed. Of those 9: 4 exactly match the issue's claimed
-pre-existing set by count and name (`test_quest.py::
-test_cli_quest_focus_prints_exact_copy_text`, `test_cli_quest_release_prints_exact_copy_text`,
-`test_cli_quest_release_no_focus_error`; `test_slots_redis.py::
-test_status_json_matches_real_sorted_set_contents`). 1
-(`test_commands.py::test_get_queue_lists_pending_oldest_first`) is
-untouched by this change and passes in isolation — flaky/order-dependent,
-pre-existing, out of scope. The remaining 4 were genuinely caused by this
-change (a stale test assertion in `test_roadmap.py`, and two more copies
-of the `_fake_locate` test helper needing the same `**kw` fix already
-applied once in `test_quest.py`) — fixed in this session; a final full run
-is in progress to confirm 553+ passed / 5 failed (the 4 pre-existing +
-the 1 flaky-unrelated one), none of them new.
+Separately, ad-hoc `pytest -q` runs on the host (not the hermetic nix
+sandbox) consistently surface a *different* subset of 4 pre-existing
+failures matching the issue's own claim exactly by name and count
+(`test_quest.py` x3, `test_slots_redis.py` x1) — order/state-dependent
+flakiness in shared fixtures across the two environments, not something
+this change causes (none of the 4 touch `gh_cache.py` or the 7 call
+sites' new code).
 
 ## Next Action
 
-1. Confirm the final full-gate run (`nix shell nixpkgs#python3Packages.pytest`
-   with `PYTHONPATH` set) comes back clean modulo the 5 known/unrelated
-   failures.
-2. `nix flake check -L` as the project's own documented gate command (in
-   background — it's slow).
-3. Commit.
-4. Push the branch to the mount's `origin` (not GitHub directly — repo's
-   `docs/delegation-loop.md` rule 1).
-5. Open a PR if push access allows; otherwise document the stacked-branch
-   approach.
-6. Post the issue report (Highlights/Evidence/Decisions/Next), explicitly
-   stating the pihome-check implementation and its hostname-mismatch risk.
+Done. `nix flake check -L` confirmed 562 passed / 1 failed (same single
+pre-existing failure). Committed; already visible in the mount
+(`/code/lupin`, worktree shares the git object store, no separate push
+needed). Follow-up issue report posted, issue left open per the
+coordinator's instruction.
 
 ## Known Blockers
 

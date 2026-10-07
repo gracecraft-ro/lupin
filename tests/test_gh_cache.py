@@ -8,6 +8,8 @@ test_slots_redis.py/test_machines.py.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from unittest import mock
 
 import redis as redis_lib
@@ -126,7 +128,7 @@ def test_canonical_machine_lock_contention_rereads_cache_instead_of_refetching(
     """
     from lupin import slots_redis
 
-    held = slots_redis.acquire("gh-fetch:acme/repo", holder="other-caller", **_kw(redis_port))
+    held = slots_redis.acquire("gh-fetch/acme/repo", holder="other-caller", **_kw(redis_port))
     try:
         _raw_client(redis_port).set(
             f"{gh_cache.PREFIX}gh-cache:acme/repo:issues:open",
@@ -154,7 +156,7 @@ def test_canonical_machine_fetches_anyway_if_lock_busy_and_cache_still_cold(
     """
     from lupin import slots_redis
 
-    held = slots_redis.acquire("gh-fetch:acme/repo", holder="other-caller", **_kw(redis_port))
+    held = slots_redis.acquire("gh-fetch/acme/repo", holder="other-caller", **_kw(redis_port))
     try:
         fetch = mock.Mock(return_value=([{"number": 2}], None))
         with mock.patch.object(machines, "hostname", return_value=gh_cache.CANONICAL_GH_FETCHER):
@@ -166,6 +168,63 @@ def test_canonical_machine_fetches_anyway_if_lock_busy_and_cache_still_cold(
         fetch.assert_called_once()
     finally:
         slots_redis.release(held, **_kw(redis_port))
+
+
+def test_concurrent_caller_that_waits_reuses_the_result_instead_of_refetching(
+    redis_port, flush_redis
+):
+    """Real two-thread race against a real redis-server, not a held-lease
+    stand-in: caller A acquires the lock and is mid-fetch (simulated by a
+    brief sleep) when caller B starts and blocks inside
+    `slots_redis.acquire`'s own poll loop. A finishes, writes the cache,
+    and releases -- only then does B's `acquire()` return. B must re-check
+    the cache at that point and reuse A's result, not call its own
+    `fetch_fn`.
+
+    The other lock-contention tests above pre-hold the lease for the whole
+    test, so `acquire()` always raises `SlotFull` for them -- they never
+    exercise a *successful* `acquire()` that happens after a wait, which is
+    the normal (not the exceptional) case and the one the bug was in.
+    """
+    fetch_b = mock.Mock()
+    a_holds_lock = threading.Event()
+
+    def fetch_a():
+        # Only reached once A's `acquire()` has already succeeded, so
+        # setting this tells B it is safe to start -- B's own `acquire()`
+        # is then guaranteed to find the lock held, not racing to get it
+        # first. `cached_gh_json` does real work (a cache read, hostname
+        # and redis checks) before it ever calls `acquire()`, so a plain
+        # head-start sleep before starting B isn't enough to guarantee
+        # ordering -- this event is.
+        a_holds_lock.set()
+        time.sleep(0.4)
+        return [{"number": 1}], None
+
+    results = {}
+
+    def call_a():
+        results["a"] = gh_cache.cached_gh_json(
+            "acme", "repo", "issues:open", fetch_a, connection=_kw(redis_port)
+        )
+
+    def call_b():
+        a_holds_lock.wait(timeout=5)
+        results["b"] = gh_cache.cached_gh_json(
+            "acme", "repo", "issues:open", fetch_b, connection=_kw(redis_port)
+        )
+
+    with mock.patch.object(machines, "hostname", return_value=gh_cache.CANONICAL_GH_FETCHER):
+        thread_a = threading.Thread(target=call_a)
+        thread_b = threading.Thread(target=call_b)
+        thread_a.start()
+        thread_b.start()
+        thread_a.join(timeout=5)
+        thread_b.join(timeout=5)
+
+    assert results["a"] == ([{"number": 1}], None)
+    assert results["b"] == ([{"number": 1}], None)
+    fetch_b.assert_not_called()
 
 
 def test_different_cache_keys_for_the_same_repo_do_not_collide(redis_port, flush_redis):

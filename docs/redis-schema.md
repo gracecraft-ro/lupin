@@ -163,10 +163,12 @@ different queries that must not share one cache entry: `issues:<state>`
 (`quest`'s issue-to-repo lookup).
 
 Guarded by the existing `slot:<name>` shape above, as
-`slot:gh-fetch:<owner>/<repo>` (max 1 holder) — this only stops `pihome`
-from running the same fetch twice if two `lupin` invocations there race
-each other. A non-`pihome` machine never takes this lock and never calls
-`gh` for these lookups at all; on a miss it reports "no data yet" instead.
+`slot:gh-fetch/<owner>/<repo>` (max 1 holder, `/` not `:` -- a colon in the
+slot name breaks `release`/`renew`'s lease-id parsing, which splits on the
+first colon) — this only stops `pihome` from running the same fetch twice
+if two `lupin` invocations there race each other. A non-`pihome` machine
+never takes this lock and never calls `gh` for these lookups at all; on a
+miss it reports "no data yet" instead.
 
 ## Command queue keys
 
@@ -244,7 +246,7 @@ numbers.
 | Command record (`cmd:<id>`) | n/a — not renewed | 1 hour (retention only, see below) |
 | Command result (`cmdres:<id>`) | n/a — not renewed | 1 hour |
 | GitHub data cache (`gh-cache:...`) | n/a — not renewed | 5 min |
-| GitHub fetch lock (`slot:gh-fetch:<owner>/<repo>`) | n/a — held only for one fetch | 2 min |
+| GitHub fetch lock (`slot:gh-fetch/<owner>/<repo>`) | n/a — held only for one fetch | 2 min |
 
 A command's Redis retention (1h) is not the same thing as how long it's
 valid to run — that's `expires_at` inside the record (120s after

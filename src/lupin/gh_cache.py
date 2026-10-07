@@ -25,6 +25,7 @@ caller's cache staying empty.
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any, Callable
 
 import redis
@@ -124,11 +125,26 @@ def cached_gh_json(
         # fetch rather than failing a command over a cache-layer outage.
         return fetch_fn()
 
+    # A unique holder per call, not just `cache_key`: `slots_redis.acquire`
+    # treats a second acquire from the *same* holder as a renew, not
+    # contention (see `_ACQUIRE_SCRIPT` -- same holder means no wait at
+    # all). Two real concurrent calls for the same cache_key need distinct
+    # holders to actually serialize against each other; `cache_key` alone
+    # would make them look like the same caller renewing its own lease.
+    holder = f"{cache_key}:{uuid.uuid4().hex[:8]}"
+
+    # No colon in the slot name: `_lease_runtime.split_lease` rebuilds
+    # `(slot, holder)` from the lease string `f"{slot}:{holder}"` by
+    # splitting on the *first* colon only, so a colon inside `slot` itself
+    # (e.g. "gh-fetch:acme/repo") makes it parse the wrong slot and
+    # `release()`/`renew()` silently act on a key that was never acquired
+    # -- the real lock then never clears until LOCK_TTL expires. "/" has
+    # the same job without that trap.
     lease = None
     try:
         lease = slots_redis.acquire(
-            f"gh-fetch:{owner}/{name}",
-            holder=cache_key,
+            f"gh-fetch/{owner}/{name}",
+            holder=holder,
             wait=LOCK_WAIT,
             ttl=LOCK_TTL,
             redis_host=connection.get("redis_host"),
@@ -145,6 +161,16 @@ def cached_gh_json(
             return cached, None
     except slots_redis.CoordinatorUnreachable:
         return fetch_fn()
+    else:
+        # We got the lock, possibly after waiting on LOCK_WAIT -- the
+        # holder we were waiting behind may have already finished and
+        # published the result. Check before paying for a second live
+        # fetch; without this, every caller that waits (the normal case,
+        # not just SlotFull) double-fetches `gh`.
+        hit, cached, _redis_ok = _read_cache(client, key)
+        if hit:
+            _release(lease, connection)
+            return cached, None
 
     try:
         data, error = fetch_fn()
@@ -154,16 +180,20 @@ def cached_gh_json(
         return data, None
     finally:
         if lease:
-            try:
-                slots_redis.release(
-                    lease,
-                    redis_host=connection.get("redis_host"),
-                    redis_port=connection.get("redis_port"),
-                    redis_username=connection.get("redis_username"),
-                    redis_password=connection.get("redis_password"),
-                )
-            except slots_redis.CoordinatorUnreachable:
-                pass
+            _release(lease, connection)
+
+
+def _release(lease, connection: dict) -> None:
+    try:
+        slots_redis.release(
+            lease,
+            redis_host=connection.get("redis_host"),
+            redis_port=connection.get("redis_port"),
+            redis_username=connection.get("redis_username"),
+            redis_password=connection.get("redis_password"),
+        )
+    except slots_redis.CoordinatorUnreachable:
+        pass
 
 
 def _read_cache(client, key: str) -> tuple[bool, Any, bool]:
