@@ -17,10 +17,14 @@ progress (issue #11, read-only); `quest focus`/`quest release` pin a quest
 to a machine (issue #12); `start`/`stop` claim and release a quest's issues
 (issue #13). `reconcile` applies the automatic release rules -- a claim
 with no heartbeat, a quest focus that is done/closed/idle/down, a started
-quest that is done/down (issue #14; see `reconcile.py`). All of them share
-one process so a caller has one binary to find and one `lupin --help` to
-read; the concerns stay as separate modules underneath, same as this
-project's other CLIs split "decide" from "do" (see review_dispatch.py).
+quest that is done/down (issue #14; see `reconcile.py`). `cmd` sends,
+checks, or lists signed cross-machine commands; `agent` is the
+long-running process that polls its own queue and runs them through a
+fixed action table (issue #28, implementing #27's design; see
+`commands.py`/`agent.py`). All of them share one process so a caller has
+one binary to find and one `lupin --help` to read; the concerns stay as
+separate modules underneath, same as this project's other CLIs split
+"decide" from "do" (see review_dispatch.py).
 
 Backend choice: `--backend local|redis` on each slot subcommand, default
 from the `LUPIN_BACKEND` env var, falling back to `local` if neither is
@@ -64,8 +68,10 @@ import os
 import sys
 import time
 
+from . import agent as agent_mod
 from . import claims
 from . import classify as classify_mod
+from . import commands
 from . import machines
 from . import place as place_mod
 from . import quest as quest_mod
@@ -356,6 +362,53 @@ def _place_args(parser: argparse.ArgumentParser) -> None:
     _fleet_connection_args(parser)
 
 
+def _signing_key_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--signing-key", default=os.environ.get("LUPIN_CMD_SIGNING_KEY"),
+        help="default: $LUPIN_CMD_SIGNING_KEY -- shared secret for this target machine",
+    )
+
+
+def _cmd_group_args(parser: argparse.ArgumentParser) -> None:
+    """`lupin cmd send|status|queue` -- nested subcommands, since each mode
+    takes a different shape of positional args (unlike `quest`, which reuses
+    one flat set of optional fields across modes).
+    """
+    sub = parser.add_subparsers(dest="cmd_action", required=True)
+
+    send = sub.add_parser("send", help="enqueue a signed command for another machine")
+    send.add_argument("machine", help="target machine")
+    send.add_argument("action", help="e.g. loop.stop, loop.run")
+    send.add_argument("params", nargs="*", help="key=value pairs, e.g. repo=owner/name")
+    send.add_argument("--ttl", type=float, default=commands.DEFAULT_TTL_S, help="command TTL in seconds")
+    send.add_argument("--json", action="store_true")
+    _signing_key_arg(send)
+    _redis_conn_args(send)
+
+    status = sub.add_parser("status", help="look up one command's result")
+    status.add_argument("id")
+    status.add_argument("--json", action="store_true")
+    _redis_conn_args(status)
+
+    queue = sub.add_parser("queue", help="list a machine's pending commands")
+    queue.add_argument("machine")
+    queue.add_argument("--json", action="store_true")
+    _redis_conn_args(queue)
+
+
+def _agent_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--machine", default=None, help="default: this host's hostname")
+    parser.add_argument(
+        "--batch", type=int, default=agent_mod.DEFAULT_BATCH, help="commands handled per poll"
+    )
+    parser.add_argument(
+        "--poll-interval", type=float, default=agent_mod.DEFAULT_POLL_INTERVAL,
+        help="seconds between polls",
+    )
+    _signing_key_arg(parser)
+    _redis_conn_args(parser)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lupin", description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -381,6 +434,8 @@ def _build_parser() -> argparse.ArgumentParser:
     _place_args(sub.add_parser("place", help="pick which machine should run a task"))
     _quest_args(sub.add_parser("quest", help="list quests, their progress, and their focus machine"))
     _reconcile_args(sub.add_parser("reconcile", help="apply the automatic release rules once"))
+    _cmd_group_args(sub.add_parser("cmd", help="send, check, or list cross-machine commands"))
+    _agent_args(sub.add_parser("agent", help="run the command-queue poll loop for this machine"))
     return parser
 
 
@@ -896,6 +951,84 @@ def _cmd_roadmap(args: argparse.Namespace) -> int:
     return code
 
 
+def _redis_kwargs(args: argparse.Namespace) -> dict:
+    return {
+        "redis_host": args.redis_host,
+        "redis_port": args.redis_port,
+        "redis_username": args.redis_username,
+        "redis_password": args.redis_password,
+    }
+
+
+def _cmd_cmd(args: argparse.Namespace) -> int:
+    if args.cmd_action == "send":
+        if not args.signing_key:
+            print("cmd send needs --signing-key or $LUPIN_CMD_SIGNING_KEY", file=sys.stderr)
+            return 1
+        try:
+            params = commands.parse_params(args.params)
+        except ValueError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+        try:
+            cmd_id = commands.enqueue(
+                args.machine, args.action, params,
+                key=args.signing_key, ttl=args.ttl, **_redis_kwargs(args),
+            )
+        except slots.CoordinatorUnreachable:
+            print(f"cannot reach the redis coordinator to send to {args.machine!r}", file=sys.stderr)
+            return 3
+        if args.json:
+            print(json.dumps({"id": cmd_id}))
+        else:
+            print(cmd_id)
+        return 0
+
+    if args.cmd_action == "status":
+        try:
+            result = commands.get_status(args.id, **_redis_kwargs(args))
+        except slots.CoordinatorUnreachable:
+            print(f"cannot reach the redis coordinator for command {args.id!r}", file=sys.stderr)
+            return 3
+        if result is None:
+            print(f"no command {args.id!r}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(result))
+        else:
+            print(f"{result['id']}: {result['status']}")
+        return 0
+
+    # args.cmd_action == "queue"
+    try:
+        entries = commands.get_queue(args.machine, **_redis_kwargs(args))
+    except slots.CoordinatorUnreachable:
+        print(f"cannot reach the redis coordinator for queue {args.machine!r}", file=sys.stderr)
+        return 3
+    if args.json:
+        print(json.dumps(entries))
+    else:
+        for entry in entries:
+            print(f"{entry['id']}: {entry.get('action', '?')} {entry.get('params', {})}")
+    return 0
+
+
+def _cmd_agent(args: argparse.Namespace) -> int:
+    if not args.signing_key:
+        print("agent needs --signing-key or $LUPIN_CMD_SIGNING_KEY", file=sys.stderr)
+        return 1
+    machine = args.machine or machines.hostname()
+    try:
+        agent_mod.run_forever(
+            machine, args.signing_key,
+            batch=args.batch, poll_interval=args.poll_interval, **_redis_kwargs(args),
+        )
+    except slots.CoordinatorUnreachable:
+        print(f"cannot reach the redis coordinator for agent {machine!r}", file=sys.stderr)
+        return 3
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     raw = sys.argv[1:] if argv is None else argv
     if "--" in raw:
@@ -949,6 +1082,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_reconcile(args)
     if args.cmd == "roadmap":
         return _cmd_roadmap(args)
+    if args.cmd == "cmd":
+        return _cmd_cmd(args)
+    if args.cmd == "agent":
+        return _cmd_agent(args)
     parser.error(f"unknown command {args.cmd!r}")  # pragma: no cover
     return 1
 
