@@ -36,6 +36,10 @@ OPENCODE_GO_AUTH_FILE = os.path.join(
 )
 OMP_STATS_FILE = os.path.expanduser("~/.omp/stats.db")
 
+# opencode.ai sits behind Cloudflare, which blocks Python urllib's default
+# "Python-urllib/x.y" user agent with a 403 (confirmed, issue #34).
+_USER_AGENT = "lupin-quota/1.0"
+
 
 class QuotaDuration(str, Enum):
     FIVE_HOURS = "PT5H"
@@ -326,7 +330,11 @@ def opencode_go_quota() -> list[dict]:
 
     request = urllib.request.Request(
         OPENCODE_GO_USAGE_URL,
-        headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+            "User-Agent": _USER_AGENT,
+        },
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
