@@ -3,7 +3,10 @@
 `route` and `classify` are the model-routing calls, moved out of
 ghostbook.nix in issue #203. `fetch-models` fetches a daily snapshot of
 which model IDs each subscription can call today and what they cost
-(issue #16; see `model_fetch.py`). `acquire`/`hold`/`release`/`status` are the
+(issue #16; see `model_fetch.py`). `fetch-benchmarks` fetches (or reads the
+fleet-shared cache of) a daily benchmark/quality score per model, via a
+restricted dispatched agent, not a local file (issue #17's reopen; see
+`benchmark_fetch.py`). `acquire`/`hold`/`release`/`status` are the
 slot-lease commands (issue #205 for the `local` backend, #210 for
 `redis`). `claim`/`renew-claim`/`release-claim` mark a GitHub issue as one
 loop's own, so two loops never work the same task (issue #6; Redis only, no
@@ -90,6 +93,7 @@ import sys
 import time
 
 from . import agent as agent_mod
+from . import benchmark_fetch
 from . import claims
 from . import classify as classify_mod
 from . import commands
@@ -141,6 +145,18 @@ def _fetch_models_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--no-write", action="store_true", help="print the snapshot without saving it")
     parser.add_argument("--json", action="store_true")
+
+
+def _fetch_benchmarks_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--force", action="store_true",
+        help="skip the freshness cache and pull now, even if a fresh snapshot already exists",
+    )
+    parser.add_argument("--json", action="store_true")
+    # Fleet-shared, not per-machine (issue #17's reopen) -- same connection
+    # resolution as `machines`/`place`, so a machine that already ran
+    # `lupin join` doesn't need to repeat its Redis location here.
+    _fleet_connection_args(parser)
 
 
 def _state_root_arg(parser: argparse.ArgumentParser) -> None:
@@ -540,6 +556,9 @@ def _build_parser() -> argparse.ArgumentParser:
     _fetch_models_args(
         sub.add_parser("fetch-models", help="fetch today's live model list and prices per subscription")
     )
+    _fetch_benchmarks_args(
+        sub.add_parser("fetch-benchmarks", help="fetch (or read the fleet-shared cache of) today's benchmark scores")
+    )
     _acquire_args(sub.add_parser("acquire", help="take a lease on a slot"))
     _hold_args(sub.add_parser("hold", help="acquire (or reuse a lease), run a command, release on exit"))
     _release_args(sub.add_parser("release", help="give up a lease"))
@@ -610,6 +629,16 @@ def _cmd_fetch_models(args: argparse.Namespace) -> int:
         for name, sub in data["subscriptions"].items():
             tag = "live" if sub.get("live") else "stale/unavailable"
             print(f"{name}: {len(sub['models'])} models ({tag})")
+    return 0
+
+
+def _cmd_fetch_benchmarks(args: argparse.Namespace) -> int:
+    data = benchmark_fetch.refresh_snapshot(force=args.force, **_fleet_connection(args))
+    if args.json:
+        print(json.dumps(data))
+    else:
+        tag = "live" if data.get("live") else f"stale/unavailable ({data.get('stale_reason')})"
+        print(f"benchmarks: {len(data.get('scores', []))} scored ({tag})")
     return 0
 
 
@@ -1475,6 +1504,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_classify(args)
     if args.cmd == "fetch-models":
         return _cmd_fetch_models(args)
+    if args.cmd == "fetch-benchmarks":
+        return _cmd_fetch_benchmarks(args)
     if args.cmd == "acquire":
         return _cmd_acquire(args)
     if args.cmd == "hold":

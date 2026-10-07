@@ -544,7 +544,12 @@ class ModelTierTests(unittest.TestCase):
         for tier in serve.MODEL_TIER_ORDER:
             self.assertIn(f"<span class=tier-name>{tier}</span>", page)
         self.assertIn("<span class='tier-pick dim'>none</span>", page)
-        self.assertNotIn("score", page)
+        # "score" is fine elsewhere on the page (the "All models" table's
+        # Perf/Value columns, issue #17's reopen) -- just not inside this
+        # category's own tier-card, which has no per-model score data.
+        card_start = page.index("<h3>frontend-ui</h3>")
+        card_end = page.index("</section>", card_start)
+        self.assertNotIn("score", page[card_start:card_end])
 
     def test_file_sourced_text_is_escaped(self):
         self.write_tiers({
@@ -613,7 +618,7 @@ class ModelTierTests(unittest.TestCase):
         handler.reply = mock.Mock()
         with mock.patch.object(serve, "render_model_tiers") as fake_render:
             handler.do_GET()
-        fake_render.assert_called_once_with(sent="pulled today's models")
+        fake_render.assert_called_once_with(sent="pulled today's models", connection={})
 
 
 class ModelSnapshotTests(unittest.TestCase):
@@ -714,6 +719,23 @@ class ModelSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(serve._format_price({"input": None, "output": None}), "no price data")
 
+    def test_format_score_variants(self):
+        self.assertEqual(serve._format_score(None), "no data")
+        self.assertEqual(serve._format_score({"score": None, "reason": "not found"}), "no data")
+        self.assertEqual(
+            serve._format_score({"score": 73.1, "scale": "Artificial Analysis Intelligence Index (0-100)"}),
+            "<span title='Artificial Analysis Intelligence Index (0-100)'>73.1</span>",
+        )
+        self.assertEqual(serve._format_score({"score": 73.1}), "73.1")
+
+    def test_format_value_variants(self):
+        self.assertEqual(serve._format_value(None, {"input": 3, "output": 15}), "no data")
+        self.assertEqual(serve._format_value({"score": None}, {"input": 3, "output": 15}), "no data")
+        self.assertEqual(serve._format_value({"score": 73.1}, None), "no data")
+        # Free price (nothing on file for either side) has no denominator.
+        self.assertEqual(serve._format_value({"score": 73.1}, {"input": None, "output": None}), "no data")
+        self.assertEqual(serve._format_value({"score": 18}, {"input": 3, "output": 15}), "2.0 pts/$")
+
 
 class AllModelsTableTests(unittest.TestCase):
     """`render_model_tiers`'s "All models" table and tier-pick live badges,
@@ -784,8 +806,50 @@ class AllModelsTableTests(unittest.TestCase):
         self.assertIn("gpt-5.4", page)
         self.assertIn("no price data", page)
         self.assertIn("no ~/.codex credentials", page)
-        # Perf/Value are never invented -- no benchmark dataset exists.
+        # Perf/Value are never invented -- no benchmark snapshot was cached.
         self.assertEqual(page.count(">no data<"), 4)
+
+    def test_perf_value_columns_read_the_shared_benchmark_snapshot(self):
+        # Perf/Value (issue #17's reopen) come from the fleet-shared Redis
+        # key, not a local file, so this mocks `benchmark_fetch.read_snapshot`
+        # directly rather than writing a fixture file like the other tests
+        # in this class do for `model_fetch.SNAPSHOT_FILE`.
+        self.write_tiers({"coding": {"tiers": {}}})
+        self.write_snapshot({
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [{"id": "claude-opus-4-5", "price": {"input": 5, "output": 25}, "promo": None}],
+                },
+            },
+        })
+        benchmark_snapshot = {
+            "fetched_at": "2026-10-07T06:00:00+00:00",
+            "live": True,
+            "scores": [
+                {"id": "claude-opus-4-5", "score": 75.0, "scale": "Artificial Analysis Intelligence Index (0-100)"},
+            ],
+        }
+        with mock.patch.object(serve.benchmark_fetch, "read_snapshot", return_value=benchmark_snapshot):
+            page = self.render()
+        self.assertIn(">75", page)
+        self.assertIn("5.0 pts/$", page)
+
+    def test_perf_value_columns_show_no_data_without_a_benchmark_snapshot(self):
+        self.write_tiers({"coding": {"tiers": {}}})
+        self.write_snapshot({
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [{"id": "claude-opus-4-5", "price": {"input": 5, "output": 25}, "promo": None}],
+                },
+            },
+        })
+        with mock.patch.object(serve.benchmark_fetch, "read_snapshot", return_value=None):
+            page = self.render()
+        self.assertEqual(page.count(">no data<"), 2)
 
     def test_sent_message_is_shown_and_escaped(self):
         self.write_tiers({})
@@ -797,6 +861,12 @@ class AllModelsTableTests(unittest.TestCase):
         page = self.render()
         self.assertIn("action='/model-tiers/refresh'", page)
         self.assertIn("Pull models", page)
+
+    def test_refresh_benchmarks_form_posts_to_model_tiers_refresh_benchmarks(self):
+        self.write_tiers({})
+        page = self.render()
+        self.assertIn("action='/model-tiers/refresh-benchmarks'", page)
+        self.assertIn("Pull benchmarks", page)
 
 
 class ModelTiersRefreshRouteTests(unittest.TestCase):
@@ -839,6 +909,74 @@ class ModelTiersRefreshRouteTests(unittest.TestCase):
             call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
         )
         self.assertIn("pull%20failed%3A%20network%20down", location)
+
+
+class ModelTiersRefreshBenchmarksRouteTests(unittest.TestCase):
+    """The "Pull benchmarks" button's route -- mirrors
+    `ModelTiersRefreshRouteTests` above, but for `benchmark_fetch` instead
+    of `model_fetch`."""
+
+    def test_refresh_benchmarks_route_forces_a_fetch_and_redirects(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh-benchmarks"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        fake_snapshot = {"live": True, "scores": [{"id": "claude-opus-4-5", "score": 75.0}]}
+        with mock.patch.object(
+            serve.benchmark_fetch, "refresh_snapshot", return_value=fake_snapshot
+        ) as fake_refresh:
+            handler.do_POST()
+        # A human clicking the button means "I want a fresh pull right now" --
+        # `force=True` -- but it still goes through the single-fetcher lock,
+        # so this does not bypass another machine's in-progress fetch.
+        fake_refresh.assert_called_once_with(force=True)
+        handler.send_response.assert_called_once_with(303)
+        location = next(
+            call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
+        )
+        self.assertTrue(location.startswith("/model-tiers?sent="))
+        self.assertIn("1%20models", location)
+
+    def test_refresh_benchmarks_not_live_redirects_with_stale_reason(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh-benchmarks"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        fake_snapshot = {"live": False, "stale_reason": "benchmark-fetch slot is held elsewhere"}
+        with mock.patch.object(serve.benchmark_fetch, "refresh_snapshot", return_value=fake_snapshot):
+            handler.do_POST()
+        location = next(
+            call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
+        )
+        self.assertIn("benchmark%20pull%20did%20not%20complete", location)
+        self.assertIn("held%20elsewhere", location)
+
+    def test_refresh_benchmarks_failure_redirects_with_message_not_a_500(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh-benchmarks"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        with mock.patch.object(
+            serve.benchmark_fetch, "refresh_snapshot", side_effect=RuntimeError("redis down")
+        ):
+            handler.do_POST()
+        handler.send_response.assert_called_once_with(303)
+        location = next(
+            call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
+        )
+        self.assertIn("pull%20failed%3A%20redis%20down", location)
 
 
 class RoadmapCliTests(unittest.TestCase):

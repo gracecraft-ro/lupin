@@ -26,6 +26,7 @@ One program, `lupin`, with subcommands. Run `lupin --help` for the full list.
 lupin route <category> <size> [--no-bmo] [--primary-effort E] [--json]
 lupin classify --issue-json FILE [--diff-stat FILE] [--json]
 lupin fetch-models [--snapshot-file FILE] [--no-write] [--json]
+lupin fetch-benchmarks [--force] [--json]
 lupin review-route (--category C --size S | --issue-json FILE) [--mode M] [--json]
 lupin review-route --prefetch N[,N...] [--repo OWNER/REPO]
 lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
@@ -98,6 +99,14 @@ mini    ghosta@mini.tailnet.ts.net
 This file is local, per-machine config (written by Nix in practice), not
 fleet state. No line for a machine: `attach` fails with an error instead
 of guessing a hostname.
+
+`fetch-benchmarks` gets a quality score for each model. It does not call a
+benchmark API. Instead it runs a sandboxed Claude agent once a day. That
+agent searches the web and reports back a score, a source, and a date —
+never a guess. The result goes into one shared Redis key, not a file on
+disk, so every machine sees the same score and only one machine does the
+work each day. Use `--force` to pull fresh data right now, skipping the
+daily cache (it still waits its turn if another machine is mid-pull).
 
 ## How a slot's limit (`max`) works
 

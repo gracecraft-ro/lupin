@@ -59,7 +59,7 @@ from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
-from . import claims, commands, loops, machines, model_fetch, quest, roadmap, slots_redis
+from . import benchmark_fetch, claims, commands, loops, machines, model_fetch, quest, roadmap, slots_redis
 from .slots import CoordinatorUnreachable
 from .quota import (
     QuotaDuration,
@@ -1602,14 +1602,44 @@ def _snapshot_age(fetched_at: str | None) -> str:
     return f"<span data-since='{epoch:.0f}'></span> ago"
 
 
-def render_snapshot_models_table(models: list[dict]) -> str:
+def _format_score(entry: dict | None) -> str:
+    """"Perf" cell: `entry`'s score with its scale as a hover tooltip, or
+    "no data" if there's no entry or the dispatched agent couldn't find
+    one (`{"score": null, "reason": ...}`, never a guess -- see
+    `benchmark_fetch.py`)."""
+    if not entry or entry.get("score") is None:
+        return "no data"
+    scale = entry.get("scale") or ""
+    score = f"{entry['score']:g}"
+    return f"<span title='{esc(scale)}'>{score}</span>" if scale else score
+
+
+def _format_value(entry: dict | None, price: dict | None) -> str:
+    """"Value" cell: score per dollar, i.e. `score / blended price`, where
+    blended price averages whatever of input/output price is on file.
+    This is this module's own ratio, computed from two real numbers (a
+    fetched score, a fetched price) -- never a guess, but also not
+    something the issue or the mockup ever specified a formula for; a
+    judgment call, flagged as such in this change's report. "no data"
+    whenever either input is missing, or price is free (nothing to divide
+    by that means anything).
+    """
+    if not entry or entry.get("score") is None or not price:
+        return "no data"
+    prices = [p for p in (price.get("input"), price.get("output")) if isinstance(p, (int, float))]
+    blended = sum(prices) / len(prices) if prices else 0
+    if not blended:
+        return "no data"
+    return f"{entry['score'] / blended:.1f} pts/$"
+
+
+def render_snapshot_models_table(models: list[dict], benchmark_scores: list[dict] | None = None) -> str:
     """The "All models" table (issue #17): every model each subscription
-    actually returned that day, not a hardcoded list. "Perf" and "Value"
-    are always "no data" -- this repo has no structured benchmark-score
-    dataset to compute them from (model-tiers.json's "source"/"note"
-    fields only cite a benchmark's name in prose, e.g. "Artificial
-    Analysis Coding Agent Index"; there are no per-model numbers to read).
-    Scored out of this pass rather than invented; see the issue report.
+    actually returned that day, not a hardcoded list. "Perf"/"Value" read
+    from `benchmark_fetch`'s fleet-shared snapshot (issue #17's reopen),
+    matched by model id the same way price already matches by id --
+    "no data" for a model the dispatched agent couldn't find a credible
+    score for, never a guess.
     """
     if not models:
         return (
@@ -1620,13 +1650,14 @@ def render_snapshot_models_table(models: list[dict]) -> str:
     for model in sorted(models, key=lambda m: (m["subscription"], m["id"])):
         source = "live" if model["live"] else (esc(model["stale_reason"]) if model["stale_reason"] else "stale")
         promo = esc(model["promo"]) if model.get("promo") else "-"
+        score_entry = benchmark_fetch.match_score(model["id"], benchmark_scores or [])
         rows.append(
             "<tr>"
             f"<td>{esc(model['display_name'])}</td>"
             f"<td>{esc(model['subscription'])}</td>"
             f"<td>{esc(_format_price(model['price']))}</td>"
-            "<td class=dim>no data</td>"
-            "<td class=dim>no data</td>"
+            f"<td>{_format_score(score_entry)}</td>"
+            f"<td>{_format_value(score_entry, model['price'])}</td>"
             f"<td>{promo}</td>"
             f"<td class=dim>{source}</td>"
             "</tr>"
@@ -1638,10 +1669,12 @@ def render_snapshot_models_table(models: list[dict]) -> str:
     )
 
 
-def render_model_tiers(*, sent: str | None = None) -> bytes:
+def render_model_tiers(*, sent: str | None = None, connection: dict | None = None) -> bytes:
     rows = model_tiers()
     snapshot = load_model_snapshot()
     models = snapshot_models(snapshot)
+    benchmark_snapshot = benchmark_fetch.read_snapshot(**(connection or {}))
+    benchmark_scores = (benchmark_snapshot or {}).get("scores") or []
     body = [
         f'<header><h1>{icon("M7 7h10v10H7zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3")}Models</h1></header>',
     ]
@@ -1650,9 +1683,12 @@ def render_model_tiers(*, sent: str | None = None) -> bytes:
     body.append(
         "<div class='card' style='display:flex;align-items:center;gap:1rem'>"
         f"<span class=dim>Last pulled: {_snapshot_age(snapshot.get('fetched_at') if snapshot else None)}</span>"
+        f"<span class=dim>Benchmarks: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)}</span>"
         "<span style='flex:1'></span>"
         "<form method=post action='/model-tiers/refresh'>"
-        "<button type=submit>Pull models</button></form></div>"
+        "<button type=submit>Pull models</button></form>"
+        "<form method=post action='/model-tiers/refresh-benchmarks'>"
+        "<button type=submit>Pull benchmarks</button></form></div>"
     )
     body.extend([
         "<h2>Routing by task category</h2>",
@@ -1689,10 +1725,12 @@ def render_model_tiers(*, sent: str | None = None) -> bytes:
     body.extend([
         "<h2>All models</h2>",
         "<p class=dim>Every model <code>lupin fetch-models</code> found reachable "
-        "today, across opencode-go, Claude, and Codex. \"Perf\" and \"Value\" "
-        "read \"no data\" for every row -- no benchmark dataset exists in "
-        "this repo yet to compute them from.</p>",
-        render_snapshot_models_table(models),
+        "today, across opencode-go, Claude, and Codex. \"Perf\" is "
+        "<code>lupin fetch-benchmarks</code>'s score for that model (a "
+        "dispatched agent's web research, cached fleet-wide); \"Value\" is "
+        "that score divided by price. Either reads \"no data\" when no "
+        "credible score was found, never a guess.</p>",
+        render_snapshot_models_table(models, benchmark_scores),
     ])
     return page("Model tiers", "".join(body), active="models")
 
@@ -2510,7 +2548,7 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/usage":
             self.reply(render_usage())
         elif url.path == "/model-tiers":
-            self.reply(render_model_tiers(sent=query.get("sent")))
+            self.reply(render_model_tiers(sent=query.get("sent"), connection=self.fleet_connection))
         elif url.path == "/machines":
             try:
                 records = machines.machines(self.fleet_connection)
@@ -2707,6 +2745,28 @@ class Handler(BaseHTTPRequestHandler):
         try:
             model_fetch.save_snapshot(model_fetch.snapshot())
             sent = "pulled today's model list and prices"
+        except Exception as exc:  # best-effort by design, see docstring above
+            sent = f"pull failed: {exc}"
+        self.redirect(f"/model-tiers?sent={quote(sent, safe='')}")
+
+    def do_model_tiers_refresh_benchmarks(self, form: dict) -> None:
+        """"Pull benchmarks": force a fresh `benchmark_fetch` dispatch,
+        right now. `force=True` because a human clicking this button has
+        already decided they want a fresh pull -- it still goes through
+        `refresh_snapshot`'s single-fetcher lock (`benchmark_fetch.py`'s
+        docstring), so if another machine is mid-fetch this click just
+        reports whatever is cached instead of starting a second, paying
+        dispatch. `refresh_snapshot` already turns every failure (timed
+        out, bad output, Redis unreachable) into a `live: False` result
+        rather than raising, so the broad except below is only a
+        last-resort guard, same reasoning as `do_model_tiers_refresh`'s.
+        """
+        try:
+            data = benchmark_fetch.refresh_snapshot(force=True, **self.fleet_connection)
+            if data.get("live"):
+                sent = f"pulled today's benchmark scores ({len(data.get('scores', []))} models)"
+            else:
+                sent = f"benchmark pull did not complete: {data.get('stale_reason', 'unknown reason')}"
         except Exception as exc:  # best-effort by design, see docstring above
             sent = f"pull failed: {exc}"
         self.redirect(f"/model-tiers?sent={quote(sent, safe='')}")
@@ -3054,6 +3114,8 @@ class Handler(BaseHTTPRequestHandler):
             self.do_repos_schedule(form)
         elif url.path == "/model-tiers/refresh":
             self.do_model_tiers_refresh(form)
+        elif url.path == "/model-tiers/refresh-benchmarks":
+            self.do_model_tiers_refresh_benchmarks(form)
         else:
             self.reply(render_error("no such page"), 404)
 
