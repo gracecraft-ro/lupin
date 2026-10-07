@@ -14,6 +14,8 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import quote, urlsplit
 
+from . import classify
+
 CODE_DIR = "/code"
 GITHUB_CACHE_SECONDS = 60 * 60
 LEDGER_CACHE_SECONDS = 5 * 60
@@ -1674,6 +1676,7 @@ def render_combined_page(repos: list[str], models: dict, page_fn) -> bytes:
     ) if owner_blocked_items else ""
     body = (
         "<header><h1>Work across repositories</h1><span class='sp'></span>"
+        "<a href='/roadmap?view=list'>list view</a> · "
         "<a href='/'>loopctl dashboard</a></header>"
         "<form class='queue-filter'><label for='repo'>Repository</label>"
         f"<select id='repo' onchange='location.href=this.value'>{''.join(selector)}</select>"
@@ -1930,6 +1933,307 @@ def render_completed_page(repo: str | None, repos: list[str], issues_by_repo: di
     )
     css = ".browse-search{display:flex;gap:.6rem;align-items:center;margin:1rem 0}.browse-search input{flex:1;min-width:12rem;font:inherit;padding:.35rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}.queue-comment-list{display:grid;gap:.35rem}.browse-more{font:inherit;margin:.3rem 0;padding:.3rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}"
     return page_fn(heading, body, css, _browse_script())
+
+
+LIST_PAGE_SIZE = 25
+EPIC_PAGE_SIZE = 10
+LIST_PRIORITIES = ["P0", "P1", "P2", "P3"]
+# Keys of model-tiers.json (route.py's lookup table). The mockup calls this
+# axis "capability"; classify.classify() already sorts an issue into one of
+# these, so the List view's capability filter reuses that, not a new label.
+LIST_CAPABILITIES = ["coding", "frontend-ui", "translation", "prose", "cad-spatial", "general"]
+LIST_SORTS = [
+    ("priority", "Priority"),
+    ("updated", "Recently updated"),
+    ("number", "Issue number"),
+]
+
+
+def _list_rows(
+    repos: list[str], models: dict, repo_filter: str, prio_filter: str, cap_filter: str, search: str
+) -> list[dict]:
+    """Flatten every repo's open issues into one row per issue.
+
+    Each row also carries its epic (from the "parent" edges build_model()
+    already derives for epic-labeled issues) so render_list_page() can group
+    by epic without re-parsing issue bodies.
+    """
+    search = search.strip().lower()
+    rows = []
+    for repo in repos:
+        if repo_filter and repo != repo_filter:
+            continue
+        model = models.get(repo)
+        if not model:
+            continue
+        by_number = {node["number"]: node for node in model["nodes"]}
+        parent_of = {
+            edge["to"]: edge["from"] for edge in model["edges"] if edge["kind"] == "parent"
+        }
+        stage_of = {
+            number: stage["name"]
+            for stage in model["stages"]
+            for number in stage["numbers"]
+        }
+        for node in model["nodes"]:
+            if prio_filter and node["priority"] != prio_filter:
+                continue
+            capability, _size = classify.classify(node)
+            if cap_filter and capability != cap_filter:
+                continue
+            if search:
+                haystack = " ".join(
+                    [str(node["number"]), node["title"], " ".join(node["labels"])]
+                ).lower()
+                if search not in haystack:
+                    continue
+            epic_number = parent_of.get(node["number"])
+            epic_node = by_number.get(epic_number) if epic_number else None
+            rows.append(
+                {
+                    "repo": repo,
+                    "number": node["number"],
+                    "title": node["title"],
+                    "url": node["url"],
+                    "priority": node["priority"],
+                    "capability": capability,
+                    "stage": stage_of.get(node["number"], ""),
+                    "updatedAt": node.get("updatedAt") or node.get("createdAt"),
+                    "epicNumber": epic_number,
+                    "epicTitle": epic_node["title"] if epic_node else None,
+                }
+            )
+    return rows
+
+
+def _sort_list_rows(rows: list[dict], sort: str) -> list[dict]:
+    if sort == "updated":
+        return sorted(
+            rows,
+            key=lambda row: _parse_time(row["updatedAt"])
+            or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )
+    if sort == "number":
+        return sorted(rows, key=lambda row: (row["repo"], row["number"]))
+
+    def priority_rank(row):
+        digits = row["priority"][1:]
+        return int(digits) if digits.isdigit() else 9
+
+    return sorted(rows, key=lambda row: (priority_rank(row), row["repo"], row["number"]))
+
+
+def render_list_page(repos: list[str], models: dict, page_fn, query: dict) -> bytes:
+    """Render the Roadmap List view: issue #33's scale fallback for Board.
+
+    Board (render_combined_page/render_page) lays out open issues in stage
+    lanes, paginated 20-at-a-time per lane with client-side JS. That only
+    works up to a few dozen issues. List instead filters and sorts
+    server-side, then returns one page of rows at a time via `?page=N` --
+    real pagination, not a DOM-side "show more" -- so the response size
+    stays constant regardless of how many open issues the repos have.
+    """
+    repo_filter = query.get("repo", "").strip()
+    prio_filter = query.get("prio", "").strip()
+    cap_filter = query.get("cap", "").strip()
+    sort = query.get("sort", "priority").strip()
+    search = query.get("q", "").strip()
+    grouped = query.get("group", "").strip() == "epic"
+
+    rows = _sort_list_rows(
+        _list_rows(repos, models, repo_filter, prio_filter, cap_filter, search), sort
+    )
+
+    base_filters = {
+        "view": "list",
+        "repo": repo_filter,
+        "prio": prio_filter,
+        "cap": cap_filter,
+        "sort": sort,
+        "q": search,
+        "group": "epic" if grouped else "",
+    }
+
+    def list_link(**overrides) -> str:
+        params = dict(base_filters)
+        params.update(overrides)
+        pairs = [(key, value) for key, value in params.items() if value]
+        return "/roadmap?" + "&".join(
+            f"{quote(key, safe='')}={quote(str(value), safe='')}" for key, value in pairs
+        )
+
+    def options(values, selected, labels=None):
+        html_options = []
+        for value in values:
+            label = labels[value] if labels else value
+            marker = " selected" if value == selected else ""
+            html_options.append(
+                f"<option value='{_escape_attr(value)}'{marker}>{html.escape(label)}</option>"
+            )
+        return "".join(html_options)
+
+    filters_form = (
+        "<form class='queue-filter' action='/roadmap' method='get'>"
+        "<input type='hidden' name='view' value='list'>"
+        "<label for='list-q'>Search</label>"
+        f"<input id='list-q' type='search' name='q' value='{_escape_attr(search)}' "
+        "placeholder='Title, #number or label'>"
+        "<label for='list-repo'>Repo</label>"
+        f"<select id='list-repo' name='repo'><option value=''>All repos</option>"
+        f"{options(repos, repo_filter)}</select>"
+        "<label for='list-prio'>Priority</label>"
+        f"<select id='list-prio' name='prio'><option value=''>Any priority</option>"
+        f"{options(LIST_PRIORITIES, prio_filter)}</select>"
+        "<label for='list-cap'>Capability</label>"
+        f"<select id='list-cap' name='cap'><option value=''>Any capability</option>"
+        f"{options(LIST_CAPABILITIES, cap_filter)}</select>"
+        "<label for='list-sort'>Sort</label>"
+        f"<select id='list-sort' name='sort'>"
+        f"{options([value for value, _label in LIST_SORTS], sort, dict(LIST_SORTS))}</select>"
+        "<button type='submit'>Apply</button>"
+        f"<a href='{_escape_attr(list_link(group='' if grouped else 'epic'))}'>"
+        f"{'Ungroup' if grouped else 'Group by epic'}</a>"
+        "</form>"
+    )
+
+    head = (
+        "<div class='list-row list-head'><span>Issue</span><span>Title</span>"
+        "<span>Epic</span><span>Capability</span><span>Repo</span>"
+        "<span>Stage</span><span>Pri</span><span>Updated</span></div>"
+    )
+
+    def row_html(row: dict) -> str:
+        href = row["url"] if row["url"].startswith("https://github.com/") else "#"
+        epic = f"#{row['epicNumber']} {row['epicTitle']}" if row["epicNumber"] else ""
+        return (
+            "<div class='list-row'>"
+            f"<a href='{_escape_attr(href)}' target='_blank' rel='noopener'>#{row['number']}</a>"
+            f"<span class='list-title'>{html.escape(row['title'])}</span>"
+            f"<span class='dim'>{html.escape(epic)}</span>"
+            f"<span class='pill'>{html.escape(row['capability'])}</span>"
+            f"<span class='dim'>{html.escape(row['repo'])}</span>"
+            f"<span class='dim'>{html.escape(row['stage'])}</span>"
+            f"<span class='pill'>{html.escape(row['priority'])}</span>"
+            f"<span class='dim'>{html.escape(_compact_time(row['updatedAt']))}</span>"
+            "</div>"
+        )
+
+    if grouped:
+        epics: dict[tuple[str, int], dict] = {}
+        ungrouped = []
+        for row in rows:
+            if row["epicNumber"]:
+                key = (row["repo"], row["epicNumber"])
+                bucket = epics.setdefault(key, {"title": row["epicTitle"], "rows": []})
+                bucket["rows"].append(row)
+            else:
+                ungrouped.append(row)
+
+        open_key = query.get("open", "").strip()
+        try:
+            shown = max(EPIC_PAGE_SIZE, int(query.get("shown", "") or EPIC_PAGE_SIZE))
+        except ValueError:
+            shown = EPIC_PAGE_SIZE
+
+        def group_section(key: str, title: str, group_rows: list[dict]) -> str:
+            is_open = key == open_key
+            toggle_href = list_link(open="" if is_open else key, shown="")
+            header = (
+                f"<a class='list-group-header' href='{_escape_attr(toggle_href)}'>"
+                f"{'▾' if is_open else '▸'} {html.escape(title)} "
+                f"<span class='dim'>({len(group_rows)} issues)</span></a>"
+            )
+            if not is_open:
+                return f"<div class='list-group'>{header}</div>"
+            visible = group_rows[:shown]
+            more = ""
+            remaining = len(group_rows) - len(visible)
+            if remaining > 0:
+                more_href = list_link(open=key, shown=str(shown + EPIC_PAGE_SIZE))
+                more = (
+                    f"<a class='list-more' href='{_escape_attr(more_href)}'>"
+                    f"Show {EPIC_PAGE_SIZE} more · {remaining} remaining</a>"
+                )
+            return (
+                f"<div class='list-group'>{header}"
+                f"{''.join(row_html(row) for row in visible)}{more}</div>"
+            )
+
+        sections = [
+            group_section(f"{repo}:{number}", title["title"] or f"#{number}", title["rows"])
+            for (repo, number), title in sorted(
+                epics.items(), key=lambda item: (-len(item[1]["rows"]), item[0])
+            )
+        ]
+        if ungrouped:
+            sections.append(group_section("none", "No epic", ungrouped))
+        table_html = head + (
+            "".join(sections) if sections else "<p class='dim'>No issues match these filters.</p>"
+        )
+        epic_count = len(epics) + (1 if ungrouped else 0)
+        footer = (
+            f"<div class='list-pager'>{len(rows)} issues in {epic_count} epics. "
+            f"Open an epic to see its issues, {EPIC_PAGE_SIZE} at a time.</div>"
+        )
+    else:
+        total = len(rows)
+        try:
+            page_num = max(1, int(query.get("page", "") or 1))
+        except ValueError:
+            page_num = 1
+        start = (page_num - 1) * LIST_PAGE_SIZE
+        if start >= total and total:
+            page_num = 1
+            start = 0
+        page_rows = rows[start : start + LIST_PAGE_SIZE]
+        has_prev = page_num > 1
+        has_next = start + LIST_PAGE_SIZE < total
+        range_text = (
+            f"{start + 1}–{min(start + LIST_PAGE_SIZE, total)}" if page_rows else "0"
+        )
+        prev_link = (
+            f"<a href='{_escape_attr(list_link(page=str(page_num - 1)))}'>Prev</a>"
+            if has_prev
+            else "<span class='dim'>Prev</span>"
+        )
+        next_link = (
+            f"<a href='{_escape_attr(list_link(page=str(page_num + 1)))}'>Next</a>"
+            if has_next
+            else "<span class='dim'>Next</span>"
+        )
+        table_html = head + (
+            "".join(row_html(row) for row in page_rows)
+            if page_rows
+            else "<p class='dim'>No issues match these filters.</p>"
+        )
+        footer = (
+            "<div class='list-pager'>"
+            f"<span>Showing <b>{range_text}</b> of {total}</span>"
+            f"<span class='sp'></span>{prev_link}{next_link}</div>"
+        )
+
+    body = (
+        "<header><h1>Work across repositories · list</h1><span class='sp'></span>"
+        "<a href='/roadmap'>board view</a></header>"
+        f"{filters_form}"
+        f"<div class='list-table'>{table_html}</div>"
+        f"{footer}"
+    )
+    css = """
+.queue-filter{display:flex;gap:.6rem;align-items:center;flex-wrap:wrap;margin:1rem 0}
+.queue-filter select,.queue-filter input{font:inherit;padding:.35rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}
+.list-table{display:grid;gap:0}
+.list-row{display:grid;grid-template-columns:64px minmax(0,1fr) 160px 120px 110px 110px 56px 110px;gap:10px;padding:.4rem 0;border-top:1px solid var(--line);align-items:center;font-size:.85rem}
+.list-head{font-weight:600;color:var(--ink3);border-top:0}
+.list-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.list-group{margin:.3rem 0}
+.list-group-header{display:block;padding:.4rem 0;font-weight:600;text-decoration:none;color:var(--fg)}
+.list-group-header:hover{text-decoration:underline}
+.list-more{display:block;padding:.3rem 0 .3rem 1.4rem}
+.list-pager{display:flex;align-items:center;gap:.8rem;margin:.8rem 0}
+"""
+    return page_fn("Work across repositories · list", body, css, "")
 
 
 def repository_names(rows: list[dict]) -> list[str]:
