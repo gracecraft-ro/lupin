@@ -31,7 +31,9 @@ by that same tuple, then reports the first dimension where a machine's
 tuple differs from the picked machine's -- that reproduces the example
 exactly (a draining machine always reads "draining"; an online machine
 beaten only on quest focus reads "not quest focus", even if it also has
-fewer free slots).
+fewer free slots). Issue #30 adds quota burn margin (`pct_left / hours to
+reset`, see `_burn_margin_rank`) as a new dimension between quest focus and
+free slots, with a matching "worse burn margin" reason.
 
 Judgment call -- quest focus: `quest_focus_for` below maps a task's issue
 number to its quest (if `quest.load_quests` -- issue #11 -- finds one in
@@ -64,6 +66,7 @@ into its own invocation; this module does not execute anything.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -178,14 +181,59 @@ def _resolve_task(task: str) -> tuple[dict, str]:
     return issue or {}, label
 
 
-def _rank_key(record: dict, quest_focus: str | None, now: float) -> tuple:
+def _burn_margin_rank(record: dict, provider: str, now: float) -> tuple[int, float]:
+    """How safe this machine's quota is: `pct_left / hours_until_reset`, as a
+    sort key where a *smaller* tuple is better (matches every other
+    dimension in `_rank_key`, which this feeds into).
+
+    Three tiers, since not every machine has enough data for a real margin:
+
+    0. A real reading -- `pct_left` and a `resets_at` are both present.
+       `resets_at` is epoch milliseconds (`quota.quota_reset_timestamp`);
+       `now` (from `time.time()`) is epoch seconds, so this converts before
+       subtracting. If `resets_at` has already passed (a stale heartbeat --
+       the window likely reset for real since the last report), treat the
+       machine as safe rather than dividing by a near-zero or negative
+       `hours_left`, which would otherwise blow the ranking up or flip its
+       sign: `-math.inf` sorts ahead of every real (finite) margin.
+    1. `pct_left` alone -- no `resets_at` to compute a rate from. Ranks
+       after every tier-0 machine regardless of how high `pct_left` is;
+       among themselves, more `pct_left` is still better.
+    2. Nothing usable (no quota entry for this provider, or `pct_left` is
+       `None`) -- ranks last, with no further ordering to apply.
+    """
+    entry = (record.get("quota") or {}).get(provider)
+    pct_left = entry.get("pct_left") if entry else None
+    if pct_left is None:
+        return (2, 0.0)
+    resets_at = entry.get("resets_at")
+    if not isinstance(resets_at, (int, float)):
+        return (1, -pct_left)
+    hours_left = (resets_at / 1000 - now) / 3600
+    if hours_left <= 0:
+        return (0, -math.inf)
+    return (0, -(pct_left / hours_left))
+
+
+def _rank_key(
+    record: dict, quest_focus: str | None, now: float, provider: str
+) -> tuple:
     state_rank = 0 if record["state"] == "online" else 1
     quest_rank = 0 if quest_focus and record["name"] == quest_focus else 1
+    margin_rank = _burn_margin_rank(record, provider, now)
     used, max_ = machines._slot_totals(record.get("slots"))
-    return (state_rank, quest_rank, -(max_ - used), machines._heartbeat_age(record, now))
+    return (
+        state_rank,
+        quest_rank,
+        margin_rank,
+        -(max_ - used),
+        machines._heartbeat_age(record, now),
+    )
 
 
-def _reason(record: dict, pick: dict | None, quest_focus: str | None) -> str:
+def _reason(
+    record: dict, pick: dict | None, quest_focus: str | None, provider: str, now: float
+) -> str:
     if pick is not None and record["name"] == pick["name"]:
         return "pick"
     if record["state"] != "online":
@@ -194,6 +242,8 @@ def _reason(record: dict, pick: dict | None, quest_focus: str | None) -> str:
         return "draining"
     if quest_focus and pick["name"] == quest_focus and record["name"] != quest_focus:
         return "not quest focus"
+    if _burn_margin_rank(record, provider, now) != _burn_margin_rank(pick, provider, now):
+        return "worse burn margin"
     used_r, max_r = machines._slot_totals(record.get("slots"))
     used_p, max_p = machines._slot_totals(pick.get("slots"))
     if (max_r - used_r) < (max_p - used_p):
@@ -266,7 +316,7 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
         issue_number_match.group(1) if issue_number_match else None, connection
     )
     now = time.time()
-    ranked = sorted(matched, key=lambda r: _rank_key(r, quest_focus, now))
+    ranked = sorted(matched, key=lambda r: _rank_key(r, quest_focus, now, provider))
     online = [r for r in ranked if r["state"] == "online"]
     pick = online[0] if online else None
 
@@ -278,7 +328,7 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
             "slots_max": machines._slot_totals(record.get("slots"))[1],
             "quest_focus": record["name"] if record["name"] == quest_focus else None,
             "version": record.get("version"),
-            "result": _reason(record, pick, quest_focus),
+            "result": _reason(record, pick, quest_focus, provider, now),
         }
         for record in ranked
     ]

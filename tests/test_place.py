@@ -12,6 +12,7 @@ which always register *this* process's own hostname), the same approach
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -224,6 +225,73 @@ def test_place_breaks_ties_on_heartbeat_freshness(redis_port, flush_redis):
     assert result["pick"] == "fresher"
     by_name = {c["name"]: c for c in result["candidates"]}
     assert by_name["staler"]["result"] == "staler heartbeat"
+
+
+def test_place_ranks_by_burn_margin_prefers_more_headroom_per_hour(redis_port, flush_redis):
+    """Issue #30's own example: both machines report 5% left, but one
+    resets in 2 minutes (high %/hour margin, about to refill) and the
+    other in 4 hours (low margin, has to last longer on the same 5%). The
+    2-minute machine should win even though raw pct_left ties.
+    """
+    near_reset = int((time.time() + 120) * 1000)
+    far_reset = int((time.time() + 4 * 3600) * 1000)
+    _write_machine(
+        redis_port, "fast-reset", slots={"bmo": {"used": 1, "max": 2}},
+        quota={"claude": {"pct_left": 5.0, "resets_at": near_reset, "source": "test"}},
+    )
+    _write_machine(
+        redis_port, "slow-reset", slots={"bmo": {"used": 1, "max": 2}},
+        quota={"claude": {"pct_left": 5.0, "resets_at": far_reset, "source": "test"}},
+    )
+
+    result = place.place("retry backoff", _kw(redis_port))
+
+    assert result["pick"] == "fast-reset"
+    by_name = {c["name"]: c for c in result["candidates"]}
+    assert by_name["slow-reset"]["result"] == "worse burn margin"
+
+
+def test_place_stale_resets_at_does_not_blow_up_the_ranking(redis_port, flush_redis):
+    """A `resets_at` already in the past (stale heartbeat) must not turn
+    into a tiny or negative divisor. It's treated as safe/full instead, so
+    it doesn't lose to a machine with a much smaller real margin.
+    """
+    stale_reset = int((time.time() - 3600) * 1000)
+    good_reset = int((time.time() + 3600) * 1000)
+    _write_machine(
+        redis_port, "stale-reset", slots={"bmo": {"used": 1, "max": 2}},
+        quota={"claude": {"pct_left": 5.0, "resets_at": stale_reset, "source": "test"}},
+    )
+    _write_machine(
+        redis_port, "normal", slots={"bmo": {"used": 1, "max": 2}},
+        quota={"claude": {"pct_left": 90.0, "resets_at": good_reset, "source": "test"}},
+    )
+
+    result = place.place("retry backoff", _kw(redis_port))
+
+    assert result["pick"] == "stale-reset"
+
+
+def test_place_missing_resets_at_sorts_after_a_real_margin(redis_port, flush_redis):
+    """No `resets_at` means no margin can be computed, so this machine
+    falls back to `pct_left` alone and ranks after any machine with a real,
+    computable margin -- even one with far less raw `pct_left`.
+    """
+    good_reset = int((time.time() + 3600) * 1000)
+    _write_machine(
+        redis_port, "has-margin", slots={"bmo": {"used": 1, "max": 2}},
+        quota={"claude": {"pct_left": 1.0, "resets_at": good_reset, "source": "test"}},
+    )
+    _write_machine(
+        redis_port, "no-resets-at", slots={"bmo": {"used": 1, "max": 2}},
+        quota={"claude": {"pct_left": 99.0, "resets_at": None, "source": "test"}},
+    )
+
+    result = place.place("retry backoff", _kw(redis_port))
+
+    assert result["pick"] == "has-margin"
+    by_name = {c["name"]: c for c in result["candidates"]}
+    assert by_name["no-resets-at"]["result"] == "worse burn margin"
 
 
 def test_place_prefers_the_quest_focus_machine_over_more_free_slots(redis_port, flush_redis, monkeypatch):
