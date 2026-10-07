@@ -24,7 +24,7 @@ import time
 
 import redis
 
-from . import claims, machines, place as place_mod, roadmap, slots_redis
+from . import claims, gh_cache, machines, place as place_mod, roadmap, slots_redis
 from .roadmap import CODE_DIR
 from .slots import CoordinatorUnreachable
 
@@ -119,48 +119,55 @@ def _slug(title: str) -> str:
     return text or "quest"
 
 
-def _read_quests(repo_path: str, owner: str, name: str):
+def _read_quests(repo_path: str, owner: str, name: str, *, connection: dict | None = None):
     """Return (quest_nodes, error): every open issue labeled `quest` in this
     repo, each with its subIssues nodes attached. Same pagination shape as
     roadmap._read_dependencies.
+
+    Goes through `gh_cache.cached_gh_json` (issue #35) -- only
+    `gh_cache.CANONICAL_GH_FETCHER` runs the loop below on a cache miss.
     """
-    quests = []
-    cursor = None
-    while True:
-        args = [
-            "gh", "api", "graphql", "-f", f"query={QUEST_GRAPHQL}",
-            "-F", f"owner={owner}", "-F", f"name={name}",
-        ]
-        if cursor:
-            args.extend(["-F", f"cursor={cursor}"])
-        data, error = roadmap._run_json(args, repo_path)
-        if error:
-            return quests, error
-        if not isinstance(data, dict):
-            return quests, "GitHub returned invalid quest data"
-        errors = data.get("errors") or []
-        if errors:
-            messages = [
-                str(item.get("message") or "GraphQL error")
-                for item in errors
-                if isinstance(item, dict)
+
+    def _fetch():
+        quests = []
+        cursor = None
+        while True:
+            args = [
+                "gh", "api", "graphql", "-f", f"query={QUEST_GRAPHQL}",
+                "-F", f"owner={owner}", "-F", f"name={name}",
             ]
-            return quests, "; ".join(messages) or "GraphQL error"
-        response = data.get("data")
-        repository = response.get("repository") if isinstance(response, dict) else None
-        page = repository.get("issues") if isinstance(repository, dict) else None
-        if not isinstance(page, dict):
-            return quests, "GitHub returned no quest data"
-        nodes = page.get("nodes")
-        page_info = page.get("pageInfo")
-        if not isinstance(nodes, list) or not isinstance(page_info, dict):
-            return quests, "GitHub returned incomplete quest data"
-        quests.extend(node for node in nodes if isinstance(node, dict))
-        if not page_info.get("hasNextPage"):
-            return quests, None
-        cursor = page_info.get("endCursor")
-        if not cursor:
-            return quests, "GitHub returned incomplete pagination data"
+            if cursor:
+                args.extend(["-F", f"cursor={cursor}"])
+            data, error = roadmap._run_json(args, repo_path)
+            if error:
+                return quests, error
+            if not isinstance(data, dict):
+                return quests, "GitHub returned invalid quest data"
+            errors = data.get("errors") or []
+            if errors:
+                messages = [
+                    str(item.get("message") or "GraphQL error")
+                    for item in errors
+                    if isinstance(item, dict)
+                ]
+                return quests, "; ".join(messages) or "GraphQL error"
+            response = data.get("data")
+            repository = response.get("repository") if isinstance(response, dict) else None
+            page = repository.get("issues") if isinstance(repository, dict) else None
+            if not isinstance(page, dict):
+                return quests, "GitHub returned no quest data"
+            nodes = page.get("nodes")
+            page_info = page.get("pageInfo")
+            if not isinstance(nodes, list) or not isinstance(page_info, dict):
+                return quests, "GitHub returned incomplete quest data"
+            quests.extend(node for node in nodes if isinstance(node, dict))
+            if not page_info.get("hasNextPage"):
+                return quests, None
+            cursor = page_info.get("endCursor")
+            if not cursor:
+                return quests, "GitHub returned incomplete pagination data"
+
+    return gh_cache.cached_gh_json(owner, name, "quests", _fetch, connection=connection)
 
 
 def _build_quest(repo: str, node: dict) -> dict:
@@ -190,7 +197,7 @@ def _build_quest(repo: str, node: dict) -> dict:
     }
 
 
-def load_quests(repos: list[str], code_dir: str = CODE_DIR):
+def load_quests(repos: list[str], code_dir: str = CODE_DIR, *, connection: dict | None = None):
     """Return (quests, warnings): every open issue labeled `quest` across
     `repos`, each with its sub-issue tasks. A repo lupin can't read from
     adds a warning, not a failure -- no quest-labeled issue anywhere is a
@@ -204,7 +211,7 @@ def load_quests(repos: list[str], code_dir: str = CODE_DIR):
         if error:
             warnings.append(f"{repo}: {error}")
             continue
-        nodes, error = _read_quests(repo_path, owner, name)
+        nodes, error = _read_quests(repo_path, owner, name, connection=connection)
         if error:
             warnings.append(f"{repo}: {error}")
             continue
@@ -428,7 +435,7 @@ def focus(
     `cli.py` turns each into the copy doc's exact text (lupin-ctl-copy.md
     section 5).
     """
-    quests, _warnings = load_quests(repos, code_dir=code_dir)
+    quests, _warnings = load_quests(repos, code_dir=code_dir, connection=connection)
     quest = find_quest(quests, quest_name)
     if quest is None:
         raise QuestNotFound(quest_name)
@@ -469,7 +476,7 @@ def release(
     Raises `QuestNotFound` if the name matches no quest, `NoFocus` if it
     has none to release, or `CoordinatorUnreachable`.
     """
-    quests, _warnings = load_quests(repos, code_dir=code_dir)
+    quests, _warnings = load_quests(repos, code_dir=code_dir, connection=connection)
     quest = find_quest(quests, quest_name)
     if quest is None:
         raise QuestNotFound(quest_name)
@@ -674,21 +681,33 @@ class StartQuestNotFound(QuestError):
         super().__init__(f"no quest matches {quest_id!r}")
 
 
-def _locate_issue(number: int, repos: list[str], code_dir: str):
+def _locate_issue(
+    number: int, repos: list[str], code_dir: str, *, connection: dict | None = None
+):
     """Find which enabled repo holds issue `number`, open or closed.
 
     Tries each repo's own checkout in turn (same ambient-`gh`-repo
     convention as the rest of this codebase -- see `roadmap._run_json`).
     Returns `(repo, "owner/name", issue-json)` for the first match, or
     `None` if no enabled repo has it.
+
+    The lookup itself goes through `gh_cache.cached_gh_json` (issue #35),
+    same as `roadmap_cli._issue_state` -- only `CANONICAL_GH_FETCHER` runs
+    `gh issue view` on a cache miss.
     """
     for repo in repos:
         repo_path = os.path.join(code_dir, repo)
         owner, name, error = roadmap._repo_identity(repo_path)
         if error:
             continue
-        issue, error = roadmap._run_json(
-            ["gh", "issue", "view", str(number), "--json", "number,state"], repo_path
+        issue, error = gh_cache.cached_gh_json(
+            owner,
+            name,
+            f"quest-locate-issue:{number}",
+            lambda repo_path=repo_path: roadmap._run_json(
+                ["gh", "issue", "view", str(number), "--json", "number,state"], repo_path
+            ),
+            connection=connection,
         )
         if error or not isinstance(issue, dict):
             continue
@@ -696,14 +715,16 @@ def _locate_issue(number: int, repos: list[str], code_dir: str):
     return None
 
 
-def _resolve_issues(issue_numbers: list[int], repos: list[str], code_dir: str) -> dict:
+def _resolve_issues(
+    issue_numbers: list[int], repos: list[str], code_dir: str, *, connection: dict | None = None
+) -> dict:
     """Existence + closed checks for every issue, in `--issue` order.
     Returns `{number: (repo, "owner/repo#number")}`. Raises `IssueNotFound`
     or `IssueClosed` on the first problem found.
     """
     resolved = {}
     for number in issue_numbers:
-        found = _locate_issue(number, repos, code_dir)
+        found = _locate_issue(number, repos, code_dir, connection=connection)
         if found is None:
             raise IssueNotFound(number)
         repo, owner_repo, issue = found
@@ -723,7 +744,12 @@ def _check_claims(resolved: dict, issue_numbers: list[int], connection: dict) ->
             raise IssueClaimed(number, held.get("session", "another loop"))
 
 
-def _check_blocked_by(resolved: dict, issue_numbers: list[int], repos: list[str], code_dir: str) -> dict:
+def _check_blocked_by(
+    resolved: dict,
+    issue_numbers: list[int],
+    repos: list[str],
+    code_dir: str,
+) -> dict:
     """Raises `IssueBlocked` if any requested issue is blocked by an issue
     outside the set. Returns the dependency DAG, so `_dependency_order`
     below doesn't fetch it twice.
@@ -914,7 +940,7 @@ def start(
             deduped.append(number)
     issue_numbers = deduped
 
-    resolved = _resolve_issues(issue_numbers, repos, code_dir)
+    resolved = _resolve_issues(issue_numbers, repos, code_dir, connection=connection)
     _check_claims(resolved, issue_numbers, connection)
     dag = _check_blocked_by(resolved, issue_numbers, repos, code_dir)
     chosen_machine = _resolve_machine(machine, issue_numbers, connection)

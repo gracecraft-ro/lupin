@@ -18,6 +18,7 @@ This is the data model `lupin` uses once the `redis` backend exists
 | `cmd:<id>` | string (JSON), with a TTL | one signed command — see Command queue keys below | nothing today |
 | `cmdres:<id>` | string (JSON), with a TTL | one command's result — see Command queue keys below | nothing today |
 | `cmdlog` | capped stream (`XADD ... MAXLEN ~`) | one entry per enqueue and one per terminal outcome — the audit trail | nothing today |
+| `gh-cache:<owner>/<repo>:<cache-key>` | string (JSON: `{"data": ...}`), with a TTL | one read-only `gh` lookup's cached result — see Fleet keys below | each machine's own direct `gh` call for the same lookup |
 
 These are new keys for the fleet CLI (issues #6–#14, split from #2) and the
 cross-machine command queue (issue #28, split from #27). They stay under
@@ -133,6 +134,40 @@ return n
 
 No ACL change needed — `GET`, `SET`, and `EVAL` are already on the list.
 
+### `gh-cache:<owner>/<repo>:<cache-key>`
+
+Backs `place`/`quest`/`roadmap`'s read-only `gh` lookups (issue #35):
+issue state, issue body/labels, quest-labeled issues, dependency links.
+Written only by `pihome` (the fixed value of `gh_cache.CANONICAL_GH_FETCHER`
+— a hard pin to one named machine, not a race any machine could win). Read
+by every machine, `pihome` included.
+
+```json
+{"data": {"number": 42, "state": "OPEN"}}
+```
+
+`data` is whatever the wrapped `gh` call returns, wrapped so a legitimate
+`null` result (e.g. "this issue does not exist") is still a cache hit, not
+indistinguishable from "nothing cached yet".
+
+TTL 5 minutes — long enough that a burst of `place`/`quest`/`roadmap` calls
+across several machines shares one fetch, short enough that a placement or
+quest decision isn't made against issue data that's badly stale.
+
+`<cache-key>` names which lookup, since the same repo backs several
+different queries that must not share one cache entry: `issues:<state>`
+(issue list), `comments:<state>` (per-issue comment pagination),
+`dependencies` (blockedBy/blocking links), `quests` (quest-labeled issues),
+`issue:<number>` (`place`'s single-issue lookup), `issue-state:<number>`
+(`roadmap_cli`'s blocker-exists check), `quest-locate-issue:<number>`
+(`quest`'s issue-to-repo lookup).
+
+Guarded by the existing `slot:<name>` shape above, as
+`slot:gh-fetch:<owner>/<repo>` (max 1 holder) — this only stops `pihome`
+from running the same fetch twice if two `lupin` invocations there race
+each other. A non-`pihome` machine never takes this lock and never calls
+`gh` for these lookups at all; on a miss it reports "no data yet" instead.
+
 ## Command queue keys
 
 These back the cross-machine command queue (`lupin cmd send|status|queue`,
@@ -208,6 +243,8 @@ numbers.
 | Machine heartbeat | 30s | 120s |
 | Command record (`cmd:<id>`) | n/a — not renewed | 1 hour (retention only, see below) |
 | Command result (`cmdres:<id>`) | n/a — not renewed | 1 hour |
+| GitHub data cache (`gh-cache:...`) | n/a — not renewed | 5 min |
+| GitHub fetch lock (`slot:gh-fetch:<owner>/<repo>`) | n/a — held only for one fetch | 2 min |
 
 A command's Redis retention (1h) is not the same thing as how long it's
 valid to run — that's `expires_at` inside the record (120s after
@@ -236,6 +273,7 @@ Connect timeout 2s, 1 retry, then:
 | Ledger | `lupin` always writes the local file too. The Redis copy misses the entry — v1 has no replay. |
 | Host-scope slot | No change — these never use Redis. |
 | Command queue | `lupin cmd send`/`lupin agent` exit 3. No local fallback, same as claims — a command only means anything if the target machine can see it. |
+| GitHub data cache | `pihome` calls `gh` directly anyway (it just can't publish for other machines). Every other machine reports "no data yet" instead of calling `gh` itself — no direct-call fallback here, unlike the resources above. |
 
 After an outage ends, a holder tries to renew its lease. If the lease
 already expired, `lupin` logs "lease lost" and tries to acquire again.

@@ -75,8 +75,10 @@ import subprocess
 import time
 
 from . import classify as classify_mod
+from . import gh_cache
 from . import machines
 from . import quest as quest_mod
+from . import roadmap
 from . import route as route_mod
 
 CoordinatorUnreachable = machines.CoordinatorUnreachable
@@ -147,7 +149,7 @@ def quest_focus_for(issue_number: str | None, connection: dict) -> str | None:
     except ValueError:
         return None
     repo = os.path.basename(os.getcwd())
-    quests, _warnings = quest_mod.load_quests([repo])
+    quests, _warnings = quest_mod.load_quests([repo], connection=connection)
     for quest in quests:
         if any(task["number"] == number for task in quest["tasks"]):
             focus = quest_mod.read_focus(quest["name"], **connection)
@@ -155,35 +157,52 @@ def quest_focus_for(issue_number: str | None, connection: dict) -> str | None:
     return None
 
 
-def _fetch_issue(number: str) -> tuple[dict, str | None]:
+def _fetch_issue(number: str, connection: dict | None = None) -> tuple[dict, str | None]:
     """`gh issue view <number> --json title,body,labels` in the current
     repo (same ambient-repo convention `roadmap.py`'s `gh` calls use).
     Returns `({}, error)` on any failure -- `classify()` still produces a
     (generic) category/size from an empty issue, so a placement decision
     is still possible without a working `gh`.
+
+    Goes through `gh_cache.cached_gh_json` (issue #35): only
+    `gh_cache.CANONICAL_GH_FETCHER` ever runs the `gh` call below, every
+    other machine reads the shared cache. A repo-identity lookup is needed
+    first to key that cache -- this costs one extra `gh repo view` call on
+    an uncached `place`, same ambient-repo lookup `roadmap.py` already does
+    for every other cached call site.
     """
-    argv = ["gh", "issue", "view", number, "--json", "title,body,labels"]
-    try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=15)
-    except (FileNotFoundError, OSError) as exc:
-        return {}, str(exc)
-    except subprocess.TimeoutExpired:
-        return {}, "gh issue view timed out"
-    if proc.returncode != 0:
-        return {}, (proc.stderr or proc.stdout or "gh issue view failed").strip()
-    try:
-        return json.loads(proc.stdout), None
-    except json.JSONDecodeError as exc:
-        return {}, f"invalid JSON from gh: {exc}"
+    owner, name, identity_error = roadmap._repo_identity(os.getcwd())
+    if identity_error:
+        return {}, identity_error
+
+    def _fetch() -> tuple[dict, str | None]:
+        argv = ["gh", "issue", "view", number, "--json", "title,body,labels"]
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=15)
+        except (FileNotFoundError, OSError) as exc:
+            return {}, str(exc)
+        except subprocess.TimeoutExpired:
+            return {}, "gh issue view timed out"
+        if proc.returncode != 0:
+            return {}, (proc.stderr or proc.stdout or "gh issue view failed").strip()
+        try:
+            return json.loads(proc.stdout), None
+        except json.JSONDecodeError as exc:
+            return {}, f"invalid JSON from gh: {exc}"
+
+    data, error = gh_cache.cached_gh_json(
+        owner, name, f"issue:{number}", _fetch, connection=connection
+    )
+    return data if data is not None else {}, error
 
 
-def _resolve_task(task: str) -> tuple[dict, str]:
+def _resolve_task(task: str, connection: dict | None = None) -> tuple[dict, str]:
     """Return (issue dict for classify(), display label)."""
     match = _ISSUE_NUMBER_RE.match(task.strip())
     if not match:
         return {"title": task}, task
     number = match.group(1)
-    issue, _error = _fetch_issue(number)
+    issue, _error = _fetch_issue(number, connection=connection)
     title = issue.get("title") if issue else None
     label = f"#{number} {title}" if title else f"#{number}"
     return issue or {}, label
@@ -378,7 +397,7 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
     downgraded model's provider (speed preserved instead). One retry only,
     same as `route()`'s own one-tier drop -- this doesn't loop.
     """
-    issue, task_label = _resolve_task(task)
+    issue, task_label = _resolve_task(task, connection)
     category, size = classify_mod.classify(issue)
     choice = route_mod.route(category, size, tiers=tiers)
     model, effort = choice["model"], choice["effort"]

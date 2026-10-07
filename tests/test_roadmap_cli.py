@@ -32,14 +32,23 @@ class BuildRoadmapTests(unittest.TestCase):
             mock.patch.object(roadmap, "_repo_identity", side_effect=identity or _identity()),
             mock.patch.object(
                 roadmap, "cached_github",
-                side_effect=lambda repo, path, state="open": (
+                side_effect=lambda repo, path, state="open", **kw: (
                     (open_issues.get(repo, []), {}, []) if state == "open" else ([], {}, [])
                 ),
             ),
-            mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir: dag),
+            mock.patch.object(
+                roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir, **kw: dag
+            ),
         ]
         if issue_state is not None:
-            patches.append(mock.patch.object(roadmap_cli, "_issue_state", side_effect=issue_state))
+            # `_issue_state` now takes (path, number, owner, name, connection=...)
+            # (issue #35) -- callers here only care about (path, number).
+            patches.append(
+                mock.patch.object(
+                    roadmap_cli, "_issue_state",
+                    side_effect=lambda path, number, owner, name, **kw: issue_state(path, number),
+                )
+            )
         for patch in patches:
             patch.start()
             self.addCleanup(patch.stop)

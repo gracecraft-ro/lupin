@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 from urllib.parse import quote, urlsplit
 
 from . import classify
+from . import gh_cache
 
 CODE_DIR = "/code"
 GITHUB_CACHE_SECONDS = 60 * 60
@@ -294,68 +295,85 @@ DIGEST_CSS = """
 
 def _read_comments(
     repo_path: str, owner: str, name: str, state: str = "open",
-    max_issues: int | None = None,
+    max_issues: int | None = None, *, connection: dict | None = None,
 ):
-    comments = {}
-    cursor = None
-    query = GRAPHQL.replace("states:OPEN", f"states:{state.upper()}")
-    while True:
-        args = [
-            "gh", "api", "graphql", "-f", f"query={query}",
-            "-F", f"owner={owner}", "-F", f"name={name}",
-        ]
-        if cursor:
-            args.extend(["-F", f"cursor={cursor}"])
-        data, error = _run_json(args, repo_path)
-        if error:
-            return comments, error
-        if not isinstance(data, dict):
-            return comments, "GitHub returned invalid comment data"
-        errors = data.get("errors") or []
-        if errors:
-            messages = [
-                str(item.get("message") or "GraphQL error")
-                for item in errors
-                if isinstance(item, dict)
+    """Return (comments, error): recent comments per open issue, paginated.
+
+    Goes through `gh_cache.cached_gh_json` (issue #35) -- only
+    `gh_cache.CANONICAL_GH_FETCHER` runs the loop below on a cache miss.
+    """
+
+    def _fetch():
+        comments = {}
+        cursor = None
+        query = GRAPHQL.replace("states:OPEN", f"states:{state.upper()}")
+        while True:
+            args = [
+                "gh", "api", "graphql", "-f", f"query={query}",
+                "-F", f"owner={owner}", "-F", f"name={name}",
             ]
-            return comments, "; ".join(messages) or "GraphQL error"
-        response = data.get("data")
-        repository = response.get("repository") if isinstance(response, dict) else None
-        page = repository.get("issues") if isinstance(repository, dict) else None
-        if not isinstance(page, dict):
-            return comments, "GitHub returned no issue comments"
-        nodes = page.get("nodes")
-        page_info = page.get("pageInfo")
-        if not isinstance(nodes, list) or not isinstance(page_info, dict):
-            return comments, "GitHub returned incomplete comment data"
-        for issue in nodes:
-            issue_comments = issue.get("comments") if isinstance(issue, dict) else None
-            comment_nodes = issue_comments.get("nodes") if isinstance(issue_comments, dict) else None
-            if not isinstance(issue, dict) or not isinstance(issue.get("number"), int):
-                return comments, "GitHub returned incomplete issue comments"
-            if not isinstance(comment_nodes, list):
-                return comments, "GitHub returned incomplete issue comments"
-            comments[issue["number"]] = [
-                {
-                    "body": str(comment.get("body") or ""),
-                    "createdAt": comment.get("createdAt"),
-                    "url": comment.get("url") or "",
-                    "author": (
-                        comment.get("author", {}).get("login", "")
-                        if isinstance(comment.get("author"), dict)
-                        else ""
-                    ),
-                }
-                for comment in comment_nodes
-                if isinstance(comment, dict)
-            ]
-            if max_issues is not None and len(comments) >= max_issues:
+            if cursor:
+                args.extend(["-F", f"cursor={cursor}"])
+            data, error = _run_json(args, repo_path)
+            if error:
+                return comments, error
+            if not isinstance(data, dict):
+                return comments, "GitHub returned invalid comment data"
+            errors = data.get("errors") or []
+            if errors:
+                messages = [
+                    str(item.get("message") or "GraphQL error")
+                    for item in errors
+                    if isinstance(item, dict)
+                ]
+                return comments, "; ".join(messages) or "GraphQL error"
+            response = data.get("data")
+            repository = response.get("repository") if isinstance(response, dict) else None
+            page = repository.get("issues") if isinstance(repository, dict) else None
+            if not isinstance(page, dict):
+                return comments, "GitHub returned no issue comments"
+            nodes = page.get("nodes")
+            page_info = page.get("pageInfo")
+            if not isinstance(nodes, list) or not isinstance(page_info, dict):
+                return comments, "GitHub returned incomplete comment data"
+            for issue in nodes:
+                issue_comments = issue.get("comments") if isinstance(issue, dict) else None
+                comment_nodes = (
+                    issue_comments.get("nodes") if isinstance(issue_comments, dict) else None
+                )
+                if not isinstance(issue, dict) or not isinstance(issue.get("number"), int):
+                    return comments, "GitHub returned incomplete issue comments"
+                if not isinstance(comment_nodes, list):
+                    return comments, "GitHub returned incomplete issue comments"
+                comments[issue["number"]] = [
+                    {
+                        "body": str(comment.get("body") or ""),
+                        "createdAt": comment.get("createdAt"),
+                        "url": comment.get("url") or "",
+                        "author": (
+                            comment.get("author", {}).get("login", "")
+                            if isinstance(comment.get("author"), dict)
+                            else ""
+                        ),
+                    }
+                    for comment in comment_nodes
+                    if isinstance(comment, dict)
+                ]
+                if max_issues is not None and len(comments) >= max_issues:
+                    return comments, None
+            if not page_info.get("hasNextPage"):
                 return comments, None
-        if not page_info.get("hasNextPage"):
-            return comments, None
-        cursor = page_info.get("endCursor")
-        if not cursor:
-            return comments, "GitHub returned incomplete pagination data"
+            cursor = page_info.get("endCursor")
+            if not cursor:
+                return comments, "GitHub returned incomplete pagination data"
+
+    cache_key = f"comments:{state}" if max_issues is None else f"comments:{state}:{max_issues}"
+    comments, error = gh_cache.cached_gh_json(owner, name, cache_key, _fetch, connection=connection)
+    # A cache hit round-trips through JSON, which stringifies dict keys --
+    # normalize back to int so a cached result matches a live fetch's shape.
+    if isinstance(comments, dict):
+        comments = {int(number): value for number, value in comments.items()}
+    return comments, error
 
 
 def _add_edge(edges: dict, issue_ids: set, source: int, target: int, kind: str) -> None:
@@ -725,7 +743,7 @@ def _repo_identity(repo_path: str):
     return owner, name, None
 
 
-def load_github(repo_path: str, state: str = "open"):
+def load_github(repo_path: str, state: str = "open", *, connection: dict | None = None):
     warnings = []
     owner, name, error = _repo_identity(repo_path)
     issues = []
@@ -743,7 +761,13 @@ def load_github(repo_path: str, state: str = "open"):
             cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).date().isoformat()
             issue_args.extend(["--search", f"closed:>={cutoff}"])
             max_issues = 100
-        issues, error = _run_json(issue_args, repo_path)
+        # gh_cache.cached_gh_json (issue #35): only CANONICAL_GH_FETCHER runs
+        # this `gh issue list` call on a cache miss.
+        issues, error = gh_cache.cached_gh_json(
+            owner, name, f"issues:{state}",
+            lambda: _run_json(issue_args, repo_path),
+            connection=connection,
+        )
         if error:
             warnings.append(f"GitHub issue data is unavailable: {error}")
             issues = []
@@ -753,14 +777,15 @@ def load_github(repo_path: str, state: str = "open"):
         else:
             if max_issues is None:
                 comments, error = _read_comments(
-                    repo_path, owner, name, state
+                    repo_path, owner, name, state, connection=connection
                 )
             else:
                 comments, error = _read_comments(
-                    repo_path, owner, name, state, max_issues
+                    repo_path, owner, name, state, max_issues, connection=connection
                 )
             if error:
                 warnings.append(f"Recent GitHub comments are unavailable: {error}")
+                comments = comments or {}
     return issues, comments, warnings
 
 
@@ -801,59 +826,70 @@ def _dependency_targets(issue: dict, key: str) -> list[dict]:
     return targets
 
 
-def _read_dependencies(repo_path: str, owner: str, name: str):
+def _read_dependencies(repo_path: str, owner: str, name: str, *, connection: dict | None = None):
     """Read every open issue's blockedBy/blocking links, with pagination.
 
     Returns (links, error). links maps issue number -> {"blockedBy": [...],
     "blocking": [...]}, each a list of {"repo", "number"} -- the repo name
     travels with the link, so a target in another repo is still usable.
+
+    Goes through `gh_cache.cached_gh_json` (issue #35) -- only
+    `gh_cache.CANONICAL_GH_FETCHER` runs the loop below on a cache miss.
     """
-    links = {}
-    cursor = None
-    while True:
-        args = [
-            "gh", "api", "graphql", "-f", f"query={DEPENDENCY_GRAPHQL}",
-            "-F", f"owner={owner}", "-F", f"name={name}",
-        ]
-        if cursor:
-            args.extend(["-F", f"cursor={cursor}"])
-        data, error = _run_json(args, repo_path)
-        if error:
-            return links, error
-        if not isinstance(data, dict):
-            return links, "GitHub returned invalid dependency data"
-        errors = data.get("errors") or []
-        if errors:
-            messages = [
-                str(item.get("message") or "GraphQL error")
-                for item in errors
-                if isinstance(item, dict)
+
+    def _fetch():
+        links = {}
+        cursor = None
+        while True:
+            args = [
+                "gh", "api", "graphql", "-f", f"query={DEPENDENCY_GRAPHQL}",
+                "-F", f"owner={owner}", "-F", f"name={name}",
             ]
-            return links, "; ".join(messages) or "GraphQL error"
-        response = data.get("data")
-        repository = response.get("repository") if isinstance(response, dict) else None
-        page = repository.get("issues") if isinstance(repository, dict) else None
-        if not isinstance(page, dict):
-            return links, "GitHub returned no issue dependency data"
-        nodes = page.get("nodes")
-        page_info = page.get("pageInfo")
-        if not isinstance(nodes, list) or not isinstance(page_info, dict):
-            return links, "GitHub returned incomplete dependency data"
-        for issue in nodes:
-            if not isinstance(issue, dict) or not isinstance(issue.get("number"), int):
-                return links, "GitHub returned incomplete issue dependency data"
-            links[issue["number"]] = {
-                "blockedBy": _dependency_targets(issue, "blockedBy"),
-                "blocking": _dependency_targets(issue, "blocking"),
-            }
-        if not page_info.get("hasNextPage"):
-            return links, None
-        cursor = page_info.get("endCursor")
-        if not cursor:
-            return links, "GitHub returned incomplete pagination data"
+            if cursor:
+                args.extend(["-F", f"cursor={cursor}"])
+            data, error = _run_json(args, repo_path)
+            if error:
+                return links, error
+            if not isinstance(data, dict):
+                return links, "GitHub returned invalid dependency data"
+            errors = data.get("errors") or []
+            if errors:
+                messages = [
+                    str(item.get("message") or "GraphQL error")
+                    for item in errors
+                    if isinstance(item, dict)
+                ]
+                return links, "; ".join(messages) or "GraphQL error"
+            response = data.get("data")
+            repository = response.get("repository") if isinstance(response, dict) else None
+            page = repository.get("issues") if isinstance(repository, dict) else None
+            if not isinstance(page, dict):
+                return links, "GitHub returned no issue dependency data"
+            nodes = page.get("nodes")
+            page_info = page.get("pageInfo")
+            if not isinstance(nodes, list) or not isinstance(page_info, dict):
+                return links, "GitHub returned incomplete dependency data"
+            for issue in nodes:
+                if not isinstance(issue, dict) or not isinstance(issue.get("number"), int):
+                    return links, "GitHub returned incomplete issue dependency data"
+                links[issue["number"]] = {
+                    "blockedBy": _dependency_targets(issue, "blockedBy"),
+                    "blocking": _dependency_targets(issue, "blocking"),
+                }
+            if not page_info.get("hasNextPage"):
+                return links, None
+            cursor = page_info.get("endCursor")
+            if not cursor:
+                return links, "GitHub returned incomplete pagination data"
+
+    links, error = gh_cache.cached_gh_json(owner, name, "dependencies", _fetch, connection=connection)
+    # Same JSON-stringifies-int-keys fix as `_read_comments` above.
+    if isinstance(links, dict):
+        links = {int(number): value for number, value in links.items()}
+    return links, error
 
 
-def load_dependencies(repo_path: str):
+def load_dependencies(repo_path: str, *, connection: dict | None = None):
     """Return (links, warnings) -- links is `_read_dependencies`'s result
     for the repo checked out at repo_path, or {} with a warning on failure.
     """
@@ -863,9 +899,10 @@ def load_dependencies(repo_path: str):
     if error:
         warnings.append(error)
     else:
-        links, error = _read_dependencies(repo_path, owner, name)
+        links, error = _read_dependencies(repo_path, owner, name, connection=connection)
         if error:
             warnings.append(f"GitHub dependency links are unavailable: {error}")
+            links = links or {}
     return links, warnings
 
 
@@ -879,6 +916,10 @@ def cached_dependencies(repo: str, repo_path: str):
     cache round-trips through JSON, which turns dict keys into strings,
     and this cache is keyed by issue number -- not worth the mismatch risk
     for data that is cheap to refetch within one `serve` run.
+
+    Does not take a `connection` override -- `load_dependencies` resolves
+    the fleet's Redis location itself (see `gh_cache.cached_gh_json`), so
+    there is nothing for a caller at this level to supply.
     """
     now = time.monotonic()
     with _CACHE_LOCK:
