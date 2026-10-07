@@ -60,11 +60,19 @@ online/offline.
   "providers": ["claude", "openai"],
   "quota": {
     "claude": {"pct_left": 42, "resets_at": "2026-10-05T18:00:00Z"}
-  }
+  },
+  "actions": ["loop.run", "loop.stop"]
 }
 ```
 
-`state` is `"online"` or `"draining"` (`lupin drain`/`undrain` set it).
+`state` is `"online"` or `"draining"` (`lupin drain`/`undrain` set it). A
+draining machine's `agent.py` still accepts actions in its own
+`DRAIN_ALLOWED` set (`loop.stop`) but rejects the rest -- it can wind work
+down, not start anything new.
+
+`actions` is this machine's `agent.py` `ACTIONS` table (issue #27/#28),
+written by `_write_record` so it can never list an action the agent here
+doesn't actually run.
 
 ### `focus:<quest>`
 
