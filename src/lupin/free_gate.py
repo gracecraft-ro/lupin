@@ -100,9 +100,9 @@ def gate(
     *,
     inline: bool,
     bmo_available: bool = True,
-    quota_exhausted: bool = False,
     primary_effort: str | None = None,
     tiers: dict | None = None,
+    quota_rows: list[dict] | None = None,
     inline_wait_s: float = INLINE_WAIT_S,
     deferred_buffer_s: float = DEFERRED_WAIT_BUFFER_S,
     connection: dict | None = None,
@@ -127,9 +127,9 @@ def gate(
         category,
         size,
         bmo_available=bmo_available,
-        quota_exhausted=quota_exhausted,
         primary_effort=primary_effort,
         tiers=tiers,
+        quota_rows=quota_rows,
     )
     if not pick["model"].startswith("bmo:"):
         return {"pick": pick, "bmo_acquired": False, "lease": None}

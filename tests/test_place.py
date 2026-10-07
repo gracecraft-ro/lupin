@@ -12,7 +12,6 @@ which always register *this* process's own hostname), the same approach
 from __future__ import annotations
 
 import json
-import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -35,6 +34,18 @@ def clean_fleet_env(monkeypatch):
     """
     for name in _AMBIENT_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_live_quota(monkeypatch):
+    """`route()` (issue #36) reads live quota by default -- every
+    `place.place()` call below would otherwise shell out to the real `omp
+    usage` command on every test. None of these tests are about quota
+    pacing itself (that's `test_pace.py`/`test_route.py`); patch `route()`'s
+    own quota source so it behaves exactly like passing `quota_rows=[]`:
+    no data, no effect on the routed model.
+    """
+    monkeypatch.setattr(place.route_mod.quota_mod, "quota_usage", lambda: [])
 
 
 def _kw(redis_port):
@@ -229,73 +240,6 @@ def test_place_breaks_ties_on_heartbeat_freshness(redis_port, flush_redis):
     assert by_name["staler"]["result"] == "staler heartbeat"
 
 
-def test_place_ranks_by_burn_margin_prefers_more_headroom_per_hour(redis_port, flush_redis):
-    """Issue #30's own example: both machines report 5% left, but one
-    resets in 2 minutes (high %/hour margin, about to refill) and the
-    other in 4 hours (low margin, has to last longer on the same 5%). The
-    2-minute machine should win even though raw pct_left ties.
-    """
-    near_reset = int((time.time() + 120) * 1000)
-    far_reset = int((time.time() + 4 * 3600) * 1000)
-    _write_machine(
-        redis_port, "fast-reset", slots={"bmo": {"used": 1, "max": 2}},
-        quota={"claude": {"pct_left": 5.0, "resets_at": near_reset, "source": "test"}},
-    )
-    _write_machine(
-        redis_port, "slow-reset", slots={"bmo": {"used": 1, "max": 2}},
-        quota={"claude": {"pct_left": 5.0, "resets_at": far_reset, "source": "test"}},
-    )
-
-    result = place.place("retry backoff", _kw(redis_port))
-
-    assert result["pick"] == "fast-reset"
-    by_name = {c["name"]: c for c in result["candidates"]}
-    assert by_name["slow-reset"]["result"] == "worse burn margin"
-
-
-def test_place_stale_resets_at_does_not_blow_up_the_ranking(redis_port, flush_redis):
-    """A `resets_at` already in the past (stale heartbeat) must not turn
-    into a tiny or negative divisor. It's treated as safe/full instead, so
-    it doesn't lose to a machine with a much smaller real margin.
-    """
-    stale_reset = int((time.time() - 3600) * 1000)
-    good_reset = int((time.time() + 3600) * 1000)
-    _write_machine(
-        redis_port, "stale-reset", slots={"bmo": {"used": 1, "max": 2}},
-        quota={"claude": {"pct_left": 5.0, "resets_at": stale_reset, "source": "test"}},
-    )
-    _write_machine(
-        redis_port, "normal", slots={"bmo": {"used": 1, "max": 2}},
-        quota={"claude": {"pct_left": 90.0, "resets_at": good_reset, "source": "test"}},
-    )
-
-    result = place.place("retry backoff", _kw(redis_port))
-
-    assert result["pick"] == "stale-reset"
-
-
-def test_place_missing_resets_at_sorts_after_a_real_margin(redis_port, flush_redis):
-    """No `resets_at` means no margin can be computed, so this machine
-    falls back to `pct_left` alone and ranks after any machine with a real,
-    computable margin -- even one with far less raw `pct_left`.
-    """
-    good_reset = int((time.time() + 3600) * 1000)
-    _write_machine(
-        redis_port, "has-margin", slots={"bmo": {"used": 1, "max": 2}},
-        quota={"claude": {"pct_left": 1.0, "resets_at": good_reset, "source": "test"}},
-    )
-    _write_machine(
-        redis_port, "no-resets-at", slots={"bmo": {"used": 1, "max": 2}},
-        quota={"claude": {"pct_left": 99.0, "resets_at": None, "source": "test"}},
-    )
-
-    result = place.place("retry backoff", _kw(redis_port))
-
-    assert result["pick"] == "has-margin"
-    by_name = {c["name"]: c for c in result["candidates"]}
-    assert by_name["no-resets-at"]["result"] == "worse burn margin"
-
-
 def test_place_prefers_the_quest_focus_machine_over_more_free_slots(redis_port, flush_redis, monkeypatch):
     _write_machine(redis_port, "mac-studio", slots={"bmo": {"used": 1, "max": 2}}, quota=_CLAUDE_QUOTA)
     _write_machine(redis_port, "mini-2", slots={"bmo": {"used": 0, "max": 4}}, quota=_CLAUDE_QUOTA)
@@ -325,75 +269,58 @@ def test_place_quota_header_prefers_a_real_reading_over_unavailable(redis_port, 
     assert result["quota"] == _CLAUDE_QUOTA["claude"]
 
 
-# --- place(): wait-or-downgrade when every candidate is exhausted (#32) ---
+# --- place(): passing through route()'s wait/downgrade (issue #36) ---
+#
+# Quota exhaustion is route()'s decision now (its own pacing, tested in
+# test_pace.py/test_route.py) -- these tests only confirm place() reports
+# whatever route() decided, without re-deriving it from machine records.
 
 
-def test_place_exhausted_machine_is_skipped_and_not_picked(redis_port, flush_redis):
-    _write_machine(
-        redis_port, "mac-studio",
-        quota={"claude": {"pct_left": 0, "resets_at": int((time.time() + 300) * 1000), "source": "test"}},
-    )
-
-    result = place.place("retry backoff", _kw(redis_port))
-
-    assert result["pick"] is None
-    assert result["candidates"] == []
-    assert result["skipped"]["quota_exhausted"] == 1
-
-
-def test_place_short_wait_reports_wait_and_keeps_the_model(redis_port, flush_redis):
-    """Every candidate is exhausted, but the soonest reset is well under
-    `PRACTICAL_WAIT_S` -- report the wait, don't touch the routed model.
+def test_place_reports_a_wait_without_filtering_machines(redis_port, flush_redis, monkeypatch):
+    """route() found every option blocked -- place() reports "no pick,
+    wait" straight away. A blocked provider is blocked for every machine
+    alike, so there is nothing to gain by still ranking them.
     """
-    resets_at = int((time.time() + 300) * 1000)  # 5 minutes -- well under 10
-    _write_machine(
-        redis_port, "mac-studio",
-        quota={"claude": {"pct_left": 0, "resets_at": resets_at, "source": "test"}},
+    _write_machine(redis_port, "mac-studio", quota=_CLAUDE_QUOTA)
+    monkeypatch.setattr(
+        place.route_mod, "route",
+        lambda *a, **kw: {"model": "opus", "effort": "high", "wait_seconds": 295.0},
     )
 
     result = place.place("retry backoff", _kw(redis_port))
 
-    # Free text, no labels -> classify() falls back to size-? -> tier2 ->
-    # "opus" (same fallback the non-exhausted tests rely on).
     assert result["model"] == "opus"
     assert result["provider"] == "claude"
     assert result["pick"] is None
     assert result["run_command"] is None
     assert result["downgraded_from"] is None
-    assert 290 <= result["wait_seconds"] <= 300
-    assert result["skipped"]["quota_exhausted"] == 1
+    assert result["wait_seconds"] == 295.0
+    assert result["candidates"] == []
+    assert result["skipped"] == {"offline": 0, "other_provider": 0}
 
 
-def test_place_long_wait_downgrades_and_repicks(redis_port, flush_redis, monkeypatch):
-    """Every candidate for the routed provider is exhausted and the soonest
-    reset is hours away -- too long to be practical. `place()` should call
-    `route(..., quota_exhausted=True)` once, switch provider, and re-rank
-    the same records against it, landing on a machine that was previously
-    skipped as `other_provider`.
+def test_place_reports_routes_downgrade_and_ranks_the_new_provider(redis_port, flush_redis, monkeypatch):
+    """route() already moved off a blocked pick onto another provider --
+    place() reports that change and ranks machines against the new
+    provider, same as any other routed provider.
     """
-    monkeypatch.setattr(place.classify_mod, "classify", lambda issue: ("coding", "size-xs"))
-    # coding/size-xs routes to tier0 ("bmo:qwen3.8-flash-next", provider
-    # "bmo") normally, and tier1 ("sonnet", provider "claude") under
-    # quota_exhausted=True -- see model-tiers.json and test_route.py's own
-    # tier0->tier1 case.
-    far_reset = int((time.time() + 2 * 3600) * 1000)
-    _write_machine(
-        redis_port, "exhausted-bmo",
-        quota={"bmo": {"pct_left": 0, "resets_at": far_reset, "source": "test"}},
-    )
-    _write_machine(
-        redis_port, "claude-backup",
-        quota={"claude": {"pct_left": 80.0, "resets_at": None, "source": "test"}},
+    _write_machine(redis_port, "claude-backup", quota=_CLAUDE_QUOTA)
+    monkeypatch.setattr(
+        place.route_mod, "route",
+        lambda *a, **kw: {
+            "model": "sonnet",
+            "effort": "medium",
+            "downgraded_from": {"model": "bmo:qwen3.8-flash-next", "effort": "low"},
+        },
     )
 
     result = place.place("small bmo task", _kw(redis_port))
 
-    assert result["downgraded_from"] == {"model": "bmo:qwen3.8-flash-next", "effort": "low"}
     assert result["model"] == "sonnet"
     assert result["provider"] == "claude"
+    assert result["downgraded_from"] == {"model": "bmo:qwen3.8-flash-next", "effort": "low"}
     assert result["wait_seconds"] is None
     assert result["pick"] == "claude-backup"
-    assert result["skipped"]["other_provider"] == 1  # exhausted-bmo, under the new provider
 
 
 def test_place_normal_pick_has_no_wait_or_downgrade_fields(redis_port, flush_redis):
@@ -407,7 +334,7 @@ def test_place_normal_pick_has_no_wait_or_downgrade_fields(redis_port, flush_red
     assert result["pick"] == "mac-studio"
     assert result["wait_seconds"] is None
     assert result["downgraded_from"] is None
-    assert result["skipped"]["quota_exhausted"] == 0
+    assert result["skipped"] == {"offline": 0, "other_provider": 0}
 
 
 def test_place_raises_coordinator_unreachable(closed_port):

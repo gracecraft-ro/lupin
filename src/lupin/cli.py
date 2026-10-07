@@ -915,15 +915,13 @@ def _format_place_explain(result: dict) -> str:
     if result["candidates"]:
         lines.append(_format_place_table(result))
     skipped = result["skipped"]
-    total_skipped = skipped["offline"] + skipped["other_provider"] + skipped["quota_exhausted"]
+    total_skipped = skipped["offline"] + skipped["other_provider"]
     if total_skipped:
         reasons = []
         if skipped["other_provider"]:
             reasons.append(f"{skipped['other_provider']} run a different provider")
         if skipped["offline"]:
             reasons.append(f"{skipped['offline']} offline")
-        if skipped["quota_exhausted"]:
-            reasons.append(f"{skipped['quota_exhausted']} out of quota")
         lines.append(f"{total_skipped} machine(s) skipped: {', '.join(reasons)}")
     return "\n".join(lines)
 

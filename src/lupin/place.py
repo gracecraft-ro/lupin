@@ -31,11 +31,20 @@ by that same tuple, then reports the first dimension where a machine's
 tuple differs from the picked machine's -- that reproduces the example
 exactly (a draining machine always reads "draining"; an online machine
 beaten only on quest focus reads "not quest focus", even if it also has
-fewer free slots). Issue #30 adds quota burn margin (`pct_left / hours to
-reset`, see `_burn_margin_rank`) as a new dimension between quest focus and
-free slots, with a matching "worse burn margin" reason. Issue #32 adds a
-fourth skip reason, `quota_exhausted` (`pct_left == 0`), and the wait-or-
-downgrade decision in `place()` for when every candidate hits it.
+fewer free slots).
+
+Quota is not a ranking dimension here (issue #36): every provider is one
+account shared by the whole fleet, so a quota reading can never actually
+differ between two machines -- ranking by it could only ever produce ties,
+and the old framing ("this machine has better quota") misdescribed what
+was going on. Issue #30's burn-margin ranking and issue #32's per-machine
+`quota_exhausted` skip/wait/downgrade are both removed for that reason;
+quota now gates the model choice directly, in `route()`'s own pacing
+(`pace.py`), before this module ever sees a machine list. `place()` just
+reads `route()`'s result: `wait_seconds` set means every option `route()`
+tried is blocked right now (wait, no machine ranking needed);
+`downgraded_from` set means `route()` already moved off a blocked pick
+onto another one.
 
 Judgment call -- quest focus: `quest_focus_for` below maps a task's issue
 number to its quest (if `quest.load_quests` -- issue #11 -- finds one in
@@ -68,7 +77,6 @@ into its own invocation; this module does not execute anything.
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import subprocess
@@ -83,14 +91,11 @@ from . import route as route_mod
 
 CoordinatorUnreachable = machines.CoordinatorUnreachable
 
-# route()'s models, mapped to the quota-tracked provider that serves them.
-# "bmo:"/"local:" models run on local/shared-GPU inference, not a cloud
-# account with a quota reading -- see `_provider_for_model`.
-_PROVIDER_BY_MODEL = {
-    "sonnet": "claude",
-    "opus": "claude",
-    "fable": "opencode-go",
-}
+# Moved to route.py (issue #36) -- quota pacing needs this mapping now too,
+# and route.py is the more fundamental module. Kept here under the same
+# name since this module still needs it for an unrelated reason: labeling
+# which provider a machine's quota entry is for.
+provider_for_model = route_mod.provider_for_model
 
 _CATEGORY_LABELS = {
     "coding": "code edit",
@@ -111,26 +116,6 @@ _SIZE_LABELS = {
 }
 
 _ISSUE_NUMBER_RE = re.compile(r"^#?(\d+)$")
-
-# A wait counts as "practical" (report it, keep the routed model) below this
-# many seconds; at or above it, `place()` downgrades instead (issue #32).
-# 10 minutes: long enough to ride out a short rate-limit window, short
-# enough that nothing is left blocked for an hour waiting on one provider.
-PRACTICAL_WAIT_S = 600
-
-
-def provider_for_model(model: str) -> str:
-    """Map a routed model to the provider `quota.snapshot()` tracks it
-    under. Falls back to the model name itself for anything this table
-    doesn't know yet, rather than raising -- an unrecognized provider
-    simply matches no machine, which `place()` reports honestly via its
-    skip count.
-    """
-    if model.startswith("bmo:"):
-        return "bmo"
-    if model.startswith("local:"):
-        return "local"
-    return _PROVIDER_BY_MODEL.get(model, model)
 
 
 def quest_focus_for(issue_number: str | None, connection: dict) -> str | None:
@@ -208,59 +193,19 @@ def _resolve_task(task: str, connection: dict | None = None) -> tuple[dict, str]
     return issue or {}, label
 
 
-def _burn_margin_rank(record: dict, provider: str, now: float) -> tuple[int, float]:
-    """How safe this machine's quota is: `pct_left / hours_until_reset`, as a
-    sort key where a *smaller* tuple is better (matches every other
-    dimension in `_rank_key`, which this feeds into).
-
-    Three tiers, since not every machine has enough data for a real margin:
-
-    0. A real reading -- `pct_left` and a `resets_at` are both present.
-       `resets_at` is epoch milliseconds (`quota.quota_reset_timestamp`);
-       `now` (from `time.time()`) is epoch seconds, so this converts before
-       subtracting. If `resets_at` has already passed (a stale heartbeat --
-       the window likely reset for real since the last report), treat the
-       machine as safe rather than dividing by a near-zero or negative
-       `hours_left`, which would otherwise blow the ranking up or flip its
-       sign: `-math.inf` sorts ahead of every real (finite) margin.
-    1. `pct_left` alone -- no `resets_at` to compute a rate from. Ranks
-       after every tier-0 machine regardless of how high `pct_left` is;
-       among themselves, more `pct_left` is still better.
-    2. Nothing usable (no quota entry for this provider, or `pct_left` is
-       `None`) -- ranks last, with no further ordering to apply.
-    """
-    entry = (record.get("quota") or {}).get(provider)
-    pct_left = entry.get("pct_left") if entry else None
-    if pct_left is None:
-        return (2, 0.0)
-    resets_at = entry.get("resets_at")
-    if not isinstance(resets_at, (int, float)):
-        return (1, -pct_left)
-    hours_left = (resets_at / 1000 - now) / 3600
-    if hours_left <= 0:
-        return (0, -math.inf)
-    return (0, -(pct_left / hours_left))
-
-
-def _rank_key(
-    record: dict, quest_focus: str | None, now: float, provider: str
-) -> tuple:
+def _rank_key(record: dict, quest_focus: str | None, now: float) -> tuple:
     state_rank = 0 if record["state"] == "online" else 1
     quest_rank = 0 if quest_focus and record["name"] == quest_focus else 1
-    margin_rank = _burn_margin_rank(record, provider, now)
     used, max_ = machines._slot_totals(record.get("slots"))
     return (
         state_rank,
         quest_rank,
-        margin_rank,
         -(max_ - used),
         machines._heartbeat_age(record, now),
     )
 
 
-def _reason(
-    record: dict, pick: dict | None, quest_focus: str | None, provider: str, now: float
-) -> str:
+def _reason(record: dict, pick: dict | None, quest_focus: str | None) -> str:
     if pick is not None and record["name"] == pick["name"]:
         return "pick"
     if record["state"] != "online":
@@ -269,8 +214,6 @@ def _reason(
         return "draining"
     if quest_focus and pick["name"] == quest_focus and record["name"] != quest_focus:
         return "not quest focus"
-    if _burn_margin_rank(record, provider, now) != _burn_margin_rank(pick, provider, now):
-        return "worse burn margin"
     used_r, max_r = machines._slot_totals(record.get("slots"))
     used_p, max_p = machines._slot_totals(pick.get("slots"))
     if (max_r - used_r) < (max_p - used_p):
@@ -315,23 +258,18 @@ def _quota_for_provider(records: list[dict], provider: str) -> dict | None:
 
 def _filter_candidates(
     records: list[dict], provider: str, quest_focus: str | None, now: float
-) -> tuple[dict, list[dict], list[dict], dict | None]:
+) -> tuple[dict, list[dict], dict | None]:
     """Split `records` into skip counts, ranked candidate rows, and a pick,
-    for one `provider`. Factored out of `place()` so it can run twice: once
-    for the routed provider, and -- only when that leaves nothing pickable
-    because every candidate is out of quota -- again for a downgraded
-    provider (issue #32).
+    for one `provider`.
 
-    `quota_exhausted` (`pct_left == 0`) is a third skip reason alongside the
-    existing `offline`/`other_provider`: that machine runs this provider and
-    is reachable, but has nothing left until its window resets. Like those
-    two, it gets a skip count, not a candidate row -- it was never going to
-    be picked, so showing it ranked and labeled would just be noise. Its
-    quota entry is returned separately so the caller can compute a wait.
+    Only two skip reasons now (issue #36 removes the third, `quota_exhausted`
+    -- that was a per-machine read of a fleet-wide number, and the number
+    has already been acted on by `route()` before this function ever runs):
+    `other_provider` (no quota entry at all for `provider` -- the stand-in
+    for "does this machine have credentials for it") and `offline`.
     """
-    skipped = {"offline": 0, "other_provider": 0, "quota_exhausted": 0}
+    skipped = {"offline": 0, "other_provider": 0}
     matched = []
-    exhausted_entries = []
     for record in records:
         entry = (record.get("quota") or {}).get(provider)
         if entry is None:
@@ -340,13 +278,9 @@ def _filter_candidates(
         if record["state"] == "offline":
             skipped["offline"] += 1
             continue
-        if entry.get("pct_left") == 0:
-            skipped["quota_exhausted"] += 1
-            exhausted_entries.append(entry)
-            continue
         matched.append(record)
 
-    ranked = sorted(matched, key=lambda r: _rank_key(r, quest_focus, now, provider))
+    ranked = sorted(matched, key=lambda r: _rank_key(r, quest_focus, now))
     online = [r for r in ranked if r["state"] == "online"]
     pick = online[0] if online else None
 
@@ -358,28 +292,11 @@ def _filter_candidates(
             "slots_max": machines._slot_totals(record.get("slots"))[1],
             "quest_focus": record["name"] if record["name"] == quest_focus else None,
             "version": record.get("version"),
-            "result": _reason(record, pick, quest_focus, provider, now),
+            "result": _reason(record, pick, quest_focus),
         }
         for record in ranked
     ]
-    return skipped, exhausted_entries, candidates, pick
-
-
-def _nearest_reset_wait(entries: list[dict], now: float) -> float | None:
-    """Seconds until the soonest `resets_at` among exhausted quota entries.
-
-    Entries with no `resets_at` are ignored -- unknown, not zero. `None`
-    means not one entry has usable timing data, so no wait can be
-    estimated at all. A `resets_at` already in the past (stale heartbeat --
-    the same edge case `_burn_margin_rank` treats as "safe") counts as `0`
-    rather than a negative number.
-    """
-    waits = [
-        max(0.0, entry["resets_at"] / 1000 - now)
-        for entry in entries
-        if isinstance(entry.get("resets_at"), (int, float))
-    ]
-    return min(waits) if waits else None
+    return skipped, candidates, pick
 
 
 def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
@@ -387,21 +304,22 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
     `CoordinatorUnreachable` if the fleet registry can't be reached (same
     exception `machines.machines()` raises).
 
-    Issue #32: if every candidate reporting the routed provider has
-    `pct_left == 0`, this does not just report "no pick" like an
-    all-offline/all-draining match would. It computes the wait to the
-    soonest reset among them and either reports that wait (keeping the
-    original model -- quality preserved) when it's short enough
-    (`PRACTICAL_WAIT_S`), or calls `route()` once more with
-    `quota_exhausted=True` and re-filters the same records against the
-    downgraded model's provider (speed preserved instead). One retry only,
-    same as `route()`'s own one-tier drop -- this doesn't loop.
+    Quota pacing is `route()`'s job now (issue #36 -- every provider is one
+    account shared by the whole fleet, so it belongs with the model choice,
+    not the machine ranking). `route()`'s result carries `wait_seconds` when
+    every option it tried is currently blocked -- this skips straight to
+    "no pick" without even filtering machines, since a blocked provider is
+    blocked for every machine alike. It carries `downgraded_from` when
+    `route()` already moved off a blocked pick onto another one; this just
+    passes that through for `--explain`/`--json` to show.
     """
     issue, task_label = _resolve_task(task, connection)
     category, size = classify_mod.classify(issue)
     choice = route_mod.route(category, size, tiers=tiers)
     model, effort = choice["model"], choice["effort"]
     provider = provider_for_model(model)
+    wait_seconds = choice.get("wait_seconds")
+    downgraded_from = choice.get("downgraded_from")
 
     records = machines.machines(connection)
     issue_number_match = _ISSUE_NUMBER_RE.match(task.strip())
@@ -410,23 +328,10 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
     )
     now = time.time()
 
-    skipped, exhausted_entries, candidates, pick = _filter_candidates(
-        records, provider, quest_focus, now
-    )
-
-    wait_seconds = None
-    downgraded_from = None
-    if pick is None and not candidates and skipped["quota_exhausted"] > 0:
-        wait_seconds = _nearest_reset_wait(exhausted_entries, now)
-        if wait_seconds is None or wait_seconds > PRACTICAL_WAIT_S:
-            downgraded_from = {"model": model, "effort": effort}
-            choice = route_mod.route(category, size, quota_exhausted=True, tiers=tiers)
-            model, effort = choice["model"], choice["effort"]
-            provider = provider_for_model(model)
-            skipped, exhausted_entries, candidates, pick = _filter_candidates(
-                records, provider, quest_focus, now
-            )
-            wait_seconds = None
+    if wait_seconds is not None:
+        skipped, candidates, pick = {"offline": 0, "other_provider": 0}, [], None
+    else:
+        skipped, candidates, pick = _filter_candidates(records, provider, quest_focus, now)
 
     quota = _quota_for_provider(records, provider)
     run_command = f"lupin run --machine {pick['name']} {task}" if pick else None

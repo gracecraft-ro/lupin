@@ -34,7 +34,7 @@ def test_bmo_pick_with_free_slot_acquires_immediately(redis_port, flush_redis):
     connection = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     start = time.monotonic()
     result = free_gate.gate(
-        "coding", "size-xs", "me", inline=False, tiers=_TIERS, connection=connection
+        "coding", "size-xs", "me", inline=False, tiers=_TIERS, quota_rows=[], connection=connection
     )
     elapsed = time.monotonic() - start
 
@@ -53,6 +53,7 @@ def test_bmo_pick_full_slot_waits_real_remaining_ttl_then_acquires(redis_port, f
         "me",
         inline=False,
         tiers=_TIERS,
+        quota_rows=[],
         deferred_buffer_s=0.3,
         connection=connection,
     )
@@ -81,6 +82,7 @@ def test_bmo_pick_full_slot_past_wait_returns_bmo_acquired_false(redis_port, flu
         "me",
         inline=False,
         tiers=_TIERS,
+        quota_rows=[],
         deferred_buffer_s=0.05,
         connection=connection,
     )
@@ -95,7 +97,7 @@ def test_non_bmo_pick_passes_through_with_no_redis_call(monkeypatch):
     monkeypatch.setattr(slots_redis, "acquire", _boom)
     monkeypatch.setattr(slots_redis, "_client", _boom)
 
-    result = free_gate.gate("coding", "size-m", "me", inline=True, tiers=_TIERS)
+    result = free_gate.gate("coding", "size-m", "me", inline=True, tiers=_TIERS, quota_rows=[])
 
     assert result == {
         "pick": {"model": "sonnet", "effort": "medium"},
@@ -118,6 +120,7 @@ def test_inline_caller_gives_up_sooner_than_a_deferred_caller(redis_port, flush_
         inline=True,
         inline_wait_s=0.2,
         tiers=_TIERS,
+        quota_rows=[],
         connection=connection,
     )
     inline_elapsed = time.monotonic() - inline_start
@@ -136,6 +139,7 @@ def test_inline_caller_gives_up_sooner_than_a_deferred_caller(redis_port, flush_
         inline=False,
         deferred_buffer_s=0.3,
         tiers=_TIERS,
+        quota_rows=[],
         connection=connection,
     )
     deferred_elapsed = time.monotonic() - deferred_start
