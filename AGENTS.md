@@ -1,6 +1,6 @@
 # lupin
 
-`lupin` is a tool for multi-machine task loops. It does three jobs:
+`lupin` is a tool for multi-machine task loops. It does four jobs:
 
 1. It picks a model and effort level for a task. Commands: `route`,
    `classify`, `review-route`.
@@ -8,6 +8,10 @@
    callers can use it at one time. Commands: `acquire`, `hold`, `release`,
    `status`.
 3. It serves a read-only dashboard for the loops. Command: `serve`.
+4. It coordinates a fleet of machines: GitHub-issue claims, a machine
+   registry, and quests (a set of issues worked together on one machine).
+   Commands: `claim`, `renew-claim`, `release-claim`, `join`, `heartbeat`,
+   `drain`, `undrain`, `machines`, `place`, `quest`, `reconcile`, `roadmap`.
 
 One program, `lupin`, with subcommands. Run `lupin --help` for the full list.
 
@@ -75,6 +79,20 @@ The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 - `src/lupin/review_dispatch.py` — picks which lock a routed model needs.
 - `src/lupin/serve.py`, `src/lupin/roadmap.py` — the dashboard. Moved from
   `ghostbook.nix`'s `hosts/jesus/loopgui/` (issue #204).
+- `src/lupin/quota.py` — the `/usage` page's quota reads, split out of
+  `serve.py`.
+- `src/lupin/claims.py` — `claim`/`renew-claim`/`release-claim`: one GitHub
+  issue claimed by one host at a time.
+- `src/lupin/machines.py` — `join`/`heartbeat`/`drain`/`undrain`/`machines`:
+  the fleet's machine registry.
+- `src/lupin/quest.py` — `quest start`/`stop`/`focus`/`release`: a set of
+  issues worked together on one machine.
+- `src/lupin/place.py` — `place`: picks which fleet machine should run a
+  task.
+- `src/lupin/reconcile.py` — `reconcile`: applies the automatic claim/
+  focus/quest release rules.
+- `src/lupin/roadmap_cli.py` — the `roadmap` subcommand's own CLI surface
+  (distinct from `roadmap.py`, which the dashboard also uses).
 - `src/lupin/cli.py` — the `lupin` command. It owns the argument parsing for
   every subcommand; the modules above take an argument list instead of
   parsing their own.

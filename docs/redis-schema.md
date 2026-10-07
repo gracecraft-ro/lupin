@@ -33,7 +33,7 @@ release its own entry.
 ## Fleet keys
 
 These back the fleet CLI (`lupin join`, `heartbeat`, `drain`, `machines`,
-`quest ...` — issues #7, #11–#13). No code reads or writes them yet.
+`quest ...` — issues #7, #11–#13).
 
 ### `machine:<name>`
 
