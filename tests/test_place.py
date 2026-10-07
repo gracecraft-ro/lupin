@@ -321,6 +321,91 @@ def test_place_quota_header_prefers_a_real_reading_over_unavailable(redis_port, 
     assert result["quota"] == _CLAUDE_QUOTA["claude"]
 
 
+# --- place(): wait-or-downgrade when every candidate is exhausted (#32) ---
+
+
+def test_place_exhausted_machine_is_skipped_and_not_picked(redis_port, flush_redis):
+    _write_machine(
+        redis_port, "mac-studio",
+        quota={"claude": {"pct_left": 0, "resets_at": int((time.time() + 300) * 1000), "source": "test"}},
+    )
+
+    result = place.place("retry backoff", _kw(redis_port))
+
+    assert result["pick"] is None
+    assert result["candidates"] == []
+    assert result["skipped"]["quota_exhausted"] == 1
+
+
+def test_place_short_wait_reports_wait_and_keeps_the_model(redis_port, flush_redis):
+    """Every candidate is exhausted, but the soonest reset is well under
+    `PRACTICAL_WAIT_S` -- report the wait, don't touch the routed model.
+    """
+    resets_at = int((time.time() + 300) * 1000)  # 5 minutes -- well under 10
+    _write_machine(
+        redis_port, "mac-studio",
+        quota={"claude": {"pct_left": 0, "resets_at": resets_at, "source": "test"}},
+    )
+
+    result = place.place("retry backoff", _kw(redis_port))
+
+    # Free text, no labels -> classify() falls back to size-? -> tier2 ->
+    # "opus" (same fallback the non-exhausted tests rely on).
+    assert result["model"] == "opus"
+    assert result["provider"] == "claude"
+    assert result["pick"] is None
+    assert result["run_command"] is None
+    assert result["downgraded_from"] is None
+    assert 290 <= result["wait_seconds"] <= 300
+    assert result["skipped"]["quota_exhausted"] == 1
+
+
+def test_place_long_wait_downgrades_and_repicks(redis_port, flush_redis, monkeypatch):
+    """Every candidate for the routed provider is exhausted and the soonest
+    reset is hours away -- too long to be practical. `place()` should call
+    `route(..., quota_exhausted=True)` once, switch provider, and re-rank
+    the same records against it, landing on a machine that was previously
+    skipped as `other_provider`.
+    """
+    monkeypatch.setattr(place.classify_mod, "classify", lambda issue: ("coding", "size-xs"))
+    # coding/size-xs routes to tier0 ("bmo:qwen3.8-flash-next", provider
+    # "bmo") normally, and tier1 ("sonnet", provider "claude") under
+    # quota_exhausted=True -- see model-tiers.json and test_route.py's own
+    # tier0->tier1 case.
+    far_reset = int((time.time() + 2 * 3600) * 1000)
+    _write_machine(
+        redis_port, "exhausted-bmo",
+        quota={"bmo": {"pct_left": 0, "resets_at": far_reset, "source": "test"}},
+    )
+    _write_machine(
+        redis_port, "claude-backup",
+        quota={"claude": {"pct_left": 80.0, "resets_at": None, "source": "test"}},
+    )
+
+    result = place.place("small bmo task", _kw(redis_port))
+
+    assert result["downgraded_from"] == {"model": "bmo:qwen3.8-flash-next", "effort": "low"}
+    assert result["model"] == "sonnet"
+    assert result["provider"] == "claude"
+    assert result["wait_seconds"] is None
+    assert result["pick"] == "claude-backup"
+    assert result["skipped"]["other_provider"] == 1  # exhausted-bmo, under the new provider
+
+
+def test_place_normal_pick_has_no_wait_or_downgrade_fields(redis_port, flush_redis):
+    """Non-exhausted path: unchanged shape and values, plus the new fields
+    present and empty -- no regression from #32.
+    """
+    _write_machine(redis_port, "mac-studio", quota=_CLAUDE_QUOTA)
+
+    result = place.place("retry backoff", _kw(redis_port))
+
+    assert result["pick"] == "mac-studio"
+    assert result["wait_seconds"] is None
+    assert result["downgraded_from"] is None
+    assert result["skipped"]["quota_exhausted"] == 0
+
+
 def test_place_raises_coordinator_unreachable(closed_port):
     with pytest.raises(place.CoordinatorUnreachable):
         place.place("retry backoff", {"redis_host": "127.0.0.1", "redis_port": closed_port})
