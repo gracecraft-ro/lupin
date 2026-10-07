@@ -63,13 +63,20 @@ def route(
     size: str,
     *,
     bmo_available: bool = True,
+    quota_exhausted: bool = False,
     primary_effort: str | None = None,
     tiers: dict | None = None,
 ) -> dict:
     """Return `{"model": ..., "effort": ...}` for a (category, size) pair.
 
     `bmo_available=False` models a timed-out bmo lock: skip a bmo-dependent
-    tier0 pick and use tier1 instead. `primary_effort` is the primary pass's
+    tier0 pick and use tier1 instead. `quota_exhausted=True` models a caller
+    that already confirmed (elsewhere -- not this function's job) the
+    resolved tier's provider is completely out of quota: drop one tier down,
+    the same forced-not-speculative way `bmo_available=False` drops tier0 to
+    tier1. The two compose: if a bmo-forced drop and a quota-forced drop both
+    apply, each drops one tier, never two at once, and the lowest tier is
+    never dropped below bounds. `primary_effort` is the primary pass's
     effort level ("low"/"medium"/"high"/"xhigh"); it is accepted so a caller
     can log or assert on it, but it never escalates the result -- a review
     call always gets the tier's base effort, never matching a high/xhigh
@@ -85,6 +92,11 @@ def route(
         and any(entry["model"].startswith("bmo:") for entry in row["tier0"])
     ):
         tier = _resolve_tier(row, "tier1")
+
+    if quota_exhausted:
+        next_index = _TIER_ORDER.index(tier) + 1
+        if next_index < len(_TIER_ORDER):
+            tier = _resolve_tier(row, _TIER_ORDER[next_index])
 
     choice = row[tier][0]
     return {"model": choice["model"], "effort": choice["effort"]}
