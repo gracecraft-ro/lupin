@@ -2249,7 +2249,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(render_error("unknown or non-loopable repository"), 404)
                 return
             state = "closed" if query.get("state") == "closed" else "open"
-            if state == "closed":
+            if query.get("view") == "list" and state == "open":
+                models = {
+                    repo: roadmap.cached_model(repo, os.path.join(CODE_DIR, repo))
+                    for repo in repos
+                }
+                body = roadmap.render_list_page(repos, models, roadmap_page, query)
+            elif state == "closed":
                 issues_by_repo = {
                     name: roadmap.cached_github(
                         name, os.path.join(CODE_DIR, name), "closed"

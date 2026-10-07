@@ -1164,6 +1164,164 @@ class RoadmapTests(unittest.TestCase):
             self.assertIn("data-digest-field='highlights'", page)
             self.assertIn("One bullet.", page)
 
+    def test_board_and_list_views_link_to_each_other(self):
+        model = roadmap.build_model([], {}, [], repo="alpha")
+        render = lambda title, body, css, js: body
+
+        board = roadmap.render_combined_page(["alpha"], {"alpha": model}, render)
+        listing = roadmap.render_list_page(
+            ["alpha"], {"alpha": model}, render, {}
+        )
+
+        self.assertIn("href='/roadmap?view=list'", board)
+        self.assertIn("href='/roadmap'", listing)
+
+    def test_list_page_paginates_server_side_and_globally(self):
+        issues = [
+            {
+                "number": number,
+                "title": f"Issue {number}",
+                "body": "",
+                "labels": ["priority/P1"],
+                "updatedAt": "2026-09-20T12:00:00Z",
+                "url": f"https://github.com/acme/alpha/issues/{number}",
+            }
+            for number in (1, 2, 3)
+        ]
+        model = roadmap.build_model(issues, {}, [], repo="alpha")
+        render = lambda title, body, css, js: body
+
+        with mock.patch.object(roadmap, "LIST_PAGE_SIZE", 2):
+            first = roadmap.render_list_page(
+                ["alpha"], {"alpha": model}, render, {}
+            )
+            second = roadmap.render_list_page(
+                ["alpha"], {"alpha": model}, render, {"page": "2"}
+            )
+
+        self.assertIn("Showing <b>1–2</b> of 3", first)
+        self.assertIn("#1</a>", first)
+        self.assertIn("#2</a>", first)
+        self.assertNotIn("#3</a>", first)
+        self.assertIn("page=2", first)
+
+        self.assertIn("Showing <b>3–3</b> of 3", second)
+        self.assertIn("#3</a>", second)
+        self.assertNotIn("#1</a>", second)
+        self.assertIn("page=1", second)
+        self.assertNotIn("page=3", second)
+
+    def test_list_page_filters_by_priority_capability_repo_and_search(self):
+        alpha_issues = [
+            {
+                "number": 1,
+                "title": "Fix backend retry logic",
+                "body": "",
+                "labels": ["priority/P0"],
+                "url": "https://github.com/acme/alpha/issues/1",
+            },
+            {
+                "number": 2,
+                "title": "Update screenshot in the UI",
+                "body": "",
+                "labels": ["priority/P2"],
+                "url": "https://github.com/acme/alpha/issues/2",
+            },
+        ]
+        beta_issues = [
+            {
+                "number": 3,
+                "title": "Translate the onboarding copy",
+                "body": "",
+                "labels": ["priority/P0"],
+                "url": "https://github.com/acme/beta/issues/3",
+            },
+        ]
+        models = {
+            "alpha": roadmap.build_model(alpha_issues, {}, [], repo="alpha"),
+            "beta": roadmap.build_model(beta_issues, {}, [], repo="beta"),
+        }
+        render = lambda title, body, css, js: body
+
+        by_priority = roadmap.render_list_page(
+            ["alpha", "beta"], models, render, {"prio": "P0"}
+        )
+        self.assertIn("#1</a>", by_priority)
+        self.assertIn("#3</a>", by_priority)
+        self.assertNotIn("#2</a>", by_priority)
+
+        by_capability = roadmap.render_list_page(
+            ["alpha", "beta"], models, render, {"cap": "frontend-ui"}
+        )
+        self.assertIn("#2</a>", by_capability)
+        self.assertNotIn("#1</a>", by_capability)
+        self.assertNotIn("#3</a>", by_capability)
+
+        by_repo = roadmap.render_list_page(
+            ["alpha", "beta"], models, render, {"repo": "beta"}
+        )
+        self.assertIn("#3</a>", by_repo)
+        self.assertNotIn("#1</a>", by_repo)
+        self.assertNotIn("#2</a>", by_repo)
+
+        by_search = roadmap.render_list_page(
+            ["alpha", "beta"], models, render, {"q": "translate"}
+        )
+        self.assertIn("#3</a>", by_search)
+        self.assertNotIn("#1</a>", by_search)
+        self.assertNotIn("#2</a>", by_search)
+
+    def test_list_page_groups_by_epic_and_paginates_ten_at_a_time(self):
+        epic = {
+            "number": 10,
+            "title": "Client resilience",
+            "body": "- #11 — First child\n- #12 — Second child\n- #13 — Third child",
+            "labels": ["epic"],
+            "url": "https://github.com/acme/alpha/issues/10",
+        }
+        children = [
+            {
+                "number": number,
+                "title": f"Child {number}",
+                "body": "",
+                "labels": ["priority/P1"],
+                "url": f"https://github.com/acme/alpha/issues/{number}",
+            }
+            for number in (11, 12, 13)
+        ]
+        model = roadmap.build_model([epic, *children], {}, [], repo="alpha")
+        render = lambda title, body, css, js: body
+
+        collapsed = roadmap.render_list_page(
+            ["alpha"], {"alpha": model}, render, {"group": "epic"}
+        )
+        self.assertIn("Client resilience", collapsed)
+        self.assertIn("(3 issues)", collapsed)
+        self.assertNotIn("Child 11", collapsed)
+
+        with mock.patch.object(roadmap, "EPIC_PAGE_SIZE", 2):
+            opened = roadmap.render_list_page(
+                ["alpha"],
+                {"alpha": model},
+                render,
+                {"group": "epic", "open": "alpha:10"},
+            )
+            expanded = roadmap.render_list_page(
+                ["alpha"],
+                {"alpha": model},
+                render,
+                {"group": "epic", "open": "alpha:10", "shown": "4"},
+            )
+
+        self.assertIn("Child 11", opened)
+        self.assertIn("Child 12", opened)
+        self.assertNotIn("Child 13", opened)
+        self.assertIn("Show 2 more · 1 remaining", opened)
+
+        self.assertIn("Child 13", expanded)
+        self.assertNotIn("Show 2 more", expanded)
+
+
 class DependencyDagTests(unittest.TestCase):
     """build_dependency_dag combines blockedBy/blocking links -- GitHub's
     real issue-dependency feature, not a text search -- into one DAG that
