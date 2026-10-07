@@ -1494,14 +1494,11 @@ def model_tiers() -> list[dict]:
 _ALIAS_PREFIX = re.compile(r"^(bmo|local):")
 
 
-def load_model_snapshot() -> dict | None:
-    """Best-effort read of `model_fetch`'s daily snapshot (issue #16). The
-    file may not exist yet -- a machine that has never run
-    `lupin fetch-models` -- or may be unreadable; either way this returns
-    `None` rather than raising, so the page still renders the tier grid
-    on its own, same as `model_tiers()` already degrades for a bad
-    `model-tiers.json`.
-    """
+def load_model_snapshot(connection: dict | None = None) -> dict | None:
+    """Read the fleet snapshot, then this host's file as a fallback."""
+    shared = model_fetch.read_shared_snapshot(**(connection or {}))
+    if shared is not None:
+        return shared
     try:
         with open(model_fetch.SNAPSHOT_FILE, encoding="utf-8") as handle:
             data = json.load(handle)
@@ -1694,7 +1691,7 @@ def render_snapshot_models_table(models: list[dict], benchmark_scores: list[dict
 
 def render_model_tiers(*, sent: str | None = None, connection: dict | None = None) -> bytes:
     rows = model_tiers()
-    snapshot = load_model_snapshot()
+    snapshot = load_model_snapshot(connection)
     models = snapshot_models(snapshot)
     benchmark_snapshot = benchmark_fetch.read_snapshot(**(connection or {}))
     benchmark_scores = (benchmark_snapshot or {}).get("scores") or []
@@ -2762,18 +2759,15 @@ class Handler(BaseHTTPRequestHandler):
         self.redirect(f"/repos?sent={quote(sent, safe='')}")
 
     def do_model_tiers_refresh(self, form: dict) -> None:
-        """"Pull models": run `model_fetch.snapshot()` live, right now, and
-        save it. Each subscription's own fetch already carries a 10s
-        timeout and catches its own errors (see model_fetch.py), so this
-        realistically never raises -- the broad except is a last-resort
-        guard so a surprise failure (e.g. disk full on save) redirects
-        back with a message instead of 500ing the page, matching the
-        issue's "must still render something useful" requirement.
-        """
+        """Pull models now and publish the snapshot for the fleet dashboard."""
         try:
-            model_fetch.save_snapshot(model_fetch.snapshot())
+            snapshot = model_fetch.snapshot()
+            model_fetch.save_snapshot(snapshot)
+            shared = model_fetch.publish_snapshot(snapshot, **self.fleet_connection)
             sent = "pulled today's model list and prices"
-        except Exception as exc:  # best-effort by design, see docstring above
+            if not shared:
+                sent += "; fleet cache unavailable, saved on this machine only"
+        except Exception as exc:  # keep the dashboard usable if a pull or write fails
             sent = f"pull failed: {exc}"
         self.redirect(f"/model-tiers?sent={quote(sent, safe='')}")
 

@@ -19,9 +19,9 @@ This is the data model `lupin` uses once the `redis` backend exists
 | `cmdres:<id>` | string (JSON), with a TTL | one command's result — see Command queue keys below | nothing today |
 | `cmdlog` | capped stream (`XADD ... MAXLEN ~`) | one entry per enqueue and one per terminal outcome — the audit trail | nothing today |
 | `benchmark-snapshot` | string (JSON), with a TTL | one fleet-wide benchmark/quality score per model ID — see Fleet keys below | nothing today |
+| `model-snapshot` | string (JSON), with a TTL | latest model list and prices from `lupin fetch-models` | nothing today |
 | `gh-cache:<owner>/<repo>:<cache-key>` | string (JSON: `{"data": ...}`), with a TTL | one read-only `gh` lookup's cached result — see Fleet keys below | each machine's own direct `gh` call for the same lookup |
 | `quota-snapshot` | string (JSON), with a TTL | one fleet-wide quota reading per provider — see Fleet keys below | nothing today |
-
 These are new keys for the fleet CLI (issues #6–#14, split from #2) and the
 cross-machine command queue (issue #28, split from #27). They stay under
 `v1`: `v1` is the shape of each key, not the whole file, and adding a key
@@ -342,6 +342,7 @@ numbers.
 | Command result (`cmdres:<id>`) | n/a — not renewed | 1 hour |
 | `slot:benchmark-fetch` lease | n/a — not renewed | ~7 min (`benchmark_fetch.CLAUDE_TIMEOUT` + 60s headroom) |
 | `benchmark-snapshot` | n/a — not renewed | 7 days (retention only, see below) |
+| `model-snapshot` | n/a — not renewed | 7 days (retention only) |
 | GitHub data cache (`gh-cache:...`) | n/a — not renewed | 5 min |
 | GitHub fetch lock (`slot:gh-fetch/<owner>/<repo>`) | n/a — held only for one fetch | 2 min |
 | `quota-snapshot` | n/a — not renewed | 24 hours (retention only; freshness is per-provider, 5 min, see above) |

@@ -14,6 +14,19 @@ from unittest import mock
 
 from lupin import cli, model_fetch
 
+
+
+def test_shared_snapshot_is_visible_to_another_fleet_reader(redis_port, flush_redis):
+    connection = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    snapshot = {
+        "fetched_at": "2026-10-07T00:00:00+00:00",
+        "subscriptions": {"claude": {"live": True, "models": [{"id": "claude-opus-4-5"}]}},
+    }
+
+    assert model_fetch.publish_snapshot(snapshot, **connection)
+    assert model_fetch.read_shared_snapshot(**connection) == snapshot
+
+
 CATALOG = {
     "anthropic": {
         "models": {
@@ -250,8 +263,13 @@ class CliFetchModelsTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tempdir:
             snapshot_path = os.path.join(tempdir, "model-snapshot.json")
-            with mock.patch.object(model_fetch, "snapshot", return_value=fixed_snapshot):
+            with (
+                mock.patch.object(model_fetch, "snapshot", return_value=fixed_snapshot),
+                mock.patch.object(model_fetch, "publish_snapshot", return_value=True) as publish,
+            ):
                 code = cli.main(["fetch-models", "--snapshot-file", snapshot_path])
+            publish.assert_called_once()
+            self.assertEqual(publish.call_args.args, (fixed_snapshot,))
 
             self.assertEqual(code, 0)
             with open(snapshot_path, encoding="utf-8") as handle:
@@ -268,8 +286,12 @@ class CliFetchModelsTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tempdir:
             snapshot_path = os.path.join(tempdir, "model-snapshot.json")
-            with mock.patch.object(model_fetch, "snapshot", return_value=fixed_snapshot):
+            with (
+                mock.patch.object(model_fetch, "snapshot", return_value=fixed_snapshot),
+                mock.patch.object(model_fetch, "publish_snapshot") as publish,
+            ):
                 code = cli.main(["fetch-models", "--snapshot-file", snapshot_path, "--no-write"])
+            publish.assert_not_called()
 
             self.assertEqual(code, 0)
             self.assertFalse(os.path.exists(snapshot_path))

@@ -55,6 +55,9 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
+import redis
+
+from . import slots_redis
 from .quota import CLAUDE_CREDENTIALS_FILE, OPENCODE_GO_AUTH_FILE, run
 
 ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
@@ -70,6 +73,44 @@ SNAPSHOT_FILE = os.path.join(
 _USER_AGENT = "lupin-model-fetch/1.0"
 _PRICE_FIELDS = ("input", "output", "cache_read", "cache_write")
 _DATE_SUFFIX = re.compile(r"-\d{8}$")
+REDIS_KEY = f"{slots_redis.PREFIX}model-snapshot"
+REDIS_KEY_TTL = 7 * 24 * 60 * 60
+_REDIS_ERRORS = redis.exceptions.RedisError
+
+
+def _client(connection: dict):
+    return slots_redis._client(
+        connection.get("redis_host"),
+        connection.get("redis_port"),
+        connection.get("redis_username"),
+        connection.get("redis_password"),
+    )
+
+
+def read_shared_snapshot(**connection) -> dict | None:
+    """Read the latest model snapshot shared by the fleet, if available."""
+    try:
+        raw = slots_redis._call_with_retry(lambda: _client(connection).get(REDIS_KEY))
+    except _REDIS_ERRORS:
+        return None
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def publish_snapshot(data: dict, **connection) -> bool:
+    """Publish this pull for the dashboard and other fleet machines."""
+    try:
+        slots_redis._call_with_retry(
+            lambda: _client(connection).set(REDIS_KEY, json.dumps(data), ex=REDIS_KEY_TTL)
+        )
+    except _REDIS_ERRORS:
+        return False
+    return True
 
 
 def _get_json(url: str, headers: dict | None = None, timeout: float = 10.0):

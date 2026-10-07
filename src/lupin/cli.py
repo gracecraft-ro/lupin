@@ -151,6 +151,7 @@ def _fetch_models_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--no-write", action="store_true", help="print the snapshot without saving it")
     parser.add_argument("--json", action="store_true")
+    _fleet_connection_args(parser)
 
 
 def _fetch_benchmarks_args(parser: argparse.ArgumentParser) -> None:
@@ -638,6 +639,8 @@ def _cmd_fetch_models(args: argparse.Namespace) -> int:
     data = model_fetch.snapshot()
     if not args.no_write:
         model_fetch.save_snapshot(data, path=args.snapshot_file)
+        if not model_fetch.publish_snapshot(data, **_fleet_connection(args)):
+            print("warning: snapshot saved locally but not shared with the fleet (Redis unavailable)", file=sys.stderr)
     if args.json:
         print(json.dumps(data))
     else:

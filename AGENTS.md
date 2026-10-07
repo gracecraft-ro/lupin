@@ -65,17 +65,16 @@ renews the lease while the command runs, and releases it when the command
 ends — on a normal exit, a non-zero exit, or the command being killed by a
 signal.
 
-`fetch-models` checks, per subscription (opencode-go, claude, codex), which
-model IDs it can call today and what each one costs. It saves the result to
-`--snapshot-file` (default: `~/.local/state/lupin/model-snapshot.json`)
-unless `--no-write` is given. Model lists for opencode-go and claude come
-from a live call to each provider; codex has no live source reachable from
-this tool, so it falls back to a public catalog (models.dev) and is marked
-`live: false`. Prices come from that same public catalog for all three,
-matched by model ID — a model with no match gets `price: null`, never a
-guessed number. Promo pricing (a free or discounted period with its own
-start and end) has no live source yet either; the `promo` field stays
-`null` until issue #18 adds one.
+`fetch-models` checks which model IDs each subscription can call today and
+what they cost. It saves the result to
+`~/.local/state/lupin/model-snapshot.json` unless `--no-write` is given. It
+also publishes the snapshot to Redis, so the PiHome dashboard shows pulls
+from other fleet machines. A Redis error leaves the local file in place and
+prints a warning. Model lists for opencode-go and claude come from live
+provider calls. Codex uses `omp models` when available; otherwise it uses
+models.dev and is marked `live: false`. Prices
+come from models.dev, matched by model ID. A model with no match has
+`price: null`. Promo pricing has no live source, so `promo` stays `null`.
 
 `stop`/`peek`/`schedule`/`pause`/`resume`/`attach` (issue #2 phase A)
 control a loop from any fleet machine. Local target: run `loopctl`

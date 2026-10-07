@@ -659,24 +659,46 @@ class ModelSnapshotTests(unittest.TestCase):
             handle.write(data if isinstance(data, str) else json.dumps(data))
 
     def test_missing_file_is_none(self):
-        with mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path):
+        with (
+            mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path),
+            mock.patch.object(serve.model_fetch, "read_shared_snapshot", return_value=None),
+        ):
             self.assertIsNone(serve.load_model_snapshot())
 
     def test_corrupt_file_is_none_not_a_crash(self):
         self.write_snapshot("{not json")
-        with mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path):
+        with (
+            mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path),
+            mock.patch.object(serve.model_fetch, "read_shared_snapshot", return_value=None),
+        ):
             self.assertIsNone(serve.load_model_snapshot())
 
     def test_non_object_json_is_none(self):
         self.write_snapshot([1, 2, 3])
-        with mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path):
+        with (
+            mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path),
+            mock.patch.object(serve.model_fetch, "read_shared_snapshot", return_value=None),
+        ):
             self.assertIsNone(serve.load_model_snapshot())
 
     def test_valid_file_round_trips(self):
         data = {"fetched_at": "2026-10-07T00:00:00+00:00", "subscriptions": {}}
         self.write_snapshot(data)
-        with mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path):
+        with (
+            mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path),
+            mock.patch.object(serve.model_fetch, "read_shared_snapshot", return_value=None),
+        ):
             self.assertEqual(serve.load_model_snapshot(), data)
+
+    def test_shared_snapshot_takes_precedence_over_local_copy(self):
+        local = {"fetched_at": "2026-10-06T00:00:00+00:00", "subscriptions": {}}
+        shared = {"fetched_at": "2026-10-07T00:00:00+00:00", "subscriptions": {}}
+        self.write_snapshot(local)
+        with (
+            mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path),
+            mock.patch.object(serve.model_fetch, "read_shared_snapshot", return_value=shared),
+        ):
+            self.assertEqual(serve.load_model_snapshot({"redis_host": "fleet"}), shared)
 
     def test_snapshot_models_flattens_every_subscription(self):
         snapshot = {
@@ -782,8 +804,31 @@ class AllModelsTableTests(unittest.TestCase):
         with (
             mock.patch.object(serve, "MODEL_TIERS_PATH", self.tiers_path),
             mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path),
+            mock.patch.object(serve.model_fetch, "read_shared_snapshot", return_value=None),
         ):
             return serve.render_model_tiers(sent=sent).decode()
+
+    def test_render_uses_fleet_snapshot_timestamp_and_models(self):
+        self.write_tiers({"coding": {"tiers": {}}})
+        shared = {
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [{"id": "claude-opus-4-5", "price": None, "promo": None}],
+                },
+            },
+        }
+        with (
+            mock.patch.object(serve, "MODEL_TIERS_PATH", self.tiers_path),
+            mock.patch.object(serve.model_fetch, "read_shared_snapshot", return_value=shared),
+            mock.patch.object(serve.benchmark_fetch, "read_snapshot", return_value=None),
+        ):
+            page = serve.render_model_tiers(connection={"redis_host": "fleet"}).decode()
+
+        self.assertIn("claude-opus-4-5", page)
+        self.assertIn("<span data-since='1791331200'></span> ago", page)
+        self.assertNotIn("Last pulled: never pulled", page)
 
     def test_no_snapshot_file_shows_placeholder_not_a_crash(self):
         self.write_tiers({"coding": {"tiers": {"tier1": [{"model": "sonnet", "effort": "high"}]}}})
@@ -902,18 +947,22 @@ class ModelTiersRefreshRouteTests(unittest.TestCase):
         handler.send_response = mock.Mock()
         handler.send_header = mock.Mock()
         handler.end_headers = mock.Mock()
+        handler.fleet_connection = {"redis_host": "fleet"}
         fake_snapshot = {"fetched_at": "2026-10-07T00:00:00+00:00", "subscriptions": {}}
         with (
             mock.patch.object(serve.model_fetch, "snapshot", return_value=fake_snapshot) as fake_fetch,
             mock.patch.object(serve.model_fetch, "save_snapshot") as fake_save,
+            mock.patch.object(serve.model_fetch, "publish_snapshot", return_value=True) as fake_publish,
         ):
             handler.do_POST()
         fake_fetch.assert_called_once_with()
         fake_save.assert_called_once_with(fake_snapshot)
+        fake_publish.assert_called_once_with(fake_snapshot, redis_host="fleet")
         handler.send_response.assert_called_once_with(303)
         location = next(
             call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
         )
+        self.assertIn("pulled%20today%27s%20model%20list", location)
         self.assertTrue(location.startswith("/model-tiers?sent="))
 
     def test_refresh_failure_redirects_with_message_not_a_500(self):
