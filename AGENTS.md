@@ -7,7 +7,9 @@
 2. It controls slots. A slot is a resource with a limit on how many
    callers can use it at one time. Commands: `acquire`, `hold`, `release`,
    `status`.
-3. It serves a read-only dashboard for the loops. Command: `serve`.
+3. It serves a dashboard for the loops, for both viewing and controlling
+   them (start/stop/close a loop, add or remove a repo, trigger a run,
+   adjust a machine's slots). Command: `serve`.
 4. It coordinates a fleet of machines: GitHub-issue claims, a machine
    registry, and quests (a set of issues worked together on one machine).
    Commands: `claim`, `renew-claim`, `release-claim`, `join`, `heartbeat`,

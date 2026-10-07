@@ -10,11 +10,18 @@ This repo is `gracecraft/lupin`. The owner clones it to
 `/code/lupin`, the same way `ghostbook.nix` is mounted at
 `/code/ghostbook.nix`.
 
-## Rule 1: do not push to GitHub from the sandbox
+## Rule 1: do not push code to GitHub from the sandbox
 
 A sandbox agent's `gh` token cannot push code to GitHub. This holds for
 `lupin` the same way it holds for `ghostbook.nix` (see that repo's
 `docs/delegation-loop.md`, rule 1).
+
+This rule covers `git push` only. The token has `write` access on the repo
+itself — confirmed with `gh api repos/gracecraft/lupin/collaborators/<user>/permission`
+— so commenting on, closing, and reopening issues and PRs through `gh`
+works and is expected, not just reading them. Don't assume an issue can't
+be closed just because its branch can't be pushed; check write access
+before writing that into a report.
 
 To work on an issue:
 
@@ -47,7 +54,8 @@ git ls-remote /code/lupin
 This repo is a plain Python package and a Nix flake, not a live system
 config. It carries none of `ghostbook.nix`'s extra danger rules (no
 activation scripts, no machine state to break). The one rule that still
-applies is rule 1 above — no push to GitHub.
+applies is rule 1 above — no `git push` to GitHub, closing/commenting on
+issues is fine.
 
 Before you merge or dispatch anything, check for work already done:
 
