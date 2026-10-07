@@ -81,14 +81,21 @@ and push.
 
 ## Next Action
 
-1. Commit.
-2. Push the branch to `origin` (this worktree's remote is the `/code/lupin`
-   mount, not GitHub — no `git push` to GitHub from this sandbox, per
-   `docs/delegation-loop.md` rule 1).
-3. Report: name the branch, summarize the 5 scope items, call out the
-   `remote_loop_hosts` fallback decision and the signing-key non-change
-   explicitly, and state that live multi-machine testing is unverified
-   (blocked on #29).
+Done.
+
+1. Committed as `bd2099a` on branch `worktree-agent-af4c38ea7248fbce5`.
+2. No push needed: `git rev-parse --git-common-dir` shows this directory is
+   a *linked worktree* of `/code/lupin`'s own repo
+   (`/code/lupin/.git/worktrees/lupin-wt-agent-af4c38ea7248fbce5`), not a
+   separate clone — it shares one object store and refs namespace with the
+   mount. The commit is already part of `/code/lupin`'s repository; nothing
+   to push there. `origin` in this worktree is inherited from the shared
+   repo config and points straight at GitHub, so it must never be pushed to
+   (rule 1) — and wasn't.
+3. Report posted (see final message): names the branch, summarizes the 5
+   scope items, calls out the `remote_loop_hosts` fallback decision and the
+   signing-key non-change explicitly, and states that live multi-machine
+   testing is unverified (blocked on #29).
 
 ## Known Blockers / Decisions
 
