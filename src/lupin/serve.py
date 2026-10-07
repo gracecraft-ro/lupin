@@ -63,11 +63,8 @@ from . import benchmark_fetch, claims, commands, loops, machines, model_fetch, q
 from .slots import CoordinatorUnreachable
 from .quota import (
     QuotaDuration,
-    claude_usage,
     epoch_ms_to_local,
-    omp_usage,
     quota_source_label,
-    quota_usage,
 )
 
 ATTACHMENT_ID = roadmap.ATTACHMENT_ID
@@ -1365,72 +1362,95 @@ def render_quota_row(row: dict, now_ms: int) -> str:
     )
 
 
-def render_usage() -> bytes:
-    quota_rows = quota_usage()
+def render_usage(connection: dict) -> bytes:
+    """Reads every machine's own already-reported usage out of the fleet
+    registry (`machines.py`'s `usage_detail`, written by whichever host
+    actually has the provider logins) rather than reading providers
+    locally -- this page runs on pihome, which has none of its own.
+    """
     now_ms = int(time.time() * 1000)
-    fetched = next((row["generated_at"] for row in quota_rows if "generated_at" in row), None)
-    body = [
-        f'<header><h1>{icon("M5 20V10M12 20V4M19 20v-7")}Usage</h1></header>',
-        "<div class=quota-heading><h2>Quota</h2>"
-        f"<span class=dim>Data timestamp: {esc(fetched) if fetched else 'not available'}</span></div>",
-        render_quota_summary(quota_rows, now_ms),
-        "<div class=quota-legend>"
-        "<span class=quota-legend-item><span class=quota-legend-used></span>used</span>"
-        "<span class=quota-legend-item><span class=quota-legend-time></span>"
-        "time elapsed in window</span>"
-        "<span class=quota-legend-item><span class=quota-legend-ahead></span>"
-        "used faster than time</span></div><div class=quota-groups>",
-    ]
-    groups: dict[str, list[dict]] = {}
-    for row in quota_rows:
-        groups.setdefault(row["provider"], []).append(row)
-    for provider, rows in groups.items():
-        body.append(
-            f"<section class='card quota-group'><div class=quota-group-heading>"
-            f"<h3>{esc(provider)}</h3><span class=dim>"
-            f"{esc(quota_source_label(provider))}</span></div>"
+    body = [f'<header><h1>{icon("M5 20V10M12 20V4M19 20v-7")}Usage</h1></header>']
+    try:
+        records = machines.machines(connection)
+    except machines.CoordinatorUnreachable as exc:
+        body.append(f"<p class=dim>Fleet registry unreachable: {esc(str(exc))}</p>")
+        return page(
+            "Agent usage", "".join(body), extra_css="main{max-width:none}", active="usage"
         )
-        for row in rows:
-            if "error" in row or "note" in row:
-                message = row.get("error", row.get("note"))
-                body.append(f"<p class=dim>{esc(message)}</p>")
-            else:
-                body.append(render_quota_row(row, now_ms))
-        body.append("</section>")
-    body.append(
-        "</div><p class=dim>Bars show quota used; the marker shows time elapsed "
-        "in the window. The reset time appears at the right. OpenCode Go uses "
-        "omp or Orca's usage API; Claude uses Anthropic's OAuth usage API. "
-        "OpenAI uses omp or Codex's latest local snapshot, which only updates "
-        "when Codex writes a session event.</p>"
-        "<h2>7-day totals</h2>"
-        "<p class=dim>Sources are read locally. Claude's local cache reports "
-        "one combined token total per day, not an input/output split, and no "
-        "daily cost -- shown in the input-tokens column with cost as "
-        "'not tracked'.</p>"
-        "<div class='card scroll'><table><tr><th>provider</th>"
-        "<th>input tokens</th><th>output tokens</th><th>cost</th>"
-        "<th>period</th><th>source</th><th>last update</th></tr>"
-    )
-    rows = claude_usage() + omp_usage()
-    for row in rows:
-        if "error" in row:
-            body.append(
-                f"<tr><td>{esc(row['provider'])}</td><td colspan=3>"
-                f"{esc(row['error'])}</td><td>last 7 days</td>"
-                f"<td>{esc(row['source'])}</td><td>-</td></tr>"
-            )
+
+    any_data = False
+    for record in sorted(records, key=lambda r: r["name"]):
+        usage = record.get("usage_detail") or {}
+        quota_rows = usage.get("quota_rows") or []
+        token_rows = usage.get("token_rows") or []
+        if not quota_rows and not token_rows:
             continue
-        output_tokens = "-" if row["output_tokens"] is None else esc(row["output_tokens"])
-        cost = "not tracked" if row["cost"] is None else f"${row['cost']:.2f}"
+        any_data = True
+        fetched = next((row["generated_at"] for row in quota_rows if "generated_at" in row), None)
         body.append(
-            f"<tr><td>{esc(row['provider'])}</td>"
-            f"<td>{esc(row['input_tokens'])}</td>"
-            f"<td>{output_tokens}</td>"
-            f"<td>{cost}</td><td>{esc(row['period'])}</td>"
-            f"<td>{esc(row['source'])}</td><td>{esc(row['last_update'])}</td></tr>"
+            f"<div class=quota-heading><h2>{esc(record['name'])}</h2>"
+            f"<span class=dim>Data timestamp: {esc(fetched) if fetched else 'not available'}</span></div>"
         )
-    body.append("</table></div>")
+        body.append(render_quota_summary(quota_rows, now_ms))
+        body.append(
+            "<div class=quota-legend>"
+            "<span class=quota-legend-item><span class=quota-legend-used></span>used</span>"
+            "<span class=quota-legend-item><span class=quota-legend-time></span>"
+            "time elapsed in window</span>"
+            "<span class=quota-legend-item><span class=quota-legend-ahead></span>"
+            "used faster than time</span></div><div class=quota-groups>"
+        )
+        groups: dict[str, list[dict]] = {}
+        for row in quota_rows:
+            groups.setdefault(row["provider"], []).append(row)
+        for provider, rows in groups.items():
+            body.append(
+                f"<section class='card quota-group'><div class=quota-group-heading>"
+                f"<h3>{esc(provider)}</h3><span class=dim>"
+                f"{esc(quota_source_label(provider))}</span></div>"
+            )
+            for row in rows:
+                if "error" in row or "note" in row:
+                    message = row.get("error", row.get("note"))
+                    body.append(f"<p class=dim>{esc(message)}</p>")
+                else:
+                    body.append(render_quota_row(row, now_ms))
+            body.append("</section>")
+        body.append(
+            "</div><p class=dim>Bars show quota used; the marker shows time elapsed "
+            "in the window. The reset time appears at the right. OpenCode Go uses "
+            "omp or Orca's usage API; Claude uses Anthropic's OAuth usage API. "
+            "OpenAI uses omp or Codex's latest local snapshot, which only updates "
+            "when Codex writes a session event.</p>"
+            "<h3>7-day totals</h3>"
+            "<p class=dim>Sources are read on that machine. Claude's local cache "
+            "reports one combined token total per day, not an input/output split, "
+            "and no daily cost -- shown in the input-tokens column with cost as "
+            "'not tracked'.</p>"
+            "<div class='card scroll'><table><tr><th>provider</th>"
+            "<th>input tokens</th><th>output tokens</th><th>cost</th>"
+            "<th>period</th><th>source</th><th>last update</th></tr>"
+        )
+        for row in token_rows:
+            if "error" in row:
+                body.append(
+                    f"<tr><td>{esc(row['provider'])}</td><td colspan=3>"
+                    f"{esc(row['error'])}</td><td>last 7 days</td>"
+                    f"<td>{esc(row['source'])}</td><td>-</td></tr>"
+                )
+                continue
+            output_tokens = "-" if row["output_tokens"] is None else esc(row["output_tokens"])
+            cost = "not tracked" if row["cost"] is None else f"${row['cost']:.2f}"
+            body.append(
+                f"<tr><td>{esc(row['provider'])}</td>"
+                f"<td>{esc(row['input_tokens'])}</td>"
+                f"<td>{output_tokens}</td>"
+                f"<td>{cost}</td><td>{esc(row['period'])}</td>"
+                f"<td>{esc(row['source'])}</td><td>{esc(row['last_update'])}</td></tr>"
+            )
+        body.append("</table></div>")
+    if not any_data:
+        body.append("<p class=dim>No usage data reported yet.</p>")
     return page(
         "Agent usage", "".join(body), extra_css="main{max-width:none}", active="usage"
     )
@@ -2546,7 +2566,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = roadmap.render_combined_page(repos, models, roadmap_page)
             self.reply(body)
         elif url.path == "/usage":
-            self.reply(render_usage())
+            self.reply(render_usage(self.fleet_connection))
         elif url.path == "/model-tiers":
             self.reply(render_model_tiers(sent=query.get("sent"), connection=self.fleet_connection))
         elif url.path == "/machines":

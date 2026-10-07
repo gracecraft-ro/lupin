@@ -30,12 +30,20 @@ _AMBIENT_ENV_VARS = (
 @pytest.fixture(autouse=True)
 def fake_quota_snapshot():
     """`_write_record` (via `join`/`heartbeat`/`drain`/`undrain`) calls
-    `quota.snapshot()` for real otherwise -- on a box with real Claude
-    credentials and `omp` installed, that means a live network call and a
-    real subprocess on every test in this file. Fixed data stands in.
+    `quota.snapshot()` and (for `usage_detail`) `quota.quota_usage()` /
+    `quota.claude_usage()` / `quota.omp_usage()` for real otherwise -- on a
+    box with real Claude credentials and `omp` installed, that means a live
+    network call and a real subprocess on every test in this file. Fixed
+    data stands in for all four.
     """
-    with mock.patch.object(
-        machines.quota, "snapshot", return_value={"claude": {"pct_left": 50, "resets_at": None, "source": "test"}}
+    with (
+        mock.patch.object(
+            machines.quota, "snapshot",
+            return_value={"claude": {"pct_left": 50, "resets_at": None, "source": "test"}},
+        ),
+        mock.patch.object(machines.quota, "quota_usage", return_value=[]),
+        mock.patch.object(machines.quota, "claude_usage", return_value=[]),
+        mock.patch.object(machines.quota, "omp_usage", return_value=[]),
     ):
         yield
 

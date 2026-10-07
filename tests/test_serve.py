@@ -212,11 +212,11 @@ class TimeFormattingTests(unittest.TestCase):
 
 
 class QuotaRenderingTests(unittest.TestCase):
-    """`/usage` rendering only. The real quota/usage readers moved to
-    `quota.py` (issue #8) and are tested in `test_quota.py` -- here,
-    `serve.quota_usage`/`claude_usage`/`omp_usage` (the names `serve.py`
-    imports from `quota.py`) are mocked, so these tests cover only how
-    `render_usage`/`render_quota_row` turn rows into HTML.
+    """`/usage` rendering only. The real quota/usage readers live in
+    `quota.py` (issue #8, tested in `test_quota.py`) and are reported into
+    the fleet registry by `machines.py`'s `usage_detail` field -- here,
+    `machines.machines` is mocked, so these tests
+    cover only how `render_usage`/`render_quota_row` turn rows into HTML.
     """
 
     def test_quota_bar_marks_window_time_and_quota_progress(self):
@@ -247,17 +247,15 @@ class QuotaRenderingTests(unittest.TestCase):
             "resets_at": reset_at_ms,
             "generated_at": "2026-01-01 00:00:00",
         }]
-        with (
-            mock.patch.object(serve, "quota_usage", return_value=rows),
-            mock.patch.object(serve, "claude_usage", return_value=[]),
-            mock.patch.object(serve, "omp_usage", return_value=[]),
-        ):
-            page = serve.render_usage().decode()
+        record = {"name": "jesus", "usage_detail": {"quota_rows": rows, "token_rows": []}}
+        with mock.patch.object(serve.machines, "machines", return_value=[record]):
+            page = serve.render_usage({}).decode()
 
         self.assertIn(
             f"data-window-duration='P30D' data-resets-at-ms='{reset_at_ms}'",
             page,
         )
+        self.assertIn("<h2>jesus</h2>", page)
         self.assertIn("<h3>opencode-go</h3>", page)
         self.assertIn("<span><strong>36%</strong> available</span>", page)
         self.assertIn("64% used", page)
@@ -265,29 +263,31 @@ class QuotaRenderingTests(unittest.TestCase):
         self.assertIn("Needs attention", page)
         self.assertIn("Most used", page)
         self.assertIn("Next reset", page)
-        self.assertLess(page.index("<h2>Quota</h2>"), page.index("<h2>7-day totals</h2>"))
+        self.assertLess(page.index("<h2>jesus</h2>"), page.index("<h3>7-day totals</h3>"))
         self.assertIn("Data timestamp: 2026-01-01 00:00:00", page)
 
     def test_quota_note_and_error_rows_render_as_dim_text(self):
-        with (
-            mock.patch.object(serve, "quota_usage", return_value=[
-                {"provider": "omp", "error": "unavailable (RuntimeError)"},
-            ]),
-            mock.patch.object(serve, "claude_usage", return_value=[]),
-            mock.patch.object(serve, "omp_usage", return_value=[]),
-        ):
-            page = serve.render_usage().decode()
+        record = {
+            "name": "jesus",
+            "usage_detail": {
+                "quota_rows": [{"provider": "omp", "error": "unavailable (RuntimeError)"}],
+                "token_rows": [],
+            },
+        }
+        with mock.patch.object(serve.machines, "machines", return_value=[record]):
+            page = serve.render_usage({}).decode()
         self.assertIn("<h3>omp</h3>", page)
         self.assertIn("<p class=dim>unavailable (RuntimeError)</p>", page)
 
-        with (
-            mock.patch.object(serve, "quota_usage", return_value=[
-                {"provider": "claude", "note": "quota unavailable"},
-            ]),
-            mock.patch.object(serve, "claude_usage", return_value=[]),
-            mock.patch.object(serve, "omp_usage", return_value=[]),
-        ):
-            page = serve.render_usage().decode()
+        record = {
+            "name": "jesus",
+            "usage_detail": {
+                "quota_rows": [{"provider": "claude", "note": "quota unavailable"}],
+                "token_rows": [],
+            },
+        }
+        with mock.patch.object(serve.machines, "machines", return_value=[record]):
+            page = serve.render_usage({}).decode()
         self.assertIn("<h3>claude</h3>", page)
         self.assertIn("quota unavailable", page)
 
@@ -317,12 +317,12 @@ class QuotaRenderingTests(unittest.TestCase):
                 "source": "/opencode/stats.db",
             },
         ]
-        with (
-            mock.patch.object(serve, "quota_usage", return_value=[]),
-            mock.patch.object(serve, "claude_usage", return_value=claude_rows),
-            mock.patch.object(serve, "omp_usage", return_value=omp_rows),
-        ):
-            page = serve.render_usage().decode()
+        record = {
+            "name": "jesus",
+            "usage_detail": {"quota_rows": [], "token_rows": claude_rows + omp_rows},
+        }
+        with mock.patch.object(serve.machines, "machines", return_value=[record]):
+            page = serve.render_usage({}).decode()
 
         self.assertIn("<td>claude</td><td>130</td><td>-</td><td>not tracked</td>", page)
         self.assertIn("<td>openai-codex</td><td>15</td><td>10</td><td>$0.50</td>", page)
