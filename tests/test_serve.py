@@ -388,6 +388,21 @@ class MachinesRouteUnitTests(unittest.TestCase):
         status = handler.reply.call_args.args[1]
         self.assertEqual(status, 400)
 
+    def test_slot_max_route_rejects_unicode_digit_isdigit_cannot_parse(self):
+        # '²' (superscript two) is str.isdigit() == True but int()
+        # raises ValueError on it. The route must not crash on this -- it
+        # should reject the request with the same clean 400 as "max=x".
+        body = "slot=bmo&max=²".encode()
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/machines/slot-max"
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.reply = mock.Mock()
+        handler.do_POST()
+        status = handler.reply.call_args.args[1]
+        self.assertEqual(status, 400)
+
     def test_slot_max_route_calls_set_max_and_redirects(self):
         handler = serve.Handler.__new__(serve.Handler)
         body = b"slot=bmo&max=3"

@@ -1375,11 +1375,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_set_slot_max(self, form: dict) -> None:
         slot = form.get("slot", "").strip()
         raw_max = form.get("max", "").strip()
-        if not slot or not raw_max.isdigit() or int(raw_max) < 1:
+        try:
+            # int(), not raw_max.isdigit(): isdigit() also accepts Unicode
+            # digits like superscript two ('²') that int() then
+            # can't parse, which used to crash this handler.
+            max_value = int(raw_max)
+        except ValueError:
+            max_value = None
+        if not slot or max_value is None or max_value < 1:
             self.reply(render_error("bad slot-max request"), 400)
             return
         try:
-            slots_redis.set_max(slot, int(raw_max), **self.redis_connection)
+            slots_redis.set_max(slot, max_value, **self.redis_connection)
         except machines.CoordinatorUnreachable:
             self.reply(render_error("cannot reach the machine registry"), 502)
             return
