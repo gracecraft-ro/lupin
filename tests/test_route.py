@@ -1,6 +1,11 @@
+import time
 import unittest
 
 from lupin import route
+from lupin.quota import QuotaDuration
+
+HOUR_MS = 60 * 60 * 1000
+MIN_MS = 60 * 1000
 
 _TIERS = {
     "coding": {
@@ -49,32 +54,44 @@ _TIERS = {
             "tier2": [{"model": "opus", "effort": "high"}],
         }
     },
+    "prose": {
+        "tiers": {
+            # Mirrors prose's real shape: tier2 lists two different
+            # providers (claude, opencode-go) -- the case a quota-pacing
+            # fallback needs to find "another provider, same tier".
+            "tier1": [{"model": "sonnet", "effort": "high"}],
+            "tier2": [
+                {"model": "opus", "effort": "high"},
+                {"model": "fable", "effort": "high"},
+            ],
+        }
+    },
 }
 
 
 class RouteTests(unittest.TestCase):
     def test_small_coding_issue_gets_tier0_bmo(self):
-        result = route.route("coding", "size-xs", tiers=_TIERS)
+        result = route.route("coding", "size-xs", tiers=_TIERS, quota_rows=[])
 
         self.assertEqual(result, {"model": "bmo:qwen3.8-flash-next", "effort": "low"})
 
     def test_medium_coding_issue_gets_tier1_sonnet(self):
-        result = route.route("coding", "size-m", tiers=_TIERS)
+        result = route.route("coding", "size-m", tiers=_TIERS, quota_rows=[])
 
         self.assertEqual(result, {"model": "sonnet", "effort": "medium"})
 
     def test_large_coding_issue_gets_tier2_opus(self):
-        result = route.route("coding", "size-l", tiers=_TIERS)
+        result = route.route("coding", "size-l", tiers=_TIERS, quota_rows=[])
 
         self.assertEqual(result, {"model": "opus", "effort": "high"})
 
     def test_xl_coding_issue_gets_tier2_opus(self):
-        result = route.route("coding", "size-xl", tiers=_TIERS)
+        result = route.route("coding", "size-xl", tiers=_TIERS, quota_rows=[])
 
         self.assertEqual(result, {"model": "opus", "effort": "high"})
 
     def test_translation_lookup_uses_its_own_row(self):
-        result = route.route("translation", "size-xs", tiers=_TIERS)
+        result = route.route("translation", "size-xs", tiers=_TIERS, quota_rows=[])
 
         self.assertEqual(
             result, {"model": "local:deepseek-v4-flash-0731", "effort": "medium"}
@@ -83,7 +100,7 @@ class RouteTests(unittest.TestCase):
     def test_no_tier0_row_escalates_small_issue_to_tier1(self):
         # frontend-ui has no tier0 -- a small UI issue still lands on tier1,
         # not a KeyError and not a silent drop to a cheaper, nonexistent tier.
-        result = route.route("frontend-ui", "size-xs", tiers=_TIERS)
+        result = route.route("frontend-ui", "size-xs", tiers=_TIERS, quota_rows=[])
 
         self.assertEqual(result, {"model": "sonnet", "effort": "high"})
 
@@ -91,12 +108,16 @@ class RouteTests(unittest.TestCase):
         # Small/mechanical coding issue would normally get bmo (tier0). A
         # timed-out bmo lock skips tier0 entirely and lands on tier1 Sonnet,
         # per #179 -- not on tier0's own local fallback entry.
-        result = route.route("coding", "size-xs", bmo_available=False, tiers=_TIERS)
+        result = route.route(
+            "coding", "size-xs", bmo_available=False, tiers=_TIERS, quota_rows=[]
+        )
 
         self.assertEqual(result, {"model": "sonnet", "effort": "medium"})
 
     def test_bmo_available_keeps_tier0_pick(self):
-        result = route.route("coding", "size-xs", bmo_available=True, tiers=_TIERS)
+        result = route.route(
+            "coding", "size-xs", bmo_available=True, tiers=_TIERS, quota_rows=[]
+        )
 
         self.assertEqual(result, {"model": "bmo:qwen3.8-flash-next", "effort": "low"})
 
@@ -104,7 +125,7 @@ class RouteTests(unittest.TestCase):
         # translation's tier0 is local-only; a bmo timeout has nothing to do
         # with it, so it should not get bumped to tier1.
         result = route.route(
-            "translation", "size-xs", bmo_available=False, tiers=_TIERS
+            "translation", "size-xs", bmo_available=False, tiers=_TIERS, quota_rows=[]
         )
 
         self.assertEqual(
@@ -118,7 +139,7 @@ class RouteTests(unittest.TestCase):
         # dependency, skipping the fallback and returning a bmo model
         # anyway. It must still fall back to tier1 here.
         result = route.route(
-            "cad-spatial", "size-xs", bmo_available=False, tiers=_TIERS
+            "cad-spatial", "size-xs", bmo_available=False, tiers=_TIERS, quota_rows=[]
         )
 
         self.assertEqual(result, {"model": "sonnet", "effort": "high"})
@@ -127,52 +148,15 @@ class RouteTests(unittest.TestCase):
         # The primary pass already ran at "high". The review still gets
         # tier1's base entry (medium), not the high-effort entry -- it
         # doesn't need to match, by design (#179 §4).
-        result = route.route("coding", "size-m", primary_effort="high", tiers=_TIERS)
+        result = route.route(
+            "coding", "size-m", primary_effort="high", tiers=_TIERS, quota_rows=[]
+        )
 
         self.assertEqual(result, {"model": "sonnet", "effort": "medium"})
 
     def test_xhigh_effort_primary_does_not_escalate_the_review(self):
-        result = route.route("coding", "size-l", primary_effort="xhigh", tiers=_TIERS)
-
-        self.assertEqual(result, {"model": "opus", "effort": "high"})
-
-    def test_quota_exhausted_falls_back_to_tier1(self):
-        # Same shape as the bmo timeout fallback: a confirmed-exhausted
-        # tier0 provider drops to tier1, one tier down.
-        result = route.route("coding", "size-xs", quota_exhausted=True, tiers=_TIERS)
-
-        self.assertEqual(result, {"model": "sonnet", "effort": "medium"})
-
-    def test_quota_exhausted_on_tier1_falls_back_to_tier2(self):
-        # The drop applies to whichever tier the pick actually resolved to,
-        # not just tier0.
-        result = route.route("coding", "size-m", quota_exhausted=True, tiers=_TIERS)
-
-        self.assertEqual(result, {"model": "opus", "effort": "high"})
-
-    def test_quota_exhausted_on_lowest_tier_does_not_drop_further(self):
-        # tier2 is the floor -- quota_exhausted has nowhere left to go, so
-        # it must not raise or wrap around.
-        result = route.route("coding", "size-l", quota_exhausted=True, tiers=_TIERS)
-
-        self.assertEqual(result, {"model": "opus", "effort": "high"})
-
-    def test_quota_exhausted_false_is_a_no_op(self):
-        result = route.route("coding", "size-xs", quota_exhausted=False, tiers=_TIERS)
-
-        self.assertEqual(result, {"model": "bmo:qwen3.8-flash-next", "effort": "low"})
-
-    def test_bmo_unavailable_and_quota_exhausted_drop_one_tier_each(self):
-        # Both flags true on a tier0 pick: bmo_available=False drops tier0
-        # to tier1, then quota_exhausted drops that tier1 result to tier2.
-        # Each condition drops exactly one tier -- not a double-skip of
-        # tier1 entirely, and not stuck on tier1 either.
         result = route.route(
-            "coding",
-            "size-xs",
-            bmo_available=False,
-            quota_exhausted=True,
-            tiers=_TIERS,
+            "coding", "size-l", primary_effort="xhigh", tiers=_TIERS, quota_rows=[]
         )
 
         self.assertEqual(result, {"model": "opus", "effort": "high"})
@@ -181,14 +165,97 @@ class RouteTests(unittest.TestCase):
         # Unknown is the least certain case -- it gets the most capable
         # model, not the cheapest. This was a bug (silently landed on tier1)
         # fixed independently of the tier0-widening question below.
-        result = route.route("coding", "size-?", tiers=_TIERS)
+        result = route.route("coding", "size-?", tiers=_TIERS, quota_rows=[])
 
         self.assertEqual(result, {"model": "opus", "effort": "high"})
 
     def test_loads_the_real_model_tiers_json(self):
         # No injected tiers dict -- confirms the default path actually
         # resolves to the packaged model-tiers.json.
-        result = route.route("coding", "size-m")
+        result = route.route("coding", "size-m", quota_rows=[])
+
+        self.assertEqual(result, {"model": "sonnet", "effort": "medium"})
+
+
+class RoutePacingTests(unittest.TestCase):
+    """Issue #36: quota is fleet-wide, so route() paces on it directly.
+    Grace's three literal rules (see pace.py), exercised through route()'s
+    own tier/bmo logic -- test_pace.py covers the rules themselves.
+    """
+
+    def _row(self, provider, used_pct, resets_in_ms, duration=QuotaDuration.FIVE_HOURS):
+        # route() uses the real clock internally (it has no `now` override),
+        # so fixtures here anchor `resets_at` to the real current time too.
+        return {
+            "provider": provider,
+            "duration": duration,
+            "used_pct": used_pct,
+            "resets_at": time.time() * 1000 + resets_in_ms,
+        }
+
+    def test_blocked_provider_falls_back_to_next_tiers_other_provider(self):
+        # prose's tier2 lists opus (claude) then fable (opencode-go). Claude
+        # blocked -> falls to fable, not a wait and not a local/bmo model
+        # (prose's tier1 has no local/bmo entry anyway, but this exercises
+        # the "other entry in the same tier" branch either way).
+        rows = [self._row("claude", 100, 10 * HOUR_MS)]
+        result = route.route("prose", "size-l", tiers=_TIERS, quota_rows=rows)
+
+        self.assertEqual(result["model"], "fable")
+        self.assertEqual(result["downgraded_from"], {"model": "opus", "effort": "high"})
+
+    def test_blocked_tier1_does_not_fall_back_to_a_tier2_on_the_same_blocked_account(self):
+        # The bug this issue fixes: coding's tier1 (sonnet) and tier2 (opus)
+        # are both "claude". A naive one-tier-down drop (the old
+        # quota_exhausted behavior) would have landed on tier2's opus --
+        # still claude, still blocked. The new fallback must recognize that
+        # and keep searching instead of silently returning a blocked model.
+        rows = [self._row("claude", 100, 10 * HOUR_MS)]
+        result = route.route("coding", "size-m", tiers=_TIERS, quota_rows=rows)
+
+        # coding has no other provider at any tier in this fixture -- every
+        # candidate is claude, so route() must report a wait, not a model
+        # it knows is still blocked.
+        self.assertEqual(result["model"], "sonnet")
+        self.assertIn("wait_seconds", result)
+        self.assertIsNotNone(result["wait_seconds"])
+
+    def test_wait_reports_the_earliest_reset_among_everything_tried(self):
+        rows = [
+            self._row("claude", 100, 5 * HOUR_MS),
+            self._row("opencode-go", 100, 20 * MIN_MS),
+        ]
+        result = route.route("prose", "size-l", tiers=_TIERS, quota_rows=rows)
+
+        # opus (claude) is blocked, falls to fable (opencode-go) -- also
+        # blocked, resetting sooner than claude. The wait must reflect that
+        # sooner reset, not claude's (seen first).
+        self.assertAlmostEqual(result["wait_seconds"], 20 * 60, delta=2)
+
+    def test_does_not_fall_back_to_a_local_or_bmo_model_to_dodge_a_wait(self):
+        # coding's tier0 is bmo/local, tier1 sonnet (claude), both blocked.
+        # Decision 3 forbids landing on tier0 to avoid the wait.
+        rows = [self._row("claude", 100, 3 * HOUR_MS)]
+        result = route.route("coding", "size-m", tiers=_TIERS, quota_rows=rows)
+
+        self.assertNotIn("bmo:", result["model"])
+        self.assertNotIn("local:", result["model"])
+        self.assertIsNotNone(result.get("wait_seconds"))
+
+    def test_lean_in_bumps_one_tier_on_a_surplus(self):
+        rows = [self._row("claude", 10, 1 * HOUR_MS)]  # <50% used, <24h left
+        result = route.route("coding", "size-m", tiers=_TIERS, quota_rows=rows)
+
+        self.assertEqual(result, {"model": "opus", "effort": "high"})
+
+    def test_lean_in_never_goes_past_the_top_tier(self):
+        rows = [self._row("claude", 10, 1 * HOUR_MS)]
+        result = route.route("coding", "size-l", tiers=_TIERS, quota_rows=rows)
+
+        self.assertEqual(result, {"model": "opus", "effort": "high"})
+
+    def test_empty_quota_rows_is_a_no_op(self):
+        result = route.route("coding", "size-m", tiers=_TIERS, quota_rows=[])
 
         self.assertEqual(result, {"model": "sonnet", "effort": "medium"})
 
