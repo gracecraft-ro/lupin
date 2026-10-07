@@ -168,7 +168,9 @@ class CodexModelsTests(unittest.TestCase):
                 "display_name": "GPT-5.6-Luna",
             }],
         )
-        run.assert_called_once_with(["omp", "models", "openai-codex", "--json"])
+        run.assert_called_once_with(
+            ["omp", "models", "openai-codex", "--json"], timeout=model_fetch._OMP_TIMEOUT
+        )
 
     def test_omp_missing_falls_back_to_catalog_openai_models_marked_not_live(self):
         with mock.patch.object(model_fetch, "run", return_value=(127, "not found: omp")):
