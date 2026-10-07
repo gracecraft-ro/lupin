@@ -155,7 +155,14 @@ def _write_record(client, name: str, *, state: str, connection: dict) -> dict:
     the opposite: it is recomputed here every time, since this function is
     the only writer of `machine:<name>` and a stale quota reading is worse
     than the extra `quota.snapshot()` call.
+
+    `actions` is read live from `agent.py`'s own `ACTIONS` table (imported
+    here, not at module load, to avoid a top-level import cycle -- `agent.py`
+    imports this module to check `draining` state). This way the list can
+    never drift from what the agent here actually supports.
     """
+    from . import agent  # deferred import, dodges the cycle noted above
+
     existing = _read_record(client, name)
     record = {
         "version": package_version(),
@@ -164,6 +171,7 @@ def _write_record(client, name: str, *, state: str, connection: dict) -> dict:
         "slots": _slot_summary(connection),
         "providers": existing.get("providers", []) if existing else [],
         "quota": quota.snapshot(),
+        "actions": sorted(agent.ACTIONS),
     }
     client.set(_record_key(name), json.dumps(record), ex=RECORD_TTL)
     return record
@@ -259,7 +267,7 @@ def undrain(connection: dict) -> dict:
 def machines(connection: dict) -> list[dict]:
     """Every registered machine, each as:
     `{"name", "state", "version", "heartbeat", "version_mismatch", "slots",
-    "providers", "quota"}`.
+    "providers", "quota", "actions"}`.
 
     `state` is the record's own `online`/`draining`, overridden to
     `offline` once `OFFLINE_AFTER` seconds have passed since `heartbeat`
@@ -303,6 +311,7 @@ def machines(connection: dict) -> list[dict]:
                     "slots": record.get("slots", {}),
                     "providers": record.get("providers", []),
                     "quota": record.get("quota", {}),
+                    "actions": record.get("actions", []),
                 }
             )
         return result

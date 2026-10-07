@@ -45,7 +45,7 @@ def test_valid_command_runs_via_systemd_run_and_produces_ok_result(redis_port, f
     touched = agent.poll_once("jesus", KEY, **kw)
 
     assert fake.calls == [[
-        "systemd-run", f"--unit=lupin-cmd-{cmd_id[:8]}", "--collect", "loopctl", "stop", "lupin",
+        "systemd-run", f"--unit=lupin-cmd-{cmd_id[:8]}", "--collect", "--wait", "loopctl", "stop", "lupin",
     ]]
     assert touched == [{"id": cmd_id, "state": "ok"}]
     status = commands.get_status(cmd_id, **kw)
@@ -161,7 +161,7 @@ def test_valid_repo_formats_are_accepted(redis_port, flush_redis, monkeypatch):
 
     assert touched == [{"id": cmd_id, "state": "ok"}]
     assert fake.calls == [[
-        "systemd-run", f"--unit=lupin-cmd-{cmd_id[:8]}", "--collect", "loopctl", "stop", "field-trip_2.0",
+        "systemd-run", f"--unit=lupin-cmd-{cmd_id[:8]}", "--collect", "--wait", "loopctl", "stop", "field-trip_2.0",
     ]]
 
 
@@ -349,6 +349,53 @@ def test_missing_required_param_is_rejected_without_executing(redis_port, flush_
     assert touched == [{"id": cmd_id, "state": "rejected"}]
     status = commands.get_status(cmd_id, **kw)
     assert status["state"] == "rejected"
+
+
+def test_draining_machine_rejects_loop_run_without_executing(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set("lupin:v1:machine:jesus", json.dumps({"state": "draining"}))
+    cmd_id = commands.enqueue("jesus", "loop.run", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)
+
+    fake = _fake_run()
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert fake.calls == []
+    assert touched == [{"id": cmd_id, "state": "rejected"}]
+    status = commands.get_status(cmd_id, **kw)
+    assert "draining" in status["reason"]
+
+
+def test_draining_machine_still_runs_loop_stop(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set("lupin:v1:machine:jesus", json.dumps({"state": "draining"}))
+    cmd_id = commands.enqueue("jesus", "loop.stop", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)
+
+    fake = _fake_run(returncode=0)
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert touched == [{"id": cmd_id, "state": "ok"}]
+    assert len(fake.calls) == 1
+
+
+def test_non_draining_machine_runs_loop_run_normally(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set("lupin:v1:machine:jesus", json.dumps({"state": "online"}))
+    cmd_id = commands.enqueue("jesus", "loop.run", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)
+
+    fake = _fake_run(returncode=0)
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert touched == [{"id": cmd_id, "state": "ok"}]
+    assert len(fake.calls) == 1
 
 
 def test_poll_once_writes_cmdlog_entries_for_terminal_outcomes(redis_port, flush_redis, monkeypatch):

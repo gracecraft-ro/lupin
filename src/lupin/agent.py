@@ -12,17 +12,24 @@ ever reaches `subprocess.run`:
 3. Not past `expires_at` (plus `commands.CLOCK_SKEW_S` grace).
 4. `action` must be in `ACTIONS`, a fixed, explicit table. An action not
    in it is rejected, never run as a best-effort guess.
-5. Per-action parameter validation (e.g. `repo` against a strict regex,
+5. If this machine's own record (`machines.py`) says `draining`, only
+   `DRAIN_ALLOWED` actions run -- a draining machine can still wind work
+   down (`loop.stop`) but refuses to start anything new.
+6. Per-action parameter validation (e.g. `repo` against a strict regex,
    defense in depth independent of whatever a future dashboard checks).
 
 `ACTIONS` wraps `loopctl` rather than reimplementing it -- the design's
 decision: `loopctl` already has the hard-won edge cases (scrollback save,
 keepalive session, exact tmux target match). Every handler returns a list
 argv, never a shell string -- execution is always
-`subprocess.run(argv, shell=False)`. Both actions run inside a detached
-transient unit (`systemd-run --unit=lupin-cmd-<id8> --collect ...`) so a
-restart of the `lupin-agent` service (`KillMode=process`, #29) can't kill
-an in-flight `loopctl` run.
+`subprocess.run(argv, shell=False)`. Both actions run inside a transient
+unit (`systemd-run --unit=lupin-cmd-<id8> --collect ...`), so a restart of
+the `lupin-agent` service (`KillMode=process`, #29) can't kill an
+in-flight `loopctl` run. `loop.stop` adds `--wait`, since it finishes in a
+few seconds -- without it, `systemd-run` returns the moment the unit
+*starts*, so the reported "ok" would mean "launched", not "done". `loop.run`
+stays detached: it starts a loop meant to keep running long after this
+command's own result is reported, so the agent must not block on it.
 """
 
 from __future__ import annotations
@@ -34,7 +41,7 @@ import time
 
 import redis
 
-from . import commands
+from . import commands, machines
 from .slots import CoordinatorUnreachable
 from .slots_redis import _call_with_retry, _client
 
@@ -66,11 +73,15 @@ def _unit_name(cmd_id: str) -> str:
 
 def _handle_loop_stop(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
-    return ["systemd-run", f"--unit={_unit_name(cmd_id)}", "--collect", "loopctl", "stop", repo]
+    # --wait: block until `loopctl stop` itself finishes, so "ok" means the
+    # loop actually stopped, not just that the unit launched.
+    return ["systemd-run", f"--unit={_unit_name(cmd_id)}", "--collect", "--wait", "loopctl", "stop", repo]
 
 
 def _handle_loop_run(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
+    # No --wait: this starts a loop meant to keep running well past this
+    # command's result, so the agent must not block on it.
     return ["systemd-run", f"--unit={_unit_name(cmd_id)}", "--collect", "loopctl", "run", repo]
 
 
@@ -80,6 +91,10 @@ ACTIONS = {
     "loop.stop": _handle_loop_stop,
     "loop.run": _handle_loop_run,
 }
+
+# Actions a draining machine still accepts -- #27's design: draining blocks
+# anything that starts new work, not actions that wind work down.
+DRAIN_ALLOWED = {"loop.stop"}
 
 
 def _write_result(client, cmd_id: str, payload: dict, *, overwrite: bool = False) -> bool:
@@ -98,6 +113,16 @@ def _reject(client, machine: str, cmd_id: str, action: str | None, reason: str) 
         client, {"id": cmd_id, "machine": machine, "state": "rejected", "action": action, "reason": reason}
     )
     return {"id": cmd_id, "state": "rejected"}
+
+
+def _is_draining(client, machine: str) -> bool:
+    """Read this machine's own `machine:<name>` record (written by
+    `machines.join`/`heartbeat`) and check its `state`. Reuses that
+    module's key format directly instead of a second copy of it."""
+    raw = _call_with_retry(lambda: client.get(machines._record_key(machine)))
+    if raw is None:
+        return False
+    return json.loads(raw).get("state") == "draining"
 
 
 def _mark_expired(client, machine: str, cmd_id: str) -> dict:
@@ -124,6 +149,8 @@ def _process_one(client, machine: str, key: str, cmd_id: str) -> dict:
         return _mark_expired(client, machine, cmd_id)
     if action not in ACTIONS:
         return _reject(client, machine, cmd_id, action, f"unknown action {action!r}")
+    if action not in DRAIN_ALLOWED and _is_draining(client, machine):
+        return _reject(client, machine, cmd_id, action, f"{machine} is draining")
 
     # Build the argv (and so validate the params) before claiming -- a
     # rejection has to land while no `cmdres` exists yet, so `_reject`'s
