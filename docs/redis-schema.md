@@ -7,7 +7,7 @@ This is the data model `lupin` uses once the `redis` backend exists
 
 | Key | Type | Holds | Replaces |
 | --- | --- | --- | --- |
-| `slot:<name>` | sorted set (member = holder, score = expiry in ms) | fleet slots. v1 has one: `bmo`, max 1 holder. | `omp.lock` |
+| `slot:<name>` | sorted set (member = holder, score = expiry in ms) | fleet slots: `bmo` (max 1 holder), and `repo:<repo>` per loopable repo (a declared loop-concurrency cap, not yet enforced by loopctl — issue #23). | `omp.lock` |
 | `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since), with a TTL | one claim per GitHub issue | nothing today |
 | `ledger:<owner>/<repo>` | stream (`XADD`) | `ts host issue branch status body` | `.loop/loop-state.json`, once more than one host writes it |
 | `machine:<name>` | string (JSON), with a TTL | one fleet machine's status — see Fleet keys below | nothing today |
