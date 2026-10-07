@@ -38,7 +38,7 @@ from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
-from . import roadmap
+from . import claims, machines, roadmap
 from .quota import (
     QuotaDuration,
     claude_usage,
@@ -311,11 +311,50 @@ def timer_active() -> bool:
     return rc == 0
 
 
-def gather(peek_lines: int) -> dict:
+def fleet_state(connection: dict) -> dict:
+    """Machines and claims from the cross-machine Redis registry (issue
+    #15). Degrades the same way the local readers above do: a Redis outage
+    returns empty data and an error string instead of raising -- claims has
+    no local fallback either way (see claims.py), so a claims-only failure
+    just leaves that part empty without blanking the machines list.
+
+    `repos` for `claims.claims_for` is built the same way
+    `roadmap_cli.build_roadmap` already does: `enabled_repos()` for the
+    short names, `roadmap._repo_identity()` to resolve each one's GitHub
+    owner from its local checkout. A repo with no local checkout (or no
+    `gh` access) is silently skipped, same as `/roadmap` already tolerates.
+    """
+    try:
+        machine_list = machines.machines(connection)
+    except machines.CoordinatorUnreachable as exc:
+        return {"machines": [], "claims": {}, "fleet_error": str(exc)}
+
+    full_names = {}
+    for repo in enabled_repos():
+        owner, _name, _warning = roadmap._repo_identity(os.path.join(CODE_DIR, repo))
+        if owner:
+            full_names[repo] = f"{owner}/{repo}"
+
+    claims_data: dict = {}
+    if full_names:
+        try:
+            claims_data = claims.claims_for(
+                list(full_names.values()),
+                redis_host=connection.get("redis_host"),
+                redis_port=connection.get("redis_port"),
+                redis_username=connection.get("redis_username"),
+                redis_password=connection.get("redis_password"),
+            )
+        except claims.CoordinatorUnreachable:
+            pass
+    return {"machines": machine_list, "claims": claims_data, "fleet_error": None}
+
+
+def gather(peek_lines: int, connection: dict | None = None) -> dict:
     sessions = tmux_sessions()
     for s in sessions:
         s["tail"] = session_tail(s["name"], peek_lines) if s["repo"] else ""
-    return {
+    state = {
         "now": time.time(),
         "enabled": enabled_repos(),
         "repos": code_repos(),
@@ -323,6 +362,8 @@ def gather(peek_lines: int) -> dict:
         "timers": timers(),
         "timer_active": timer_active(),
     }
+    state.update(fleet_state(connection or {}))
+    return state
 
 
 # --------------------------------------------------------------------------
@@ -721,6 +762,47 @@ def render_dashboard(state: dict) -> bytes:
         )
     body.append("</table></div>")
 
+    # ---- fleet (issue #15) -------------------------------------------
+    body.append(
+        f'<div class="section-head">{icon("M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3", 15)}<h2>Fleet</h2></div>'
+    )
+    fleet_error = state.get("fleet_error")
+    if fleet_error:
+        body.append(f"<div class='card dim'>Fleet registry unreachable: {esc(fleet_error)}</div>")
+    else:
+        fleet_machines = state.get("machines", [])
+        if not fleet_machines:
+            body.append("<div class='card dim'>No machines registered.</div>")
+        else:
+            body.append("<div class='card scroll'><table>")
+            body.append("<tr><th>machine</th><th>state</th><th>version</th><th>heartbeat</th></tr>")
+            for m in fleet_machines:
+                pill = {
+                    "online": "<span class='pill on'>online</span>",
+                    "offline": "<span class='pill off'>offline</span>",
+                }.get(m["state"], f"<span class=pill>{esc(m['state'])}</span>")
+                version = esc(m.get("version") or "-")
+                if m.get("version_mismatch"):
+                    version += " <span class=pill>mismatch</span>"
+                body.append(
+                    f"<tr><td>{esc(m['name'])}</td><td>{pill}</td>"
+                    f"<td class=dim>{version}</td><td class=dim>{esc(m.get('heartbeat') or '-')}</td></tr>"
+                )
+            body.append("</table></div>")
+
+        fleet_claims = state.get("claims", {})
+        if not fleet_claims:
+            body.append("<div class='card dim'>No claimed issues.</div>")
+        else:
+            body.append("<div class='card scroll'><table>")
+            body.append("<tr><th>issue</th><th>claimed by</th><th>host</th></tr>")
+            for target, info in sorted(fleet_claims.items()):
+                body.append(
+                    f"<tr><td>{esc(target)}</td><td>{esc(info.get('session', '-'))}</td>"
+                    f"<td class=dim>{esc(info.get('host', '-'))}</td></tr>"
+                )
+            body.append("</table></div>")
+
     # ---- repos --------------------------------------------------------
     body.append(
         f'<div class="section-head">{icon("M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM18 9a9 9 0 01-9 9", 15)}<h2>Repos</h2></div>'
@@ -1099,6 +1181,12 @@ class Handler(BaseHTTPRequestHandler):
     sys_version = ""
     peek_lines = 25
     allowed_hosts: set = set()
+    # Named `fleet_connection`, not `connection` -- `socketserver`'s own
+    # `BaseRequestHandler` already sets `self.connection` to the live
+    # client socket, which would otherwise shadow this class attribute on
+    # every real request (a bug caught by the real-HTTP tests, not the
+    # mocked-Handler ones, since those never call setup()).
+    fleet_connection: dict = {}
 
     def reply(self, body: bytes, status: int = 200) -> None:
         self.send_response(status)
@@ -1150,7 +1238,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(FAVICON)
         elif url.path == "/":
-            self.reply(render_dashboard(gather(self.peek_lines)))
+            self.reply(render_dashboard(gather(self.peek_lines, self.fleet_connection)))
         elif url.path == "/roadmap":
             # roadmap.py owns this page's content; it only knows the shell's
             # 4-argument page_fn contract, so pin the "Roadmap" nav entry
@@ -1189,7 +1277,7 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/model-tiers":
             self.reply(render_model_tiers())
         elif url.path == "/api/state":
-            self.reply_json(gather(self.peek_lines))
+            self.reply_json(gather(self.peek_lines, self.fleet_connection))
         elif url.path == "/peek":
             self.do_peek(query)
         elif url.path == "/image":
@@ -1323,6 +1411,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--roadmap", metavar="REPO", help="print a repository roadmap and exit")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--json", action="store_true")
+    # Fleet data (issue #15): same flags and env-var fallback as
+    # cli.py's `_fleet_connection_args`, kept in sync by hand since
+    # serve.py parses its own argv independently of cli.py (see this
+    # function's docstring) and importing cli.py here would be circular.
+    ap.add_argument("--redis-host", default=os.environ.get("LUPIN_REDIS_HOST"))
+    ap.add_argument(
+        "--redis-port", type=int,
+        default=int(os.environ["LUPIN_REDIS_PORT"]) if os.environ.get("LUPIN_REDIS_PORT") else None,
+    )
+    ap.add_argument("--redis-username", default=os.environ.get("LUPIN_REDIS_USERNAME"))
+    ap.add_argument("--redis-password", default=os.environ.get("LUPIN_REDIS_PASSWORD"))
+    ap.add_argument(
+        "--config-path", default=os.environ.get("LUPIN_FLEET_CONFIG"),
+        help="fleet config file (default: $LUPIN_FLEET_CONFIG or ~/.config/lupin/fleet.json)",
+    )
     args, _unknown = ap.parse_known_args(argv)
 
     if args.roadmap:
@@ -1360,6 +1463,13 @@ def main(argv: list[str] | None = None) -> int:
         f"[::1]:{args.port}",
         f"{args.bind}:{args.port}",
     }
+    Handler.fleet_connection = machines.resolve_connection(
+        redis_host=args.redis_host,
+        redis_port=args.redis_port,
+        redis_username=args.redis_username,
+        redis_password=args.redis_password,
+        config_path=args.config_path,
+    )
 
     httpd = Server((args.bind, args.port), Handler)
     print(f"lupin on http://{args.bind}:{args.port}", file=sys.stderr)

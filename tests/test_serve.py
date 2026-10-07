@@ -1,6 +1,9 @@
 import contextlib
 import io
+import socket
 import sys
+import threading
+import urllib.request
 
 import ipaddress
 import json
@@ -8,10 +11,14 @@ import os
 import tempfile
 import time
 import unittest
+from http.server import ThreadingHTTPServer
 from importlib import resources
 from unittest import mock
 
-from lupin import serve
+import pytest
+import redis as redis_lib
+
+from lupin import cli, claims, machines, serve
 
 
 class TimerTests(unittest.TestCase):
@@ -553,6 +560,247 @@ class RoadmapCliTests(unittest.TestCase):
         self.assertEqual(status, 2)
         self.assertIn("unknown repository", errors.getvalue())
         self.assertNotIn("Traceback", errors.getvalue())
+
+
+class FleetStateTests(unittest.TestCase):
+    """`fleet_state` (issue #15): the dashboard's machines + claims read,
+    mocked here so these run without a real Redis. The real-Redis,
+    real-HTTP round trip is in `test_dashboard_shows_real_fleet_data_from_redis`
+    / `test_dashboard_degrades_when_redis_unreachable` below.
+    """
+
+    def test_coordinator_unreachable_returns_empty_with_error(self):
+        with mock.patch.object(
+            serve.machines, "machines",
+            side_effect=machines.CoordinatorUnreachable("machine registry"),
+        ):
+            result = serve.fleet_state({"redis_host": "127.0.0.1", "redis_port": 1})
+        self.assertEqual(result["machines"], [])
+        self.assertEqual(result["claims"], {})
+        self.assertIn("machine registry", result["fleet_error"])
+
+    def test_machines_and_claims_merge_when_repo_identity_resolves(self):
+        machine_rows = [{"name": "jesus", "state": "online"}]
+        with (
+            mock.patch.object(serve.machines, "machines", return_value=machine_rows),
+            mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(serve.roadmap, "_repo_identity", return_value=("acme", "widgets", None)),
+            mock.patch.object(
+                serve.claims, "claims_for",
+                return_value={"acme/widgets#7": {"session": "loop-widgets#1"}},
+            ) as claims_for,
+        ):
+            result = serve.fleet_state({"redis_host": "127.0.0.1", "redis_port": 1})
+        self.assertEqual(result["machines"], machine_rows)
+        self.assertEqual(result["claims"], {"acme/widgets#7": {"session": "loop-widgets#1"}})
+        self.assertIsNone(result["fleet_error"])
+        claims_for.assert_called_once_with(
+            ["acme/widgets"],
+            redis_host="127.0.0.1", redis_port=1, redis_username=None, redis_password=None,
+        )
+
+    def test_repos_with_no_resolvable_owner_skip_the_claims_lookup(self):
+        with (
+            mock.patch.object(serve.machines, "machines", return_value=[]),
+            mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(
+                serve.roadmap, "_repo_identity", return_value=(None, None, "no gh access")
+            ),
+            mock.patch.object(serve.claims, "claims_for") as claims_for,
+        ):
+            result = serve.fleet_state({})
+        claims_for.assert_not_called()
+        self.assertEqual(result["claims"], {})
+
+    def test_claims_unreachable_does_not_blank_the_machines_list(self):
+        machine_rows = [{"name": "jesus", "state": "online"}]
+        with (
+            mock.patch.object(serve.machines, "machines", return_value=machine_rows),
+            mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(serve.roadmap, "_repo_identity", return_value=("acme", "widgets", None)),
+            mock.patch.object(
+                serve.claims, "claims_for",
+                side_effect=claims.CoordinatorUnreachable("claims_for"),
+            ),
+        ):
+            result = serve.fleet_state({})
+        self.assertEqual(result["machines"], machine_rows)
+        self.assertEqual(result["claims"], {})
+        self.assertIsNone(result["fleet_error"])
+
+
+class FleetDashboardRenderTests(unittest.TestCase):
+    """render_dashboard's new "Fleet" section. `base_state` omits
+    machines/claims/fleet_error on purpose for the first test -- older
+    callers (and the other `DashboardRouteTests`-style tests above) build
+    state dicts without those keys, so render_dashboard must still work.
+    """
+
+    base_state = {"sessions": [], "enabled": [], "timers": [], "timer_active": True, "repos": []}
+
+    def test_missing_fleet_keys_degrade_to_empty_sections(self):
+        page = serve.render_dashboard(dict(self.base_state)).decode()
+        self.assertIn("No machines registered.", page)
+        self.assertIn("No claimed issues.", page)
+
+    def test_fleet_error_shown_instead_of_machine_table(self):
+        state = dict(self.base_state, fleet_error="machine registry: connection refused")
+        page = serve.render_dashboard(state).decode()
+        self.assertIn("Fleet registry unreachable", page)
+        self.assertIn("connection refused", page)
+        self.assertNotIn("No machines registered.", page)
+
+    def test_machines_and_claims_render_as_table_rows(self):
+        state = dict(
+            self.base_state,
+            fleet_error=None,
+            machines=[
+                {
+                    "name": "jesus", "state": "online", "version": "1.2.3",
+                    "version_mismatch": False, "heartbeat": "2026-10-06T00:00:00Z",
+                },
+                {
+                    "name": "ralpha", "state": "offline", "version": "1.0.0",
+                    "version_mismatch": True, "heartbeat": "2026-10-05T00:00:00Z",
+                },
+            ],
+            claims={"acme/widgets#7": {"session": "loop-widgets#1", "host": "jesus"}},
+        )
+        page = serve.render_dashboard(state).decode()
+        self.assertIn("jesus", page)
+        self.assertIn("ralpha", page)
+        self.assertIn("<span class='pill on'>online</span>", page)
+        self.assertIn("<span class='pill off'>offline</span>", page)
+        self.assertIn("mismatch", page)
+        self.assertIn("acme/widgets#7", page)
+        self.assertIn("loop-widgets#1", page)
+
+
+class ServeArgsParsingTests(unittest.TestCase):
+    """Closes the gap noted in issue #15: `cli.main()` strictly parses the
+    full argv (including `serve`'s) before dispatching to `serve.main()`,
+    so `lupin serve --redis-host ...` needs `_serve_args` to accept these
+    flags or it fails before serve.py ever sees them.
+    """
+
+    def test_top_level_parser_accepts_redis_flags_for_serve(self):
+        args = cli._build_parser().parse_args(
+            [
+                "serve",
+                "--redis-host", "10.0.0.1",
+                "--redis-port", "6380",
+                "--redis-username", "u",
+                "--redis-password", "p",
+                "--config-path", "/tmp/fleet.json",
+            ]
+        )
+        self.assertEqual(args.redis_host, "10.0.0.1")
+        self.assertEqual(args.redis_port, 6380)
+
+
+def _write_machine_record(redis_port, name, *, state="online"):
+    """Write a `machine:<name>` record directly -- same minimal shape as
+    `test_machines.py`'s own `_write_raw_record` helper, not shared across
+    test files since it's a few lines and each file's fixtures differ.
+    """
+    record = {
+        "version": "0.0.0+dev",
+        "heartbeat": machines._now_iso(),
+        "state": state,
+        "slots": {},
+        "providers": [],
+        "quota": {},
+    }
+    client = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    client.set(f"{machines.PREFIX}machine:{name}", json.dumps(record))
+
+
+def _free_test_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@contextlib.contextmanager
+def _live_dashboard(connection: dict):
+    """Run the real `serve.Handler` on a real socket, like `serve.main()`
+    does, so a test can hit it with a real HTTP request -- not the
+    `Handler.__new__` + mocked-`reply` style the rest of this file uses,
+    which never exercises a real socket or a real `do_GET` response body.
+    Class attributes are restored afterward since `Handler` is shared
+    module state.
+    """
+    port = _free_test_port()
+    orig_connection = serve.Handler.fleet_connection
+    orig_hosts = serve.Handler.allowed_hosts
+    orig_peek = serve.Handler.peek_lines
+    serve.Handler.fleet_connection = connection
+    serve.Handler.allowed_hosts = {f"127.0.0.1:{port}"}
+    serve.Handler.peek_lines = 5
+
+    class Server(ThreadingHTTPServer):
+        daemon_threads = True
+
+    httpd = Server(("127.0.0.1", port), serve.Handler)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield port
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+        serve.Handler.fleet_connection = orig_connection
+        serve.Handler.allowed_hosts = orig_hosts
+        serve.Handler.peek_lines = orig_peek
+
+
+def test_dashboard_shows_real_fleet_data_from_redis(redis_port, flush_redis):
+    """The actual regression this issue fixes: a real machine record and a
+    real claim in Redis both show up on the rendered page, fetched over a
+    real HTTP request against a real running server -- not a mock.
+    """
+    _write_machine_record(redis_port, "jesus", state="online")
+    claims.claim(
+        "acme/widgets#7", "loop-widgets#1", redis_host="127.0.0.1", redis_port=redis_port
+    )
+    connection = {
+        "redis_host": "127.0.0.1", "redis_port": redis_port,
+        "redis_username": None, "redis_password": None,
+    }
+
+    with (
+        mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+        mock.patch.object(serve.roadmap, "_repo_identity", return_value=("acme", "widgets", None)),
+        _live_dashboard(connection) as port,
+    ):
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=15) as resp:
+            status = resp.status
+            body = resp.read().decode()
+
+    assert status == 200
+    assert "jesus" in body
+    assert "<span class='pill on'>online</span>" in body
+    assert "acme/widgets#7" in body
+    assert "loop-widgets#1" in body
+
+
+def test_dashboard_degrades_when_redis_unreachable(closed_port):
+    """No Redis listening on the other end -- the page must still render
+    200 with a plain "unreachable" message, not 500.
+    """
+    connection = {
+        "redis_host": "127.0.0.1", "redis_port": closed_port,
+        "redis_username": None, "redis_password": None,
+    }
+
+    with _live_dashboard(connection) as port:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=15) as resp:
+            status = resp.status
+            body = resp.read().decode()
+
+    assert status == 200
+    assert "Fleet registry unreachable" in body
 
 
 if __name__ == "__main__":

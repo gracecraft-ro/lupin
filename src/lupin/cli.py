@@ -265,6 +265,13 @@ def _serve_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--roadmap", metavar="REPO", help="print a repository roadmap and exit")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--json", action="store_true")
+    # Lets `lupin serve --redis-host ...` parse at this top level (issue
+    # #15's dashboard reads the fleet registry) -- `main()` still hands
+    # `serve`'s own argv to `serve.main()` rather than this parsed
+    # Namespace (see `main()` below), so serve.py's own parser repeats
+    # these same flags; this call only keeps `--help` and top-level
+    # parsing in sync with what serve.py actually accepts.
+    _fleet_connection_args(parser)
 
 
 def _review_route_args(parser: argparse.ArgumentParser) -> None:
