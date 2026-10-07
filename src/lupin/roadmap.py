@@ -1090,7 +1090,9 @@ def _render_body(body: str) -> str:
     return f"<div class='issue-body'>{''.join(parts)}</div>"
 
 
-def render_issue_details(node: dict, include_comments: bool = True) -> str:
+def render_issue_details(
+    node: dict, include_comments: bool = True, quest_pick: bool = False
+) -> str:
     comments = (
         sorted(
             node["comments"],
@@ -1158,9 +1160,15 @@ def render_issue_details(node: dict, include_comments: bool = True) -> str:
     label_data = _escape_attr(json.dumps(node.get("labels", []), ensure_ascii=False))
     digest_html = render_digest(node.get("digest"))
     digest_note = "<p class='dim'>Digest from the last ledger handoff.</p>" if digest_html else ""
+    pick_html = (
+        f"<label class='quest-pick' onclick='event.stopPropagation()'>"
+        f"<input type=checkbox form=quest-start name=issue value='{node['number']}'> quest</label> "
+        if quest_pick
+        else ""
+    )
     return (
         f"<details class='issue-details' data-browse-item data-labels='{label_data}'>"
-        f"<summary>{issue_title} · "
+        f"<summary>{pick_html}{issue_title} · "
         f"{details_label}</summary>"
         f"{digest_html}{digest_note}"
         f"{date_html}{labels_html}<h4>Description</h4>{_render_body(node['body'])}{activity}</details>"
@@ -1722,7 +1730,47 @@ def render_combined_page(repos: list[str], models: dict, page_fn) -> bytes:
         _browse_script(),
     )
 
-def render_page(repo: str | None, repos: list[str], model: dict | None, page_fn) -> bytes:
+def _render_quest_section(repo: str | None, quest_state: dict | None) -> str:
+    """The quest card: a "Start quest" button that submits whichever issue
+    checkboxes (rendered elsewhere, via `form=quest-start`) are ticked, and,
+    when `quest_state` names one already running, its progress and a "Stop
+    quest" button. `quest_state` is `None` when the page has no `?quest=`
+    id, or that id didn't resolve (see `Handler.quest_state` in serve.py).
+    """
+    repo_input = f"<input type=hidden name=repo value='{_escape_attr(repo or '')}'>"
+    start_form = (
+        f"<form id=quest-start class='row' action='/quest/start' method='post'>{repo_input}"
+        "<button type='submit'>Start quest</button>"
+        "<span class='dim'>Tick issues below, then start.</span></form>"
+    )
+    if not quest_state:
+        return f"<div class='card'><h2>Quest</h2>{start_form}</div>"
+    done = quest_state["done"]
+    total = quest_state["total"]
+    issue_list = ", ".join(f"#{n}" for n in quest_state["pending"] + done)
+    progress_pill = "pill on" if total and len(done) == total else "pill"
+    progress = (
+        f"<div class='row'><span class='pill'>quest {_escape_attr(quest_state['id'])}</span>"
+        f"<span class='pill'>{_escape_attr(quest_state['machine'] or '?')}</span>"
+        f"<span class='{progress_pill}'>{len(done)}/{total} done</span>"
+        f"<span class='pill'>{_escape_attr(quest_state['state'] or '?')}</span></div>"
+        f"<p class='dim'>{_escape_attr(issue_list)}</p>"
+    )
+    stop_form = (
+        f"<form class='row' action='/quest/stop' method='post'>{repo_input}"
+        f"<input type=hidden name=id value='{_escape_attr(quest_state['id'])}'>"
+        "<button type='submit'>Stop quest</button></form>"
+    )
+    return f"<div class='card'><h2>Quest</h2>{progress}{stop_form}{start_form}</div>"
+
+
+def render_page(
+    repo: str | None,
+    repos: list[str],
+    model: dict | None,
+    page_fn,
+    quest_state: dict | None = None,
+) -> bytes:
 
     options = ["<option value=''>All repositories</option>"]
     for name in repos:
@@ -1764,7 +1812,9 @@ def render_page(repo: str | None, repos: list[str], model: dict | None, page_fn)
         or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
-    issue_details = [render_issue_details(node) for node in detail_nodes]
+    issue_details = [
+        render_issue_details(node, quest_pick=True) for node in detail_nodes
+    ]
     filter_labels = sorted({
         label for node in model["nodes"] for label in node.get("labels", [])
     })
@@ -1816,6 +1866,7 @@ def render_page(repo: str | None, repos: list[str], model: dict | None, page_fn)
         f"<div class='queue-facts'><span class='pill'>{len(model['nodes'])} open issues</span>"
         f"<span class='pill'>{model['activeCount']} marked in flight</span>"
         f"<span class='pill'>{len(model['batch'])} next batch</span>{handoff_fact}</div>"
+        f"{_render_quest_section(repo, quest_state)}"
         f"{warnings}<h2>Issue roadmap</h2>"
         "<p class='dim'>Line key: solid lines show dependencies; dashed lines show parent or split links. Cards link to GitHub.</p>"
         f"<div class='queue-scroll'>{svg}</div>"
@@ -1836,6 +1887,7 @@ def render_page(repo: str | None, repos: list[str], model: dict | None, page_fn)
 .warning{border-color:var(--warn);color:var(--warn)}
 .queue-comment-list{display:grid;gap:.35rem}
 .issue-body img.image-attachment{display:block;max-width:100%;max-height:640px;height:auto;object-fit:contain;margin:.6rem 0;border-radius:6px}
+.quest-pick{display:inline-flex;align-items:center;gap:.25rem;font-size:.8rem;color:var(--ink2);margin-right:.4rem}
 """
     css += DIGEST_CSS
     return page_fn(title, body, css, _browse_script())
