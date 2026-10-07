@@ -1,6 +1,7 @@
 """The per-machine poll loop: claims and runs commands from `commands.py`'s
-queue (issue #28, implementing #27's design). `cli.py`'s `lupin agent`
-subcommand is the long-running process; this module is what it runs.
+queue. Implements #27's design -- see that issue's design comment for the
+full spec. `cli.py`'s `lupin agent` subcommand is the long-running process;
+this module is what it runs.
 
 Security model, checked in this order, and nothing after a failed check
 ever reaches `subprocess.run`:
@@ -8,20 +9,26 @@ ever reaches `subprocess.run`:
 2. `target` must equal this machine -- belt and suspenders. A command
    only reaches this machine's queue by key already, but a forged payload
    naming the wrong `target` field should still be caught, not trusted.
-3. Not past its TTL (`issued_at + ttl_ms`).
+3. Not past `expires_at` (plus `commands.CLOCK_SKEW_S` grace).
 4. `action` must be in `ACTIONS`, a fixed, explicit table. An action not
    in it is rejected, never run as a best-effort guess.
+5. Per-action parameter validation (e.g. `repo` against a strict regex,
+   defense in depth independent of whatever a future dashboard checks).
 
-`ACTIONS` wraps `loopctl` rather than reimplementing it -- #27's decision
-comment: `loopctl` already has the hard-won edge cases (scrollback save,
+`ACTIONS` wraps `loopctl` rather than reimplementing it -- the design's
+decision: `loopctl` already has the hard-won edge cases (scrollback save,
 keepalive session, exact tmux target match). Every handler returns a list
 argv, never a shell string -- execution is always
-`subprocess.run(argv, shell=False)`.
+`subprocess.run(argv, shell=False)`. Both actions run inside a detached
+transient unit (`systemd-run --unit=lupin-cmd-<id8> --collect ...`) so a
+restart of the `lupin-agent` service (`KillMode=process`, #29) can't kill
+an in-flight `loopctl` run.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 
@@ -31,10 +38,15 @@ from . import commands
 from .slots import CoordinatorUnreachable
 from .slots_redis import _call_with_retry, _client
 
-DEFAULT_BATCH = 10
+DEFAULT_BATCH = 20  # design: "ZRANGE the oldest 20"
 DEFAULT_POLL_INTERVAL = 2.0
 EXEC_TIMEOUT_S = 120.0
-OUTPUT_CAP = 4000  # characters kept per stream -- a runaway command can't bloat cmdres forever
+OUTPUT_CAP = 8192  # 8 KiB, combined stdout+stderr -- design's "last 8 KiB combined"
+
+# Stricter than loopctl's own `check_repo_name` (which still also runs) --
+# the design's explicit defense-in-depth requirement, checked here even
+# though nothing upstream validates yet either.
+_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
 class RejectedCommand(Exception):
@@ -42,18 +54,24 @@ class RejectedCommand(Exception):
     `subprocess.run`, turned into a `rejected` result, never executed."""
 
 
-def _handle_loop_stop(params: dict) -> list[str]:
-    repo = params.get("repo")
-    if not repo:
-        raise RejectedCommand("loop.stop needs a 'repo' param")
-    return ["loopctl", "stop", repo]
+def _validate_repo(repo) -> str:
+    if not isinstance(repo, str) or not _REPO_RE.match(repo):
+        raise RejectedCommand(f"invalid repo {repo!r}")
+    return repo
 
 
-def _handle_loop_run(params: dict) -> list[str]:
-    repo = params.get("repo")
-    if not repo:
-        raise RejectedCommand("loop.run needs a 'repo' param")
-    return ["loopctl", "run", repo]
+def _unit_name(cmd_id: str) -> str:
+    return f"lupin-cmd-{cmd_id[:8]}"
+
+
+def _handle_loop_stop(params: dict, cmd_id: str) -> list[str]:
+    repo = _validate_repo(params.get("repo"))
+    return ["systemd-run", f"--unit={_unit_name(cmd_id)}", "--collect", "loopctl", "stop", repo]
+
+
+def _handle_loop_run(params: dict, cmd_id: str) -> list[str]:
+    repo = _validate_repo(params.get("repo"))
+    return ["systemd-run", f"--unit={_unit_name(cmd_id)}", "--collect", "loopctl", "run", repo]
 
 
 # Fixed, explicit allowlist -- the only actions this process will ever run.
@@ -73,29 +91,27 @@ def _write_result(client, cmd_id: str, payload: dict, *, overwrite: bool = False
     return bool(_call_with_retry(lambda: client.set(key, value, nx=True, px=px)))
 
 
-def _log(client, fields: dict) -> None:
-    flat = {k: str(v) for k, v in fields.items()}
-    _call_with_retry(lambda: client.xadd(commands.LOG_KEY, flat, maxlen=1000, approximate=True))
-
-
 def _reject(client, machine: str, cmd_id: str, action: str | None, reason: str) -> dict:
-    _write_result(client, cmd_id, {"id": cmd_id, "status": "rejected", "machine": machine, "error": reason})
+    _write_result(client, cmd_id, {"id": cmd_id, "state": "rejected", "host": machine, "reason": reason})
     _call_with_retry(lambda: client.zrem(commands.queue_key(machine), cmd_id))
-    _log(client, {"id": cmd_id, "machine": machine, "status": "rejected", "action": action, "reason": reason})
-    return {"id": cmd_id, "status": "rejected"}
+    commands.log_event(
+        client, {"id": cmd_id, "machine": machine, "state": "rejected", "action": action, "reason": reason}
+    )
+    return {"id": cmd_id, "state": "rejected"}
 
 
 def _mark_expired(client, machine: str, cmd_id: str) -> dict:
-    _write_result(client, cmd_id, {"id": cmd_id, "status": "expired", "machine": machine})
+    _write_result(client, cmd_id, {"id": cmd_id, "state": "expired", "host": machine})
     _call_with_retry(lambda: client.zrem(commands.queue_key(machine), cmd_id))
-    _log(client, {"id": cmd_id, "machine": machine, "status": "expired", "reason": "ttl"})
-    return {"id": cmd_id, "status": "expired"}
+    commands.log_event(client, {"id": cmd_id, "machine": machine, "state": "expired", "reason": "ttl"})
+    return {"id": cmd_id, "state": "expired"}
 
 
-def _process_one(client, machine: str, key: str, cmd_id: str, now: int) -> dict:
+def _process_one(client, machine: str, key: str, cmd_id: str) -> dict:
     raw = _call_with_retry(lambda: client.get(commands.cmd_key(cmd_id)))
     if raw is None:
-        # Expired between the prune pass and here -- same outcome.
+        # Gone from Redis already (its own retention TTL, or evicted under
+        # memory pressure) -- same outcome either way.
         return _mark_expired(client, machine, cmd_id)
     cmd = json.loads(raw)
     action = cmd.get("action")
@@ -104,7 +120,7 @@ def _process_one(client, machine: str, key: str, cmd_id: str, now: int) -> dict:
         return _reject(client, machine, cmd_id, action, "bad signature")
     if cmd.get("target") != machine:
         return _reject(client, machine, cmd_id, action, f"addressed to {cmd.get('target')!r}")
-    if now >= cmd.get("issued_at", 0) + cmd.get("ttl_ms", 0):
+    if time.time() >= cmd.get("expires_at", 0) + commands.CLOCK_SKEW_S:
         return _mark_expired(client, machine, cmd_id)
     if action not in ACTIONS:
         return _reject(client, machine, cmd_id, action, f"unknown action {action!r}")
@@ -115,14 +131,15 @@ def _process_one(client, machine: str, key: str, cmd_id: str, now: int) -> dict:
     # a "running" claim already sitting there.
     params = cmd.get("params") or {}
     try:
-        argv = ACTIONS[action](params)
+        argv = ACTIONS[action](params, cmd_id)
     except RejectedCommand as exc:
         return _reject(client, machine, cmd_id, action, str(exc))
 
+    started_at = time.time()
     claimed = _call_with_retry(
         lambda: client.set(
             commands.res_key(cmd_id),
-            json.dumps({"id": cmd_id, "status": "running", "machine": machine, "action": action, "claimed_at": now}),
+            json.dumps({"id": cmd_id, "state": "running", "host": machine, "action": action, "started_at": started_at}),
             nx=True,
             px=int(commands.RESULT_TTL_S * 1000),
         )
@@ -131,34 +148,37 @@ def _process_one(client, machine: str, key: str, cmd_id: str, now: int) -> dict:
         # Another poller racing on the same id claimed it first. Don't
         # touch the queue or run anything -- the claimant finishes the
         # job, including the dequeue.
-        return {"id": cmd_id, "status": "lost-race"}
+        return {"id": cmd_id, "state": "lost-race"}
 
     try:
         proc = subprocess.run(argv, shell=False, capture_output=True, text=True, timeout=EXEC_TIMEOUT_S)
+        combined = (proc.stdout or "") + (proc.stderr or "")
         payload = {
             "id": cmd_id,
-            "status": "ok" if proc.returncode == 0 else "failed",
-            "machine": machine,
+            "state": "ok" if proc.returncode == 0 else "failed",
+            "host": machine,
             "action": action,
-            "returncode": proc.returncode,
-            "stdout": proc.stdout[-OUTPUT_CAP:],
-            "stderr": proc.stderr[-OUTPUT_CAP:],
-            "finished_at": commands.now_ms(),
+            "started_at": started_at,
+            "finished_at": time.time(),
+            "exit_code": proc.returncode,
+            "output": combined[-OUTPUT_CAP:],
+            "truncated": len(combined) > OUTPUT_CAP,
         }
     except Exception as exc:  # subprocess failed to even start, or timed out
         payload = {
             "id": cmd_id,
-            "status": "failed",
-            "machine": machine,
+            "state": "failed",
+            "host": machine,
             "action": action,
-            "error": str(exc),
-            "finished_at": commands.now_ms(),
+            "started_at": started_at,
+            "finished_at": time.time(),
+            "reason": str(exc),
         }
 
     _write_result(client, cmd_id, payload, overwrite=True)
     _call_with_retry(lambda: client.zrem(commands.queue_key(machine), cmd_id))
-    _log(client, {"id": cmd_id, "machine": machine, "status": payload["status"], "action": action})
-    return {"id": cmd_id, "status": payload["status"]}
+    commands.log_event(client, {"id": cmd_id, "machine": machine, "state": payload["state"], "action": action})
+    return {"id": cmd_id, "state": payload["state"]}
 
 
 def startup_scan(
@@ -183,14 +203,14 @@ def startup_scan(
             if raw is None:
                 continue
             result = json.loads(raw)
-            if result.get("status") != "running" or result.get("machine") != machine:
+            if result.get("state") != "running" or result.get("host") != machine:
                 continue
-            result["status"] = "failed"
-            result["error"] = "orphaned: still running when the agent restarted"
-            result["finished_at"] = commands.now_ms()
+            result["state"] = "failed"
+            result["reason"] = "orphaned: still running when the agent restarted"
+            result["finished_at"] = time.time()
             _write_result(client, cmd_id, result, overwrite=True)
             _call_with_retry(lambda c=cmd_id: client.zrem(commands.queue_key(machine), c))
-            _log(client, {"id": cmd_id, "machine": machine, "status": "failed", "reason": "startup-scan"})
+            commands.log_event(client, {"id": cmd_id, "machine": machine, "state": "failed", "reason": "startup-scan"})
             marked.append(cmd_id)
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(machine) from exc
@@ -207,26 +227,25 @@ def poll_once(
     redis_username: str | None = None,
     redis_password: str | None = None,
 ) -> list[dict]:
-    """One pass: prune anything past its TTL, then claim and run up to
-    `batch` of the oldest remaining pending commands. Returns a summary per
-    id touched, in the order handled.
+    """One pass: prune queue entries past the retention window, then claim
+    and run up to `batch` of the oldest remaining pending commands. Returns
+    a summary per id touched, in the order handled.
     """
     client = _client(redis_host, redis_port, redis_username, redis_password)
     qkey = commands.queue_key(machine)
-    now = commands.now_ms()
     touched: list[dict] = []
     try:
-        # Prune: an id whose cmd:<id> key is already gone (Redis's own PX
-        # TTL did it) is expired and will never be processed.
-        all_ids = _call_with_retry(lambda: client.zrange(qkey, 0, -1))
-        for cmd_id in all_ids:
-            exists = _call_with_retry(lambda c=cmd_id: client.get(commands.cmd_key(c)))
-            if exists is None:
-                touched.append(_mark_expired(client, machine, cmd_id))
+        # Safety-net prune: entries older than the retention window are
+        # long past `expires_at` too (120s default vs. 1h here) -- this
+        # just stops the queue growing forever if something is never
+        # polled. The real "is this still runnable" check is `expires_at`,
+        # done per-item below.
+        cutoff_ms = commands.now_ms() - int(commands.CMD_RETENTION_S * 1000)
+        _call_with_retry(lambda: client.zremrangebyscore(qkey, "-inf", cutoff_ms))
 
         pending = _call_with_retry(lambda: client.zrange(qkey, 0, batch - 1))
         for cmd_id in pending:
-            touched.append(_process_one(client, machine, key, cmd_id, now))
+            touched.append(_process_one(client, machine, key, cmd_id))
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(machine) from exc
     return touched

@@ -1,19 +1,22 @@
 """Cross-machine command queue: one machine enqueues a signed command for
-another, the target's `lupin agent` process claims and runs it (issue #28,
-implementing #27's design). See `docs/redis-schema.md` for the key shapes.
+another, the target's `lupin agent` process claims and runs it. Implements
+#27's design -- see that issue's design comment for the full spec (key
+schema, signing, security layers); `docs/redis-schema.md` has the key
+shapes as deployed here.
 
 Four key families, all under `lupin:v1:`:
 - `cmdq:<machine>` -- sorted set, member = command id, score = issued_at
   (ms). The target machine's pending queue, oldest first.
-- `cmd:<id>` -- string (JSON), the signed command itself, with a `PX` TTL
-  so an unclaimed command expires on its own. Written once, by `enqueue`'s
-  EVAL (`SET ... NX` -- a collision would mean two calls somehow minted
-  the same id).
+- `cmd:<id>` -- string (JSON), the signed command itself. `PX` TTL is a
+  fixed retention window (`CMD_RETENTION_S`, 1h, matching the design's
+  table) -- not the same thing as whether the command is still valid to
+  run. That's `expires_at`, a field inside the JSON, checked by the
+  executor (`agent.py`). Written once, by `enqueue`'s EVAL (`SET ... NX`).
 - `cmdres:<id>` -- string (JSON), the result. The executor claims a
   command with `SET ... NX` (first writer wins a race between two
   pollers), then overwrites its own claim with the final result.
 - `cmdlog` -- a capped stream (`XADD ... MAXLEN ~`), one entry per
-  terminal outcome, for observability only -- nothing reads it back today.
+  enqueue and one per terminal outcome -- the audit trail.
 
 Signing: HMAC-SHA256 over a canonical JSON encoding (`json.dumps(...,
 sort_keys=True, separators=(",", ":"))`) of every field except `sig`
@@ -21,8 +24,8 @@ itself. One shared secret per target machine (`--signing-key` /
 `$LUPIN_CMD_SIGNING_KEY`, same convention as `--redis-password` /
 `$LUPIN_REDIS_PASSWORD`) -- whoever sends to a machine must know that
 machine's key, so a compromised host can't forge a command for a
-different one (#27's decision comment: per-target HMAC, not Redis ACL
-selectors alone).
+different one (design's security section 4b: per-target HMAC, decided
+over Redis ACL selectors alone).
 
 This module only handles the Redis plumbing and the signature -- it does
 not know or enforce which actions exist. That allowlist lives in
@@ -49,10 +52,23 @@ from .slots import CoordinatorUnreachable
 from .slots_redis import _call_with_retry, _client
 
 PREFIX = "lupin:v1:"
-DEFAULT_TTL_S = 300.0  # 5 minutes -- an unclaimed command expires on its own
-RESULT_TTL_S = 3600.0  # 1 hour -- long enough to query a result after it finishes
 
-STATUSES = {"queued", "running", "ok", "failed", "rejected", "expired"}
+# Two different things that both look like "a TTL" -- kept apart on purpose
+# (finding #5 of the independent review on #28: conflating them left one
+# check dead). `CMD_RETENTION_S` is how long the signed request record
+# stays in Redis at all (so `cmd status` can still explain an old id).
+# `DEFAULT_PICKUP_S` is how long a command stays *valid to run* -- the
+# design's "pickup deadline, not a run-time limit". A command can easily
+# still be sitting in Redis (first number) long after it's stopped being
+# runnable (second number).
+CMD_RETENTION_S = 3600.0  # 1 hour, matches the design's key table
+RESULT_TTL_S = 3600.0  # 1 hour -- long enough to query a result after it finishes
+DEFAULT_PICKUP_S = 120.0  # design default: issued_at + 120s
+CLOCK_SKEW_S = 30.0  # design's allowance on the staleness check
+
+LOG_MAXLEN = 2000  # design: `XADD cmdlog MAXLEN ~ 2000`
+
+STATES = {"queued", "running", "ok", "failed", "rejected", "expired"}
 
 
 def cmd_key(cmd_id: str) -> str:
@@ -106,10 +122,23 @@ def parse_params(pairs: list[str]) -> dict:
     return result
 
 
+def log_event(client, fields: dict) -> None:
+    """Append one `cmdlog` entry. Best-effort: a dropped audit line must
+    never abort the write it's describing -- the `cmd`/`cmdres` key is
+    already the source of truth, this is observability on top of it.
+    """
+    flat = {k: str(v) for k, v in fields.items()}
+    try:
+        _call_with_retry(lambda: client.xadd(LOG_KEY, flat, maxlen=LOG_MAXLEN, approximate=True))
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError):
+        pass
+
+
 # KEYS[1] = cmd:<id>, KEYS[2] = cmdq:<target>. ARGV[1] = value (JSON),
-# ARGV[2] = ttl_ms, ARGV[3] = issued_at (score), ARGV[4] = id (member).
-# One EVAL instead of a transaction -- MULTI isn't on the ACL list. SET's
-# own NX is the only guard against two calls minting the same id.
+# ARGV[2] = retention_ms, ARGV[3] = issued_at (score, ms), ARGV[4] = id
+# (member). One EVAL instead of a transaction -- MULTI isn't on the ACL
+# list. SET's own NX is the only guard against two calls minting the same
+# id.
 _ENQUEUE_SCRIPT = """
 local ok = redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2])
 if not ok then
@@ -126,7 +155,9 @@ def enqueue(
     params: dict,
     *,
     key: str,
-    ttl: float = DEFAULT_TTL_S,
+    actor: str,
+    issuer: str,
+    pickup_window: float = DEFAULT_PICKUP_S,
     redis_host: str | None = None,
     redis_port: int | None = None,
     redis_username: str | None = None,
@@ -134,24 +165,30 @@ def enqueue(
 ) -> str:
     """Sign and enqueue one command for `target`. Returns the new command id.
 
-    Raises `CoordinatorUnreachable` if Redis can't be reached -- commands
-    have no local fallback, same as claims (`docs/redis-schema.md`'s
-    fallback table has nothing for this key family).
+    `actor` is who asked for this (audit only, per the design -- never used
+    to authorize anything; that's the HMAC's job). `issuer` is what sent it
+    (a hostname or system name). Raises `CoordinatorUnreachable` if Redis
+    can't be reached -- commands have no local fallback, same as claims.
     """
     client = _client(redis_host, redis_port, redis_username, redis_password)
     cmd_id = uuid.uuid4().hex
-    issued_at = now_ms()
-    ttl_ms = int(ttl * 1000)
+    issued_at = time.time()
+    expires_at = issued_at + pickup_window
     fields = {
+        "v": 1,
         "id": cmd_id,
         "target": target,
         "action": action,
         "params": params,
+        "actor": actor,
+        "issuer": issuer,
         "issued_at": issued_at,
-        "ttl_ms": ttl_ms,
+        "expires_at": expires_at,
     }
     cmd = {**fields, "sig": sign(fields, key)}
     value = json.dumps(cmd)
+    retention_ms = int(CMD_RETENTION_S * 1000)
+    score_ms = int(issued_at * 1000)
     try:
         result = _call_with_retry(
             lambda: client.eval(
@@ -160,8 +197,8 @@ def enqueue(
                 cmd_key(cmd_id),
                 queue_key(target),
                 value,
-                ttl_ms,
-                issued_at,
+                retention_ms,
+                score_ms,
                 cmd_id,
             )
         )
@@ -169,6 +206,7 @@ def enqueue(
         raise CoordinatorUnreachable(target) from exc
     if not result:
         raise RuntimeError(f"command id collision: {cmd_id}")  # practically impossible (uuid4)
+    log_event(client, {"id": cmd_id, "target": target, "action": action, "actor": actor, "event": "enqueued"})
     return cmd_id
 
 
@@ -180,7 +218,7 @@ def get_status(
     redis_username: str | None = None,
     redis_password: str | None = None,
 ) -> dict | None:
-    """The result if one exists yet, else `{"status": "queued", ...}` if the
+    """The result if one exists yet, else `{"state": "queued", ...}` if the
     command is still waiting, else `None` if neither key exists (never
     existed, or both have expired)."""
     client = _client(redis_host, redis_port, redis_username, redis_password)
@@ -194,7 +232,7 @@ def get_status(
     if raw_cmd is None:
         return None
     cmd = json.loads(raw_cmd)
-    return {"id": cmd_id, "status": "queued", "target": cmd.get("target"), "action": cmd.get("action")}
+    return {"id": cmd_id, "state": "queued", "target": cmd.get("target"), "action": cmd.get("action")}
 
 
 def get_queue(

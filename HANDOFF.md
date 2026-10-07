@@ -32,38 +32,93 @@ exists yet.
 
 ## Current Step
 
-Done. Merged locally into `issue-28-cmd-queue-agent` (off `main` at
-4e614ce). Commits: 153737f (implementation), e476112 (merge commit).
-Reported to the issue.
+Done, including a follow-up fix round. Merged locally into
+`issue-28-cmd-queue-agent` (off `main` at 4e614ce). Commits: 153737f
+(implementation), e476112 (merge commit), f7cf268 (first HANDOFF), plus
+this round's fix commit (see git log). Reported to the issue both times.
+
+### Follow-up round: 5 gaps from an independent review
+
+Issue #27's design comment wasn't posted when the first round above was
+built; it is now (issue #28 comment), and an independent review of the
+first merge found 5 gaps against it. All 5 fixed:
+
+1. **Repo format validation** — `agent.py`'s `_validate_repo` now checks
+   `^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$` before any handler builds argv
+   (defense in depth, independent of whatever the dashboard checks).
+   Note: the design's own example payload uses a bare repo name
+   (`"repo": "field-trip"`, no owner prefix) — the regex has no `/`. An
+   `owner/repo` string is rejected by design, not a bug.
+2. **`systemd-run` detachment** — both `loop.stop` and `loop.run` now
+   build `["systemd-run", f"--unit=lupin-cmd-{id[:8]}", "--collect",
+   "loopctl", <action>, repo]` instead of a bare `loopctl` call, so an
+   agent restart (`KillMode=process`, #29) can't kill an in-flight action.
+   Note: the design's own action-mapping table only shows `loop.run`
+   wrapped this way, not `loop.stop` — wrapped both per the coordinator's
+   explicit instruction ("not a bare `loopctl run`/`stop` call"), since
+   wrapping `stop` too is strictly safer and the instruction was direct.
+3. **Audit trail** — `commands.py`'s signed payload now carries
+   `actor`/`issuer`; `cmdlog` (a capped stream, `XADD ... MAXLEN ~ 2000`)
+   gets one entry at enqueue and one per terminal outcome
+   (ok/failed/rejected/expired), via `commands.log_event`.
+4. **Field names realigned to the design** — `cmdres` now uses
+   `state`/`host` (was `status`/`machine`), matching what #21/#22/#23 will
+   be built against.
+5. **TTL vs. expiry separated** — `cmd:<id>`'s Redis `PX` (`CMD_RETENTION_S`,
+   fixed 1h) is now purely retention; the pickup deadline is the JSON
+   field `expires_at` (`issued_at + pickup_window`, default 120s), checked
+   by the executor with a 30s `CLOCK_SKEW_S` grace allowance. Queue pruning
+   uses `ZREMRANGEBYSCORE` against the 1h cutoff as a safety net; the real
+   runnability check is per-item `expires_at`.
+
+Deliberately left out of this round (not among the 5 named findings, no
+scope creep): in-memory anti-replay id tracking, "draining machine"
+rejection, optional `platform`/`note` params, `c_`-prefixed ids.
 
 ## Files Changed
 
-- `src/lupin/commands.py` (new) — key helpers, enqueue EVAL, HMAC sign/verify, status/queue reads.
-- `src/lupin/agent.py` (new) — poll loop, fixed ACTIONS table, startup scan.
-- `src/lupin/cli.py` — `cmd send|status|queue`, `agent` subcommands.
-- `docs/redis-schema.md` — new key families under `v1`.
-- `tests/test_commands.py`, `tests/test_agent.py` (new).
+- `src/lupin/commands.py` — key helpers, enqueue EVAL (now signs
+  `actor`/`issuer` too, writes a `cmdlog` entry), HMAC sign/verify,
+  status/queue reads (`state` field).
+- `src/lupin/agent.py` — poll loop, fixed ACTIONS table (now
+  `systemd-run`-wrapped), startup scan, repo-regex validation,
+  `expires_at` + clock-skew staleness check, `cmdlog` writes on every
+  terminal outcome.
+- `src/lupin/cli.py` — `cmd send|status|queue` (`--actor`/`--issuer`/
+  `--pickup-window` replacing `--ttl`), `agent` subcommands.
+- `docs/redis-schema.md` — key shapes updated to match (`actor`/`issuer`/
+  `state`/`host`, TTL-vs-`expires_at` explanation).
+- `tests/test_commands.py`, `tests/test_agent.py` — extended for all 5
+  fixes: custom pickup window, cmdlog entry at enqueue, `systemd-run` argv
+  for both actions (asserting the exact unit-name pattern), invalid/valid
+  repo formats, clock-skew allowance (just past nominal expiry still
+  runs; well past the skew is marked expired), cmdlog entry at finish.
 
 ## Verification Status
 
-`nix develop . -c pytest` run twice:
-- On baseline `main` (4e614ce, via a tracked `git stash`/checkout/restore,
-  not a reset): 4 pre-existing failures, unrelated to this change --
-  `test_quest.py::test_cli_quest_focus_prints_exact_copy_text`,
+`nix develop . -c pytest` run on this branch after the fix round:
+- Before this round's fixes (first-round merge, previously reported):
+  360 passed, 4 pre-existing failures, 0 errors.
+- After this round's fixes and test updates: **368 passed, same 4
+  pre-existing failures, 0 errors** — net 8 new/extended tests passing,
+  no regressions. The 4 pre-existing failures are unchanged from the
+  first round and were independently reproduced against baseline `main`
+  then: `test_quest.py::test_cli_quest_focus_prints_exact_copy_text`,
   `test_quest.py::test_cli_quest_release_prints_exact_copy_text`,
   `test_quest.py::test_cli_quest_release_no_focus_error`,
   `test_slots_redis.py::test_status_json_matches_real_sorted_set_contents`.
-  Same 4 failures, same assertions, reproduced identically on baseline.
-- On this branch (`issue-28-cmd-queue-agent`, after merge): same 4
-  pre-existing failures + 360 passed, 0 errors (all new
-  `test_commands.py`/`test_agent.py` tests pass). One earlier run on this
-  branch hit 26 `ConnectionError`s against the session Redis fixture;
-  re-ran clean (360 passed, same 4 known failures, 0 errors) -- a one-off
-  sandbox flake, not reproducible, not related to this change.
+- Caught one bug in my own first test draft: I wrote several `test_agent.py`
+  cases using `"repo": "gracecraft/lupin"` (contains `/`), which the new
+  regex correctly rejects — fixed by using a bare repo name (`"lupin"`),
+  matching the design's own example. Also found my first expiry test used
+  too short a gap (10ms past a 10ms pickup window) to clear the 30s
+  clock-skew allowance — rewrote it to construct a command 80s past
+  `expires_at` directly.
 
 ## Next Action
 
-None. Shipped: merged locally, reported to the issue.
+None. Shipped: fix round committed and merged locally, reported to the
+issue.
 
 ## Known Blockers
 

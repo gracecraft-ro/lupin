@@ -380,7 +380,12 @@ def _cmd_group_args(parser: argparse.ArgumentParser) -> None:
     send.add_argument("machine", help="target machine")
     send.add_argument("action", help="e.g. loop.stop, loop.run")
     send.add_argument("params", nargs="*", help="key=value pairs, e.g. repo=owner/name")
-    send.add_argument("--ttl", type=float, default=commands.DEFAULT_TTL_S, help="command TTL in seconds")
+    send.add_argument(
+        "--pickup-window", type=float, default=commands.DEFAULT_PICKUP_S,
+        help="seconds this command stays valid to run, not stored (default: 120)",
+    )
+    send.add_argument("--actor", default=os.environ.get("USER", "unknown"), help="audit only, not authorization")
+    send.add_argument("--issuer", default=None, help="default: this host's hostname")
     send.add_argument("--json", action="store_true")
     _signing_key_arg(send)
     _redis_conn_args(send)
@@ -973,7 +978,8 @@ def _cmd_cmd(args: argparse.Namespace) -> int:
         try:
             cmd_id = commands.enqueue(
                 args.machine, args.action, params,
-                key=args.signing_key, ttl=args.ttl, **_redis_kwargs(args),
+                key=args.signing_key, actor=args.actor, issuer=args.issuer or machines.hostname(),
+                pickup_window=args.pickup_window, **_redis_kwargs(args),
             )
         except slots.CoordinatorUnreachable:
             print(f"cannot reach the redis coordinator to send to {args.machine!r}", file=sys.stderr)
@@ -996,7 +1002,7 @@ def _cmd_cmd(args: argparse.Namespace) -> int:
         if args.json:
             print(json.dumps(result))
         else:
-            print(f"{result['id']}: {result['status']}")
+            print(f"{result['id']}: {result['state']}")
         return 0
 
     # args.cmd_action == "queue"

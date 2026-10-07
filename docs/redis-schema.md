@@ -17,7 +17,7 @@ This is the data model `lupin` uses once the `redis` backend exists
 | `cmdq:<machine>` | sorted set (member = command id, score = issued_at in ms) | one machine's pending commands, oldest first — see Command queue keys below | nothing today |
 | `cmd:<id>` | string (JSON), with a TTL | one signed command — see Command queue keys below | nothing today |
 | `cmdres:<id>` | string (JSON), with a TTL | one command's result — see Command queue keys below | nothing today |
-| `cmdlog` | capped stream (`XADD ... MAXLEN ~`) | one entry per command's terminal outcome, for observability | nothing today |
+| `cmdlog` | capped stream (`XADD ... MAXLEN ~`) | one entry per enqueue and one per terminal outcome — the audit trail | nothing today |
 
 These are new keys for the fleet CLI (issues #6–#14, split from #2) and the
 cross-machine command queue (issue #28, split from #27). They stay under
@@ -137,47 +137,56 @@ wrapping `loopctl`).
 
 Written once by `lupin cmd send`, via one `EVAL` that does `SET ... NX`
 here and `ZADD cmdq:<target>` together — `MULTI` isn't on the ACL list (see
-below), so this is the atomic primitive instead. The `PX` TTL means an
-unclaimed command expires on its own; no cleanup code needed.
+below), so this is the atomic primitive instead. The `PX` TTL (1h, fixed)
+is just retention — how long the record stays around to look up, not
+whether the command is still valid to run. That's `expires_at`, a field
+inside the JSON, checked on the target host with a 30s clock-skew
+allowance.
 
 ```json
 {
+  "v": 1,
   "id": "a1b2c3d4e5f6...",
   "target": "jesus",
   "action": "loop.stop",
   "params": {"repo": "gracecraft/lupin"},
-  "issued_at": 1759708800000,
-  "ttl_ms": 300000,
+  "actor": "grace",
+  "issuer": "pihome",
+  "issued_at": 1759708800.123,
+  "expires_at": 1759708920.123,
   "sig": "..."
 }
 ```
 
-`sig` is HMAC-SHA256 over a canonical JSON encoding (`json.dumps(...,
-sort_keys=True, separators=(",", ":"))`) of every other field, keyed by a
-secret shared with the target machine only — per-target HMAC, not a Redis
-ACL selector, so a compromised host can't forge a command for a different
-one.
+`actor` is who asked for this (audit only, never trusted for
+authorization — that's the HMAC's job). `issuer` is what sent it. `sig` is
+HMAC-SHA256 over a canonical JSON encoding (`json.dumps(..., sort_keys=True,
+separators=(",", ":"))`) of every other field, keyed by a secret shared
+with the target machine only — per-target HMAC, not a Redis ACL selector,
+so a compromised host can't forge a command for a different one.
 
 ### `cmdres:<id>`
 
 Claimed with `SET ... NX` (first writer wins a race between two pollers
 on the same id), then overwritten by the same claimant with the final
-result. `status` is one of `queued` (no `cmdres` yet — the `cmd:<id>` key
+result. `state` is one of `queued` (no `cmdres` yet — the `cmd:<id>` key
 is the only record), `running`, `ok`, `failed`, `rejected`, `expired`.
 
 ```json
-{"id": "a1b2c3d4e5f6...", "status": "ok", "machine": "jesus", "action": "loop.stop", "returncode": 0}
+{"id": "a1b2c3d4e5f6...", "state": "ok", "host": "jesus", "action": "loop.stop", "exit_code": 0, "output": "...", "truncated": false}
 ```
 
 A `running` entry still present when `lupin agent` restarts means the
 previous process crashed mid-command — the startup scan marks it `failed`
-rather than silently re-running it.
+rather than silently re-running it. `output` is the last 8 KiB of combined
+stdout+stderr; `rejected`/`failed`-without-a-run carry a `reason` string
+instead.
 
 ### `cmdlog`
 
-One stream entry per terminal outcome (`ok`/`failed`/`rejected`/`expired`),
-capped with `MAXLEN ~ 1000`. Observability only — nothing reads it back
-today.
+One stream entry per enqueue and one per terminal outcome
+(`ok`/`failed`/`rejected`/`expired`) — the audit trail, capped with
+`MAXLEN ~ 2000`.
 
 ## TTLs
 
@@ -189,8 +198,14 @@ numbers.
 | Slot lease | 30s | 120s |
 | Claim | 2 min | 10 min |
 | Machine heartbeat | 30s | 120s |
-| Command (unclaimed) | n/a — not renewed | 5 min |
-| Command result | n/a — not renewed | 1 hour |
+| Command record (`cmd:<id>`) | n/a — not renewed | 1 hour (retention only, see below) |
+| Command result (`cmdres:<id>`) | n/a — not renewed | 1 hour |
+
+A command's Redis retention (1h) is not the same thing as how long it's
+valid to run — that's `expires_at` inside the record (120s after
+`issued_at` by default, the "pickup deadline"), checked by `lupin agent`
+with a 30s clock-skew allowance. A command can sit in Redis, inspectable,
+long after it's stopped being runnable.
 
 ## ACL command list
 
