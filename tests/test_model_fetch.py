@@ -143,8 +143,36 @@ class OpencodeGoModelsTests(unittest.TestCase):
 
 
 class CodexModelsTests(unittest.TestCase):
-    def test_falls_back_to_catalog_openai_models_marked_not_live(self):
-        result = model_fetch.codex_models(CATALOG)
+    def test_live_list_priced_from_omp(self):
+        payload = {
+            "models": [
+                {
+                    "provider": "openai-codex",
+                    "id": "gpt-5.6-luna",
+                    "name": "GPT-5.6-Luna",
+                    "cost": {"input": 0.2, "output": 1.2, "cacheRead": 0.02, "cacheWrite": 0.25},
+                }
+            ]
+        }
+        with mock.patch.object(model_fetch, "run", return_value=(0, json.dumps(payload))) as run:
+            result = model_fetch.codex_models(CATALOG)
+
+        self.assertTrue(result["live"])
+        self.assertEqual(
+            result["models"],
+            [{
+                "id": "gpt-5.6-luna",
+                "price": {"input": 0.2, "output": 1.2, "cache_read": 0.02, "cache_write": 0.25},
+                "price_source": "omp",
+                "promo": None,
+                "display_name": "GPT-5.6-Luna",
+            }],
+        )
+        run.assert_called_once_with(["omp", "models", "openai-codex", "--json"])
+
+    def test_omp_missing_falls_back_to_catalog_openai_models_marked_not_live(self):
+        with mock.patch.object(model_fetch, "run", return_value=(127, "not found: omp")):
+            result = model_fetch.codex_models(CATALOG)
         self.assertFalse(result["live"])
         self.assertIn("stale_reason", result)
         self.assertEqual(
@@ -152,8 +180,9 @@ class CodexModelsTests(unittest.TestCase):
             [{"id": "gpt-5.4", "price": {"input": 2.5, "output": 15}, "price_source": "models.dev", "promo": None}],
         )
 
-    def test_no_catalog_at_all_is_empty_not_live(self):
-        result = model_fetch.codex_models(None)
+    def test_no_catalog_and_omp_unavailable_is_empty_not_live(self):
+        with mock.patch.object(model_fetch, "run", return_value=(127, "not found: omp")):
+            result = model_fetch.codex_models(None)
         self.assertFalse(result["live"])
         self.assertEqual(result["models"], [])
         self.assertIn("error", result)
