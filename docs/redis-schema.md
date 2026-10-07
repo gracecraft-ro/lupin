@@ -60,11 +60,22 @@ online/offline.
   "providers": ["claude", "openai"],
   "quota": {
     "claude": {"pct_left": 42, "resets_at": "2026-10-05T18:00:00Z"}
-  }
+  },
+  "actions": ["loop.peek", "loop.run", "loop.stop", "schedule.pause", "schedule.resume", "schedule.set", "schedule.show"]
 }
 ```
 
-`state` is `"online"` or `"draining"` (`lupin drain`/`undrain` set it).
+`state` is `"online"` or `"draining"` (`lupin drain`/`undrain` set it). A
+draining machine's `agent.py` still accepts actions in its own
+`DRAIN_ALLOWED` set (`loop.stop`, `loop.peek`, `schedule.show`,
+`schedule.pause`) but rejects the rest -- it can wind work down or read
+state, not start anything new. `loop.run` starts a loop outright;
+`schedule.set`/`schedule.resume` arm a timer to start one later, which
+still counts as new work, just deferred.
+
+`actions` is this machine's `agent.py` `ACTIONS` table (issue #27/#28),
+written by `_write_record` so it can never list an action the agent here
+doesn't actually run.
 
 ### `focus:<quest>`
 
@@ -130,8 +141,9 @@ No ACL change needed — `GET`, `SET`, and `EVAL` are already on the list.
 These back the cross-machine command queue (`lupin cmd send|status|queue`,
 `lupin agent` — issue #28, implementing #27's design). One machine enqueues
 a signed command; the target machine's `lupin agent` process claims and
-runs it through a fixed action table (`loop.stop`, `loop.run` in v1, both
-wrapping `loopctl`).
+runs it through a fixed action table: `loop.stop`, `loop.run`, `loop.peek`,
+`schedule.show`, `schedule.set`, `schedule.pause`, `schedule.resume` (issue
+#2 phase A), all wrapping `loopctl`.
 
 ### `cmd:<id>`
 

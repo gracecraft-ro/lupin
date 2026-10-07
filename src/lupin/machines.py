@@ -51,7 +51,6 @@ from pathlib import Path
 
 import redis
 
-from . import agent as agent_mod
 from . import quota, slots_redis
 
 CoordinatorUnreachable = slots_redis.CoordinatorUnreachable
@@ -177,7 +176,14 @@ def _write_record(client, name: str, *, state: str, connection: dict, loops: lis
     is recomputed here every time, since this function is the only writer
     of `machine:<name>` and a stale quota reading is worse than the extra
     `quota.snapshot()` call.
+
+    `actions` is read live from `agent.py`'s own `ACTIONS` table (imported
+    here, not at module load, to avoid a top-level import cycle -- `agent.py`
+    imports this module to check `draining` state). This way the list can
+    never drift from what the agent here actually supports.
     """
+    from . import agent  # deferred import, dodges the cycle noted above
+
     existing = _read_record(client, name)
     record = {
         "version": package_version(),
@@ -188,7 +194,7 @@ def _write_record(client, name: str, *, state: str, connection: dict, loops: lis
         "quota": quota.snapshot(),
         "loops": loops if loops is not None else (existing.get("loops", []) if existing else []),
         "session_backend": SESSION_BACKEND,
-        "actions": sorted(agent_mod.ACTIONS),
+        "actions": sorted(agent.ACTIONS),
     }
     client.set(_record_key(name), json.dumps(record), ex=RECORD_TTL)
     return record

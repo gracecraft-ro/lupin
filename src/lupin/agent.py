@@ -12,7 +12,10 @@ ever reaches `subprocess.run`:
 3. Not past `expires_at` (plus `commands.CLOCK_SKEW_S` grace).
 4. `action` must be in `ACTIONS`, a fixed, explicit table. An action not
    in it is rejected, never run as a best-effort guess.
-5. Per-action parameter validation (e.g. `repo` against a strict regex,
+5. If this machine's own record (`machines.py`) says `draining`, only
+   `DRAIN_ALLOWED` actions run -- a draining machine can still wind work
+   down (`loop.stop`) but refuses to start anything new.
+6. Per-action parameter validation (e.g. `repo` against a strict regex,
    defense in depth independent of whatever a future dashboard checks).
 
 `ACTIONS` wraps `loopctl` rather than reimplementing it -- the design's
@@ -21,15 +24,22 @@ keepalive session, exact tmux target match). Every handler returns a list
 argv, never a shell string -- execution is always
 `subprocess.run(argv, shell=False)`.
 
-Two shapes of action, per issue #2's phase A plan:
-- Mutating (`loop.stop`, `loop.run`, `schedule.set`, `schedule.pause`,
+Three shapes of action, per issue #2's phase A plan:
+- Mutating, short-lived (`loop.stop`, `schedule.set`, `schedule.pause`,
   `schedule.resume`): run as `sudo -n systemd-run --unit=lupin-cmd-<id8>
   --collect --wait --pipe loopctl ...` -- `sudo -n` because every other
   `systemd-run` call in ghostbook.nix needs it too (plain `systemd-run` as
   this process's own user is not authorized); `--wait --pipe` so the
   reported exit code is the actual action's, not just "did the transient
   unit start" (a bug in the first cut of this table -- `systemd-run`
-  without `--wait` always looked like success).
+  without `--wait` always looked like success the moment the unit
+  *launched*, not once the action actually finished).
+- Mutating, long-lived (`loop.run`): same `sudo -n systemd-run ... loopctl
+  run ...`, but no `--wait`/`--pipe` -- `loopctl run` execs straight into
+  `delegation-launch`, a process meant to keep running long after this
+  command's own result is reported, so the agent must not block on it.
+  Still runs inside its own transient unit, so a restart of the
+  `lupin-agent` service (`KillMode=process`, #29) can't kill it.
 - Read-only (`loop.peek`, `schedule.show`): run `loopctl` directly, no
   `systemd-run` wrapper -- nothing to isolate or wait synchronously for
   that `subprocess.run`'s own timeout doesn't already cover.
@@ -55,7 +65,7 @@ import time
 
 import redis
 
-from . import commands
+from . import commands, machines
 from .slots import CoordinatorUnreachable
 from .slots_redis import _call_with_retry, _client
 
@@ -144,19 +154,21 @@ def _unit_name(cmd_id: str) -> str:
     return f"lupin-cmd-{cmd_id[:8]}"
 
 
-def _sudo_systemd_run(cmd_id: str, *loopctl_args: str) -> list[str]:
-    """A mutating action's argv: `sudo -n systemd-run ... --wait --pipe
-    loopctl <loopctl_args>`. `sudo -n` matches every other `systemd-run`
-    call in ghostbook.nix (this process's own user has no bare
-    `systemd-run` rights); `--wait --pipe` makes `subprocess.run`'s
-    returncode the actual action's exit code, not just "did the transient
-    unit start" -- the first cut of this table had neither.
+def _sudo_systemd_run(cmd_id: str, *loopctl_args: str, wait: bool = True) -> list[str]:
+    """A mutating action's argv: `sudo -n systemd-run ... loopctl
+    <loopctl_args>`. `sudo -n` matches every other `systemd-run` call in
+    ghostbook.nix (this process's own user has no bare `systemd-run`
+    rights). `wait=True` (the default) adds `--wait --pipe`, so
+    `subprocess.run`'s returncode is the actual action's exit code, not
+    just "did the transient unit start" -- the first cut of this table had
+    neither. `wait=False` is for `loop.run` only: see the module docstring
+    for why it must not block.
     """
-    return [
-        "sudo", "-n", "systemd-run",
-        f"--unit={_unit_name(cmd_id)}", "--collect", "--wait", "--pipe",
-        "loopctl", *loopctl_args,
-    ]
+    argv = ["sudo", "-n", "systemd-run", f"--unit={_unit_name(cmd_id)}", "--collect"]
+    if wait:
+        argv += ["--wait", "--pipe"]
+    argv += ["loopctl", *loopctl_args]
+    return argv
 
 
 def _handle_loop_stop(params: dict, cmd_id: str) -> list[str]:
@@ -166,7 +178,9 @@ def _handle_loop_stop(params: dict, cmd_id: str) -> list[str]:
 
 def _handle_loop_run(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
-    return _sudo_systemd_run(cmd_id, "run", repo)
+    # No --wait/--pipe: `loopctl run` execs into a loop meant to keep
+    # running well past this command's own result (see module docstring).
+    return _sudo_systemd_run(cmd_id, "run", repo, wait=False)
 
 
 def _handle_loop_peek(params: dict, cmd_id: str) -> list[str]:
@@ -214,6 +228,15 @@ ACTIONS = {
     "schedule.resume": _handle_schedule_resume,
 }
 
+# Actions a draining machine still accepts -- #27's design: draining blocks
+# anything that starts new work, not actions that wind work down or only
+# read state. `loop.stop` and `schedule.pause` wind down (stop a loop, stop
+# a timer from firing again); `loop.peek` and `schedule.show` are
+# read-only. `loop.run` starts a loop outright, so it's blocked; `schedule.
+# set`/`schedule.resume` are blocked too -- both arm a timer to start a
+# loop later, which is still "starting new work", just deferred.
+DRAIN_ALLOWED = {"loop.stop", "loop.peek", "schedule.show", "schedule.pause"}
+
 
 def _write_result(client, cmd_id: str, payload: dict, *, overwrite: bool = False) -> bool:
     value = json.dumps(payload)
@@ -231,6 +254,16 @@ def _reject(client, machine: str, cmd_id: str, action: str | None, reason: str) 
         client, {"id": cmd_id, "machine": machine, "state": "rejected", "action": action, "reason": reason}
     )
     return {"id": cmd_id, "state": "rejected"}
+
+
+def _is_draining(client, machine: str) -> bool:
+    """Read this machine's own `machine:<name>` record (written by
+    `machines.join`/`heartbeat`) and check its `state`. Reuses that
+    module's key format directly instead of a second copy of it."""
+    raw = _call_with_retry(lambda: client.get(machines._record_key(machine)))
+    if raw is None:
+        return False
+    return json.loads(raw).get("state") == "draining"
 
 
 def _mark_expired(client, machine: str, cmd_id: str) -> dict:
@@ -257,6 +290,8 @@ def _process_one(client, machine: str, key: str, cmd_id: str) -> dict:
         return _mark_expired(client, machine, cmd_id)
     if action not in ACTIONS:
         return _reject(client, machine, cmd_id, action, f"unknown action {action!r}")
+    if action not in DRAIN_ALLOWED and _is_draining(client, machine):
+        return _reject(client, machine, cmd_id, action, f"{machine} is draining")
 
     # Build the argv (and so validate the params) before claiming -- a
     # rejection has to land while no `cmdres` exists yet, so `_reject`'s

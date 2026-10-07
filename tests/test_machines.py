@@ -96,6 +96,16 @@ def test_join_registers_machine_and_writes_config(redis_port, flush_redis, tmp_p
     assert stored["state"] == "online"
 
 
+def test_join_publishes_actions_from_agent_table(redis_port, flush_redis, tmp_path):
+    # `actions` must come from `agent.ACTIONS` itself, not a hand-kept copy
+    # -- this is the check that would catch the two drifting apart.
+    from lupin import agent
+
+    result = machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
+
+    assert result["actions"] == sorted(agent.ACTIONS)
+
+
 def test_heartbeat_refreshes_fields_and_keeps_state(redis_port, flush_redis, tmp_path):
     kw = _kw(redis_port)
     machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
@@ -187,6 +197,14 @@ def test_machines_lists_multiple_including_offline(redis_port, flush_redis):
     # Past OFFLINE_AFTER (120s) with no renewal: offline, even though the
     # stored `state` field itself still says "draining".
     assert result["jesus"]["state"] == "offline"
+
+
+def test_machines_surfaces_actions_field(redis_port, flush_redis, tmp_path):
+    machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
+
+    result = machines.machines(_kw(redis_port))
+
+    assert result[0]["actions"] == sorted(agent_mod.ACTIONS)
 
 
 def test_machines_lists_loops_session_backend_and_actions(redis_port, flush_redis, tmp_path):

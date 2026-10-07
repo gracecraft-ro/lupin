@@ -19,14 +19,17 @@ What's live and what's not, confirmed against this sandbox:
 - claude: `ANTHROPIC_MODELS_URL`, same OAuth token quota.py's
   `claude_oauth_quota()` already reads from `CLAUDE_CREDENTIALS_FILE`.
   Live, but carries no price -- Anthropic's API never returns one.
-- codex: no live source. `~/.codex` holds no auth.json or session
-  rollouts in this sandbox (quota.py's `codex_session_quota()` already
-  treats that as normal -- there's just nothing to read), and OpenAI's
-  public `/v1/models` needs a billing API key, which a Codex Pro OAuth
-  login doesn't provide. `codex_models()` falls back to models.dev's
-  published OpenAI catalog -- every ID in it is real, but it's OpenAI's
-  general API lineup, not a check of what this Codex Pro subscription
-  specifically includes. Marked `live: False` for that reason.
+- codex: live via `omp models openai-codex --json` -- the same `omp` CLI
+  quota.py's `quota_usage()` already shells out to, authenticated for this
+  Codex Pro subscription. Its models carry their own `cost` fields, so no
+  models.dev price lookup is needed for this one. That call itself runs
+  ~10.3s in this sandbox (measured with `time`), so it gets a 15s timeout
+  (`_OMP_TIMEOUT`) rather than this module's usual 10s. If `omp` is
+  missing, times out, exits non-zero, or prints something unparseable,
+  `codex_models()` falls back to models.dev's published OpenAI catalog
+  instead -- every ID in it is real, but it's OpenAI's general API
+  lineup, not a check of what this Codex Pro subscription specifically
+  includes. Marked `live: False` in that fallback case.
 
 Baseline price for all three comes from `MODELS_DEV_CATALOG_URL`
 (models.dev's public model/price catalog, no auth needed) rather than
@@ -52,7 +55,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-from .quota import CLAUDE_CREDENTIALS_FILE, OPENCODE_GO_AUTH_FILE
+from .quota import CLAUDE_CREDENTIALS_FILE, OPENCODE_GO_AUTH_FILE, run
 
 ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
 OPENCODE_GO_MODELS_URL = "https://opencode.ai/zen/go/v1/models"
@@ -184,11 +187,65 @@ def opencode_go_models(catalog: dict | None = None) -> dict:
     return {"subscription": "opencode-go", "live": True, "source": OPENCODE_GO_MODELS_URL, "models": models}
 
 
+_OMP_COST_FIELDS = {"input": "input", "output": "output", "cacheRead": "cache_read", "cacheWrite": "cache_write"}
+
+
+def _omp_price(cost) -> dict | None:
+    if not isinstance(cost, dict):
+        return None
+    price = {dest: cost[src] for src, dest in _OMP_COST_FIELDS.items() if src in cost}
+    return price or None
+
+
+_OMP_TIMEOUT = 15.0  # measured: `omp models openai-codex --json` takes ~10.3s in
+# this sandbox (4 runs, `time omp models openai-codex --json`), over this
+# module's usual 10.0s (`_get_json`'s default) -- so this call gets its own,
+# longer, still-bounded timeout instead of that one.
+
+
+def _omp_codex_models() -> list[dict] | None:
+    """Parsed `models` array from `omp models openai-codex --json`, or
+    `None` if `omp` is missing, times out, exits non-zero, or prints
+    something unparseable -- any of those just means "no live list"."""
+    return_code, output = run(["omp", "models", "openai-codex", "--json"], timeout=_OMP_TIMEOUT)
+    if return_code != 0:
+        return None
+    try:
+        data = json.loads(output)
+    except ValueError:
+        return None
+    rows = data.get("models") if isinstance(data, dict) else None
+    return rows if isinstance(rows, list) else None
+
+
 def codex_models(catalog: dict | None = None) -> dict:
-    """No live source: see this module's docstring. Falls back to
-    models.dev's published OpenAI catalog -- real IDs, but OpenAI's general
-    API lineup, not a check of this Codex Pro subscription specifically.
+    """Live via `omp models openai-codex --json` when that succeeds --
+    see this module's docstring. Falls back to models.dev's published
+    OpenAI catalog, marked `live: False`, otherwise.
     """
+    rows = _omp_codex_models()
+    if rows is not None:
+        models = []
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("id"):
+                continue
+            price = _omp_price(row.get("cost"))
+            model = {
+                "id": row["id"],
+                "price": price,
+                "price_source": "omp" if price else None,
+                "promo": None,
+            }
+            if row.get("name"):
+                model["display_name"] = row["name"]
+            models.append(model)
+        return {
+            "subscription": "codex",
+            "live": True,
+            "source": "omp models openai-codex --json",
+            "models": models,
+        }
+
     if not catalog:
         return {
             "subscription": "codex",
@@ -205,9 +262,9 @@ def codex_models(catalog: dict | None = None) -> dict:
         "subscription": "codex",
         "live": False,
         "stale_reason": (
-            "no ~/.codex credentials in this sandbox, and OpenAI's public model-list API "
-            "needs a billing API key that a Codex Pro OAuth login doesn't provide -- these "
-            "are models.dev's published OpenAI models, not a live check of this subscription"
+            "`omp models openai-codex --json` was unavailable (missing binary, not "
+            "authenticated, timed out, or bad output) -- these are models.dev's "
+            "published OpenAI models instead, not a live check of this subscription"
         ),
         "source": "models.dev (openai)",
         "models": models,
