@@ -1662,7 +1662,12 @@ class TestLoopsPageIntegration:
 
     def test_claimed_elsewhere_shows_up_as_remote_in_by_machine_grouping(self, redis_port, flush_redis):
         kw = _kw(redis_port)
-        claims.claim("acme/widgets#7", "loop-widgets#1", **kw)
+        # claims.claim() stamps the claim's "host" with the real
+        # socket.gethostname() of whoever calls it -- mock that too, or the
+        # claim never actually lands under "jesus" and the assertions below
+        # are unreachable no matter who runs the test.
+        with mock.patch.object(claims.socket, "gethostname", return_value="jesus"):
+            claims.claim("acme/widgets#7", "loop-widgets#1", **kw)
         with (
             mock.patch.object(serve, "code_repos", return_value=[{"repo": "widgets", "loopable": True}]),
             mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
