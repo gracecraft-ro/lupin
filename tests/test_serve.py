@@ -18,7 +18,7 @@ from unittest import mock
 import pytest
 import redis as redis_lib
 
-from lupin import cli, claims, commands, machines, quest, roadmap, serve, slots, slots_redis
+from lupin import cli, claims, commands, machines, quest, quota_cache, roadmap, serve, slots, slots_redis
 
 
 def _kw(redis_port):
@@ -212,11 +212,14 @@ class TimeFormattingTests(unittest.TestCase):
 
 
 class QuotaRenderingTests(unittest.TestCase):
-    """`/usage` rendering only. The real quota/usage readers moved to
-    `quota.py` (issue #8) and are tested in `test_quota.py` -- here,
-    `serve.quota_usage`/`claude_usage`/`omp_usage` (the names `serve.py`
-    imports from `quota.py`) are mocked, so these tests cover only how
-    `render_usage`/`render_quota_row` turn rows into HTML.
+    """`/usage` rendering only. The real quota readers moved to `quota.py`
+    (issue #8) and are tested in `test_quota.py`; the fleet-shared cache
+    they publish through is tested in `test_quota_cache.py` (issue #38).
+    Here, `quota_cache.read_snapshot` (what `render_usage` now reads
+    instead of calling a provider directly) and `claude_usage`/
+    `omp_usage` (still local, for the 7-day totals table only) are
+    mocked, so these tests cover only how `render_usage`/`render_quota_row`
+    turn rows into HTML.
     """
 
     def test_quota_bar_marks_window_time_and_quota_progress(self):
@@ -247,8 +250,15 @@ class QuotaRenderingTests(unittest.TestCase):
             "resets_at": reset_at_ms,
             "generated_at": "2026-01-01 00:00:00",
         }]
+        snapshot = {
+            "opencode-go": {
+                "rows": rows,
+                "fetched_at": "2026-01-01T00:00:00+00:00",
+                "fetched_by": "jesus",
+            }
+        }
         with (
-            mock.patch.object(serve, "quota_usage", return_value=rows),
+            mock.patch.object(quota_cache, "read_snapshot", return_value=snapshot),
             mock.patch.object(serve, "claude_usage", return_value=[]),
             mock.patch.object(serve, "omp_usage", return_value=[]),
         ):
@@ -267,12 +277,20 @@ class QuotaRenderingTests(unittest.TestCase):
         self.assertIn("Next reset", page)
         self.assertLess(page.index("<h2>Quota</h2>"), page.index("<h2>7-day totals</h2>"))
         self.assertIn("Data timestamp: 2026-01-01 00:00:00", page)
+        # Staleness is visible, per provider -- fetched via this fake "jesus".
+        self.assertIn("fetched", page)
+        self.assertIn("via jesus", page)
 
     def test_quota_note_and_error_rows_render_as_dim_text(self):
+        omp_snapshot = {
+            "omp": {
+                "rows": [{"provider": "omp", "error": "unavailable (RuntimeError)"}],
+                "fetched_at": "2026-01-01T00:00:00+00:00",
+                "fetched_by": "jesus",
+            }
+        }
         with (
-            mock.patch.object(serve, "quota_usage", return_value=[
-                {"provider": "omp", "error": "unavailable (RuntimeError)"},
-            ]),
+            mock.patch.object(quota_cache, "read_snapshot", return_value=omp_snapshot),
             mock.patch.object(serve, "claude_usage", return_value=[]),
             mock.patch.object(serve, "omp_usage", return_value=[]),
         ):
@@ -280,10 +298,15 @@ class QuotaRenderingTests(unittest.TestCase):
         self.assertIn("<h3>omp</h3>", page)
         self.assertIn("<p class=dim>unavailable (RuntimeError)</p>", page)
 
+        claude_snapshot = {
+            "claude": {
+                "rows": [{"provider": "claude", "note": "quota unavailable"}],
+                "fetched_at": "2026-01-01T00:00:00+00:00",
+                "fetched_by": "jesus",
+            }
+        }
         with (
-            mock.patch.object(serve, "quota_usage", return_value=[
-                {"provider": "claude", "note": "quota unavailable"},
-            ]),
+            mock.patch.object(quota_cache, "read_snapshot", return_value=claude_snapshot),
             mock.patch.object(serve, "claude_usage", return_value=[]),
             mock.patch.object(serve, "omp_usage", return_value=[]),
         ):
@@ -318,7 +341,7 @@ class QuotaRenderingTests(unittest.TestCase):
             },
         ]
         with (
-            mock.patch.object(serve, "quota_usage", return_value=[]),
+            mock.patch.object(quota_cache, "read_snapshot", return_value={}),
             mock.patch.object(serve, "claude_usage", return_value=claude_rows),
             mock.patch.object(serve, "omp_usage", return_value=omp_rows),
         ):

@@ -20,6 +20,7 @@ This is the data model `lupin` uses once the `redis` backend exists
 | `cmdlog` | capped stream (`XADD ... MAXLEN ~`) | one entry per enqueue and one per terminal outcome — the audit trail | nothing today |
 | `benchmark-snapshot` | string (JSON), with a TTL | one fleet-wide benchmark/quality score per model ID — see Fleet keys below | nothing today |
 | `gh-cache:<owner>/<repo>:<cache-key>` | string (JSON: `{"data": ...}`), with a TTL | one read-only `gh` lookup's cached result — see Fleet keys below | each machine's own direct `gh` call for the same lookup |
+| `quota-snapshot` | string (JSON), with a TTL | one fleet-wide quota reading per provider — see Fleet keys below | nothing today |
 
 These are new keys for the fleet CLI (issues #6–#14, split from #2) and the
 cross-machine command queue (issue #28, split from #27). They stay under
@@ -211,6 +212,58 @@ if two `lupin` invocations there race each other. A non-`pihome` machine
 never takes this lock and never calls `gh` for these lookups at all; on a
 miss it reports "no data yet" instead.
 
+### `quota-snapshot`
+
+Backs `lupin quota` and `serve.py`'s `/usage` page (issue #38). Quota is
+one shared account per provider (Claude, opencode-go, OpenAI/Codex — issue
+#36), so one real reading per provider is the fleet's answer, not
+something to merge across machines.
+
+```json
+{
+  "claude": {
+    "rows": [{"provider": "claude", "duration": "PT5H", "used_pct": 42, "resets_at": 1_790_547_474_348}],
+    "fetched_at": "2026-10-07T12:00:00+00:00",
+    "fetched_by": "jesus"
+  },
+  "openai": {
+    "rows": [{"provider": "openai", "duration": "PT5H", "used_pct": 10, "resets_at": 1_790_550_000_000}],
+    "fetched_at": "2026-10-07T11:58:00+00:00",
+    "fetched_by": "mini"
+  }
+}
+```
+
+One key, one entry per provider — each provider goes stale/fresh on its
+own, so each carries its own `fetched_at`/`fetched_by`. `rows` is
+`quota.quota_usage()`'s own row shape for that provider (one row per
+window: 5 hours, 7 days, 30 days), kept whole rather than collapsed to one
+number, so a reader can show duration, percent left, and time to reset —
+not just one of them. A provider's `duration` is written as the plain
+string `quota.QuotaDuration`'s own value serializes to (`"PT5H"` etc.);
+`quota_cache.py` converts it back to the real enum on read.
+
+Unlike `gh-cache`'s fixed `pihome` pin, there is no fixed canonical
+machine here: credentials for different providers can live on different
+machines, unknown in advance. Instead, whichever machine's own local
+`quota.quota_usage()` call actually returns a real `used_pct` for a
+provider is treated as that provider's fetcher for this round — a machine
+with no credentials for a provider never has real data for it, so it
+never writes for it, and can never clobber a good reading from elsewhere.
+
+TTL on the key is retention only (24 hours) — freshness is judged per
+provider, by comparing that provider's own `fetched_at` to 5 minutes
+(`quota_cache.CACHE_TTL`), the same "stored timestamp, not Redis TTL"
+convention `benchmark-snapshot`/`machine:<name>` already use. A provider
+entry older than that is still shown (better than nothing) but is no
+longer trusted to trigger a skip — the next `lupin quota` run on a
+credentialed machine republishes it.
+
+Guarded by `slot:quota-fetch/<provider>` (max 1 holder, non-blocking, no
+wait) — only stops two `lupin` processes on the *same* machine from
+publishing the same provider at once, same narrow job the `gh-fetch`/
+`benchmark-fetch` locks do.
+
 ## Command queue keys
 
 These back the cross-machine command queue (`lupin cmd send|status|queue`,
@@ -291,6 +344,8 @@ numbers.
 | `benchmark-snapshot` | n/a — not renewed | 7 days (retention only, see below) |
 | GitHub data cache (`gh-cache:...`) | n/a — not renewed | 5 min |
 | GitHub fetch lock (`slot:gh-fetch/<owner>/<repo>`) | n/a — held only for one fetch | 2 min |
+| `quota-snapshot` | n/a — not renewed | 24 hours (retention only; freshness is per-provider, 5 min, see above) |
+| Quota fetch lock (`slot:quota-fetch/<provider>`) | n/a — held only for one fetch, no wait | 1 min |
 
 A command's Redis retention (1h) is not the same thing as how long it's
 valid to run — that's `expires_at` inside the record (120s after
@@ -321,6 +376,7 @@ Connect timeout 2s, 1 retry, then:
 | Command queue | `lupin cmd send`/`lupin agent` exit 3. No local fallback, same as claims — a command only means anything if the target machine can see it. |
 | Benchmark snapshot | `lupin fetch-benchmarks` reports `live: false` with a `stale_reason` (exit 0, same convention as `model_fetch.py`'s own failure cases — see `cli.py`'s exit-code table, "any other error" doesn't fit this, it's a data-availability fact, not a usage error). No local fallback — a fleet-shared cache has nothing meaningful to fall back to on one machine. |
 | GitHub data cache | `pihome` calls `gh` directly anyway (it just can't publish for other machines). Every other machine reports "no data yet" instead of calling `gh` itself — no direct-call fallback here, unlike the resources above. |
+| Quota snapshot | A machine with real provider credentials still returns its own live reading (it just can't publish for other machines). A machine with no credentials for a provider has nothing to fall back to and reports "no data cached yet" for it. |
 
 After an outage ends, a holder tries to renew its lease. If the lease
 already expired, `lupin` logs "lease lost" and tries to acquire again.
