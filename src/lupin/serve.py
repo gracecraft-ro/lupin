@@ -59,7 +59,7 @@ from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
-from . import claims, commands, machines, quest, roadmap, slots_redis
+from . import claims, commands, machines, model_fetch, quest, roadmap, slots_redis
 from .slots import CoordinatorUnreachable
 from .quota import (
     QuotaDuration,
@@ -1411,8 +1411,107 @@ def model_tiers() -> list[dict]:
     return rows
 
 
-def render_tier_picks(tiers: dict) -> str:
-    """One row per tier: its ordered fallback chain, or that it has none."""
+_ALIAS_PREFIX = re.compile(r"^(bmo|local):")
+
+
+def load_model_snapshot() -> dict | None:
+    """Best-effort read of `model_fetch`'s daily snapshot (issue #16). The
+    file may not exist yet -- a machine that has never run
+    `lupin fetch-models` -- or may be unreadable; either way this returns
+    `None` rather than raising, so the page still renders the tier grid
+    on its own, same as `model_tiers()` already degrades for a bad
+    `model-tiers.json`.
+    """
+    try:
+        with open(model_fetch.SNAPSHOT_FILE, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def snapshot_models(snapshot: dict | None) -> list[dict]:
+    """Flatten a snapshot's per-subscription model lists into one list,
+    each row tagged with which subscription it came from and whether that
+    subscription's fetch was live that day."""
+    rows = []
+    for subscription, info in (snapshot or {}).get("subscriptions", {}).items():
+        if not isinstance(info, dict):
+            continue
+        for model in info.get("models") or []:
+            if not isinstance(model, dict) or not model.get("id"):
+                continue
+            rows.append({
+                "subscription": subscription,
+                "id": model["id"],
+                "display_name": model.get("display_name") or model["id"],
+                "price": model.get("price"),
+                "promo": model.get("promo"),
+                "live": bool(info.get("live")),
+                "stale_reason": info.get("stale_reason") or info.get("error"),
+            })
+    return rows
+
+
+def match_live_model(alias: str, models: list[dict]) -> dict | None:
+    """Match a model-tiers.json alias (short hand names like "sonnet" or
+    "bmo:qwen3.8-flash-next") to a snapshot model (full API IDs like
+    "claude-sonnet-4-5-..."). It is not a 1:1 lookup, so this is a
+    heuristic, not a resolver:
+
+    - A "bmo:" or "local:" prefix is stripped before matching, but those
+      two are never found -- `model_fetch` only covers the claude,
+      opencode-go, and codex subscriptions, not bmo's or a local model
+      server's own catalog. Those aliases always report "no live data".
+    - What remains is looked up as a case-insensitive substring of a
+      snapshot model's id or display name, first match wins. Good enough
+      to flag "known reachable today" without pretending to be a precise
+      ID resolver -- a short alias like "opus" could in principle match
+      more than one real id (e.g. a future "opus-mini"), but today's
+      catalogs don't have that collision.
+    """
+    bare = _ALIAS_PREFIX.sub("", alias).strip().lower()
+    if not bare:
+        return None
+    for model in models:
+        haystack = f"{model['id']} {model.get('display_name', '')}".lower()
+        if bare in haystack:
+            return model
+    return None
+
+
+def _format_price(price: dict | None) -> str:
+    if not price:
+        return "no price data"
+    input_price, output_price = price.get("input"), price.get("output")
+    if input_price is None and output_price is None:
+        return "no price data"
+    def fmt(value):
+        return f"${value:.2f}" if isinstance(value, (int, float)) else "-"
+
+    return f"{fmt(input_price)} / {fmt(output_price)} per Mtok"
+
+
+def _live_badge(alias: str, models: list[dict] | None) -> str:
+    """A tier pick's live-match note: today's price if `match_live_model`
+    finds one, "no live data" if not, or nothing at all when the caller
+    (e.g. an existing test of the static chain) passed no snapshot."""
+    if models is None:
+        return ""
+    match = match_live_model(alias, models)
+    if not match:
+        return "<span class=dim> &middot; no live data</span>"
+    return f"<span class=dim> &middot; {esc(_format_price(match['price']))}</span>"
+
+
+def render_tier_picks(tiers: dict, models: list[dict] | None = None) -> str:
+    """One row per tier: its ordered fallback chain, or that it has none.
+
+    `models` is the day's snapshot (issue #16), optional for callers that
+    only want the static chain (e.g. existing tests). When given, each
+    pick gets a live-match badge from `match_live_model` -- today's price
+    if matched, "no live data" if not.
+    """
     rows = []
     for tier in MODEL_TIER_ORDER:
         entries = tiers.get(tier)
@@ -1425,6 +1524,7 @@ def render_tier_picks(tiers: dict) -> str:
             "<span class=tier-pick>"
             f"<span class=tier-model>{esc(pick.get('model', '-'))}</span>"
             f"<span class=dim>{esc(pick.get('effort', '-'))}</span>"
+            f"{_live_badge(pick.get('model', ''), models)}"
             "</span>"
             for pick in picks
         ) or "<span class='tier-pick dim'>none</span>"
@@ -1435,17 +1535,78 @@ def render_tier_picks(tiers: dict) -> str:
     return "".join(rows)
 
 
-def render_model_tiers() -> bytes:
+def _snapshot_age(fetched_at: str | None) -> str:
+    if not fetched_at:
+        return "never pulled"
+    try:
+        epoch = datetime.fromisoformat(fetched_at).timestamp()
+    except ValueError:
+        return "never pulled"
+    return f"<span data-since='{epoch:.0f}'></span> ago"
+
+
+def render_snapshot_models_table(models: list[dict]) -> str:
+    """The "All models" table (issue #17): every model each subscription
+    actually returned that day, not a hardcoded list. "Perf" and "Value"
+    are always "no data" -- this repo has no structured benchmark-score
+    dataset to compute them from (model-tiers.json's "source"/"note"
+    fields only cite a benchmark's name in prose, e.g. "Artificial
+    Analysis Coding Agent Index"; there are no per-model numbers to read).
+    Scored out of this pass rather than invented; see the issue report.
+    """
+    if not models:
+        return (
+            "<p class=dim>No model snapshot yet. Run <code>lupin fetch-models</code> "
+            "or click \"Pull models\" above.</p>"
+        )
+    rows = []
+    for model in sorted(models, key=lambda m: (m["subscription"], m["id"])):
+        source = "live" if model["live"] else (esc(model["stale_reason"]) if model["stale_reason"] else "stale")
+        promo = esc(model["promo"]) if model.get("promo") else "-"
+        rows.append(
+            "<tr>"
+            f"<td>{esc(model['display_name'])}</td>"
+            f"<td>{esc(model['subscription'])}</td>"
+            f"<td>{esc(_format_price(model['price']))}</td>"
+            "<td class=dim>no data</td>"
+            "<td class=dim>no data</td>"
+            f"<td>{promo}</td>"
+            f"<td class=dim>{source}</td>"
+            "</tr>"
+        )
+    return (
+        "<div class='card scroll'><table><tr><th>model</th><th>subscription</th>"
+        "<th>price</th><th>perf</th><th>value</th><th>promo</th><th>source</th></tr>"
+        f"{''.join(rows)}</table></div>"
+    )
+
+
+def render_model_tiers(*, sent: str | None = None) -> bytes:
     rows = model_tiers()
+    snapshot = load_model_snapshot()
+    models = snapshot_models(snapshot)
     body = [
         f'<header><h1>{icon("M7 7h10v10H7zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3")}Models</h1></header>',
+    ]
+    if sent:
+        body.append(f"<p class=dim>{esc(sent)}</p>")
+    body.append(
+        "<div class='card' style='display:flex;align-items:center;gap:1rem'>"
+        f"<span class=dim>Last pulled: {_snapshot_age(snapshot.get('fetched_at') if snapshot else None)}</span>"
+        "<span style='flex:1'></span>"
+        "<form method=post action='/model-tiers/refresh'>"
+        "<button type=submit>Pull models</button></form></div>"
+    )
+    body.extend([
         "<h2>Routing by task category</h2>",
         "<p class=dim>Read from <code>"
         f"{esc(MODEL_TIERS_PATH)}</code>. Each tier is an ordered fallback "
         "chain: the first entry is tried first, then the next. A category "
-        "with no entry for a tier escalates to the next tier up.</p>",
+        "with no entry for a tier escalates to the next tier up. The "
+        "&middot; note after each pick is today's live match (issue #16's "
+        "fetch), when one is found.</p>",
         "<div class=tier-grid>",
-    ]
+    ])
     for row in rows:
         if "error" in row:
             body.append(
@@ -1461,13 +1622,21 @@ def render_model_tiers() -> bytes:
             f"<h3>{esc(row['category'])}</h3>"
             f"<span class=dim>verified {esc(row['last_verified'])}</span></div>"
             f"<div class=dim>{esc(row['source'])}</div>"
-            f"{render_tier_picks(row['tiers'])}"
+            f"{render_tier_picks(row['tiers'], models)}"
             + (f"<p class='tier-note dim'>{esc(note)}</p>" if note else "")
             + "</section>"
         )
     if not rows:
         body.append("<div class='card dim'>No task categories.</div>")
     body.append("</div>")
+    body.extend([
+        "<h2>All models</h2>",
+        "<p class=dim>Every model <code>lupin fetch-models</code> found reachable "
+        "today, across opencode-go, Claude, and Codex. \"Perf\" and \"Value\" "
+        "read \"no data\" for every row -- no benchmark dataset exists in "
+        "this repo yet to compute them from.</p>",
+        render_snapshot_models_table(models),
+    ])
     return page("Model tiers", "".join(body), active="models")
 
 
@@ -2279,7 +2448,7 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/usage":
             self.reply(render_usage())
         elif url.path == "/model-tiers":
-            self.reply(render_model_tiers())
+            self.reply(render_model_tiers(sent=query.get("sent")))
         elif url.path == "/machines":
             try:
                 records = machines.machines(self.fleet_connection)
@@ -2463,6 +2632,22 @@ class Handler(BaseHTTPRequestHandler):
             return
         sent = f"scheduled a one-off run for {repo} at {when}"
         self.redirect(f"/repos?sent={quote(sent, safe='')}")
+
+    def do_model_tiers_refresh(self, form: dict) -> None:
+        """"Pull models": run `model_fetch.snapshot()` live, right now, and
+        save it. Each subscription's own fetch already carries a 10s
+        timeout and catches its own errors (see model_fetch.py), so this
+        realistically never raises -- the broad except is a last-resort
+        guard so a surprise failure (e.g. disk full on save) redirects
+        back with a message instead of 500ing the page, matching the
+        issue's "must still render something useful" requirement.
+        """
+        try:
+            model_fetch.save_snapshot(model_fetch.snapshot())
+            sent = "pulled today's model list and prices"
+        except Exception as exc:  # best-effort by design, see docstring above
+            sent = f"pull failed: {exc}"
+        self.redirect(f"/model-tiers?sent={quote(sent, safe='')}")
 
     def do_loops(self, query: dict) -> None:
         group = "machine" if query.get("group") == "machine" else "repo"
@@ -2808,6 +2993,8 @@ class Handler(BaseHTTPRequestHandler):
             self.do_repos_slot_max(form)
         elif url.path == "/repos/schedule":
             self.do_repos_schedule(form)
+        elif url.path == "/model-tiers/refresh":
+            self.do_model_tiers_refresh(form)
         else:
             self.reply(render_error("no such page"), 404)
 
