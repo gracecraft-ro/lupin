@@ -18,7 +18,46 @@ from unittest import mock
 import pytest
 import redis as redis_lib
 
-from lupin import cli, claims, machines, serve
+from lupin import cli, claims, machines, quest, roadmap, serve
+
+
+def _kw(redis_port):
+    return {"redis_host": "127.0.0.1", "redis_port": redis_port}
+
+
+def _issue_json(number, state="OPEN"):
+    return {"number": number, "state": state}
+
+
+def _fake_locate(table):
+    """Stand-in for `quest._locate_issue` -- see test_quest.py's copy of
+    this same helper for the full contract."""
+
+    def _locate(number, repos, code_dir):
+        return table.get(number)
+
+    return _locate
+
+
+def _quest_handler(redis_port):
+    """A `Handler` wired to the test's throwaway redis-server, with the
+    same `Handler.__new__` + mocked I/O pattern `DashboardRouteTests` uses
+    for GET routes -- do_POST needs `.headers`/`.rfile` too."""
+    handler = serve.Handler.__new__(serve.Handler)
+    handler.fleet_connection = _kw(redis_port)
+    handler.host_ok = mock.Mock(return_value=True)
+    handler.reply = mock.Mock()
+    handler.redirect = mock.Mock()
+    return handler
+
+
+def _post_body(handler, path, fields: dict) -> None:
+    from urllib.parse import urlencode
+
+    body = urlencode(fields, doseq=True).encode("utf-8")
+    handler.path = path
+    handler.headers = {"Content-Length": str(len(body))}
+    handler.rfile = io.BytesIO(body)
 
 
 class TimerTests(unittest.TestCase):
@@ -801,6 +840,205 @@ def test_dashboard_degrades_when_redis_unreachable(closed_port):
 
     assert status == 200
     assert "Fleet registry unreachable" in body
+
+
+def test_do_post_quest_start_creates_quest_writes_redis_and_redirects(
+    redis_port, flush_redis, monkeypatch
+):
+    locate_table = {
+        11: ("repo-a", "acme/repo-a", _issue_json(11)),
+        12: ("repo-a", "acme/repo-a", _issue_json(12)),
+    }
+    monkeypatch.setattr(quest, "_locate_issue", _fake_locate(locate_table))
+    monkeypatch.setattr(
+        quest.roadmap, "cached_dependency_dag", lambda repos, code_dir: {"repos": {}}
+    )
+    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection: {"pick": "jesus"})
+    monkeypatch.setattr(serve, "enabled_repos", lambda: ["repo-a"])
+
+    handler = _quest_handler(redis_port)
+    _post_body(handler, "/quest/start", {"repo": "repo-a", "issue": ["11", "12"]})
+
+    handler.do_POST()
+
+    handler.redirect.assert_called_once()
+    (location,), _kwargs = handler.redirect.call_args
+    assert location.startswith("/roadmap?repo=repo-a&quest=q")
+    quest_id = location.rpartition("quest=")[2]
+
+    record = quest.read_quest(quest_id, _kw(redis_port))
+    assert record["issues"] == [11, 12]
+    assert record["machine"] == "jesus"
+    held = claims.claims_for(["acme/repo-a"], **_kw(redis_port))
+    assert held["acme/repo-a#11"]["session"] == f"quest:{quest_id}"
+    assert held["acme/repo-a#12"]["session"] == f"quest:{quest_id}"
+
+
+def test_do_post_quest_start_rejects_no_issues_selected(redis_port, flush_redis):
+    handler = _quest_handler(redis_port)
+    _post_body(handler, "/quest/start", {"repo": "repo-a"})
+
+    handler.do_POST()
+
+    handler.redirect.assert_not_called()
+    handler.reply.assert_called_once()
+    body, status = handler.reply.call_args[0]
+    assert status == 400
+    assert b"select at least one issue" in body
+
+
+def test_do_post_quest_stop_releases_claims_deletes_record_and_redirects(
+    redis_port, flush_redis, monkeypatch
+):
+    locate_table = {21: ("repo-a", "acme/repo-a", _issue_json(21))}
+    monkeypatch.setattr(quest, "_locate_issue", _fake_locate(locate_table))
+    monkeypatch.setattr(
+        quest.roadmap, "cached_dependency_dag", lambda repos, code_dir: {"repos": {}}
+    )
+    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection: {"pick": "jesus"})
+    started = quest.start([21], ["repo-a"], connection=_kw(redis_port))
+
+    handler = _quest_handler(redis_port)
+    _post_body(handler, "/quest/stop", {"id": started["id"], "repo": "repo-a"})
+
+    handler.do_POST()
+
+    handler.redirect.assert_called_once_with("/roadmap?repo=repo-a")
+    assert quest.read_quest(started["id"], _kw(redis_port)) is None
+    held = claims.claims_for(["acme/repo-a"], **_kw(redis_port))
+    assert "acme/repo-a#21" not in held
+
+
+def test_do_post_quest_stop_unknown_id_errors_without_redirect(redis_port, flush_redis):
+    handler = _quest_handler(redis_port)
+    _post_body(handler, "/quest/stop", {"id": "q999", "repo": "repo-a"})
+
+    handler.do_POST()
+
+    handler.redirect.assert_not_called()
+    handler.reply.assert_called_once()
+
+
+def _raw_post(port: int, path: str, headers: dict, body: bytes) -> bytes:
+    """Send a hand-built POST request over a real socket -- `urllib` would
+    always compute a correct, numeric `Content-Length` and a valid utf-8
+    body itself, so it can't reproduce the malformed requests below.
+    Returns everything read back before the server closes the connection.
+    """
+    header_lines = "".join(f"{key}: {value}\r\n" for key, value in headers.items())
+    request = (
+        f"POST {path} HTTP/1.1\r\n"
+        f"Host: 127.0.0.1:{port}\r\n"
+        f"{header_lines}"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii") + body
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(10)
+        sock.connect(("127.0.0.1", port))
+        sock.sendall(request)
+        chunks = []
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except socket.timeout:
+            pass
+    return b"".join(chunks)
+
+
+def test_do_post_non_numeric_content_length_returns_clean_400(redis_port, flush_redis):
+    """A malformed `Content-Length` must not crash do_POST -- it used to
+    raise an unhandled ValueError inside `int(...)`, dropping the
+    connection with no HTTP response at all instead of a 400.
+    """
+    connection = _kw(redis_port)
+    with _live_dashboard(connection) as port:
+        response = _raw_post(
+            port, "/quest/stop", {"Content-Length": "bogus"}, b""
+        )
+
+    assert response.startswith(b"HTTP/1.0 400") or response.startswith(b"HTTP/1.1 400")
+
+
+def test_do_post_non_utf8_body_returns_clean_400(redis_port, flush_redis):
+    """A body that isn't valid utf-8 must not crash do_POST -- it used to
+    raise an unhandled UnicodeDecodeError inside `raw.decode("utf-8")`,
+    dropping the connection with no HTTP response at all instead of a 400.
+    """
+    body = b"\xff\xfe\xfd"
+    connection = _kw(redis_port)
+    with _live_dashboard(connection) as port:
+        response = _raw_post(
+            port, "/quest/stop", {"Content-Length": str(len(body))}, body
+        )
+
+    assert response.startswith(b"HTTP/1.0 400") or response.startswith(b"HTTP/1.1 400")
+
+
+def test_quest_state_partitions_pending_and_done(redis_port, flush_redis, monkeypatch):
+    locate_table = {
+        31: ("repo-a", "acme/repo-a", _issue_json(31)),
+        32: ("repo-a", "acme/repo-a", _issue_json(32)),
+    }
+    monkeypatch.setattr(quest, "_locate_issue", _fake_locate(locate_table))
+    monkeypatch.setattr(
+        quest.roadmap, "cached_dependency_dag", lambda repos, code_dir: {"repos": {}}
+    )
+    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection: {"pick": "jesus"})
+    started = quest.start([31, 32], ["repo-a"], connection=_kw(redis_port))
+    # Simulate #31 merging: something else (e.g. `reconcile`) releases its
+    # claim the way a closed/merged issue's own claim gets released.
+    claims.release_claim("acme/repo-a#31", f"quest:{started['id']}", **_kw(redis_port))
+
+    handler = serve.Handler.__new__(serve.Handler)
+    handler.fleet_connection = _kw(redis_port)
+
+    state = handler.quest_state(started["id"])
+
+    assert state["id"] == started["id"]
+    assert state["machine"] == "jesus"
+    assert state["done"] == [31]
+    assert state["pending"] == [32]
+    assert state["total"] == 2
+
+
+def test_quest_state_returns_none_for_blank_or_missing_id(redis_port, flush_redis):
+    handler = serve.Handler.__new__(serve.Handler)
+    handler.fleet_connection = _kw(redis_port)
+    assert handler.quest_state("") is None
+    assert handler.quest_state("q999") is None
+
+
+def test_render_page_has_quest_checkbox_and_start_button():
+    issues = [{"number": 5, "title": "Do thing", "body": "", "labels": []}]
+    model = roadmap.build_model(issues, {}, [], repo="nix")
+    render = lambda title, body, css, js: body
+
+    page = roadmap.render_page("nix", ["nix"], model, render)
+
+    assert "<form id=quest-start" in page
+    assert "action='/quest/start'" in page
+    assert "Start quest" in page
+    assert "form=quest-start name=issue value='5'" in page
+
+
+def test_render_page_shows_progress_and_stop_button_when_quest_running():
+    issues = [{"number": 5, "title": "Do thing", "body": "", "labels": []}]
+    model = roadmap.build_model(issues, {}, [], repo="nix")
+    render = lambda title, body, css, js: body
+    quest_state = {
+        "id": "q7", "machine": "jesus", "state": "running",
+        "pending": [5], "done": [], "total": 1,
+    }
+
+    page = roadmap.render_page("nix", ["nix"], model, render, quest_state)
+
+    assert "quest q7" in page
+    assert "0/1 done" in page
+    assert "Stop quest" in page
+    assert "name=id value='q7'" in page
 
 
 if __name__ == "__main__":
