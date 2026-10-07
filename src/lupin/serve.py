@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""lupin serve - a read-only web dashboard for the loopctl delegation loops.
+"""lupin serve - a mostly read-only web dashboard for the loopctl delegation loops.
 
 The server binds a loopback or tailnet address (100.64.0.0/10); it refuses
 to start on any other address. A tailnet bind relies on the headscale ACL
 and the host firewall as its boundary (same model as this project's Redis
 deployment, docs/redis-schema.md) -- the DNS-rebinding check below still
-only accepts the Host header matching what was actually bound. There is no
-POST route and no code path that starts a process with
-arguments built from the browser. Read probes use fixed argv lists, run
-without a shell. GitHub attachment images use an authenticated, fixed-host
-proxy; it sends the GitHub token only to github.com and strips it before a
-validated storage redirect.
+only accepts the Host header matching what was actually bound. The only
+POST routes are /quest/start and /quest/stop, and both only write to Redis
+(via quest.py) -- no code path starts a process with arguments built from
+the browser. Read probes use fixed argv lists, run without a shell. GitHub
+attachment images use an authenticated, fixed-host proxy; it sends the
+GitHub token only to github.com and strips it before a validated storage
+redirect.
 
-The page reads loop state but does not change it. It does not shell out to
-loopctl. The installed CLI can be older than this dashboard; direct reads of
-tmux and systemd avoid version skew.
+The page reads loop state but does not change it, except for starting or
+stopping a quest. It does not shell out to loopctl. The installed CLI can
+be older than this dashboard; direct reads of tmux and systemd avoid
+version skew.
 
 Python standard library only. GitHub image bytes are fetched only when the
 browser requests a validated attachment ID.
@@ -38,7 +40,8 @@ from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
-from . import claims, machines, roadmap
+from . import claims, machines, quest, roadmap
+from .slots import CoordinatorUnreachable
 from .quota import (
     QuotaDuration,
     claude_usage,
@@ -1185,7 +1188,8 @@ class Handler(BaseHTTPRequestHandler):
     # `BaseRequestHandler` already sets `self.connection` to the live
     # client socket, which would otherwise shadow this class attribute on
     # every real request (a bug caught by the real-HTTP tests, not the
-    # mocked-Handler ones, since those never call setup()).
+    # mocked-Handler ones, since those never call setup()). Used by issue
+    # #15's fleet data and issue #19's quest POST routes alike.
     fleet_connection: dict = {}
 
     def reply(self, body: bytes, status: int = 200) -> None:
@@ -1212,6 +1216,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def redirect(self, location: str) -> None:
+        """303: the browser re-GETs `location` instead of re-submitting
+        the form that landed here (standard post/redirect/get)."""
+        self.send_response(303)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def host_ok(self) -> bool:
         """Block DNS rebinding: only the names we bound to are accepted."""
@@ -1264,7 +1276,8 @@ class Handler(BaseHTTPRequestHandler):
                 )
             elif selected:
                 model = roadmap.cached_model(selected, os.path.join(CODE_DIR, selected))
-                body = roadmap.render_page(selected, repos, model, roadmap_page)
+                quest_state = self.quest_state(query.get("quest", "").strip())
+                body = roadmap.render_page(selected, repos, model, roadmap_page, quest_state)
             else:
                 models = {
                     repo: roadmap.cached_combined_model(repo, os.path.join(CODE_DIR, repo))
@@ -1330,6 +1343,98 @@ class Handler(BaseHTTPRequestHandler):
             f"<pre style='max-height:none'>{esc(out.rstrip() or '(no output)')}</pre>"
         )
         self.reply(page(f"peek {repo}", body, active="overview"))
+
+    def quest_state(self, quest_id: str) -> dict | None:
+        """Read `quest:<quest_id>` and work out which of its issues are
+        still claimed (in progress) versus released (done, closed, or
+        merged). Returns `None` if there's no id, no such quest, or Redis
+        can't be reached -- the roadmap page just skips the progress card
+        in that case rather than failing the whole (read-only) page.
+        """
+        if not quest_id:
+            return None
+        try:
+            record = quest.read_quest(quest_id, self.fleet_connection)
+        except CoordinatorUnreachable:
+            return None
+        if record is None:
+            return None
+        targets = record.get("targets", [])
+        owner_repos = sorted({target.rpartition("#")[0] for target in targets})
+        try:
+            held = claims.claims_for(owner_repos, **self.fleet_connection) if owner_repos else {}
+        except CoordinatorUnreachable:
+            held = {}
+        holder = f"quest:{quest_id}"
+        pending, done = [], []
+        for number, target in zip(record.get("issues", []), targets):
+            if held.get(target, {}).get("session") == holder:
+                pending.append(number)
+            else:
+                done.append(number)
+        return {
+            "id": quest_id,
+            "machine": record.get("machine"),
+            "state": record.get("state"),
+            "pending": pending,
+            "done": done,
+            "total": len(record.get("issues", [])),
+        }
+
+    def do_POST(self):  # noqa: N802
+        if not self.host_ok():
+            self.reply(render_error("bad Host header"), 421)
+            return
+        url = urlparse(self.path)
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        form = parse_qs(raw.decode("utf-8"))
+
+        if url.path == "/quest/start":
+            self.do_quest_start(form)
+        elif url.path == "/quest/stop":
+            self.do_quest_stop(form)
+        else:
+            self.reply(render_error("no such page"), 404)
+
+    def do_quest_start(self, form: dict) -> None:
+        repo = form.get("repo", [""])[0].strip()
+        try:
+            issue_numbers = [int(value) for value in form.get("issue", [])]
+        except ValueError:
+            self.reply(render_error("bad issue number"), 400)
+            return
+        if not issue_numbers:
+            self.reply(render_error("select at least one issue to start a quest"), 400)
+            return
+        try:
+            result = quest.start(issue_numbers, enabled_repos(), connection=self.fleet_connection)
+        except quest.QuestError as exc:
+            self.reply(render_error(f"quest start failed: {exc}"), 400)
+            return
+        except CoordinatorUnreachable as exc:
+            self.reply(render_error(f"cannot reach the redis coordinator: {exc}"), 502)
+            return
+        query = f"quest={quote(result['id'], safe='')}"
+        if repo:
+            query = f"repo={quote(repo, safe='')}&{query}"
+        self.redirect(f"/roadmap?{query}")
+
+    def do_quest_stop(self, form: dict) -> None:
+        quest_id = form.get("id", [""])[0].strip()
+        repo = form.get("repo", [""])[0].strip()
+        if not quest_id:
+            self.reply(render_error("missing quest id"), 400)
+            return
+        try:
+            quest.stop(quest_id, connection=self.fleet_connection)
+        except quest.QuestError as exc:
+            self.reply(render_error(f"quest stop failed: {exc}"), 400)
+            return
+        except CoordinatorUnreachable as exc:
+            self.reply(render_error(f"cannot reach the redis coordinator: {exc}"), 502)
+            return
+        self.redirect(f"/roadmap?repo={quote(repo, safe='')}" if repo else "/roadmap")
 
 
 def _roadmap_rows(model: dict) -> list[dict]:
@@ -1411,10 +1516,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--roadmap", metavar="REPO", help="print a repository roadmap and exit")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--json", action="store_true")
-    # Fleet data (issue #15): same flags and env-var fallback as
-    # cli.py's `_fleet_connection_args`, kept in sync by hand since
-    # serve.py parses its own argv independently of cli.py (see this
-    # function's docstring) and importing cli.py here would be circular.
+    # Fleet data (issue #15, also used by issue #19's quest POST routes):
+    # same flags and env-var fallback as cli.py's `_fleet_connection_args`,
+    # kept in sync by hand since serve.py parses its own argv independently
+    # of cli.py (see this function's docstring) and importing cli.py here
+    # would be circular.
     ap.add_argument("--redis-host", default=os.environ.get("LUPIN_REDIS_HOST"))
     ap.add_argument(
         "--redis-port", type=int,

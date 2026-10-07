@@ -403,13 +403,16 @@ class RoadmapTests(unittest.TestCase):
             [node["number"] for node in model["nodes"]], [1, 2, 3]
         )
         self.assertLess(page.index(">#1 ·"), page.index(">#3 ·"))
+        # Each summary starts with a quest-pick checkbox (issue #19) before
+        # the issue's own title span, so match on the span rather than an
+        # exact "<summary>...". span" prefix.
         self.assertLess(
-            details.index("<summary><span title='Newest issue'>#3 Newest issue"),
-            details.index("<summary><span title='Oldest issue'>#1 Oldest issue"),
+            details.index("<span title='Newest issue'>#3 Newest issue"),
+            details.index("<span title='Oldest issue'>#1 Oldest issue"),
         )
         self.assertLess(
-            details.index("<summary><span title='Oldest issue'>#1 Oldest issue"),
-            details.index("<summary><span title='No timestamp issue'>#2 No timestamp issue"),
+            details.index("<span title='Oldest issue'>#1 Oldest issue"),
+            details.index("<span title='No timestamp issue'>#2 No timestamp issue"),
         )
 
     def test_invalid_graphql_data_returns_warning(self):
