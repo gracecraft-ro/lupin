@@ -59,7 +59,7 @@ from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
-from . import claims, commands, machines, model_fetch, quest, roadmap, slots_redis
+from . import claims, commands, loops, machines, model_fetch, quest, roadmap, slots_redis
 from .slots import CoordinatorUnreachable
 from .quota import (
     QuotaDuration,
@@ -308,6 +308,52 @@ def session_tail(session: str, lines: int) -> str:
     return out if rc == 0 else f"(could not read pane: {out.strip()})"
 
 
+def _repo_platforms() -> dict[str, str]:
+    """repo -> platform, read straight from `REPOS_FILE` -- the same file
+    loopctl.nix's own `repo_platform` reads, second whitespace-separated
+    token per line (`"claude"` if a line has none). Not `enabled_repos()`,
+    which only keeps the first token -- this is a separate, narrow read of
+    the same file, for the one new field that needs the second column.
+    """
+    result: dict[str, str] = {}
+    try:
+        with open(REPOS_FILE, encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()
+                if parts:
+                    result[parts[0]] = parts[1] if len(parts) > 1 else "claude"
+    except OSError:
+        pass
+    return result
+
+
+def local_loops() -> list[dict]:
+    """This machine's live loops, for the fleet heartbeat (issue #2 phase
+    A, `machines.py`'s `loops` field): one entry per live tmux loop
+    session, `{"repo", "platform", "state", "since"}`. `state` is always
+    `None` -- there's no Herdr/agent-state signal on the tmux backend yet.
+    """
+    platforms = _repo_platforms()
+    out = []
+    for s in tmux_sessions():
+        if not s["repo"]:
+            continue
+        since = (
+            datetime.fromtimestamp(s["created"], tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if s["created"]
+            else None
+        )
+        out.append(
+            {
+                "repo": s["repo"],
+                "platform": platforms.get(s["repo"], "claude"),
+                "state": None,
+                "since": since,
+            }
+        )
+    return out
+
+
 def timers() -> list[dict]:
     """Delegation timers, from systemd's own JSON. Times are epoch seconds."""
     rc, out = run(["systemctl", "list-timers", "--all", "--no-pager", "--output=json"])
@@ -450,11 +496,12 @@ def remote_loop_hosts(claims_data: dict, full_names: dict[str, str], local_host:
     """repo -> host, for a repo whose issue is claimed by a machine other
     than this one.
 
-    This is the only signal this dashboard has that a loop for that repo
-    may be running elsewhere: there is no key that lists a machine's live
-    tmux sessions (docs/redis-schema.md has no such key), so a claim's own
-    `host` field stands in for it. It is a guess, not proof the loop is
-    still running -- the Loops page says so next to it.
+    Fallback only (issue #2 phase A): `gather_loops` now prefers
+    `_loop_hosts_from_heartbeat`, the real signal from each machine's own
+    heartbeat `loops` field. This guess-from-claims stays in use only for a
+    machine whose `lupin` is old enough to not publish `loops` yet -- a
+    claim's own `host` field is not proof a loop is still running there,
+    just the best guess available before that field existed.
     """
     hosts: dict[str, str] = {}
     for repo, owner_repo in full_names.items():
@@ -465,6 +512,23 @@ def remote_loop_hosts(claims_data: dict, full_names: dict[str, str], local_host:
             if host and host != local_host:
                 hosts[repo] = host
                 break
+    return hosts
+
+
+def _loop_hosts_from_heartbeat(machine_records: list[dict], local_host: str) -> dict[str, str]:
+    """repo -> host, read straight from every other machine's own
+    heartbeat `loops` list (issue #2 phase A) -- the real signal, once
+    every machine runs a build that publishes it. Empty until then, in
+    which case `gather_loops` falls back to `remote_loop_hosts`'s guess.
+    """
+    hosts: dict[str, str] = {}
+    for record in machine_records:
+        if record.get("name") == local_host:
+            continue
+        for loop in record.get("loops", []):
+            repo = loop.get("repo")
+            if repo:
+                hosts[repo] = record["name"]
     return hosts
 
 
@@ -482,7 +546,9 @@ def gather_loops(connection: dict) -> dict:
     sessions_by_repo = {s["repo"]: s for s in tmux_sessions() if s["repo"]}
     enabled = set(enabled_repos())
     state = fleet_state(connection)
-    remote_hosts = remote_loop_hosts(state.get("claims", {}), _repo_full_names(), local_host)
+    remote_hosts = _loop_hosts_from_heartbeat(state.get("machines", []), local_host) or remote_loop_hosts(
+        state.get("claims", {}), _repo_full_names(), local_host
+    )
 
     entries = []
     for r in code_repos():
@@ -2344,6 +2410,11 @@ class Handler(BaseHTTPRequestHandler):
     # Needed only to close/restart a loop on another fleet machine (issue
     # #21) -- a local-machine close/restart never signs anything. See
     # commands.py's docstring for what this key is and why it's per target.
+    # Known, flagged gap (issue #2's posted architecture-plan comment,
+    # "Signing-key scheme"): one shared key signs for every target today,
+    # so once any machine can command any other, a single compromised
+    # host could forge a command fleet-wide. Moving to per-machine keys is
+    # Grace's call to make, not a default to pick here.
     cmd_signing_key: str | None = None
 
     def reply(self, body: bytes, status: int = 200) -> None:
@@ -2678,9 +2749,6 @@ class Handler(BaseHTTPRequestHandler):
 
         self.reply(render_loops(data, group=group, selected_repo=selected_repo, selected_tail=tail, lines=lines))
 
-    def _loopctl_local(self, action: str, repo: str) -> tuple[int, str]:
-        return run(["loopctl", action, repo], timeout=20.0)
-
     def _loop_targets(self, machine: str, scope: str, repo: str) -> list[str]:
         """Repos to act on for one close request. `"all"` means every loop
         this dashboard currently believes is on `machine` -- there's no
@@ -2711,35 +2779,34 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("bad repo name"), 400)
             return
         local_host = machines.hostname()
-        if machine == local_host:
-            errors = []
-            for target in targets:
-                rc, out = self._loopctl_local("stop", target)
-                if rc != 0:
-                    errors.append(f"{target}: {out.strip()}")
-            if errors:
-                self.reply(render_error("loopctl stop failed:\n" + "\n".join(errors)), 502)
-                return
-        else:
-            if not self.cmd_signing_key:
-                self.reply(
-                    render_error(
-                        "closing a loop on another machine needs --cmd-signing-key "
-                        "or $LUPIN_CMD_SIGNING_KEY"
-                    ),
-                    400,
+        if machine != local_host and not self.cmd_signing_key:
+            self.reply(
+                render_error(
+                    "closing a loop on another machine needs --cmd-signing-key "
+                    "or $LUPIN_CMD_SIGNING_KEY"
+                ),
+                400,
+            )
+            return
+        errors = []
+        for target in targets:
+            try:
+                result = loops.dispatch_loop_action(
+                    machine=machine, local_host=local_host,
+                    local_argv=["loopctl", "stop", target],
+                    queue_action="loop.stop", queue_params={"repo": target},
+                    connection=self.fleet_connection, signing_key=self.cmd_signing_key,
+                    actor="lupin-dashboard", issuer=local_host,
+                    run_local=lambda argv: run(argv, timeout=20.0),
                 )
+            except CoordinatorUnreachable:
+                self.reply(render_error("cannot reach the redis coordinator"), 502)
                 return
-            for target in targets:
-                try:
-                    commands.enqueue(
-                        machine, "loop.stop", {"repo": target},
-                        key=self.cmd_signing_key, actor="lupin-dashboard", issuer=local_host,
-                        **self.fleet_connection,
-                    )
-                except CoordinatorUnreachable:
-                    self.reply(render_error("cannot reach the redis coordinator"), 502)
-                    return
+            if result["mode"] == "local" and result["returncode"] != 0:
+                errors.append(f"{target}: {result['output'].strip()}")
+        if errors:
+            self.reply(render_error("loopctl stop failed:\n" + "\n".join(errors)), 502)
+            return
         self.redirect(f"/loops?repo={quote(repo, safe='')}")
 
     def do_loops_start(self, form: dict) -> None:
@@ -2749,30 +2816,30 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("bad start request"), 400)
             return
         local_host = machines.hostname()
-        if machine == local_host:
-            rc, out = self._loopctl_local("run", repo)
-            if rc != 0:
-                self.reply(render_error(f"loopctl run failed: {out.strip()}"), 502)
-                return
-        else:
-            if not self.cmd_signing_key:
-                self.reply(
-                    render_error(
-                        "starting a loop on another machine needs --cmd-signing-key "
-                        "or $LUPIN_CMD_SIGNING_KEY"
-                    ),
-                    400,
-                )
-                return
-            try:
-                commands.enqueue(
-                    machine, "loop.run", {"repo": repo},
-                    key=self.cmd_signing_key, actor="lupin-dashboard", issuer=local_host,
-                    **self.fleet_connection,
-                )
-            except CoordinatorUnreachable:
-                self.reply(render_error("cannot reach the redis coordinator"), 502)
-                return
+        if machine != local_host and not self.cmd_signing_key:
+            self.reply(
+                render_error(
+                    "starting a loop on another machine needs --cmd-signing-key "
+                    "or $LUPIN_CMD_SIGNING_KEY"
+                ),
+                400,
+            )
+            return
+        try:
+            result = loops.dispatch_loop_action(
+                machine=machine, local_host=local_host,
+                local_argv=["loopctl", "run", repo],
+                queue_action="loop.run", queue_params={"repo": repo},
+                connection=self.fleet_connection, signing_key=self.cmd_signing_key,
+                actor="lupin-dashboard", issuer=local_host,
+                run_local=lambda argv: run(argv, timeout=20.0),
+            )
+        except CoordinatorUnreachable:
+            self.reply(render_error("cannot reach the redis coordinator"), 502)
+            return
+        if result["mode"] == "local" and result["returncode"] != 0:
+            self.reply(render_error(f"loopctl run failed: {result['output'].strip()}"), 502)
+            return
         self.redirect(f"/loops?repo={quote(repo, safe='')}")
 
     def do_schedule_timer(self, form: dict) -> None:
@@ -2873,19 +2940,20 @@ class Handler(BaseHTTPRequestHandler):
 
         errors = []
         for repo, machine in zip(targets_repos, assigned):
-            if machine == local_host:
-                rc, out = self._loopctl_local("run", repo)
-                if rc != 0:
-                    errors.append(f"{repo}@{machine}: {out.strip()}")
-            else:
-                try:
-                    commands.enqueue(
-                        machine, "loop.run", {"repo": repo},
-                        key=self.cmd_signing_key, actor="lupin-dashboard", issuer=local_host,
-                        **self.fleet_connection,
-                    )
-                except CoordinatorUnreachable:
-                    errors.append(f"{repo}@{machine}: cannot reach the redis coordinator")
+            try:
+                result = loops.dispatch_loop_action(
+                    machine=machine, local_host=local_host,
+                    local_argv=["loopctl", "run", repo],
+                    queue_action="loop.run", queue_params={"repo": repo},
+                    connection=self.fleet_connection, signing_key=self.cmd_signing_key,
+                    actor="lupin-dashboard", issuer=local_host,
+                    run_local=lambda argv: run(argv, timeout=20.0),
+                )
+            except CoordinatorUnreachable:
+                errors.append(f"{repo}@{machine}: cannot reach the redis coordinator")
+                continue
+            if result["mode"] == "local" and result["returncode"] != 0:
+                errors.append(f"{repo}@{machine}: {result['output'].strip()}")
         if errors:
             self.reply(render_error("run now failed:\n" + "\n".join(errors)), 502)
             return

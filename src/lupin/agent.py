@@ -19,16 +19,37 @@ ever reaches `subprocess.run`:
 decision: `loopctl` already has the hard-won edge cases (scrollback save,
 keepalive session, exact tmux target match). Every handler returns a list
 argv, never a shell string -- execution is always
-`subprocess.run(argv, shell=False)`. Both actions run inside a detached
-transient unit (`systemd-run --unit=lupin-cmd-<id8> --collect ...`) so a
-restart of the `lupin-agent` service (`KillMode=process`, #29) can't kill
-an in-flight `loopctl` run.
+`subprocess.run(argv, shell=False)`.
+
+Two shapes of action, per issue #2's phase A plan:
+- Mutating (`loop.stop`, `loop.run`, `schedule.set`, `schedule.pause`,
+  `schedule.resume`): run as `sudo -n systemd-run --unit=lupin-cmd-<id8>
+  --collect --wait --pipe loopctl ...` -- `sudo -n` because every other
+  `systemd-run` call in ghostbook.nix needs it too (plain `systemd-run` as
+  this process's own user is not authorized); `--wait --pipe` so the
+  reported exit code is the actual action's, not just "did the transient
+  unit start" (a bug in the first cut of this table -- `systemd-run`
+  without `--wait` always looked like success).
+- Read-only (`loop.peek`, `schedule.show`): run `loopctl` directly, no
+  `systemd-run` wrapper -- nothing to isolate or wait synchronously for
+  that `subprocess.run`'s own timeout doesn't already cover.
+
+`schedule.set`'s `cal` mode is validated before it ever reaches `loopctl`:
+`loopctl schedule cal "<expr>"` (ghostbook.nix) writes `<expr>` straight
+into a systemd timer drop-in with a bare `printf`, no escaping -- a `expr`
+containing a newline could add arbitrary extra directives to that file.
+`validate_cal_expr` rejects a newline/control character or an
+overlength string unconditionally (pure, no subprocess, so it is testable
+without `systemd-analyze` installed); `_check_cal_expr_with_systemd_analyze`
+adds a real syntax check through `systemd-analyze calendar` when that
+binary is reachable.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import time
 
@@ -48,6 +69,13 @@ OUTPUT_CAP = 8192  # 8 KiB, combined stdout+stderr -- design's "last 8 KiB combi
 # though nothing upstream validates yet either.
 _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
+# Length caps are generous for a real value, tight enough to stop anyone
+# using these fields to smuggle something else through.
+_CAL_EXPR_MAX_LEN = 256
+_SCHEDULE_TOKEN_MAX_LEN = 64
+_DEFAULT_PEEK_LINES = 60
+_MAX_PEEK_LINES = 5000
+
 
 class RejectedCommand(Exception):
     """A command whose params don't fit its action -- caught before
@@ -60,18 +88,118 @@ def _validate_repo(repo) -> str:
     return repo
 
 
+def _validate_peek_lines(value) -> int:
+    if value is None:
+        return _DEFAULT_PEEK_LINES
+    try:
+        lines = int(value)
+    except (TypeError, ValueError):
+        raise RejectedCommand(f"invalid lines {value!r}")
+    if not (1 <= lines <= _MAX_PEEK_LINES):
+        raise RejectedCommand(f"lines must be 1-{_MAX_PEEK_LINES}, got {lines}")
+    return lines
+
+
+def _reject_unsafe_text(label: str, value, max_len: int) -> str:
+    """Shared by every string field that ends up written verbatim into a
+    config file or passed as one `loopctl` argument -- a newline or other
+    control character in any of them is the same injection shape as the
+    `cal` expression this was written for (see module docstring)."""
+    if not isinstance(value, str) or not value:
+        raise RejectedCommand(f"{label} must be a non-empty string")
+    if len(value) > max_len:
+        raise RejectedCommand(f"{label} longer than {max_len} characters")
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+        raise RejectedCommand(f"{label} contains a newline or control character")
+    return value
+
+
+def validate_cal_expr(expr) -> str:
+    """Character/length check only -- pure, no subprocess, so this runs
+    (and is tested) even where `systemd-analyze` isn't installed. See
+    `_check_cal_expr_with_systemd_analyze` for the syntax check on top."""
+    return _reject_unsafe_text("cal expression", expr, _CAL_EXPR_MAX_LEN)
+
+
+def validate_schedule_token(label: str, value) -> str:
+    return _reject_unsafe_text(f"schedule {label}", value, _SCHEDULE_TOKEN_MAX_LEN)
+
+
+def _check_cal_expr_with_systemd_analyze(expr: str) -> None:
+    """Ask systemd itself whether `expr` parses as a calendar expression --
+    the same check a human would run by hand before trusting one. Runs
+    unconditionally; a no-op (not a pass) when the binary isn't on PATH, so
+    a sandbox without it still exercises `validate_cal_expr` above rather
+    than silently skipping all cal validation.
+    """
+    binary = shutil.which("systemd-analyze")
+    if binary is None:
+        return
+    proc = subprocess.run([binary, "calendar", expr], capture_output=True, text=True, timeout=5.0)
+    if proc.returncode != 0:
+        raise RejectedCommand(f"not a valid calendar expression: {expr!r}")
+
+
 def _unit_name(cmd_id: str) -> str:
     return f"lupin-cmd-{cmd_id[:8]}"
 
 
+def _sudo_systemd_run(cmd_id: str, *loopctl_args: str) -> list[str]:
+    """A mutating action's argv: `sudo -n systemd-run ... --wait --pipe
+    loopctl <loopctl_args>`. `sudo -n` matches every other `systemd-run`
+    call in ghostbook.nix (this process's own user has no bare
+    `systemd-run` rights); `--wait --pipe` makes `subprocess.run`'s
+    returncode the actual action's exit code, not just "did the transient
+    unit start" -- the first cut of this table had neither.
+    """
+    return [
+        "sudo", "-n", "systemd-run",
+        f"--unit={_unit_name(cmd_id)}", "--collect", "--wait", "--pipe",
+        "loopctl", *loopctl_args,
+    ]
+
+
 def _handle_loop_stop(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
-    return ["systemd-run", f"--unit={_unit_name(cmd_id)}", "--collect", "loopctl", "stop", repo]
+    return _sudo_systemd_run(cmd_id, "stop", repo)
 
 
 def _handle_loop_run(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
-    return ["systemd-run", f"--unit={_unit_name(cmd_id)}", "--collect", "loopctl", "run", repo]
+    return _sudo_systemd_run(cmd_id, "run", repo)
+
+
+def _handle_loop_peek(params: dict, cmd_id: str) -> list[str]:
+    # Read-only -- run loopctl directly, no systemd-run wrapper (see module
+    # docstring's "two shapes of action").
+    repo = _validate_repo(params.get("repo"))
+    lines = _validate_peek_lines(params.get("lines"))
+    return ["loopctl", "peek", repo, str(lines)]
+
+
+def _handle_schedule_show(params: dict, cmd_id: str) -> list[str]:
+    return ["loopctl", "schedule"]
+
+
+def _handle_schedule_set(params: dict, cmd_id: str) -> list[str]:
+    mode = params.get("mode")
+    if mode == "cal":
+        expr = validate_cal_expr(params.get("expr"))
+        _check_cal_expr_with_systemd_analyze(expr)
+        return _sudo_systemd_run(cmd_id, "schedule", "cal", expr)
+    if mode == "first":
+        when = validate_schedule_token("when", params.get("when"))
+        interval = validate_schedule_token("interval", params.get("interval"))
+        return _sudo_systemd_run(cmd_id, "schedule", "first", when, "every", interval)
+    raise RejectedCommand(f"unknown schedule mode {mode!r}")
+
+
+def _handle_schedule_pause(params: dict, cmd_id: str) -> list[str]:
+    return _sudo_systemd_run(cmd_id, "pause")
+
+
+def _handle_schedule_resume(params: dict, cmd_id: str) -> list[str]:
+    return _sudo_systemd_run(cmd_id, "resume")
 
 
 # Fixed, explicit allowlist -- the only actions this process will ever run.
@@ -79,6 +207,11 @@ def _handle_loop_run(params: dict, cmd_id: str) -> list[str]:
 ACTIONS = {
     "loop.stop": _handle_loop_stop,
     "loop.run": _handle_loop_run,
+    "loop.peek": _handle_loop_peek,
+    "schedule.show": _handle_schedule_show,
+    "schedule.set": _handle_schedule_set,
+    "schedule.pause": _handle_schedule_pause,
+    "schedule.resume": _handle_schedule_resume,
 }
 
 
