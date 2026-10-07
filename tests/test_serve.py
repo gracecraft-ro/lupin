@@ -18,7 +18,7 @@ from unittest import mock
 import pytest
 import redis as redis_lib
 
-from lupin import cli, claims, machines, quest, roadmap, serve, slots, slots_redis
+from lupin import cli, claims, commands, machines, quest, roadmap, serve, slots, slots_redis
 
 
 def _kw(redis_port):
@@ -1192,6 +1192,305 @@ class TestMachinesPageIntegration:
         # A new acquire is blocked until holders drop back under the max.
         with pytest.raises(slots.SlotFull):
             slots_redis.acquire("bmo", "c", **kw)
+
+
+def _loops_handler(connection=None):
+    """A `Handler` for the `/loops` routes, mocked reply/redirect like
+    `_quest_handler` above -- these tests check routing and validation, not
+    real I/O. `cmd_signing_key` defaults to `None` (local-machine close/
+    restart needs no key; a test that needs one sets it directly)."""
+    handler = serve.Handler.__new__(serve.Handler)
+    handler.fleet_connection = connection if connection is not None else {}
+    handler.cmd_signing_key = None
+    handler.host_ok = mock.Mock(return_value=True)
+    handler.reply = mock.Mock()
+    handler.redirect = mock.Mock()
+    return handler
+
+
+def _loop_entry(repo, status, machine, session=None):
+    return {"repo": repo, "enabled": True, "status": status, "machine": machine, "session": session}
+
+
+class GatherLoopsTests(unittest.TestCase):
+    """`remote_loop_hosts`/`gather_loops` (issue #21) -- mocked here so
+    these run without a real Redis or tmux. See TestLoopsPageIntegration
+    below for the real-Redis claim-derived "remote" grouping.
+    """
+
+    def test_remote_loop_hosts_finds_a_claim_held_by_another_machine(self):
+        claims_data = {"acme/widgets#7": {"host": "jesus"}}
+        hosts = serve.remote_loop_hosts(claims_data, {"widgets": "acme/widgets"}, "pihome")
+        self.assertEqual(hosts, {"widgets": "jesus"})
+
+    def test_remote_loop_hosts_ignores_a_claim_held_by_this_machine(self):
+        claims_data = {"acme/widgets#7": {"host": "pihome"}}
+        hosts = serve.remote_loop_hosts(claims_data, {"widgets": "acme/widgets"}, "pihome")
+        self.assertEqual(hosts, {})
+
+    def test_gather_loops_skips_non_loopable_repos(self):
+        with (
+            mock.patch.object(serve, "code_repos", return_value=[{"repo": "x", "loopable": False}]),
+            mock.patch.object(serve, "tmux_sessions", return_value=[]),
+            mock.patch.object(serve, "enabled_repos", return_value=[]),
+            mock.patch.object(serve, "fleet_state", return_value={"claims": {}, "machines": [], "fleet_error": None}),
+            mock.patch.object(serve, "_repo_full_names", return_value={}),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            data = serve.gather_loops({})
+        self.assertEqual(data["entries"], [])
+
+    def test_gather_loops_marks_live_local_session_as_running(self):
+        with (
+            mock.patch.object(serve, "code_repos", return_value=[{"repo": "a", "loopable": True}]),
+            mock.patch.object(
+                serve, "tmux_sessions",
+                return_value=[{"name": "loop-a", "repo": "a", "created": 1, "attached": False, "activity": 2, "windows": 1}],
+            ),
+            mock.patch.object(serve, "enabled_repos", return_value=["a"]),
+            mock.patch.object(serve, "fleet_state", return_value={"claims": {}, "machines": [], "fleet_error": None}),
+            mock.patch.object(serve, "_repo_full_names", return_value={}),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            data = serve.gather_loops({})
+        self.assertEqual(data["entries"][0]["status"], "running")
+        self.assertEqual(data["entries"][0]["machine"], "pihome")
+        self.assertEqual(data["entries"][0]["session"]["name"], "loop-a")
+
+    def test_gather_loops_marks_claimed_elsewhere_as_remote(self):
+        with (
+            mock.patch.object(serve, "code_repos", return_value=[{"repo": "a", "loopable": True}]),
+            mock.patch.object(serve, "tmux_sessions", return_value=[]),
+            mock.patch.object(serve, "enabled_repos", return_value=["a"]),
+            mock.patch.object(
+                serve, "fleet_state",
+                return_value={"claims": {"acme/a#1": {"host": "jesus"}}, "machines": [], "fleet_error": None},
+            ),
+            mock.patch.object(serve, "_repo_full_names", return_value={"a": "acme/a"}),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            data = serve.gather_loops({})
+        self.assertEqual(data["entries"][0]["status"], "remote")
+        self.assertEqual(data["entries"][0]["machine"], "jesus")
+
+    def test_gather_loops_defaults_to_stopped(self):
+        with (
+            mock.patch.object(serve, "code_repos", return_value=[{"repo": "a", "loopable": True}]),
+            mock.patch.object(serve, "tmux_sessions", return_value=[]),
+            mock.patch.object(serve, "enabled_repos", return_value=["a"]),
+            mock.patch.object(serve, "fleet_state", return_value={"claims": {}, "machines": [], "fleet_error": None}),
+            mock.patch.object(serve, "_repo_full_names", return_value={}),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            data = serve.gather_loops({})
+        self.assertEqual(data["entries"][0]["status"], "stopped")
+        self.assertEqual(data["entries"][0]["machine"], "pihome")
+
+
+class LoopsRouteUnitTests(unittest.TestCase):
+    """Routing/validation logic only -- mocked gather_loops/tmux/loopctl,
+    no real Redis or subprocess. See TestLoopsPageIntegration below for the
+    real-Redis enqueue shape and claim-derived "remote" grouping.
+    """
+
+    def test_loops_route_renders(self):
+        handler = _loops_handler()
+        handler.path = "/loops"
+        with mock.patch.object(
+            serve, "gather_loops",
+            return_value={"entries": [], "machines": [], "fleet_error": None, "local_host": "h"},
+        ):
+            handler.do_GET()
+        handler.reply.assert_called_once()
+
+    def test_loops_route_rejects_bad_lines(self):
+        handler = _loops_handler()
+        handler.path = "/loops?lines=abc"
+        handler.do_GET()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+
+    def test_loops_fullscreen_unknown_repo_is_404(self):
+        handler = _loops_handler()
+        handler.path = "/loops?repo=missing&fullscreen=1"
+        with mock.patch.object(
+            serve, "gather_loops",
+            return_value={"entries": [], "machines": [], "fleet_error": None, "local_host": "h"},
+        ):
+            handler.do_GET()
+        self.assertEqual(handler.reply.call_args.args[1], 404)
+
+    def test_loops_route_shows_tail_for_a_running_loop(self):
+        entries = [_loop_entry("a", "running", "h", session={"name": "loop-a"})]
+        handler = _loops_handler()
+        handler.path = "/loops?repo=a"
+        with (
+            mock.patch.object(
+                serve, "gather_loops",
+                return_value={"entries": entries, "machines": [], "fleet_error": None, "local_host": "h"},
+            ),
+            mock.patch.object(serve, "session_tail", return_value="hello there") as tail,
+        ):
+            handler.do_GET()
+        tail.assert_called_once_with("loop-a", 60)
+        body = handler.reply.call_args.args[0].decode()
+        self.assertIn("hello there", body)
+
+    def test_close_route_rejects_bad_repo_name(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/close", {"repo": "../etc", "machine": "h"})
+        handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+
+    def test_start_route_rejects_bad_repo_name(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/start", {"repo": "bad name", "machine": "h"})
+        handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+
+    def test_close_route_calls_loopctl_directly_for_the_local_machine(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/close", {"repo": "a", "machine": "h", "scope": "repo"})
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
+        ):
+            handler.do_POST()
+        fake_run.assert_called_once_with(["loopctl", "stop", "a"], timeout=20.0)
+        handler.redirect.assert_called_once_with("/loops?repo=a")
+
+    def test_close_route_scope_all_stops_every_loop_known_on_that_machine(self):
+        entries = [
+            _loop_entry("a", "running", "h", session={"name": "loop-a"}),
+            _loop_entry("b", "running", "h", session={"name": "loop-b"}),
+            _loop_entry("c", "stopped", "h"),
+        ]
+        handler = _loops_handler()
+        _post_body(handler, "/loops/close", {"repo": "a", "machine": "h", "scope": "all"})
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve, "gather_loops", return_value={"entries": entries}),
+            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
+        ):
+            handler.do_POST()
+        self.assertEqual(
+            [call.args[0] for call in fake_run.call_args_list],
+            [["loopctl", "stop", "a"], ["loopctl", "stop", "b"]],
+        )
+
+    def test_close_route_local_loopctl_failure_is_reported_not_swallowed(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/close", {"repo": "a", "machine": "h", "scope": "repo"})
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve, "run", return_value=(1, "boom")),
+        ):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 502)
+        handler.redirect.assert_not_called()
+
+    def test_close_route_remote_machine_without_signing_key_is_rejected(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/close", {"repo": "a", "machine": "jesus", "scope": "repo"})
+        with mock.patch.object(serve.machines, "hostname", return_value="h"):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+        self.assertIn("signing-key", handler.reply.call_args.args[0].decode())
+
+    def test_start_route_calls_loopctl_run_directly_for_the_local_machine(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/start", {"repo": "a", "machine": "h"})
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
+        ):
+            handler.do_POST()
+        fake_run.assert_called_once_with(["loopctl", "run", "a"], timeout=20.0)
+        handler.redirect.assert_called_once_with("/loops?repo=a")
+
+    def test_start_route_remote_machine_without_signing_key_is_rejected(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/start", {"repo": "a", "machine": "jesus"})
+        with mock.patch.object(serve.machines, "hostname", return_value="h"):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+        self.assertIn("signing-key", handler.reply.call_args.args[0].decode())
+
+    def test_nav_has_a_loops_link(self):
+        self.assertIn("href='/loops'", serve.render_nav("loops"))
+
+
+class TestLoopsPageIntegration:
+    """Real `redis-server` fixtures, same rule as TestMachinesPageIntegration
+    -- a wrong enqueue shape, or a claim lookup that doesn't actually
+    attribute the right host, would be caught here, not just a
+    call-was-made assertion.
+    """
+
+    def test_claimed_elsewhere_shows_up_as_remote_in_by_machine_grouping(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        claims.claim("acme/widgets#7", "loop-widgets#1", **kw)
+        with (
+            mock.patch.object(serve, "code_repos", return_value=[{"repo": "widgets", "loopable": True}]),
+            mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(serve, "tmux_sessions", return_value=[]),
+            mock.patch.object(serve.roadmap, "_repo_identity", return_value=("acme", "widgets", None)),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            handler = _get_handler("/loops?group=machine", kw)
+            handler.do_GET()
+        body = handler.reply.call_args.args[0].decode()
+        assert "jesus" in body
+        assert "running elsewhere" in body
+
+    def test_close_enqueues_loop_stop_for_a_remote_machine(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        handler = _post_handler("/loops/close", b"repo=widgets&machine=jesus&scope=repo", kw)
+        handler.cmd_signing_key = "secret"
+        with mock.patch.object(serve.machines, "hostname", return_value="pihome"):
+            handler.do_POST()
+
+        raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+        queued = raw.zrange("lupin:v1:cmdq:jesus", 0, -1)
+        assert len(queued) == 1
+        stored = json.loads(raw.get(f"lupin:v1:cmd:{queued[0]}"))
+        assert stored["action"] == "loop.stop"
+        assert stored["params"] == {"repo": "widgets"}
+        assert stored["target"] == "jesus"
+        assert stored["issuer"] == "pihome"
+        assert commands.verify(stored, "secret") is True
+        handler.send_response.assert_called_once_with(303)
+
+    def test_start_enqueues_loop_run_for_a_remote_machine(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        handler = _post_handler("/loops/start", b"repo=widgets&machine=jesus", kw)
+        handler.cmd_signing_key = "secret"
+        with mock.patch.object(serve.machines, "hostname", return_value="pihome"):
+            handler.do_POST()
+
+        raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+        queued = raw.zrange("lupin:v1:cmdq:jesus", 0, -1)
+        assert len(queued) == 1
+        stored = json.loads(raw.get(f"lupin:v1:cmd:{queued[0]}"))
+        assert stored["action"] == "loop.run"
+        assert stored["params"] == {"repo": "widgets"}
+
+    def test_close_scope_all_enqueues_one_command_per_loop_known_remotely(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        entries = [
+            {"repo": "widgets", "enabled": True, "status": "remote", "machine": "jesus", "session": None},
+            {"repo": "gizmos", "enabled": True, "status": "remote", "machine": "jesus", "session": None},
+        ]
+        handler = _post_handler("/loops/close", b"repo=widgets&machine=jesus&scope=all", kw)
+        handler.cmd_signing_key = "secret"
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+            mock.patch.object(serve, "gather_loops", return_value={"entries": entries}),
+        ):
+            handler.do_POST()
+
+        raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+        queued = raw.zrange("lupin:v1:cmdq:jesus", 0, -1)
+        assert len(queued) == 2
 
 
 if __name__ == "__main__":
