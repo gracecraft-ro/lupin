@@ -606,6 +606,240 @@ class ModelTierTests(unittest.TestCase):
             handler.do_GET()
         handler.reply.assert_called_once_with(b"tiers page")
 
+    def test_model_tiers_route_passes_sent_query_through(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers?sent=pulled+today%27s+models"
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.reply = mock.Mock()
+        with mock.patch.object(serve, "render_model_tiers") as fake_render:
+            handler.do_GET()
+        fake_render.assert_called_once_with(sent="pulled today's models")
+
+
+class ModelSnapshotTests(unittest.TestCase):
+    """`load_model_snapshot`/`snapshot_models`/`match_live_model` -- the
+    issue #16 snapshot read and its alias-matching, independent of
+    `model_tiers()`'s category/tier rows."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.snapshot_path = os.path.join(self.tempdir.name, "model-snapshot.json")
+
+    def write_snapshot(self, data):
+        with open(self.snapshot_path, "w", encoding="utf-8") as handle:
+            handle.write(data if isinstance(data, str) else json.dumps(data))
+
+    def test_missing_file_is_none(self):
+        with mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path):
+            self.assertIsNone(serve.load_model_snapshot())
+
+    def test_corrupt_file_is_none_not_a_crash(self):
+        self.write_snapshot("{not json")
+        with mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path):
+            self.assertIsNone(serve.load_model_snapshot())
+
+    def test_non_object_json_is_none(self):
+        self.write_snapshot([1, 2, 3])
+        with mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path):
+            self.assertIsNone(serve.load_model_snapshot())
+
+    def test_valid_file_round_trips(self):
+        data = {"fetched_at": "2026-10-07T00:00:00+00:00", "subscriptions": {}}
+        self.write_snapshot(data)
+        with mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path):
+            self.assertEqual(serve.load_model_snapshot(), data)
+
+    def test_snapshot_models_flattens_every_subscription(self):
+        snapshot = {
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [
+                        {"id": "claude-sonnet-4-5-20250929", "display_name": "Claude Sonnet 4.5",
+                         "price": {"input": 3, "output": 15}, "promo": None},
+                    ],
+                },
+                "codex": {
+                    "live": False,
+                    "stale_reason": "no credentials",
+                    "models": [{"id": "gpt-5.4", "price": None, "promo": None}],
+                },
+            }
+        }
+        rows = serve.snapshot_models(snapshot)
+        self.assertEqual(len(rows), 2)
+        claude_row = next(r for r in rows if r["id"] == "claude-sonnet-4-5-20250929")
+        self.assertTrue(claude_row["live"])
+        self.assertEqual(claude_row["display_name"], "Claude Sonnet 4.5")
+        codex_row = next(r for r in rows if r["id"] == "gpt-5.4")
+        self.assertFalse(codex_row["live"])
+        self.assertEqual(codex_row["stale_reason"], "no credentials")
+
+    def test_snapshot_models_skips_malformed_entries(self):
+        snapshot = {
+            "subscriptions": {
+                "claude": {"live": True, "models": [{"id": ""}, "not a dict", {"no": "id field"}]},
+                "codex": "not a dict either",
+            }
+        }
+        self.assertEqual(serve.snapshot_models(snapshot), [])
+
+    def test_snapshot_models_handles_no_snapshot(self):
+        self.assertEqual(serve.snapshot_models(None), [])
+
+    def test_match_live_model_by_substring(self):
+        models = [
+            {"id": "claude-sonnet-4-5-20250929", "display_name": "Claude Sonnet 4.5"},
+            {"id": "claude-opus-4-5-20251101", "display_name": "Claude Opus 4.5"},
+        ]
+        match = serve.match_live_model("sonnet", models)
+        self.assertEqual(match["id"], "claude-sonnet-4-5-20250929")
+
+    def test_match_live_model_strips_bmo_and_local_prefixes(self):
+        # bmo/local aliases never match -- model_fetch only covers claude,
+        # opencode-go, and codex, not bmo's or a local model server's catalog.
+        models = [{"id": "claude-sonnet-4-5", "display_name": "Claude Sonnet"}]
+        self.assertIsNone(serve.match_live_model("bmo:qwen3.8-flash-next", models))
+        self.assertIsNone(serve.match_live_model("local:deepseek-v4-flash-0731", models))
+
+    def test_match_live_model_no_match_is_none(self):
+        self.assertIsNone(serve.match_live_model("fable", [{"id": "claude-opus-4-5"}]))
+
+    def test_format_price_variants(self):
+        self.assertEqual(serve._format_price(None), "no price data")
+        self.assertEqual(serve._format_price({}), "no price data")
+        self.assertEqual(
+            serve._format_price({"input": 3, "output": 15}), "$3.00 / $15.00 per Mtok"
+        )
+        self.assertEqual(serve._format_price({"input": None, "output": None}), "no price data")
+
+
+class AllModelsTableTests(unittest.TestCase):
+    """`render_model_tiers`'s "All models" table and tier-pick live badges,
+    sourced from `model_fetch`'s snapshot (issue #16)."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.tiers_path = os.path.join(self.tempdir.name, "model-tiers.json")
+        self.snapshot_path = os.path.join(self.tempdir.name, "model-snapshot.json")
+
+    def write_tiers(self, data):
+        with open(self.tiers_path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(data))
+
+    def write_snapshot(self, data):
+        with open(self.snapshot_path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(data))
+
+    def render(self, sent=None):
+        with (
+            mock.patch.object(serve, "MODEL_TIERS_PATH", self.tiers_path),
+            mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.snapshot_path),
+        ):
+            return serve.render_model_tiers(sent=sent).decode()
+
+    def test_no_snapshot_file_shows_placeholder_not_a_crash(self):
+        self.write_tiers({"coding": {"tiers": {"tier1": [{"model": "sonnet", "effort": "high"}]}}})
+        page = self.render()
+        self.assertIn("No model snapshot yet", page)
+        self.assertIn("no live data", page)
+        self.assertIn("never pulled", page)
+
+    def test_matched_tier_pick_shows_live_price_not_no_live_data(self):
+        self.write_tiers({"coding": {"tiers": {"tier1": [{"model": "sonnet", "effort": "high"}]}}})
+        self.write_snapshot({
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [{"id": "claude-sonnet-4-5", "price": {"input": 3, "output": 15}, "promo": None}],
+                },
+            },
+        })
+        page = self.render()
+        self.assertIn("$3.00 / $15.00 per Mtok", page)
+        self.assertNotIn("no live data", page)
+
+    def test_all_models_table_lists_every_subscription_model(self):
+        self.write_tiers({"coding": {"tiers": {}}})
+        self.write_snapshot({
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [{"id": "claude-opus-4-5", "price": {"input": 5, "output": 25}, "promo": None}],
+                },
+                "codex": {
+                    "live": False,
+                    "stale_reason": "no ~/.codex credentials",
+                    "models": [{"id": "gpt-5.4", "price": None, "promo": None}],
+                },
+            },
+        })
+        page = self.render()
+        self.assertIn("claude-opus-4-5", page)
+        self.assertIn("$5.00 / $25.00 per Mtok", page)
+        self.assertIn("gpt-5.4", page)
+        self.assertIn("no price data", page)
+        self.assertIn("no ~/.codex credentials", page)
+        # Perf/Value are never invented -- no benchmark dataset exists.
+        self.assertEqual(page.count(">no data<"), 4)
+
+    def test_sent_message_is_shown_and_escaped(self):
+        self.write_tiers({})
+        page = self.render(sent="pull failed: <boom>")
+        self.assertIn("pull failed: &lt;boom&gt;", page)
+
+    def test_refresh_form_posts_to_model_tiers_refresh(self):
+        self.write_tiers({})
+        page = self.render()
+        self.assertIn("action='/model-tiers/refresh'", page)
+        self.assertIn("Pull models", page)
+
+
+class ModelTiersRefreshRouteTests(unittest.TestCase):
+    def test_refresh_route_fetches_saves_and_redirects(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        fake_snapshot = {"fetched_at": "2026-10-07T00:00:00+00:00", "subscriptions": {}}
+        with (
+            mock.patch.object(serve.model_fetch, "snapshot", return_value=fake_snapshot) as fake_fetch,
+            mock.patch.object(serve.model_fetch, "save_snapshot") as fake_save,
+        ):
+            handler.do_POST()
+        fake_fetch.assert_called_once_with()
+        fake_save.assert_called_once_with(fake_snapshot)
+        handler.send_response.assert_called_once_with(303)
+        location = next(
+            call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
+        )
+        self.assertTrue(location.startswith("/model-tiers?sent="))
+
+    def test_refresh_failure_redirects_with_message_not_a_500(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        with mock.patch.object(serve.model_fetch, "snapshot", side_effect=RuntimeError("network down")):
+            handler.do_POST()
+        handler.send_response.assert_called_once_with(303)
+        location = next(
+            call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
+        )
+        self.assertIn("pull%20failed%3A%20network%20down", location)
+
 
 class RoadmapCliTests(unittest.TestCase):
     def setUp(self):
