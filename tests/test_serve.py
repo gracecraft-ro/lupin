@@ -1845,5 +1845,479 @@ class TestSchedulePageIntegration:
         assert total_queued == 2
 
 
+# --------------------------------------------------------------------------
+# Repos page (issue #23)
+# --------------------------------------------------------------------------
+
+
+def _repos_handler(connection=None):
+    """A `Handler` for the `/repos` routes, same mocked reply/redirect
+    style `_loops_handler`/`_schedule_handler` use."""
+    handler = serve.Handler.__new__(serve.Handler)
+    handler.fleet_connection = connection if connection is not None else {}
+    handler.cmd_signing_key = None
+    handler.host_ok = mock.Mock(return_value=True)
+    handler.reply = mock.Mock()
+    handler.redirect = mock.Mock()
+    return handler
+
+
+def _make_repo(tmp_path, name, *, doc=True):
+    """A throwaway `<tmp_path>/<name>` directory, with a delegation doc
+    unless `doc=False` -- the fixture every filesystem-touching `/repos/*`
+    route test below builds on, with `CODE_DIR` pointed at `tmp_path` so
+    none of this ever touches the real /code.
+    """
+    repo_dir = tmp_path / name
+    repo_dir.mkdir()
+    if doc:
+        (repo_dir / "docs").mkdir()
+        (repo_dir / "docs" / "delegation-loop.md").write_text("# doc\n")
+    return repo_dir
+
+
+class RepoHelperTests(unittest.TestCase):
+    def test_repo_slot_name_is_prefixed_so_it_cannot_collide_with_bmo(self):
+        self.assertEqual(serve._repo_slot_name("widgets"), "repo:widgets")
+
+    def test_delegation_doc_template_names_the_repo(self):
+        text = serve._delegation_doc_template("widgets")
+        self.assertIn("widgets", text)
+
+    def test_write_enabled_repos_round_trips_through_enabled_repos(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = os.path.join(tmp, "state")
+            with (
+                mock.patch.object(serve, "STATE_DIR", state_dir),
+                mock.patch.object(serve, "REPOS_FILE", os.path.join(state_dir, "repos")),
+            ):
+                serve.write_enabled_repos(["b-repo", "a-repo"])
+                self.assertEqual(serve.enabled_repos(), ["b-repo", "a-repo"])
+
+    def test_slot_controls_disable_the_lower_button_at_the_minimum(self):
+        html = serve._repo_slot_controls("widgets", 1)
+        self.assertIn("disabled", html)
+
+    def test_slot_controls_post_the_computed_neighbor_values(self):
+        html = serve._repo_slot_controls("widgets", 3)
+        self.assertNotIn("disabled", html)
+        self.assertIn("name=max value='2'", html)
+        self.assertIn("name=max value='4'", html)
+
+
+class GatherReposTests(unittest.TestCase):
+    """`gather_repos` (issue #23) -- mocked `code_repos`/`gather_loops`/
+    `slots_redis.status`, no real Redis or filesystem."""
+
+    def test_folds_running_status_and_slot_max_into_code_repos(self):
+        with (
+            mock.patch.object(
+                serve, "code_repos",
+                return_value=[{"repo": "a", "state": "enabled", "loopable": True}],
+            ),
+            mock.patch.object(
+                serve, "gather_loops",
+                return_value={
+                    "entries": [{"repo": "a", "status": "running", "machine": "h", "session": None}],
+                    "machines": [], "fleet_error": None, "local_host": "h",
+                },
+            ),
+            mock.patch.object(serve.slots_redis, "status", return_value={"repo:a": {"holders": 0, "max": 3}}),
+        ):
+            data = serve.gather_repos({})
+        row = data["repos"][0]
+        self.assertTrue(row["running"])
+        self.assertEqual(row["machine"], "h")
+        self.assertEqual(row["max"], 3)
+
+    def test_non_loopable_repo_defaults_to_local_host_not_running_no_max(self):
+        with (
+            mock.patch.object(
+                serve, "code_repos",
+                return_value=[{"repo": "x", "state": "no-doc", "loopable": False}],
+            ),
+            mock.patch.object(
+                serve, "gather_loops",
+                return_value={"entries": [], "machines": [], "fleet_error": None, "local_host": "h"},
+            ),
+            mock.patch.object(serve.slots_redis, "status", return_value={}),
+        ):
+            data = serve.gather_repos({})
+        row = data["repos"][0]
+        self.assertFalse(row["running"])
+        self.assertEqual(row["machine"], "h")
+        self.assertIsNone(row["max"])
+
+    def test_a_remote_claim_counts_as_running_on_the_claiming_machine(self):
+        with (
+            mock.patch.object(
+                serve, "code_repos",
+                return_value=[{"repo": "a", "state": "enabled", "loopable": True}],
+            ),
+            mock.patch.object(
+                serve, "gather_loops",
+                return_value={
+                    "entries": [{"repo": "a", "status": "remote", "machine": "jesus", "session": None}],
+                    "machines": [], "fleet_error": None, "local_host": "h",
+                },
+            ),
+            mock.patch.object(serve.slots_redis, "status", return_value={}),
+        ):
+            data = serve.gather_repos({})
+        row = data["repos"][0]
+        self.assertTrue(row["running"])
+        self.assertEqual(row["machine"], "jesus")
+
+
+class RepoRenderTests(unittest.TestCase):
+    def _data(self, **overrides):
+        data = {
+            "repos": [
+                {"repo": "widgets", "state": "enabled", "loopable": True, "running": True, "machine": "pihome", "max": 2},
+                {"repo": "gizmos", "state": "disabled", "loopable": True, "running": False, "machine": "pihome", "max": None},
+                {"repo": "scratch", "state": "no-doc", "loopable": False, "running": False, "machine": "pihome", "max": None},
+            ],
+            "machines": [],
+            "fleet_error": None,
+            "local_host": "pihome",
+        }
+        data.update(overrides)
+        return data
+
+    def test_renders_one_row_per_repo_with_its_state_pill(self):
+        page = serve.render_repos(self._data()).decode()
+        self.assertIn("widgets", page)
+        self.assertIn("<span class='pill on'>enabled</span>", page)
+        self.assertIn("<span class=pill>disabled</span>", page)
+        self.assertIn("<span class='pill off'>no doc</span>", page)
+
+    def test_enabled_row_has_run_now_and_remove(self):
+        page = serve.render_repos(self._data()).decode()
+        self.assertIn("action=/schedule/run", page)
+        self.assertIn("/repos?remove=widgets", page)
+
+    def test_disabled_row_has_add_to_schedule_not_a_remove_link(self):
+        page = serve.render_repos(self._data()).decode()
+        self.assertIn("action=/repos/add", page)
+        self.assertNotIn("/repos?remove=gizmos", page)
+
+    def test_no_doc_row_points_at_add_repo_instead_of_loop_controls(self):
+        page = serve.render_repos(self._data()).decode()
+        self.assertIn('generate docs via "Add repo" to enable', page)
+
+    def test_slot_max_stepper_shows_the_current_value(self):
+        page = serve.render_repos(self._data()).decode()
+        self.assertIn("<span class=mono>2</span>", page)
+
+    def test_empty_state_shown_when_no_repos(self):
+        page = serve.render_repos(self._data(repos=[])).decode()
+        self.assertIn("No repos yet", page)
+
+    def test_sent_banner_shown(self):
+        page = serve.render_repos(self._data(), sent="widgets added to the schedule").decode()
+        self.assertIn("widgets added to the schedule", page)
+
+    def test_add_panel_existing_tab_offers_add_or_generate_for_non_enabled_repos(self):
+        page = serve.render_repos(self._data(), add="existing").decode()
+        self.assertIn("action=/repos/add", page)
+        self.assertIn("action=/repos/generate-docs", page)
+        self.assertIn("missing docs/delegation-loop.md", page)
+
+    def test_add_panel_new_tab_is_disabled_with_a_note(self):
+        page = serve.render_repos(self._data(), add="new").decode()
+        self.assertIn("Not implemented yet", page)
+        self.assertIn("disabled", page)
+
+    def test_doc_panel_view_mode_shows_the_text(self):
+        page = serve.render_repos(self._data(), doc_repo="widgets", doc_text="hello doc").decode()
+        self.assertIn("hello doc", page)
+        self.assertIn("widgets/docs/delegation-loop.md", page)
+
+    def test_doc_panel_edit_mode_shows_a_textarea(self):
+        page = serve.render_repos(
+            self._data(), doc_repo="widgets", doc_text="hello doc", doc_edit=True
+        ).decode()
+        self.assertIn("<textarea name=text", page)
+
+    def test_schedule_panel_names_the_real_loopctl_once_command(self):
+        page = serve.render_repos(self._data(), schedule_repo="widgets").decode()
+        self.assertIn("loopctl once", page)
+        self.assertIn("widgets", page)
+
+    def test_remove_panel_asks_to_type_the_repo_name(self):
+        page = serve.render_repos(self._data(), remove_repo="widgets").decode()
+        self.assertIn("Type the repo name to confirm", page)
+
+    def test_fleet_error_note_shown(self):
+        page = serve.render_repos(self._data(fleet_error="boom")).decode()
+        self.assertIn("boom", page)
+
+    def test_nav_has_a_repos_link(self):
+        self.assertIn("href='/repos'", serve.render_nav("repos"))
+
+
+class TestReposPageRoutes:
+    """Routing/validation logic for the `/repos` write routes (issue #23).
+    `CODE_DIR` is pointed at a throwaway `tmp_path`, never the real /code --
+    same reasoning the rest of this module mocks `run()` for, just for the
+    filesystem instead of a subprocess.
+    """
+
+    def test_repos_route_renders(self, monkeypatch):
+        handler = _repos_handler()
+        handler.path = "/repos"
+        monkeypatch.setattr(
+            serve, "gather_repos",
+            lambda connection: {"repos": [], "machines": [], "fleet_error": None, "local_host": "h"},
+        )
+        handler.do_GET()
+        handler.reply.assert_called_once()
+
+    def test_doc_route_unknown_repo_is_404(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        handler = _repos_handler()
+        handler.path = "/repos?doc=missing"
+        handler.do_GET()
+        assert handler.reply.call_args.args[1] == 404
+
+    def test_doc_route_reads_the_real_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        monkeypatch.setattr(
+            serve, "gather_repos",
+            lambda connection: {"repos": [], "machines": [], "fleet_error": None, "local_host": "h"},
+        )
+        handler = _repos_handler()
+        handler.path = "/repos?doc=widgets"
+        handler.do_GET()
+        body = handler.reply.call_args.args[0].decode()
+        assert "# doc" in body
+
+    def test_add_route_rejects_a_non_loopable_repo(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        handler = _repos_handler()
+        _post_body(handler, "/repos/add", {"repo": "ghost"})
+        handler.do_POST()
+        assert handler.reply.call_args.args[1] == 400
+
+    def test_add_route_adds_a_loopable_repo_to_the_schedule(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        monkeypatch.setattr(serve, "enabled_repos", lambda: ["other"])
+        written = {}
+        monkeypatch.setattr(serve, "write_enabled_repos", lambda names: written.setdefault("names", names))
+        handler = _repos_handler()
+        _post_body(handler, "/repos/add", {"repo": "widgets"})
+        handler.do_POST()
+        assert written["names"] == ["other", "widgets"]
+        handler.redirect.assert_called_once()
+        assert "added" in handler.redirect.call_args.args[0]
+
+    def test_add_route_is_a_no_op_when_already_enabled(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        monkeypatch.setattr(serve, "enabled_repos", lambda: ["widgets"])
+
+        def _fail(names):
+            raise AssertionError("should not write -- already enabled")
+
+        monkeypatch.setattr(serve, "write_enabled_repos", _fail)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/add", {"repo": "widgets"})
+        handler.do_POST()
+        handler.redirect.assert_called_once()
+
+    def test_generate_docs_route_rejects_a_repo_that_already_has_one(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        handler = _repos_handler()
+        _post_body(handler, "/repos/generate-docs", {"repo": "widgets"})
+        handler.do_POST()
+        assert handler.reply.call_args.args[1] == 400
+
+    def test_generate_docs_route_rejects_an_unknown_directory(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        handler = _repos_handler()
+        _post_body(handler, "/repos/generate-docs", {"repo": "ghost"})
+        handler.do_POST()
+        assert handler.reply.call_args.args[1] == 400
+
+    def test_generate_docs_route_writes_a_doc_and_adds_to_the_schedule(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets", doc=False)
+        monkeypatch.setattr(serve, "enabled_repos", lambda: [])
+        written = {}
+        monkeypatch.setattr(serve, "write_enabled_repos", lambda names: written.setdefault("names", names))
+        handler = _repos_handler()
+        _post_body(handler, "/repos/generate-docs", {"repo": "widgets"})
+        handler.do_POST()
+        doc_path = tmp_path / "widgets" / "docs" / "delegation-loop.md"
+        assert doc_path.is_file()
+        assert "widgets" in doc_path.read_text()
+        assert written["names"] == ["widgets"]
+
+    def test_remove_route_rejects_a_repo_not_on_the_schedule(self, monkeypatch):
+        monkeypatch.setattr(serve, "enabled_repos", lambda: ["other"])
+        handler = _repos_handler()
+        _post_body(handler, "/repos/remove", {"repo": "widgets", "confirm": "widgets"})
+        handler.do_POST()
+        assert handler.reply.call_args.args[1] == 400
+
+    def test_remove_route_rejects_a_mismatched_confirmation(self, monkeypatch):
+        monkeypatch.setattr(serve, "enabled_repos", lambda: ["widgets"])
+        handler = _repos_handler()
+        _post_body(handler, "/repos/remove", {"repo": "widgets", "confirm": "not-it"})
+        handler.do_POST()
+        assert handler.reply.call_args.args[1] == 400
+
+    def test_remove_route_removes_a_confirmed_repo(self, monkeypatch):
+        monkeypatch.setattr(serve, "enabled_repos", lambda: ["widgets", "other"])
+        written = {}
+        monkeypatch.setattr(serve, "write_enabled_repos", lambda names: written.setdefault("names", names))
+        handler = _repos_handler()
+        _post_body(handler, "/repos/remove", {"repo": "widgets", "confirm": "widgets"})
+        handler.do_POST()
+        assert written["names"] == ["other"]
+        handler.redirect.assert_called_once()
+
+    def test_doc_save_route_rejects_a_non_loopable_repo(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        handler = _repos_handler()
+        _post_body(handler, "/repos/doc/save", {"repo": "ghost", "text": "hi"})
+        handler.do_POST()
+        assert handler.reply.call_args.args[1] == 400
+
+    def test_doc_save_route_overwrites_the_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        handler = _repos_handler()
+        _post_body(handler, "/repos/doc/save", {"repo": "widgets", "text": "new content"})
+        handler.do_POST()
+        doc_path = tmp_path / "widgets" / "docs" / "delegation-loop.md"
+        assert doc_path.read_text() == "new content"
+        handler.redirect.assert_called_once_with("/repos?doc=widgets&sent=saved")
+
+    def test_slot_max_route_rejects_a_non_loopable_repo(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        handler = _repos_handler()
+        _post_body(handler, "/repos/slot-max", {"repo": "ghost", "max": "2"})
+        handler.do_POST()
+        assert handler.reply.call_args.args[1] == 400
+
+    def test_slot_max_route_rejects_a_non_positive_max(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        handler = _repos_handler()
+        _post_body(handler, "/repos/slot-max", {"repo": "widgets", "max": "0"})
+        handler.do_POST()
+        assert handler.reply.call_args.args[1] == 400
+
+    def test_slot_max_route_calls_set_max_with_the_repo_prefixed_slot_name(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        calls = {}
+
+        def fake_set_max(slot, max_value, **kw):
+            calls["slot"] = slot
+            calls["max"] = max_value
+            return max_value
+
+        monkeypatch.setattr(serve.slots_redis, "set_max", fake_set_max)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/slot-max", {"repo": "widgets", "max": "3"})
+        handler.do_POST()
+        assert calls == {"slot": "repo:widgets", "max": 3}
+        handler.redirect.assert_called_once_with("/repos")
+
+    def test_slot_max_route_502_on_coordinator_unreachable(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+
+        def raise_unreachable(slot, max_value, **kw):
+            raise slots.CoordinatorUnreachable(slot)
+
+        monkeypatch.setattr(serve.slots_redis, "set_max", raise_unreachable)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/slot-max", {"repo": "widgets", "max": "3"})
+        handler.do_POST()
+        assert handler.reply.call_args.args[1] == 502
+
+    def test_schedule_route_rejects_a_non_loopable_repo(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        handler = _repos_handler()
+        _post_body(handler, "/repos/schedule", {"repo": "ghost", "when": "now"})
+        handler.do_POST()
+        assert handler.reply.call_args.args[1] == 400
+
+    def test_schedule_route_rejects_a_missing_when(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        handler = _repos_handler()
+        _post_body(handler, "/repos/schedule", {"repo": "widgets", "when": ""})
+        handler.do_POST()
+        assert handler.reply.call_args.args[1] == 400
+
+    def test_schedule_route_calls_loopctl_once_with_a_fixed_argv_list(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        calls = []
+
+        def fake_run(argv, timeout=10.0):
+            calls.append(argv)
+            return (0, "")
+
+        monkeypatch.setattr(serve, "run", fake_run)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/schedule", {"repo": "widgets", "when": "tomorrow 09:00"})
+        handler.do_POST()
+        assert calls == [["loopctl", "once", "tomorrow 09:00", "widgets"]]
+        handler.redirect.assert_called_once()
+        assert "scheduled" in handler.redirect.call_args.args[0]
+
+    def test_schedule_route_502_on_loopctl_failure(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        monkeypatch.setattr(serve, "run", lambda argv, timeout=10.0: (1, "boom"))
+        handler = _repos_handler()
+        _post_body(handler, "/repos/schedule", {"repo": "widgets", "when": "now"})
+        handler.do_POST()
+        assert handler.reply.call_args.args[1] == 502
+
+
+class TestReposPageIntegration:
+    """Real `redis-server` fixtures, same rule as TestMachinesPageIntegration
+    -- checks the real slot shape (`repo:<repo>`), not just that `set_max`
+    was called with the right arguments.
+    """
+
+    def test_slot_max_route_changes_what_status_reports(self, redis_port, flush_redis, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        kw = _kw(redis_port)
+        handler = _post_handler("/repos/slot-max", b"repo=widgets&max=4", kw)
+        handler.do_POST()
+        handler.send_response.assert_called_once_with(303)
+        assert slots_redis.status(**kw)["repo:widgets"]["max"] == 4
+
+    def test_repos_page_renders_the_live_slot_max(self, redis_port, flush_redis, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        kw = _kw(redis_port)
+        slots_redis.set_max("repo:widgets", 5, **kw)
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(serve, "tmux_sessions", return_value=[]),
+            mock.patch.object(
+                serve, "fleet_state",
+                return_value={"machines": [], "claims": {}, "fleet_error": None},
+            ),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            handler = _get_handler("/repos", kw)
+            handler.do_GET()
+        body = handler.reply.call_args.args[0].decode()
+        assert "<span class=mono>5</span>" in body
+
+
 if __name__ == "__main__":
     unittest.main()
