@@ -6,7 +6,10 @@ which model IDs each subscription can call today and what they cost
 (issue #16; see `model_fetch.py`). `fetch-benchmarks` fetches (or reads the
 fleet-shared cache of) a daily benchmark/quality score per model, via a
 restricted dispatched agent, not a local file (issue #17's reopen; see
-`benchmark_fetch.py`). `acquire`/`hold`/`release`/`status` are the
+`benchmark_fetch.py`). `quota` prints quota per provider -- real data read
+locally on a machine with credentials, published to a fleet-shared cache
+that any other machine then reads (issue #38; see `quota_cache.py`).
+`acquire`/`hold`/`release`/`status` are the
 slot-lease commands (issue #205 for the `local` backend, #210 for
 `redis`). `claim`/`renew-claim`/`release-claim` mark a GitHub issue as one
 loop's own, so two loops never work the same task (issue #6; Redis only, no
@@ -91,6 +94,7 @@ import os
 import shlex
 import sys
 import time
+from datetime import datetime
 
 from . import agent as agent_mod
 from . import benchmark_fetch
@@ -102,6 +106,8 @@ from . import machines
 from . import model_fetch
 from . import place as place_mod
 from . import quest as quest_mod
+from . import quota
+from . import quota_cache
 from . import reconcile as reconcile_mod
 from . import review_dispatch
 from . import roadmap
@@ -156,6 +162,14 @@ def _fetch_benchmarks_args(parser: argparse.ArgumentParser) -> None:
     # Fleet-shared, not per-machine (issue #17's reopen) -- same connection
     # resolution as `machines`/`place`, so a machine that already ran
     # `lupin join` doesn't need to repeat its Redis location here.
+    _fleet_connection_args(parser)
+
+
+def _quota_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--json", action="store_true")
+    # Same fleet-shared connection resolution as `fetch-benchmarks` -- this
+    # command both reads and (if this machine has real credentials for a
+    # provider) publishes to the shared quota cache (issue #38).
     _fleet_connection_args(parser)
 
 
@@ -559,6 +573,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _fetch_benchmarks_args(
         sub.add_parser("fetch-benchmarks", help="fetch (or read the fleet-shared cache of) today's benchmark scores")
     )
+    _quota_args(sub.add_parser("quota", help="show quota per provider -- real data if this machine has credentials, fleet cache otherwise"))
     _acquire_args(sub.add_parser("acquire", help="take a lease on a slot"))
     _hold_args(sub.add_parser("hold", help="acquire (or reuse a lease), run a command, release on exit"))
     _release_args(sub.add_parser("release", help="give up a lease"))
@@ -639,6 +654,57 @@ def _cmd_fetch_benchmarks(args: argparse.Namespace) -> int:
     else:
         tag = "live" if data.get("live") else f"stale/unavailable ({data.get('stale_reason')})"
         print(f"benchmarks: {len(data.get('scores', []))} scored ({tag})")
+    return 0
+
+
+def _ago(fetched_at: str | None) -> str:
+    """"N ago" for a CLI line, from an ISO timestamp. Plain-text cousin of
+    `serve._snapshot_age()`, which does the same job as an HTML span for
+    the dashboard -- that version can't be reused here since it returns
+    markup, not text."""
+    if not fetched_at:
+        return "unknown"
+    try:
+        epoch = datetime.fromisoformat(fetched_at).timestamp()
+    except ValueError:
+        return "unknown"
+    seconds = max(0, time.time() - epoch)
+    if seconds < 60:
+        return "<1m ago"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes}m ago"
+    return f"{minutes // 60}h ago"
+
+
+def _cmd_quota(args: argparse.Namespace) -> int:
+    """`lupin quota`: publishes this machine's real quota readings (if it
+    has credentials for any provider) to the fleet-shared cache, then
+    prints the merged view -- same data `/usage` shows, for a terminal.
+    See `quota_cache.py` for why "canonical fetcher" is decided per
+    provider by who actually has real data, not a fixed machine name.
+    """
+    merged = quota_cache.refresh_snapshot(**_fleet_connection(args))
+    if args.json:
+        print(json.dumps(merged))
+        return 0
+    if not merged:
+        print("no quota data available yet -- run this on a machine with real provider credentials")
+        return 0
+    for provider in sorted(merged):
+        entry = merged[provider]
+        real_rows = [row for row in entry.get("rows", []) if isinstance(row.get("used_pct"), (int, float))]
+        if not real_rows:
+            print(f"{provider}: no quota data cached yet")
+            continue
+        age = _ago(entry.get("fetched_at"))
+        fetched_by = entry.get("fetched_by", "-")
+        for row in real_rows:
+            duration = row.get("duration")
+            label = duration.label if isinstance(duration, quota.QuotaDuration) else str(duration)
+            left = max(0.0, 100 - row["used_pct"])
+            resets = serve.time_until_reset(row.get("resets_at"))
+            print(f"{provider:<12} {label:<9} {left:.0f}% left   resets in {resets:<8} (fetched {age} via {fetched_by})")
     return 0
 
 
@@ -1506,6 +1572,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_fetch_models(args)
     if args.cmd == "fetch-benchmarks":
         return _cmd_fetch_benchmarks(args)
+    if args.cmd == "quota":
+        return _cmd_quota(args)
     if args.cmd == "acquire":
         return _cmd_acquire(args)
     if args.cmd == "hold":

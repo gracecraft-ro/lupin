@@ -27,6 +27,7 @@ lupin route <category> <size> [--no-bmo] [--primary-effort E] [--json]
 lupin classify --issue-json FILE [--diff-stat FILE] [--json]
 lupin fetch-models [--snapshot-file FILE] [--no-write] [--json]
 lupin fetch-benchmarks [--force] [--json]
+lupin quota [--json]
 lupin review-route (--category C --size S | --issue-json FILE) [--mode M] [--json]
 lupin review-route --prefetch N[,N...] [--repo OWNER/REPO]
 lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
@@ -108,6 +109,14 @@ disk, so every machine sees the same score and only one machine does the
 work each day. Use `--force` to pull fresh data right now, skipping the
 daily cache (it still waits its turn if another machine is mid-pull).
 
+`quota` shows how much of each provider's quota is left: percent left,
+which window (5 hours, 7 days, 30 days), and time to reset. Quota is one
+account per provider, shared by the whole fleet, not a per-machine fact —
+a machine with real provider logins reads it live and publishes it to one
+shared Redis key; every other machine reads that key instead of calling
+the provider itself. A provider with no reading yet (no machine with its
+logins has run `quota` recently) shows "no quota data cached yet".
+
 ## How a slot's limit (`max`) works
 
 A slot does not know its own limit until something tells it. The first
@@ -142,6 +151,9 @@ The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
   `ghostbook.nix`'s `hosts/jesus/loopgui/` (issue #204).
 - `src/lupin/quota.py` — the `/usage` page's quota reads, split out of
   `serve.py`.
+- `src/lupin/quota_cache.py` — `lupin quota`'s shared Redis cache: one
+  machine's real quota reading, published for the whole fleet to read
+  (issue #38).
 - `src/lupin/model_fetch.py` — `fetch-models`: a daily snapshot of model
   IDs and prices per subscription.
 - `src/lupin/claims.py` — `claim`/`renew-claim`/`release-claim`: one GitHub

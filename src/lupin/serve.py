@@ -59,7 +59,7 @@ from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
-from . import benchmark_fetch, claims, commands, loops, machines, model_fetch, quest, roadmap, slots_redis
+from . import benchmark_fetch, claims, commands, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
 from .slots import CoordinatorUnreachable
 from .quota import (
     QuotaDuration,
@@ -67,7 +67,6 @@ from .quota import (
     epoch_ms_to_local,
     omp_usage,
     quota_source_label,
-    quota_usage,
 )
 
 ATTACHMENT_ID = roadmap.ATTACHMENT_ID
@@ -1365,8 +1364,22 @@ def render_quota_row(row: dict, now_ms: int) -> str:
     )
 
 
-def render_usage() -> bytes:
-    quota_rows = quota_usage()
+def render_usage(*, connection: dict | None = None) -> bytes:
+    """Quota comes from the fleet-shared cache (issue #38), read fresh on
+    every render -- never a local provider call, and never cached in this
+    process -- same pattern `render_model_tiers` already uses for
+    `benchmark_fetch.read_snapshot`. This is what lets this page show real
+    quota on a machine with no provider credentials of its own (the
+    dashboard is pinned to one such machine, issue #35): whichever machine
+    actually has credentials publishes here, via `lupin quota`.
+    """
+    snapshot = quota_cache.read_snapshot(**(connection or {}))
+    quota_rows: list[dict] = []
+    fetched_by_provider: dict[str, dict] = {}
+    for provider, entry in snapshot.items():
+        rows = entry.get("rows") or []
+        quota_rows.extend(rows)
+        fetched_by_provider[provider] = entry
     now_ms = int(time.time() * 1000)
     fetched = next((row["generated_at"] for row in quota_rows if "generated_at" in row), None)
     body = [
@@ -1381,14 +1394,22 @@ def render_usage() -> bytes:
         "<span class=quota-legend-item><span class=quota-legend-ahead></span>"
         "used faster than time</span></div><div class=quota-groups>",
     ]
+    if not quota_rows:
+        body.append(
+            "<p class=dim>No quota data cached yet -- run <code>lupin quota</code> "
+            "on a machine with real provider credentials.</p>"
+        )
     groups: dict[str, list[dict]] = {}
     for row in quota_rows:
         groups.setdefault(row["provider"], []).append(row)
     for provider, rows in groups.items():
+        age = _snapshot_age((fetched_by_provider.get(provider) or {}).get("fetched_at"))
+        fetched_by = (fetched_by_provider.get(provider) or {}).get("fetched_by", "-")
         body.append(
             f"<section class='card quota-group'><div class=quota-group-heading>"
             f"<h3>{esc(provider)}</h3><span class=dim>"
-            f"{esc(quota_source_label(provider))}</span></div>"
+            f"{esc(quota_source_label(provider))} &middot; fetched {age} via {esc(fetched_by)}"
+            "</span></div>"
         )
         for row in rows:
             if "error" in row or "note" in row:
@@ -2546,7 +2567,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = roadmap.render_combined_page(repos, models, roadmap_page)
             self.reply(body)
         elif url.path == "/usage":
-            self.reply(render_usage())
+            self.reply(render_usage(connection=self.fleet_connection))
         elif url.path == "/model-tiers":
             self.reply(render_model_tiers(sent=query.get("sent"), connection=self.fleet_connection))
         elif url.path == "/machines":
