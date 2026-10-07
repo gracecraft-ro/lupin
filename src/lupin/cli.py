@@ -265,6 +265,9 @@ def _serve_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--roadmap", metavar="REPO", help="print a repository roadmap and exit")
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--json", action="store_true")
+    # The Machines page reads machines.machines(), which needs the same
+    # Redis connection info as claim/roadmap -- see _roadmap_args for why.
+    _redis_conn_args(parser)
 
 
 def _review_route_args(parser: argparse.ArgumentParser) -> None:

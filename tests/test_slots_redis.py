@@ -68,6 +68,42 @@ def test_status_json_matches_real_sorted_set_contents(redis_port, flush_redis, c
     assert set(raw.zrange("lupin:v1:slot:bmo", 0, -1)) == {"a", "b"}
 
 
+def test_set_max_overwrites_an_already_set_max(redis_port, flush_redis):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    slots_redis.acquire("bmo", "a", max_holders=2, **kw)
+    assert slots_redis.status(**kw)["bmo"]["max"] == 2
+
+    slots_redis.set_max("bmo", 5, **kw)
+
+    assert slots_redis.status(**kw)["bmo"]["max"] == 5
+
+
+def test_set_max_does_not_evict_holders_above_the_new_max(redis_port, flush_redis):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    slots_redis.acquire("bmo", "a", max_holders=2, **kw)
+    slots_redis.acquire("bmo", "b", **kw)
+
+    slots_redis.set_max("bmo", 1, **kw)
+
+    # Both existing holders are still counted -- lowering the max doesn't
+    # touch the holder sorted set, only the separate `:max` key.
+    assert slots_redis.status(**kw)["bmo"] == {"holders": 2, "max": 1}
+    # A third, brand new acquire is turned away by the lowered max.
+    with pytest.raises(slots.SlotFull):
+        slots_redis.acquire("bmo", "c", **kw)
+    # A fourth acquire frees up once a holder's lease is released.
+    assert slots_redis.release("bmo:a", **kw) is True
+    with pytest.raises(slots.SlotFull):
+        slots_redis.acquire("bmo", "c", **kw)  # still 1 holder ("b"), max 1
+    assert slots_redis.release("bmo:b", **kw) is True
+    slots_redis.acquire("bmo", "c", **kw)  # now under the max
+
+
+def test_set_max_unreachable_redis_raises_coordinator_unreachable(closed_port):
+    with pytest.raises(slots.CoordinatorUnreachable):
+        slots_redis.set_max("bmo", 3, redis_host="127.0.0.1", redis_port=closed_port)
+
+
 def test_unreachable_redis_falls_back_to_local_for_bmo(closed_port, tmp_path, capsys):
     root = str(tmp_path)
     lease = slots_redis.acquire(

@@ -25,6 +25,11 @@ first `acquire`/`hold` call and read on every later one. `GET`/`SET` are
 already on the ACL command list in `docs/redis-schema.md`, so this adds no
 new permission, just a second use of an already-allowed command pair.
 
+A dashboard or operator can still change that number later, with
+`set_max()` -- a plain `SET`, no `NX`. It does not touch `slot:<name>`
+itself, so a holder already past the new, lower max keeps its lease; only
+a later `acquire` sees the new number and can be turned away by it.
+
 Fallback: only the `bmo` slot falls back to the `local` backend when Redis
 is unreachable (`docs/redis-schema.md`'s fallback table; a connect timeout
 counts as unreachable too). Every other slot name raises
@@ -141,6 +146,38 @@ def _get_or_set_max(client: "redis.Redis", slot: str, max_holders: int | None) -
     chosen = max_holders if max_holders is not None else 1
     client.set(key, chosen, nx=True)
     return int(client.get(key))
+
+
+def set_max(
+    slot: str,
+    max_holders: int,
+    *,
+    redis_host: str | None = None,
+    redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
+) -> int:
+    """Change a slot's max, overwriting whatever `_get_or_set_max` set it to.
+
+    A plain `SET`, not `NX` -- unlike `acquire`'s one-time bootstrap, this
+    call means to replace the stored number. Does not touch `slot:<name>`
+    (the holder sorted set): a lowered max does not evict anyone already
+    holding a lease, since `_ACQUIRE_SCRIPT` only checks the max on a new
+    acquire, never on an existing holder's renew. New acquires are turned
+    away until enough holders release or expire to bring the count back
+    under the new max.
+
+    Raises `CoordinatorUnreachable` if Redis can't be reached -- there is no
+    local-backend equivalent of this call to fall back to, for `bmo` or any
+    other slot.
+    """
+    client = _client(redis_host, redis_port, redis_username, redis_password)
+    key = f"{PREFIX}slot:{slot}:max"
+    try:
+        _call_with_retry(lambda: client.set(key, max_holders))
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
+        raise CoordinatorUnreachable(slot) from exc
+    return max_holders
 
 
 def acquire(
