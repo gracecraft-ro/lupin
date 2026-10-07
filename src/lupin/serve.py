@@ -882,16 +882,28 @@ document.documentElement.setAttribute("data-theme",t);
 NAV_ITEMS = [
     ("overview", "/", "Overview", "M3 11l9-8 9 8M5 10v10h14V10"),
     (
-        "repos",
-        "/repos",
-        "Repos",
-        "M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM18 9a9 9 0 01-9 9",
+        "machines",
+        "/machines",
+        "Machines",
+        "M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01",
     ),
     (
         "loops",
         "/loops",
         "Loops",
         "M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3",
+    ),
+    (
+        "schedule",
+        "/schedule",
+        "Schedule",
+        "M4 5h16v16H4zM4 10h16M8 3v4M16 3v4",
+    ),
+    (
+        "repos",
+        "/repos",
+        "Repos",
+        "M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM18 9a9 9 0 01-9 9",
     ),
     ("roadmap", "/roadmap", "Roadmap", "M5 21V4M5 4h12l-2 4 2 4H5"),
     ("usage", "/usage", "Usage", "M5 20V10M12 20V4M19 20v-7"),
@@ -900,18 +912,6 @@ NAV_ITEMS = [
         "/model-tiers",
         "Models",
         "M7 7h10v10H7zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3",
-    ),
-    (
-        "machines",
-        "/machines",
-        "Machines",
-        "M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01",
-    ),
-    (
-        "schedule",
-        "/schedule",
-        "Schedule",
-        "M4 5h16v16H4zM4 10h16M8 3v4M16 3v4",
     ),
 ]
 SUN_ICON = "M12 8a4 4 0 100 8 4 4 0 000-8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
