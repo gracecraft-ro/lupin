@@ -18,7 +18,7 @@ from unittest import mock
 import pytest
 import redis as redis_lib
 
-from lupin import cli, claims, machines, quest, roadmap, serve
+from lupin import cli, claims, machines, quest, roadmap, serve, slots, slots_redis
 
 
 def _kw(redis_port):
@@ -387,6 +387,82 @@ class DashboardRouteTests(unittest.TestCase):
         head = serve.page("test", "").decode()
         self.assertIn("href='/favicon.ico' type='image/svg+xml'", head)
         self.assertIn("name=viewport", head)
+
+
+class MachinesRouteUnitTests(unittest.TestCase):
+    """Routing/dispatch logic only -- mocked machines/slots_redis calls, no
+    real Redis. See MachinesPageIntegrationTests below for real data.
+    """
+
+    def test_machines_route_renders_records(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/machines"
+        handler.redis_connection = {"redis_host": "127.0.0.1"}
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.reply = mock.Mock()
+        with (
+            mock.patch.object(serve.machines, "machines", return_value=[]) as fake,
+            mock.patch.object(serve.slots_redis, "status", return_value={}),
+        ):
+            handler.do_GET()
+        fake.assert_called_once_with({"redis_host": "127.0.0.1"})
+        handler.reply.assert_called_once()
+
+    def test_machines_route_unreachable_coordinator_is_502(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/machines"
+        handler.redis_connection = {}
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.reply = mock.Mock()
+        with mock.patch.object(
+            serve.machines, "machines", side_effect=serve.machines.CoordinatorUnreachable("machine registry")
+        ):
+            handler.do_GET()
+        status = handler.reply.call_args.args[1]
+        self.assertEqual(status, 502)
+
+    def test_slot_max_route_rejects_non_numeric_max(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/machines/slot-max"
+        handler.headers = {"Content-Length": "15"}
+        handler.rfile = io.BytesIO(b"slot=bmo&max=x")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.reply = mock.Mock()
+        handler.do_POST()
+        status = handler.reply.call_args.args[1]
+        self.assertEqual(status, 400)
+
+    def test_slot_max_route_rejects_unicode_digit_isdigit_cannot_parse(self):
+        # '²' (superscript two) is str.isdigit() == True but int()
+        # raises ValueError on it. The route must not crash on this -- it
+        # should reject the request with the same clean 400 as "max=x".
+        body = "slot=bmo&max=²".encode()
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/machines/slot-max"
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.reply = mock.Mock()
+        handler.do_POST()
+        status = handler.reply.call_args.args[1]
+        self.assertEqual(status, 400)
+
+    def test_slot_max_route_calls_set_max_and_redirects(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        body = b"slot=bmo&max=3"
+        handler.path = "/machines/slot-max"
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        handler.redis_connection = {"redis_host": "127.0.0.1"}
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        with mock.patch.object(serve.slots_redis, "set_max") as fake_set_max:
+            handler.do_POST()
+        fake_set_max.assert_called_once_with("bmo", 3, redis_host="127.0.0.1")
+        handler.send_response.assert_called_once_with(303)
+        self.assertIn(mock.call("Location", "/machines"), handler.send_header.call_args_list)
 
 
 class ModelTierTests(unittest.TestCase):
@@ -1039,6 +1115,83 @@ def test_render_page_shows_progress_and_stop_button_when_quest_running():
     assert "0/1 done" in page
     assert "Stop quest" in page
     assert "name=id value='q7'" in page
+
+
+def _post_handler(path, form_body, connection):
+    handler = serve.Handler.__new__(serve.Handler)
+    handler.path = path
+    handler.headers = {"Content-Length": str(len(form_body))}
+    handler.rfile = io.BytesIO(form_body)
+    handler.fleet_connection = connection
+    handler.host_ok = mock.Mock(return_value=True)
+    handler.send_response = mock.Mock()
+    handler.send_header = mock.Mock()
+    handler.end_headers = mock.Mock()
+    return handler
+
+
+def _get_handler(path, connection):
+    handler = serve.Handler.__new__(serve.Handler)
+    handler.path = path
+    handler.fleet_connection = connection
+    handler.host_ok = mock.Mock(return_value=True)
+    handler.reply = mock.Mock()
+    return handler
+
+
+class TestMachinesPageIntegration:
+    """Real `redis-server` fixtures (issue #20), same rule as
+    test_machines.py/test_slots_redis.py -- not mocked, so a rendering bug
+    or a `set_max` that doesn't actually change what `status()` reports
+    would be caught here, not just a call-was-made assertion.
+    """
+
+    def test_page_renders_real_machine_and_slot_data(self, redis_port, flush_redis, tmp_path):
+        # join() before acquire() on purpose -- join's own written `slots`
+        # snapshot would be empty at this point. The page still has to show
+        # the lease below, so it must be reading slots_redis.status() live,
+        # not that stale per-record field.
+        kw = _kw(redis_port)
+        machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
+        slots_redis.acquire("bmo", "worker-a", max_holders=2, **kw)
+
+        handler = _get_handler("/machines", kw)
+        handler.do_GET()
+
+        body = handler.reply.call_args.args[0].decode()
+        assert machines.hostname() in body
+        assert "<td>bmo</td><td>1</td><td>2</td>" in body
+
+    def test_unreachable_coordinator_is_502(self, closed_port):
+        handler = _get_handler("/machines", {"redis_host": "127.0.0.1", "redis_port": closed_port})
+        handler.do_GET()
+        assert handler.reply.call_args.args[1] == 502
+
+    def test_slot_max_control_changes_what_status_reports(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        slots_redis.acquire("bmo", "a", max_holders=2, **kw)
+        assert slots_redis.status(**kw)["bmo"]["max"] == 2
+
+        handler = _post_handler("/machines/slot-max", b"slot=bmo&max=5", kw)
+        handler.do_POST()
+
+        handler.send_response.assert_called_once_with(303)
+        assert slots_redis.status(**kw)["bmo"]["max"] == 5
+
+    def test_lowering_max_below_holders_keeps_them_but_blocks_new_acquires(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        slots_redis.acquire("bmo", "a", max_holders=2, **kw)
+        slots_redis.acquire("bmo", "b", **kw)
+        assert slots_redis.status(**kw)["bmo"] == {"holders": 2, "max": 2}
+
+        handler = _post_handler("/machines/slot-max", b"slot=bmo&max=1", kw)
+        handler.do_POST()
+
+        # Existing holders are not evicted by a lowered max.
+        assert slots_redis.status(**kw)["bmo"] == {"holders": 2, "max": 1}
+        # A new acquire is blocked until holders drop back under the max.
+        with pytest.raises(slots.SlotFull):
+            slots_redis.acquire("bmo", "c", **kw)
 
 
 if __name__ == "__main__":

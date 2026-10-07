@@ -270,7 +270,10 @@ def _serve_args(parser: argparse.ArgumentParser) -> None:
     # `serve`'s own argv to `serve.main()` rather than this parsed
     # Namespace (see `main()` below), so serve.py's own parser repeats
     # these same flags; this call only keeps `--help` and top-level
-    # parsing in sync with what serve.py actually accepts.
+    # parsing in sync with what serve.py actually accepts. The Machines
+    # page (#20) reads machines.machines(), which needs this same
+    # fleet-config-aware resolution, not _redis_conn_args's hardcoded
+    # localhost default -- see _machines_args, which uses the same helper.
     _fleet_connection_args(parser)
 
 

@@ -6,17 +6,19 @@ to start on any other address. A tailnet bind relies on the headscale ACL
 and the host firewall as its boundary (same model as this project's Redis
 deployment, docs/redis-schema.md) -- the DNS-rebinding check below still
 only accepts the Host header matching what was actually bound. The only
-POST routes are /quest/start and /quest/stop, and both only write to Redis
-(via quest.py) -- no code path starts a process with arguments built from
-the browser. Read probes use fixed argv lists, run without a shell. GitHub
-attachment images use an authenticated, fixed-host proxy; it sends the
-GitHub token only to github.com and strips it before a validated storage
-redirect.
+POST routes are /quest/start, /quest/stop (both only write to Redis via
+quest.py), and /machines/slot-max (changes one Redis slot's max holder
+count -- a validated slot name and a positive integer, nothing else); no
+route starts a process with arguments built from the browser. Read probes
+use fixed argv lists, run without a shell. GitHub attachment images use an
+authenticated, fixed-host proxy; it sends the GitHub token only to
+github.com and strips it before a validated storage redirect. None of
+these write routes carry auth of their own -- a reverse proxy in front of
+this server is expected to gate write access before a request reaches here.
 
-The page reads loop state but does not change it, except for starting or
-stopping a quest. It does not shell out to loopctl. The installed CLI can
-be older than this dashboard; direct reads of tmux and systemd avoid
-version skew.
+Every other page reads loop state but does not change it. It does not
+shell out to loopctl. The installed CLI can be older than this dashboard;
+direct reads of tmux and systemd avoid version skew.
 
 Python standard library only. GitHub image bytes are fetched only when the
 browser requests a validated attachment ID.
@@ -36,11 +38,12 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
-from . import claims, machines, quest, roadmap
+from . import claims, machines, quest, roadmap, slots_redis
 from .slots import CoordinatorUnreachable
 from .quota import (
     QuotaDuration,
@@ -56,6 +59,7 @@ ATTACHMENT_REDIRECT_HOST = re.compile(
     r"github-production-user-asset-[a-z0-9-]+\.s3\.amazonaws\.com"
 )
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_FORM_BYTES = 8 * 1024
 IMAGE_TYPES = {"image/gif", "image/jpeg", "image/png", "image/webp"}
 FAVICON = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><path fill="#e11d48" d="M16 28S3 20.4 3 11.5A7.5 7.5 0 0 1 16 7.4a7.5 7.5 0 0 1 13 4.1C29 20.4 16 28 16 28Z"/></svg>"""
 
@@ -605,6 +609,12 @@ NAV_ITEMS = [
         "/model-tiers",
         "Models",
         "M7 7h10v10H7zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3",
+    ),
+    (
+        "machines",
+        "/machines",
+        "Machines",
+        "M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01",
     ),
 ]
 SUN_ICON = "M12 8a4 4 0 100 8 4 4 0 000-8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
@@ -1164,6 +1174,93 @@ def render_model_tiers() -> bytes:
     return page("Model tiers", "".join(body), active="models")
 
 
+def _heartbeat_epoch(stamp: str | None) -> float | None:
+    """`machines()`'s `heartbeat` field is an ISO stamp; the page's
+    `data-since` ticker (see `JS` above) wants epoch seconds, same as
+    `tmux_sessions()`'s `created`/`activity` fields.
+    """
+    if not stamp:
+        return None
+    try:
+        return datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def _slot_controls(slot: str, current_max: int) -> str:
+    """Two tiny forms, not one with a number input -- a GET-free "fewer" /
+    "more" button pair needs no JS and matches the mockup's control shape.
+    Posting the already-computed next value (not a +1/-1 delta) means the
+    route has no read-modify-write race to get wrong.
+    """
+    fewer = max(1, current_max - 1)
+    more = current_max + 1
+    fewer_disabled = " disabled" if current_max <= 1 else ""
+    return (
+        "<form method=post action='/machines/slot-max' style='display:inline'>"
+        f"<input type=hidden name=slot value='{esc(slot)}'>"
+        f"<input type=hidden name=max value='{fewer}'>"
+        f"<button type=submit{fewer_disabled}>fewer slots</button></form> "
+        "<form method=post action='/machines/slot-max' style='display:inline'>"
+        f"<input type=hidden name=slot value='{esc(slot)}'>"
+        f"<input type=hidden name=max value='{more}'>"
+        "<button type=submit>more slots</button></form>"
+    )
+
+
+def render_machines(records: list[dict], slot_status: dict) -> bytes:
+    """The fleet machine list (issue #20).
+
+    `slot_status` is a live `slots_redis.status()` read, not each record's
+    own `slots` field -- that field is a snapshot taken at the machine's
+    last `join`/`heartbeat` call (`machines.py`'s `_write_record`), so it
+    would hide a slot-max change made through this page's own controls
+    until the next heartbeat (up to 30s, longer if the heartbeat loop isn't
+    running). `slots_redis.status()` has no such lag.
+
+    v1 has exactly one fleet slot (`bmo`), shared by the whole fleet, not
+    partitioned per machine -- so the same live numbers are shown, and the
+    same controls apply, on every machine's card. Changing a slot's max
+    from any one card changes it everywhere.
+    """
+    body = [f'<header><h1>{icon("M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01")}Machines</h1></header>']
+    if not records:
+        body.append("<div class='card dim'>No machine has joined the fleet yet.</div>")
+    for record in sorted(records, key=lambda r: r["name"]):
+        state = record["state"]
+        pill_class = {"online": "on", "offline": "off"}.get(state, "")
+        body.append("<div class=card>")
+        body.append("<div class=row>")
+        body.append(f"<span class=big>{esc(record['name'])}</span>")
+        body.append(f"<span class='pill {pill_class}'>{esc(state)}</span>")
+        if record["version_mismatch"]:
+            body.append(f"<span class='pill off'>version mismatch: {esc(record['version'] or '-')}</span>")
+        else:
+            body.append(f"<span class=dim>{esc(record['version'] or '-')}</span>")
+        hb = _heartbeat_epoch(record.get("heartbeat"))
+        if hb is not None:
+            body.append(f"<span class=dim>heartbeat <span data-since='{hb:.0f}'></span></span>")
+        else:
+            body.append("<span class=dim>no heartbeat</span>")
+        body.append("</div>")
+        if slot_status:
+            body.append("<table><tr><th>slot</th><th>holders</th><th>max</th><th></th></tr>")
+            for slot_name, info in sorted(slot_status.items()):
+                used = info.get("holders", 0)
+                slot_max = info.get("max")
+                controls = _slot_controls(slot_name, slot_max if slot_max is not None else 1)
+                body.append(
+                    f"<tr><td>{esc(slot_name)}</td><td>{esc(used)}</td>"
+                    f"<td>{esc(slot_max) if slot_max is not None else '-'}</td>"
+                    f"<td>{controls}</td></tr>"
+                )
+            body.append("</table>")
+        else:
+            body.append("<p class=dim>No slot data reported.</p>")
+        body.append("</div>")
+    return page("Machines", "".join(body), active="machines")
+
+
 def render_error(msg: str) -> bytes:
     return page(
         "error",
@@ -1189,7 +1286,8 @@ class Handler(BaseHTTPRequestHandler):
     # client socket, which would otherwise shadow this class attribute on
     # every real request (a bug caught by the real-HTTP tests, not the
     # mocked-Handler ones, since those never call setup()). Used by issue
-    # #15's fleet data and issue #19's quest POST routes alike.
+    # #15's fleet data, issue #19's quest POST routes, and issue #20's
+    # Machines page alike.
     fleet_connection: dict = {}
 
     def reply(self, body: bytes, status: int = 200) -> None:
@@ -1289,6 +1387,14 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_usage())
         elif url.path == "/model-tiers":
             self.reply(render_model_tiers())
+        elif url.path == "/machines":
+            try:
+                records = machines.machines(self.fleet_connection)
+                slot_status = slots_redis.status(**self.fleet_connection)
+            except machines.CoordinatorUnreachable:
+                self.reply(render_error("cannot reach the machine registry"), 502)
+                return
+            self.reply(render_machines(records, slot_status))
         elif url.path == "/api/state":
             self.reply_json(gather(self.peek_lines, self.fleet_connection))
         elif url.path == "/peek":
@@ -1391,6 +1497,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             self.reply(render_error("bad Content-Length header"), 400)
             return
+        length = max(0, min(length, MAX_FORM_BYTES))
         raw = self.rfile.read(length) if length else b""
         try:
             form = parse_qs(raw.decode("utf-8"))
@@ -1402,6 +1509,8 @@ class Handler(BaseHTTPRequestHandler):
             self.do_quest_start(form)
         elif url.path == "/quest/stop":
             self.do_quest_stop(form)
+        elif url.path == "/machines/slot-max":
+            self.do_set_slot_max(form)
         else:
             self.reply(render_error("no such page"), 404)
 
@@ -1443,6 +1552,29 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error(f"cannot reach the redis coordinator: {exc}"), 502)
             return
         self.redirect(f"/roadmap?repo={quote(repo, safe='')}" if repo else "/roadmap")
+
+    def do_set_slot_max(self, form: dict) -> None:
+        slot = form.get("slot", [""])[0].strip()
+        raw_max = form.get("max", [""])[0].strip()
+        try:
+            # int(), not raw_max.isdigit(): isdigit() also accepts Unicode
+            # digits like superscript two ('²') that int() then
+            # can't parse, which used to crash this handler.
+            max_value = int(raw_max)
+        except ValueError:
+            max_value = None
+        if not slot or max_value is None or max_value < 1:
+            self.reply(render_error("bad slot-max request"), 400)
+            return
+        try:
+            slots_redis.set_max(slot, max_value, **self.fleet_connection)
+        except machines.CoordinatorUnreachable:
+            self.reply(render_error("cannot reach the machine registry"), 502)
+            return
+        self.send_response(303)
+        self.send_header("Location", "/machines")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
 def _roadmap_rows(model: dict) -> list[dict]:
@@ -1524,11 +1656,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--roadmap", metavar="REPO", help="print a repository roadmap and exit")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--json", action="store_true")
-    # Fleet data (issue #15, also used by issue #19's quest POST routes):
-    # same flags and env-var fallback as cli.py's `_fleet_connection_args`,
-    # kept in sync by hand since serve.py parses its own argv independently
-    # of cli.py (see this function's docstring) and importing cli.py here
-    # would be circular.
+    # Fleet data (issue #15, also used by issue #19's quest POST routes and
+    # issue #20's Machines page): same flags and env-var fallback as
+    # cli.py's `_fleet_connection_args`, kept in sync by hand since serve.py
+    # parses its own argv independently of cli.py (see this function's
+    # docstring) and importing cli.py here would be circular.
     ap.add_argument("--redis-host", default=os.environ.get("LUPIN_REDIS_HOST"))
     ap.add_argument(
         "--redis-port", type=int,
