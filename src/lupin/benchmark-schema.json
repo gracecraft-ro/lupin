@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "properties": {
+    "scores": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "score": {"type": ["number", "null"]},
+          "scale": {"type": ["string", "null"]},
+          "source": {"type": ["string", "null"]},
+          "as_of": {"type": ["string", "null"]},
+          "reason": {"type": ["string", "null"]}
+        },
+        "required": ["id", "score"]
+      }
+    }
+  },
+  "required": ["scores"]
+}

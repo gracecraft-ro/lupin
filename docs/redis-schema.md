@@ -18,6 +18,7 @@ This is the data model `lupin` uses once the `redis` backend exists
 | `cmd:<id>` | string (JSON), with a TTL | one signed command — see Command queue keys below | nothing today |
 | `cmdres:<id>` | string (JSON), with a TTL | one command's result — see Command queue keys below | nothing today |
 | `cmdlog` | capped stream (`XADD ... MAXLEN ~`) | one entry per enqueue and one per terminal outcome — the audit trail | nothing today |
+| `benchmark-snapshot` | string (JSON), with a TTL | one fleet-wide benchmark/quality score per model ID — see Fleet keys below | nothing today |
 
 These are new keys for the fleet CLI (issues #6–#14, split from #2) and the
 cross-machine command queue (issue #28, split from #27). They stay under
@@ -133,6 +134,43 @@ return n
 
 No ACL change needed — `GET`, `SET`, and `EVAL` are already on the list.
 
+### `benchmark-snapshot`
+
+Written by `lupin fetch-benchmarks` (issue #17's reopen; see
+`benchmark_fetch.py`); read by `lupin fetch-benchmarks` and the Models
+page. One key, fleet-wide — a benchmark score doesn't depend on which
+machine looked it up, unlike `model:<name>`'s per-machine model-fetch
+snapshot, so there is no `benchmark-snapshot:<machine>` variant.
+
+```json
+{
+  "fetched_at": "2026-10-07T12:00:00+00:00",
+  "live": true,
+  "source": "claude -p sonnet, web search/fetch",
+  "scores": [
+    {"id": "claude-opus-4-5", "score": 73.1, "scale": "Artificial Analysis Intelligence Index (0-100)",
+     "source": "https://artificialanalysis.ai/models/claude-opus-4-5", "as_of": "2026-10-07"},
+    {"id": "gpt-5.4", "score": null, "reason": "not found"}
+  ]
+}
+```
+
+`live: false` carries a `stale_reason` instead of a `source`/`scores` list
+with real entries — the dispatched agent timed out, exited non-zero, or
+returned something that didn't match its schema. TTL is retention only
+(7 days, `benchmark_fetch.REDIS_KEY_TTL`) — freshness is decided by
+comparing `fetched_at` to a 20-hour window
+(`benchmark_fetch.CACHE_FRESH_SECONDS`), not by the key expiring; the
+same "stored timestamp, not Redis TTL" convention as `machine:<name>`'s
+offline detection above.
+
+Only one machine fetches at a time: `lupin fetch-benchmarks` wraps the
+actual dispatch in `slot:benchmark-fetch` (max 1 holder, no renewal —
+see `benchmark_fetch.py`'s docstring for why a lease TTL alone, not a
+renew timer, is what recovers this slot if its holder crashes mid-fetch).
+A machine that finds the slot already held just reads whatever is in
+`benchmark-snapshot` right now instead of waiting.
+
 ## Command queue keys
 
 These back the cross-machine command queue (`lupin cmd send|status|queue`,
@@ -208,6 +246,8 @@ numbers.
 | Machine heartbeat | 30s | 120s |
 | Command record (`cmd:<id>`) | n/a — not renewed | 1 hour (retention only, see below) |
 | Command result (`cmdres:<id>`) | n/a — not renewed | 1 hour |
+| `slot:benchmark-fetch` lease | n/a — not renewed | ~7 min (`benchmark_fetch.CLAUDE_TIMEOUT` + 60s headroom) |
+| `benchmark-snapshot` | n/a — not renewed | 7 days (retention only, see below) |
 
 A command's Redis retention (1h) is not the same thing as how long it's
 valid to run — that's `expires_at` inside the record (120s after
@@ -236,6 +276,7 @@ Connect timeout 2s, 1 retry, then:
 | Ledger | `lupin` always writes the local file too. The Redis copy misses the entry — v1 has no replay. |
 | Host-scope slot | No change — these never use Redis. |
 | Command queue | `lupin cmd send`/`lupin agent` exit 3. No local fallback, same as claims — a command only means anything if the target machine can see it. |
+| Benchmark snapshot | `lupin fetch-benchmarks` reports `live: false` with a `stale_reason` (exit 0, same convention as `model_fetch.py`'s own failure cases — see `cli.py`'s exit-code table, "any other error" doesn't fit this, it's a data-availability fact, not a usage error). No local fallback — a fleet-shared cache has nothing meaningful to fall back to on one machine. |
 
 After an outage ends, a holder tries to renew its lease. If the lease
 already expired, `lupin` logs "lease lost" and tries to acquire again.
