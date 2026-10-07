@@ -735,17 +735,28 @@ def _format_place_explain(result: dict) -> str:
             lines.append(f"{result['provider']} quota {pct}")
     else:
         lines.append(f"{result['provider']} quota: unknown")
+    if result.get("downgraded_from"):
+        prior = result["downgraded_from"]
+        lines.append(
+            f"{prior['model']} {prior['effort']} was out of quota everywhere -- "
+            f"downgraded to {result['model']} {result['effort']} ({result['provider']})"
+        )
+    elif result.get("wait_seconds") is not None:
+        wait = place_mod.format_duration(result["wait_seconds"])
+        lines.append(f"every candidate is out of quota -- wait {wait}, same model")
     lines.append("")
     if result["candidates"]:
         lines.append(_format_place_table(result))
     skipped = result["skipped"]
-    total_skipped = skipped["offline"] + skipped["other_provider"]
+    total_skipped = skipped["offline"] + skipped["other_provider"] + skipped["quota_exhausted"]
     if total_skipped:
         reasons = []
         if skipped["other_provider"]:
             reasons.append(f"{skipped['other_provider']} run a different provider")
         if skipped["offline"]:
             reasons.append(f"{skipped['offline']} offline")
+        if skipped["quota_exhausted"]:
+            reasons.append(f"{skipped['quota_exhausted']} out of quota")
         lines.append(f"{total_skipped} machine(s) skipped: {', '.join(reasons)}")
     return "\n".join(lines)
 
@@ -763,7 +774,15 @@ def _cmd_place(args: argparse.Namespace) -> int:
         print(_format_place_explain(result))
         return 0 if result["pick"] else 2
     if not result["pick"]:
-        print(f"no online machine runs provider {result['provider']!r}", file=sys.stderr)
+        if result["wait_seconds"] is not None:
+            wait = place_mod.format_duration(result["wait_seconds"])
+            print(
+                f"every {result['provider']!r} machine is out of quota -- "
+                f"wait {wait}, same model ({result['model']})",
+                file=sys.stderr,
+            )
+        else:
+            print(f"no online machine runs provider {result['provider']!r}", file=sys.stderr)
         return 2
     print(result["run_command"])
     return 0
