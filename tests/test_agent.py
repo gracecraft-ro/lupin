@@ -45,7 +45,8 @@ def test_valid_command_runs_via_systemd_run_and_produces_ok_result(redis_port, f
     touched = agent.poll_once("jesus", KEY, **kw)
 
     assert fake.calls == [[
-        "systemd-run", f"--unit=lupin-cmd-{cmd_id[:8]}", "--collect", "--wait", "loopctl", "stop", "lupin",
+        "sudo", "-n", "systemd-run", f"--unit=lupin-cmd-{cmd_id[:8]}", "--collect", "--wait", "--pipe",
+        "loopctl", "stop", "lupin",
     ]]
     assert touched == [{"id": cmd_id, "state": "ok"}]
     status = commands.get_status(cmd_id, **kw)
@@ -58,7 +59,10 @@ def test_valid_command_runs_via_systemd_run_and_produces_ok_result(redis_port, f
     assert raw.zrange("lupin:v1:cmdq:jesus", 0, -1) == []
 
 
-def test_loop_run_also_wraps_in_systemd_run(redis_port, flush_redis, monkeypatch):
+def test_loop_run_wraps_in_systemd_run_without_waiting(redis_port, flush_redis, monkeypatch):
+    # No --wait/--pipe: `loopctl run` execs into a loop meant to outlive
+    # this command's own result, so the agent must not block on it (see
+    # agent.py's module docstring).
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     cmd_id = commands.enqueue("jesus", "loop.run", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)
 
@@ -68,7 +72,8 @@ def test_loop_run_also_wraps_in_systemd_run(redis_port, flush_redis, monkeypatch
     agent.poll_once("jesus", KEY, **kw)
 
     assert fake.calls == [[
-        "systemd-run", f"--unit=lupin-cmd-{cmd_id[:8]}", "--collect", "loopctl", "run", "lupin",
+        "sudo", "-n", "systemd-run", f"--unit=lupin-cmd-{cmd_id[:8]}", "--collect",
+        "loopctl", "run", "lupin",
     ]]
 
 
@@ -161,7 +166,8 @@ def test_valid_repo_formats_are_accepted(redis_port, flush_redis, monkeypatch):
 
     assert touched == [{"id": cmd_id, "state": "ok"}]
     assert fake.calls == [[
-        "systemd-run", f"--unit=lupin-cmd-{cmd_id[:8]}", "--collect", "--wait", "loopctl", "stop", "field-trip_2.0",
+        "sudo", "-n", "systemd-run", f"--unit=lupin-cmd-{cmd_id[:8]}", "--collect", "--wait", "--pipe",
+        "loopctl", "stop", "field-trip_2.0",
     ]]
 
 
@@ -351,6 +357,192 @@ def test_missing_required_param_is_rejected_without_executing(redis_port, flush_
     assert status["state"] == "rejected"
 
 
+def test_sudo_systemd_run_includes_sudo_and_wait_pipe():
+    """Bug fixes #1/#2 from issue #2's dispatch: every short-lived mutating
+    action's argv must run as `sudo -n` (every other `systemd-run` call in
+    ghostbook.nix needs it) and with `--wait --pipe` (so the reported exit
+    code is the action's, not just "did the transient unit start")."""
+    argv = agent._sudo_systemd_run("abcdef1234", "stop", "lupin")
+    assert argv[:3] == ["sudo", "-n", "systemd-run"]
+    assert "--wait" in argv
+    assert "--pipe" in argv
+    assert argv[-3:] == ["loopctl", "stop", "lupin"]
+
+
+def test_sudo_systemd_run_wait_false_omits_wait_and_pipe():
+    """`loop.run` passes `wait=False` -- it execs into a loop meant to
+    outlive this command's own result, so the agent must not block on it
+    (see agent.py's module docstring)."""
+    argv = agent._sudo_systemd_run("abcdef1234", "run", "lupin", wait=False)
+    assert argv == [
+        "sudo", "-n", "systemd-run", "--unit=lupin-cmd-abcdef12", "--collect",
+        "loopctl", "run", "lupin",
+    ]
+
+
+def testvalidate_cal_expr_rejects_newline():
+    with pytest.raises(agent.RejectedCommand):
+        agent.validate_cal_expr("*-*-* 00:00:00\n[Service]\nExecStart=rm -rf /")
+
+
+def testvalidate_cal_expr_rejects_control_char():
+    with pytest.raises(agent.RejectedCommand):
+        agent.validate_cal_expr("*-*-* 00\x0000:00")
+
+
+def testvalidate_cal_expr_rejects_overlength():
+    with pytest.raises(agent.RejectedCommand):
+        agent.validate_cal_expr("x" * (agent._CAL_EXPR_MAX_LEN + 1))
+
+
+def testvalidate_cal_expr_accepts_a_normal_expression():
+    assert agent.validate_cal_expr("*-*-* 00/5:00:00") == "*-*-* 00/5:00:00"
+
+
+def test_loop_peek_runs_loopctl_directly_without_systemd_run(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    cmd_id = commands.enqueue("jesus", "loop.peek", {"repo": "lupin", "lines": "20"}, key=KEY, **ACTOR_KW, **kw)
+
+    fake = _fake_run(returncode=0, stdout="pane text")
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert fake.calls == [["loopctl", "peek", "lupin", "20"]]
+    assert touched == [{"id": cmd_id, "state": "ok"}]
+
+
+def test_loop_peek_defaults_lines_to_sixty(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    commands.enqueue("jesus", "loop.peek", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)
+
+    fake = _fake_run(returncode=0)
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    agent.poll_once("jesus", KEY, **kw)
+
+    assert fake.calls == [["loopctl", "peek", "lupin", "60"]]
+
+
+def test_schedule_show_runs_loopctl_directly_without_systemd_run(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    commands.enqueue("jesus", "schedule.show", {}, key=KEY, **ACTOR_KW, **kw)
+
+    fake = _fake_run(returncode=0)
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    agent.poll_once("jesus", KEY, **kw)
+
+    assert fake.calls == [["loopctl", "schedule"]]
+
+
+def test_schedule_set_cal_wraps_in_systemd_run_after_validation(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    cmd_id = commands.enqueue(
+        "jesus", "schedule.set", {"mode": "cal", "expr": "*-*-* 00/5:00:00"}, key=KEY, **ACTOR_KW, **kw
+    )
+
+    fake = _fake_run(returncode=0)
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+    monkeypatch.setattr(agent.shutil, "which", lambda name: None)  # no systemd-analyze in this sandbox
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert fake.calls == [[
+        "sudo", "-n", "systemd-run", f"--unit=lupin-cmd-{cmd_id[:8]}", "--collect", "--wait", "--pipe",
+        "loopctl", "schedule", "cal", "*-*-* 00/5:00:00",
+    ]]
+    assert touched == [{"id": cmd_id, "state": "ok"}]
+
+
+def test_schedule_set_cal_with_newline_is_rejected_without_executing(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    cmd_id = commands.enqueue(
+        "jesus", "schedule.set",
+        {"mode": "cal", "expr": "*-*-* 00:00:00\n[Service]\nExecStart=rm -rf /"},
+        key=KEY, **ACTOR_KW, **kw,
+    )
+
+    fake = _fake_run()
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert fake.calls == []
+    assert touched == [{"id": cmd_id, "state": "rejected"}]
+
+
+def test_schedule_set_cal_rejected_when_systemd_analyze_says_invalid(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    cmd_id = commands.enqueue(
+        "jesus", "schedule.set", {"mode": "cal", "expr": "not a real expression"}, key=KEY, **ACTOR_KW, **kw
+    )
+
+    fake = _fake_run()
+    monkeypatch.setattr(agent.shutil, "which", lambda name: "/usr/bin/systemd-analyze")
+    monkeypatch.setattr(
+        agent.subprocess, "run",
+        lambda argv, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="bad")
+        if argv[:2] == ["/usr/bin/systemd-analyze", "calendar"] else fake(argv, **kwargs),
+    )
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert touched == [{"id": cmd_id, "state": "rejected"}]
+    assert fake.calls == []
+
+
+def test_schedule_set_first_wraps_in_systemd_run(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    cmd_id = commands.enqueue(
+        "jesus", "schedule.set", {"mode": "first", "when": "+2h5m", "interval": "5h15m"},
+        key=KEY, **ACTOR_KW, **kw,
+    )
+
+    fake = _fake_run(returncode=0)
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert fake.calls == [[
+        "sudo", "-n", "systemd-run", f"--unit=lupin-cmd-{cmd_id[:8]}", "--collect", "--wait", "--pipe",
+        "loopctl", "schedule", "first", "+2h5m", "every", "5h15m",
+    ]]
+    assert touched == [{"id": cmd_id, "state": "ok"}]
+
+
+def test_schedule_pause_wraps_in_systemd_run(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    cmd_id = commands.enqueue("jesus", "schedule.pause", {}, key=KEY, **ACTOR_KW, **kw)
+
+    fake = _fake_run(returncode=0)
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert fake.calls == [[
+        "sudo", "-n", "systemd-run", f"--unit=lupin-cmd-{cmd_id[:8]}", "--collect", "--wait", "--pipe",
+        "loopctl", "pause",
+    ]]
+    assert touched == [{"id": cmd_id, "state": "ok"}]
+
+
+def test_schedule_resume_wraps_in_systemd_run(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    cmd_id = commands.enqueue("jesus", "schedule.resume", {}, key=KEY, **ACTOR_KW, **kw)
+
+    fake = _fake_run(returncode=0)
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert fake.calls == [[
+        "sudo", "-n", "systemd-run", f"--unit=lupin-cmd-{cmd_id[:8]}", "--collect", "--wait", "--pipe",
+        "loopctl", "resume",
+    ]]
+    assert touched == [{"id": cmd_id, "state": "ok"}]
+
+
 def test_draining_machine_rejects_loop_run_without_executing(redis_port, flush_redis, monkeypatch):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
@@ -368,6 +560,40 @@ def test_draining_machine_rejects_loop_run_without_executing(redis_port, flush_r
     assert "draining" in status["reason"]
 
 
+def test_draining_machine_rejects_schedule_set_without_executing(redis_port, flush_redis, monkeypatch):
+    # schedule.set arms a timer to start a loop later -- draining blocks it
+    # the same as loop.run (see DRAIN_ALLOWED's comment in agent.py).
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set("lupin:v1:machine:jesus", json.dumps({"state": "draining"}))
+    cmd_id = commands.enqueue(
+        "jesus", "schedule.set", {"mode": "first", "when": "+1h", "interval": "1h"}, key=KEY, **ACTOR_KW, **kw
+    )
+
+    fake = _fake_run()
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert fake.calls == []
+    assert touched == [{"id": cmd_id, "state": "rejected"}]
+
+
+def test_draining_machine_rejects_schedule_resume_without_executing(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set("lupin:v1:machine:jesus", json.dumps({"state": "draining"}))
+    cmd_id = commands.enqueue("jesus", "schedule.resume", {}, key=KEY, **ACTOR_KW, **kw)
+
+    fake = _fake_run()
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert fake.calls == []
+    assert touched == [{"id": cmd_id, "state": "rejected"}]
+
+
 def test_draining_machine_still_runs_loop_stop(redis_port, flush_redis, monkeypatch):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
@@ -381,6 +607,22 @@ def test_draining_machine_still_runs_loop_stop(redis_port, flush_redis, monkeypa
 
     assert touched == [{"id": cmd_id, "state": "ok"}]
     assert len(fake.calls) == 1
+
+
+def test_draining_machine_still_runs_peek_show_and_pause(redis_port, flush_redis, monkeypatch):
+    # Read-only actions, and schedule.pause (winds a timer down, same
+    # shape as loop.stop) -- all three are in DRAIN_ALLOWED.
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set("lupin:v1:machine:jesus", json.dumps({"state": "draining"}))
+
+    fake = _fake_run(returncode=0)
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    for action, params in (("loop.peek", {"repo": "lupin"}), ("schedule.show", {}), ("schedule.pause", {})):
+        cmd_id = commands.enqueue("jesus", action, params, key=KEY, **ACTOR_KW, **kw)
+        touched = agent.poll_once("jesus", KEY, **kw)
+        assert touched == [{"id": cmd_id, "state": "ok"}], action
 
 
 def test_non_draining_machine_runs_loop_run_normally(redis_port, flush_redis, monkeypatch):

@@ -22,20 +22,47 @@ ever reaches `subprocess.run`:
 decision: `loopctl` already has the hard-won edge cases (scrollback save,
 keepalive session, exact tmux target match). Every handler returns a list
 argv, never a shell string -- execution is always
-`subprocess.run(argv, shell=False)`. Both actions run inside a transient
-unit (`systemd-run --unit=lupin-cmd-<id8> --collect ...`), so a restart of
-the `lupin-agent` service (`KillMode=process`, #29) can't kill an
-in-flight `loopctl` run. `loop.stop` adds `--wait`, since it finishes in a
-few seconds -- without it, `systemd-run` returns the moment the unit
-*starts*, so the reported "ok" would mean "launched", not "done". `loop.run`
-stays detached: it starts a loop meant to keep running long after this
-command's own result is reported, so the agent must not block on it.
+`subprocess.run(argv, shell=False)`.
+
+There are three kinds of action:
+- Short actions that change something (`loop.stop`, `schedule.set`,
+  `schedule.pause`, `schedule.resume`). These run as:
+  `sudo -n systemd-run --unit=lupin-cmd-<id8> --collect --wait --pipe loopctl ...`
+  They need `sudo -n` because every other `systemd-run` call in
+  ghostbook.nix needs it too. This process's own user cannot run
+  `systemd-run` on its own.
+  They need `--wait --pipe` so the reported exit code is the real exit
+  code of the action, not just "the unit started". An earlier version of
+  this code skipped `--wait`. It then reported success as soon as the
+  unit *launched*, even if the action inside later failed.
+- The one long-running action that changes something (`loop.run`). It
+  uses the same `sudo -n systemd-run ... loopctl run ...` command, but
+  without `--wait`/`--pipe`. `loopctl run` hands off straight to
+  `delegation-launch`, a process meant to keep running long after this
+  command reports its result. This module must not wait for it to
+  finish. It still runs inside its own systemd unit, so restarting the
+  `lupin-agent` service (`KillMode=process`, issue #29) cannot kill it.
+- Read-only actions (`loop.peek`, `schedule.show`). These run `loopctl`
+  directly, with no `systemd-run` wrapper. There is nothing to isolate,
+  and `subprocess.run`'s own timeout already covers the wait.
+
+`schedule.set`'s `cal` mode is checked before it reaches `loopctl`.
+`loopctl schedule cal "<expr>"` (in ghostbook.nix) writes `<expr>`
+straight into a systemd timer file, using a plain `printf` with no
+escaping. If `expr` had a newline in it, it could add extra lines to
+that file that nobody asked for. `validate_cal_expr` rejects a newline,
+another control character, or a string that is too long. This check
+uses only string operations, no subprocess call, so it still runs where
+`systemd-analyze` is not installed. `_check_cal_expr_with_systemd_analyze`
+adds a real syntax check on top, using `systemd-analyze calendar`, when
+that program is available.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import time
 
@@ -55,6 +82,13 @@ OUTPUT_CAP = 8192  # 8 KiB, combined stdout+stderr -- design's "last 8 KiB combi
 # though nothing upstream validates yet either.
 _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
+# These limits are big enough for a real value. They are small enough to
+# stop someone from hiding something else inside a long string.
+_CAL_EXPR_MAX_LEN = 256
+_SCHEDULE_TOKEN_MAX_LEN = 64
+_DEFAULT_PEEK_LINES = 60
+_MAX_PEEK_LINES = 5000
+
 
 class RejectedCommand(Exception):
     """A command whose params don't fit its action -- caught before
@@ -67,22 +101,130 @@ def _validate_repo(repo) -> str:
     return repo
 
 
+def _validate_peek_lines(value) -> int:
+    if value is None:
+        return _DEFAULT_PEEK_LINES
+    try:
+        lines = int(value)
+    except (TypeError, ValueError):
+        raise RejectedCommand(f"invalid lines {value!r}")
+    if not (1 <= lines <= _MAX_PEEK_LINES):
+        raise RejectedCommand(f"lines must be 1-{_MAX_PEEK_LINES}, got {lines}")
+    return lines
+
+
+def _reject_unsafe_text(label: str, value, max_len: int) -> str:
+    """Check one string field before it is written into a config file or
+    passed as a `loopctl` argument. Several fields share this check. A
+    newline or other control character in any of them is the same kind
+    of injection risk as the `cal` expression described in the module
+    docstring."""
+    if not isinstance(value, str) or not value:
+        raise RejectedCommand(f"{label} must be a non-empty string")
+    if len(value) > max_len:
+        raise RejectedCommand(f"{label} longer than {max_len} characters")
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in value):
+        raise RejectedCommand(f"{label} contains a newline or control character")
+    return value
+
+
+def validate_cal_expr(expr) -> str:
+    """Check characters and length only. No subprocess call, so this
+    check (and its tests) still run where `systemd-analyze` is not
+    installed. See `_check_cal_expr_with_systemd_analyze` for the real
+    syntax check on top."""
+    return _reject_unsafe_text("cal expression", expr, _CAL_EXPR_MAX_LEN)
+
+
+def validate_schedule_token(label: str, value) -> str:
+    return _reject_unsafe_text(f"schedule {label}", value, _SCHEDULE_TOKEN_MAX_LEN)
+
+
+def _check_cal_expr_with_systemd_analyze(expr: str) -> None:
+    """Ask systemd whether `expr` is a valid calendar expression. This is
+    the same check a person would run by hand before trusting one.
+
+    If `systemd-analyze` is not on PATH, this function does nothing --
+    it does not pretend the check passed. That way, a sandbox without
+    the binary still runs `validate_cal_expr` above, instead of skipping
+    all checks.
+    """
+    binary = shutil.which("systemd-analyze")
+    if binary is None:
+        return
+    proc = subprocess.run([binary, "calendar", expr], capture_output=True, text=True, timeout=5.0)
+    if proc.returncode != 0:
+        raise RejectedCommand(f"not a valid calendar expression: {expr!r}")
+
+
 def _unit_name(cmd_id: str) -> str:
     return f"lupin-cmd-{cmd_id[:8]}"
 
 
+def _sudo_systemd_run(cmd_id: str, *loopctl_args: str, wait: bool = True) -> list[str]:
+    """Build the argv for an action that changes something:
+    `sudo -n systemd-run ... loopctl <loopctl_args>`.
+
+    It uses `sudo -n` because every other `systemd-run` call in
+    ghostbook.nix needs it too -- this process's own user has no right
+    to run `systemd-run` on its own.
+
+    By default (`wait=True`) it adds `--wait --pipe`, so
+    `subprocess.run`'s returncode is the real exit code of the action,
+    not just "the unit started". `wait=False` is only for `loop.run` --
+    see the module docstring for why that one action must not block.
+    """
+    argv = ["sudo", "-n", "systemd-run", f"--unit={_unit_name(cmd_id)}", "--collect"]
+    if wait:
+        argv += ["--wait", "--pipe"]
+    argv += ["loopctl", *loopctl_args]
+    return argv
+
+
 def _handle_loop_stop(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
-    # --wait: block until `loopctl stop` itself finishes, so "ok" means the
-    # loop actually stopped, not just that the unit launched.
-    return ["systemd-run", f"--unit={_unit_name(cmd_id)}", "--collect", "--wait", "loopctl", "stop", repo]
+    return _sudo_systemd_run(cmd_id, "stop", repo)
 
 
 def _handle_loop_run(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
-    # No --wait: this starts a loop meant to keep running well past this
-    # command's result, so the agent must not block on it.
-    return ["systemd-run", f"--unit={_unit_name(cmd_id)}", "--collect", "loopctl", "run", repo]
+    # No --wait/--pipe: `loopctl run` hands off to a loop that keeps
+    # running long after this command reports its result (see module
+    # docstring).
+    return _sudo_systemd_run(cmd_id, "run", repo, wait=False)
+
+
+def _handle_loop_peek(params: dict, cmd_id: str) -> list[str]:
+    # Read-only action -- run loopctl directly, no systemd-run wrapper
+    # (see the module docstring's three kinds of action).
+    repo = _validate_repo(params.get("repo"))
+    lines = _validate_peek_lines(params.get("lines"))
+    return ["loopctl", "peek", repo, str(lines)]
+
+
+def _handle_schedule_show(params: dict, cmd_id: str) -> list[str]:
+    return ["loopctl", "schedule"]
+
+
+def _handle_schedule_set(params: dict, cmd_id: str) -> list[str]:
+    mode = params.get("mode")
+    if mode == "cal":
+        expr = validate_cal_expr(params.get("expr"))
+        _check_cal_expr_with_systemd_analyze(expr)
+        return _sudo_systemd_run(cmd_id, "schedule", "cal", expr)
+    if mode == "first":
+        when = validate_schedule_token("when", params.get("when"))
+        interval = validate_schedule_token("interval", params.get("interval"))
+        return _sudo_systemd_run(cmd_id, "schedule", "first", when, "every", interval)
+    raise RejectedCommand(f"unknown schedule mode {mode!r}")
+
+
+def _handle_schedule_pause(params: dict, cmd_id: str) -> list[str]:
+    return _sudo_systemd_run(cmd_id, "pause")
+
+
+def _handle_schedule_resume(params: dict, cmd_id: str) -> list[str]:
+    return _sudo_systemd_run(cmd_id, "resume")
 
 
 # Fixed, explicit allowlist -- the only actions this process will ever run.
@@ -90,11 +232,22 @@ def _handle_loop_run(params: dict, cmd_id: str) -> list[str]:
 ACTIONS = {
     "loop.stop": _handle_loop_stop,
     "loop.run": _handle_loop_run,
+    "loop.peek": _handle_loop_peek,
+    "schedule.show": _handle_schedule_show,
+    "schedule.set": _handle_schedule_set,
+    "schedule.pause": _handle_schedule_pause,
+    "schedule.resume": _handle_schedule_resume,
 }
 
-# Actions a draining machine still accepts -- #27's design: draining blocks
-# anything that starts new work, not actions that wind work down.
-DRAIN_ALLOWED = {"loop.stop"}
+# Actions a draining machine still accepts. Issue #27's design: draining
+# blocks anything that starts new work. It does not block actions that
+# wind work down, or actions that only read state.
+# `loop.stop` and `schedule.pause` wind down -- they stop a loop, or stop
+# a timer from firing again. `loop.peek` and `schedule.show` only read
+# state. `loop.run` starts a loop, so it is blocked. `schedule.set` and
+# `schedule.resume` are blocked too -- both arm a timer to start a loop
+# later, which still counts as starting new work, just delayed.
+DRAIN_ALLOWED = {"loop.stop", "loop.peek", "schedule.show", "schedule.pause"}
 
 
 def _write_result(client, cmd_id: str, payload: dict, *, overwrite: bool = False) -> bool:

@@ -15,6 +15,8 @@
    registry, and quests (a set of issues worked together on one machine).
    Commands: `claim`, `renew-claim`, `release-claim`, `join`, `heartbeat`,
    `drain`, `undrain`, `machines`, `place`, `quest`, `reconcile`, `roadmap`.
+   Loop control from any machine: `stop`, `peek`, `attach`, `schedule`,
+   `pause`, `resume`.
 
 One program, `lupin`, with subcommands. Run `lupin --help` for the full list.
 
@@ -31,6 +33,14 @@ lupin hold (--lease ID | <slot> --holder H --wait S) [--ttl SECONDS] -- <command
 lupin release --lease ID
 lupin status [--json]
 lupin serve [--bind 127.0.0.1] [--port 8788] [--roadmap REPO]
+lupin stop <repo> [--machine M] [--wait S] [--json]
+lupin peek <repo> [LINES] [--machine M] [--json]
+lupin attach <repo> [--machine M] [--print]
+lupin schedule [--machine M] [--json]
+lupin schedule cal <expr> [--machine M] [--json]
+lupin schedule first <when> every <interval> [--machine M] [--json]
+lupin pause [--machine M | --all] [--json]
+lupin resume [--machine M | --all] [--json]
 ```
 
 `route` and `classify` print a plain result by default (`model effort`, or
@@ -64,6 +74,30 @@ matched by model ID — a model with no match gets `price: null`, never a
 guessed number. Promo pricing (a free or discounted period with its own
 start and end) has no live source yet either; the `promo` field stays
 `null` until issue #18 adds one.
+
+`stop`/`peek`/`schedule`/`pause`/`resume`/`attach` (issue #2 phase A)
+control a loop from any fleet machine. Local target: run `loopctl`
+directly. Remote target: send a signed command over the Redis queue
+(needs `--signing-key` or `$LUPIN_CMD_SIGNING_KEY`) and wait up to `--wait`
+seconds (default 20) for a result. Two exit codes besides the usual ones:
+4 means sent but the result is still unknown after the wait (check later
+with `lupin cmd status <id>`); 5 means `stop`/`peek` couldn't tell which
+machine runs `<repo>` (0 or more than 1 match) -- pass `--machine`.
+`attach` never goes through the queue; it execs a terminal directly, and
+`--print` shows the command instead of running it.
+
+A remote `attach` needs to know which host to `ssh` into. That mapping
+lives in a plain text file, `~/.config/lupin/ssh-targets` -- one machine
+per line, `<machine> <target>`, blank lines and `#` comments ignored:
+
+```
+jesus   ghosta@jesus.local
+mini    ghosta@mini.tailnet.ts.net
+```
+
+This file is local, per-machine config (written by Nix in practice), not
+fleet state. No line for a machine: `attach` fails with an error instead
+of guessing a hostname.
 
 ## How a slot's limit (`max`) works
 
@@ -103,6 +137,9 @@ The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
   issue claimed by one host at a time.
 - `src/lupin/machines.py` — `join`/`heartbeat`/`drain`/`undrain`/`machines`:
   the fleet's machine registry.
+- `src/lupin/loops.py` — shared local-or-remote dispatch for
+  `stop`/`peek`/`schedule`/`pause`/`resume`, used by both `cli.py` and
+  `serve.py` so the two don't drift.
 - `src/lupin/quest.py` — `quest start`/`stop`/`focus`/`release`: a set of
   issues worked together on one machine.
 - `src/lupin/place.py` — `place`: picks which fleet machine should run a

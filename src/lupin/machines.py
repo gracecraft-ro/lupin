@@ -23,6 +23,29 @@ machines retired long ago -- not the thing that decides online/offline.
 write. `providers` is still a stub (`[]`) -- nothing populates it yet, but
 `_write_record` carries over whatever is already there instead of
 overwriting it, so a future writer's value survives the next heartbeat.
+
+`loops` (issue #2 phase A) lists this machine's live loops. Each entry
+looks like `{"repo", "platform", "state", "since"}`. `state` is always
+`None` for now -- there is no signal yet that reports a loop's own state
+on the tmux backend.
+
+Like `providers`, a write that does not recompute `loops`
+(`join`/`drain`/`undrain`) leaves the existing value alone instead of
+wiping it out. `heartbeat()` is meant to be the one call that keeps
+`loops` fresh.
+
+This module has no way to read tmux or run `loopctl` itself -- that code
+lives in `serve.py`. `serve.py` already imports this module, so this
+module cannot import `serve.py` back (that would be a cycle). Instead,
+the caller (`cli.py`) reads the loop list itself and passes it in.
+
+`session_backend` is always `"tmux"` for now, on every machine. This
+will change once ghostbook.nix's `LOOP_BACKEND` setting ships (issue #2,
+phase B).
+
+`actions` is the list of queue actions this machine's `lupin agent`
+accepts. It is read straight from `agent.ACTIONS`, so it always matches
+what the agent actually runs.
 """
 
 from __future__ import annotations
@@ -45,6 +68,12 @@ OFFLINE_AFTER = 120.0
 RECORD_TTL = int(OFFLINE_AFTER * 20)
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "lupin" / "fleet.json"
 _REDIS_ERRORS = (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)
+
+# Issue #2, phase A: every machine runs loops over tmux right now. This
+# will become a per-machine setting once ghostbook.nix's `LOOP_BACKEND`
+# setting ships (phase B). Until then, this module does not need to
+# decide it.
+SESSION_BACKEND = "tmux"
 
 
 def package_version() -> str:
@@ -148,13 +177,15 @@ def _slot_summary(connection: dict) -> dict:
     return {name: {"used": info["holders"], "max": info["max"]} for name, info in raw.items()}
 
 
-def _write_record(client, name: str, *, state: str, connection: dict) -> dict:
-    """`providers` has no writer yet -- carry over whatever the existing
-    record has (same reason `heartbeat` carries over `state`), so a plain
-    heartbeat can't wipe it out once something does write it. `quota` is
-    the opposite: it is recomputed here every time, since this function is
-    the only writer of `machine:<name>` and a stale quota reading is worse
-    than the extra `quota.snapshot()` call.
+def _write_record(client, name: str, *, state: str, connection: dict, loops: list[dict] | None = None) -> dict:
+    """Not every caller recomputes `providers`/`loops` on every write. When
+    `loops` isn't given, this carries over whatever the existing record
+    already has -- the same reason `heartbeat` carries over `state` --
+    so a plain `join`/`drain`/`undrain` can't wipe it out.
+
+    `quota` is the opposite: it is recomputed here every time. This
+    function is the only writer of `machine:<name>`, and a stale quota
+    reading is worse than the extra `quota.snapshot()` call costs.
 
     `actions` is read live from `agent.py`'s own `ACTIONS` table (imported
     here, not at module load, to avoid a top-level import cycle -- `agent.py`
@@ -171,6 +202,8 @@ def _write_record(client, name: str, *, state: str, connection: dict) -> dict:
         "slots": _slot_summary(connection),
         "providers": existing.get("providers", []) if existing else [],
         "quota": quota.snapshot(),
+        "loops": loops if loops is not None else (existing.get("loops", []) if existing else []),
+        "session_backend": SESSION_BACKEND,
         "actions": sorted(agent.ACTIONS),
     }
     client.set(_record_key(name), json.dumps(record), ex=RECORD_TTL)
@@ -200,6 +233,7 @@ def join(
     redis_username: str | None = None,
     redis_password: str | None = None,
     config_path: str | Path | None = None,
+    loops: list[dict] | None = None,
 ) -> dict:
     """Write the Redis location (+ user, if given) to the local fleet
     config, then register this machine as online. The password is taken
@@ -221,13 +255,18 @@ def join(
     }
     client = slots_redis._client(host, port, redis_username, redis_password)
     name = hostname()
-    record = _run(lambda: _write_record(client, name, state="online", connection=connection))
+    record = _run(lambda: _write_record(client, name, state="online", connection=connection, loops=loops))
     return {"name": name, "config_path": str(path), **record}
 
 
-def heartbeat(connection: dict) -> dict:
+def heartbeat(connection: dict, *, loops: list[dict] | None = None) -> dict:
     """Refresh this machine's record, keeping whatever `state` it already
     had (so a draining machine stays draining through a heartbeat).
+
+    `loops` is this machine's current live-loop list (issue #2 phase A).
+    The caller (`cli.py`) reads that list itself and passes it in -- this
+    module has no way to read tmux or run `loopctl` (see module
+    docstring).
     """
     client = slots_redis._client(
         connection.get("redis_host"),
@@ -240,7 +279,7 @@ def heartbeat(connection: dict) -> dict:
     def op():
         existing = _read_record(client, name)
         state = existing["state"] if existing else "online"
-        return _write_record(client, name, state=state, connection=connection)
+        return _write_record(client, name, state=state, connection=connection, loops=loops)
 
     return _run(op)
 
@@ -267,7 +306,7 @@ def undrain(connection: dict) -> dict:
 def machines(connection: dict) -> list[dict]:
     """Every registered machine, each as:
     `{"name", "state", "version", "heartbeat", "version_mismatch", "slots",
-    "providers", "quota", "actions"}`.
+    "providers", "quota", "loops", "session_backend", "actions"}`.
 
     `state` is the record's own `online`/`draining`, overridden to
     `offline` once `OFFLINE_AFTER` seconds have passed since `heartbeat`
@@ -279,6 +318,12 @@ def machines(connection: dict) -> list[dict]:
     scores machines on exactly this data. Earlier callers only read
     name/state/version/heartbeat, so this is a pure addition, not a change
     to those fields.
+
+    `loops`/`session_backend`/`actions` (issue #2 phase A) are the same
+    kind of addition. Every read here uses `.get(..., default)`, so a
+    machine still running an older `lupin` -- one that never wrote these
+    fields -- shows up with an empty or unknown value instead of raising
+    `KeyError`.
     """
     client = slots_redis._client(
         connection.get("redis_host"),
@@ -311,6 +356,8 @@ def machines(connection: dict) -> list[dict]:
                     "slots": record.get("slots", {}),
                     "providers": record.get("providers", []),
                     "quota": record.get("quota", {}),
+                    "loops": record.get("loops", []),
+                    "session_backend": record.get("session_backend"),
                     "actions": record.get("actions", []),
                 }
             )
