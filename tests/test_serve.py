@@ -2040,6 +2040,38 @@ class LoopsRouteUnitTests(unittest.TestCase):
         handler.do_POST()
         self.assertEqual(handler.reply.call_args.args[1], 400)
 
+    def test_send_route_rejects_bad_repo_name(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/send", {"repo": "../etc", "machine": "h", "text": "hi"})
+        handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+
+    def test_send_route_rejects_empty_text(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/send", {"repo": "a", "machine": "h", "text": "   "})
+        handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+
+    def test_send_route_runs_the_local_lupin_action(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/send", {"repo": "a", "machine": "h", "text": "yes, keep going"})
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
+        ):
+            handler.do_POST()
+        fake_run.assert_called_once_with(
+            ["lupin", "loop", "local-action", "send", "a", "yes, keep going"], timeout=20.0
+        )
+        handler.redirect.assert_called_once_with("/loops?repo=a")
+
+    def test_send_route_remote_machine_without_signing_key_is_rejected(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/send", {"repo": "a", "machine": "jesus", "text": "hi"})
+        with mock.patch.object(serve.machines, "hostname", return_value="h"):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+
     def test_start_route_rejects_bad_repo_name(self):
         handler = _loops_handler()
         _post_body(handler, "/loops/start", {"repo": "bad name", "machine": "h"})

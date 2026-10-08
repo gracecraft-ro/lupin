@@ -183,6 +183,24 @@ def _handle_loop_peek(params: dict, cmd_id: str) -> list[str]:
     return ["lupin", "loop", "local-action", "peek", repo, str(lines)]
 
 
+_MAX_SEND_CHARS = 2000
+
+
+def _validate_send_text(value) -> str:
+    # One printable line. A newline would submit before the user is done typing.
+    if not isinstance(value, str) or not value.strip():
+        raise RejectedCommand("text must be a non-empty string")
+    if len(value) > _MAX_SEND_CHARS or not value.isprintable():
+        raise RejectedCommand(f"text must be one printable line of at most {_MAX_SEND_CHARS} characters")
+    return value
+
+
+def _handle_loop_send(params: dict, cmd_id: str) -> list[str]:
+    repo = _validate_repo(params.get("repo"))
+    text = _validate_send_text(params.get("text"))
+    return ["lupin", "loop", "local-action", "send", repo, text]
+
+
 def _handle_loop_state(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
     return ["lupin", "loop", "local-action", "state", repo]
@@ -221,6 +239,7 @@ ACTIONS = {
     "loop.run": _handle_loop_run,
     "loop.run-all": _handle_loop_run_all,
     "loop.peek": _handle_loop_peek,
+    "loop.send": _handle_loop_send,
     "loop.state": _handle_loop_state,
     "schedule.show": _handle_schedule_show,
     "schedule.set": _handle_schedule_set,

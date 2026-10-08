@@ -461,3 +461,29 @@ def test_start_loop_refuses_an_open_legacy_session(monkeypatch, tmp_path: Path):
 
     assert not started
     assert "legacy tmux loop-widgets is open" in message
+
+
+def test_send_loop_types_the_text_then_presses_enter(monkeypatch):
+    calls = []
+    monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: {"session": "lupin-widgets-abc123"})
+    monkeypatch.setattr(loop_runtime, "_server_running", lambda session: True)
+    monkeypatch.setattr(
+        loop_runtime, "_find_workspace",
+        lambda session, metadata: {"id": "w1", "root_pane": {"pane_id": "w1:p1", "workspace_id": "w1"}},
+    )
+    monkeypatch.setattr(loop_runtime, "_herdr", lambda session, *args, **kw: calls.append((session, args)) or "")
+
+    loop_runtime.send_loop("widgets", "yes, keep going")
+
+    assert calls == [
+        ("lupin-widgets-abc123", ("pane", "send-text", "w1:p1", "yes, keep going")),
+        ("lupin-widgets-abc123", ("pane", "send-keys", "w1:p1", "Enter")),
+    ]
+
+
+def test_send_loop_refuses_a_loop_that_is_not_running(monkeypatch):
+    monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: {"session": "lupin-widgets-abc123"})
+    monkeypatch.setattr(loop_runtime, "_server_running", lambda session: False)
+
+    with pytest.raises(loop_runtime.LoopError):
+        loop_runtime.send_loop("widgets", "hello")

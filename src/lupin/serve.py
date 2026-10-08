@@ -2514,6 +2514,11 @@ def render_loops(
                 f"<input type=hidden name=repo value='{esc(selected_repo)}'>"
                 f"<input type=hidden name=machine value='{esc(selected['machine'])}'>"
                 "<button type=submit>refresh state</button></form>"
+                "<form method=post action=/loops/send style='display:inline'>"
+                f"<input type=hidden name=repo value='{esc(selected_repo)}'>"
+                f"<input type=hidden name=machine value='{esc(selected['machine'])}'>"
+                "<input name=text maxlength=2000 size=40 required placeholder='type a line to send to the agent'> "
+                "<button type=submit>send</button></form>"
                 "<form method=post action=/loops/close style='display:inline'>"
                 f"<input type=hidden name=repo value='{esc(selected_repo)}'>"
                 f"<input type=hidden name=machine value='{esc(selected['machine'])}'>"
@@ -3110,6 +3115,35 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.redirect(f"/loops?repo={quote(repo, safe='')}")
 
+    def do_loops_send(self, form: dict) -> None:
+        repo = form.get("repo", [""])[0].strip()
+        machine = form.get("machine", [""])[0].strip()
+        text = form.get("text", [""])[0].strip()
+        if not repo or not _valid_repo_name(repo) or not machine or not text:
+            self.reply(render_error("bad send request"), 400)
+            return
+        local_host = machines.hostname()
+        signing_key = self._signing_key_for(machine)
+        if machine != local_host and not signing_key:
+            self.reply(render_error(f"no signing key is configured for {machine!r}"), 400)
+            return
+        try:
+            result = loops.dispatch_loop_action(
+                machine=machine, local_host=local_host,
+                local_argv=["lupin", "loop", "local-action", "send", repo, text],
+                queue_action="loop.send", queue_params={"repo": repo, "text": text},
+                connection=self.fleet_connection, signing_key=signing_key,
+                actor="lupin-dashboard", issuer=local_host,
+                run_local=lambda argv: run(argv, timeout=20.0),
+            )
+        except CoordinatorUnreachable:
+            self.reply(render_error("cannot reach the redis coordinator"), 502)
+            return
+        if result["mode"] == "local" and result["returncode"] != 0:
+            self.reply(render_error("send failed:\n" + result["output"].strip()), 502)
+            return
+        self.redirect(f"/loops?repo={quote(repo, safe='')}")
+
     def do_loops_start(self, form: dict) -> None:
         repo = form.get("repo", [""])[0].strip()
         machine = form.get("machine", [""])[0].strip()
@@ -3400,6 +3434,8 @@ class Handler(BaseHTTPRequestHandler):
             self.do_set_slot_max(form)
         elif url.path == "/loops/close":
             self.do_loops_close(form)
+        elif url.path == "/loops/send":
+            self.do_loops_send(form)
         elif url.path == "/loops/state":
             self.do_loops_state(form)
         elif url.path == "/loops/start":

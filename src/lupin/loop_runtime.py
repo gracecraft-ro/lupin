@@ -885,6 +885,23 @@ def peek_loop(repo: str, lines: int = 60) -> str:
     return _herdr(session, "pane", "read", pane, "--source", "recent", "--lines", str(lines), "--format", "text")
 
 
+def send_loop(repo: str, text: str) -> None:
+    """Type one line into the loop's pane and press Enter."""
+    repo = validate_repo(repo)
+    metadata = _read_metadata(repo)
+    if not metadata:
+        raise LoopError(f"no Lupin loop state for {repo}")
+    session = metadata.get("session") or session_name(repo)
+    if not _server_running(session):
+        raise LoopError(f"Herdr session for {repo} is not running")
+    workspace = _find_workspace(session, metadata)
+    pane = _pane_id(workspace) if workspace else None
+    if not pane:
+        raise LoopError(f"Herdr pane for {repo} is not available")
+    _herdr(session, "pane", "send-text", pane, text)
+    _herdr(session, "pane", "send-keys", pane, "Enter")
+
+
 def loop_state(repo: str) -> dict:
     repo = validate_repo(repo)
     metadata = _read_metadata(repo)
@@ -1228,7 +1245,7 @@ def main(argv: list[str] | None = None) -> int:
     once_parser = sub.add_parser("once-fire", help=argparse.SUPPRESS)
     once_parser.add_argument("--id", required=True)
     local_parser = sub.add_parser("local-action", help=argparse.SUPPRESS)
-    local_parser.add_argument("local_action", choices=("stop", "peek", "state", "schedule", "pause", "resume"))
+    local_parser.add_argument("local_action", choices=("stop", "peek", "send", "state", "schedule", "pause", "resume"))
     local_parser.add_argument("action_args", nargs=argparse.REMAINDER)
     sub.add_parser("recover", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -1261,6 +1278,9 @@ def main(argv: list[str] | None = None) -> int:
             elif args.local_action == "peek":
                 lines = int(args.action_args[1]) if len(args.action_args) > 1 else 60
                 print(peek_loop(args.action_args[0], lines))
+            elif args.local_action == "send":
+                send_loop(args.action_args[0], args.action_args[1])
+                print(f"sent to {args.action_args[0]}")
             elif args.local_action == "state":
                 _print_json(loop_state(args.action_args[0]))
             elif args.local_action == "schedule":

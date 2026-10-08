@@ -426,6 +426,30 @@ def test_loop_peek_defaults_lines_to_sixty(redis_port, flush_redis, monkeypatch)
 
     assert fake.calls == [["lupin", "loop", "local-action", "peek", "lupin", "60"]]
 
+def test_loop_send_runs_local_action_with_the_text(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    cmd_id = commands.enqueue(
+        "jesus", "loop.send", {"repo": "lupin", "text": "yes, keep going"}, key=KEY, **ACTOR_KW, **kw
+    )
+    fake = _fake_run(returncode=0)
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert fake.calls == [["lupin", "loop", "local-action", "send", "lupin", "yes, keep going"]]
+    assert touched == [{"id": cmd_id, "state": "ok"}]
+
+
+@pytest.mark.parametrize("text", ["", "   ", "one\ntwo", "tab\there", "x" * 2001, None, 5])
+def test_loop_send_rejects_bad_text(text):
+    with pytest.raises(agent.RejectedCommand):
+        agent.ACTIONS["loop.send"]({"repo": "lupin", "text": text}, "id")
+
+
+def test_loop_send_is_not_allowed_while_draining():
+    assert "loop.send" not in agent.DRAIN_ALLOWED
+
+
 def test_loop_state_uses_herdr_reported_state(redis_port, flush_redis, monkeypatch):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     cmd_id = commands.enqueue("jesus", "loop.state", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)
