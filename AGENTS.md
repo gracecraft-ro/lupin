@@ -206,7 +206,9 @@ The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 
 `ui.dc.html` contains dashboard mockups. Read the matching section before
 changing a dashboard page. For example, the Machines page is section `1k`.
-Use the mockup for layout and content. Treat its values as sample data.
+`docs/ui-mockups.md` shows a screenshot for each mockup section. Use the
+matching screenshot as a visual reference. Use `ui.dc.html` for layout and
+content. Treat its values as sample data.
 Keep real data and controls accurate. Do not show shared fleet capacity as a
 per-machine limit or add controls that the current code cannot support.
 
