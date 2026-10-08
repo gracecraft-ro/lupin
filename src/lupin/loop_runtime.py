@@ -28,7 +28,8 @@ REPORTS_DIR = STATE_DIR / "reports"
 HERDR = os.environ.get("LUPIN_HERDR_BIN", "herdr")
 DEFAULT_PROMPT = (
     "You are the delegation-loop orchestrator for this repository. Read "
-    "AGENTS.md and /delegation-loop, then follow them."
+    "AGENTS.md and /delegation-loop. If docs/delegation-loop.md exists, read "
+    "it; otherwise continue without repo-specific delegation notes."
 )
 HERDR_TIMEOUT = 20.0
 SERVER_START_TIMEOUT = 30.0
@@ -301,11 +302,12 @@ def repo_catalog() -> list[dict]:
     for path in sorted(CODE_DIR.iterdir(), key=lambda item: item.name.casefold()):
         if not path.is_dir() or not REPO_RE.fullmatch(path.name):
             continue
-        loopable = (path / "docs" / "delegation-loop.md").is_file()
+        has_doc = (path / "docs" / "delegation-loop.md").is_file()
         rows.append({
             "repo": path.name,
-            "loopable": loopable,
-            "state": "enabled" if path.name in enabled else ("disabled" if loopable else "no-doc"),
+            "loopable": True,
+            "has_doc": has_doc,
+            "state": "enabled" if path.name in enabled else "disabled",
             "platform": enabled.get(path.name, "claude"),
         })
     return rows
@@ -438,8 +440,8 @@ def start_loop(
     repo = validate_repo(repo)
     selected = validate_platform(platform or enabled_repos().get(repo, "claude"))
     directory = CODE_DIR / repo
-    if not (directory / "docs" / "delegation-loop.md").is_file():
-        return False, f"skip {repo}: no docs/delegation-loop.md"
+    if not directory.is_dir():
+        return False, f"skip {repo}: no checkout at {directory}"
     if note is not None and (
         not isinstance(note, str) or len(note) > 8000 or "\x00" in note
     ):

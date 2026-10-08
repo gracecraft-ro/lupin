@@ -187,8 +187,8 @@ def _delegation_doc_template(repo: str) -> str:
     """
     return (
         f"# {repo} -- the delegation loop\n\n"
-        "This file is the loop's entry point for this repo. Fill it in\n"
-        "before the first loop runs.\n\n"
+        "This file gives repo-specific guidance. Fill it in with useful details;\n"
+        "a loop can run without it.\n\n"
         "## What this repo is for\n\n"
         "TODO: say what this repo does, and what the first loops should build.\n\n"
         "## Rules\n\n"
@@ -208,14 +208,14 @@ def code_repos() -> list[dict]:
     except OSError:
         names = []
     for name in names:
-        loopable = os.path.isfile(os.path.join(CODE_DIR, name, LOOP_DOC))
-        if not loopable:
-            state = "no-doc"
-        elif name in enabled:
-            state = "enabled"
-        else:
-            state = "disabled"
-        out.append({"repo": name, "state": state, "loopable": loopable})
+        has_doc = os.path.isfile(os.path.join(CODE_DIR, name, LOOP_DOC))
+        state = "enabled" if name in enabled else "disabled"
+        out.append({
+            "repo": name,
+            "state": state,
+            "loopable": True,
+            "has_doc": has_doc,
+        })
     return out
 
 
@@ -419,11 +419,7 @@ def merge_repo_inventory(
         if repo in repos:
             repos[repo]["fleet_enabled"] = entry["enabled"]
             continue
-        state = (
-            "enabled" if entry["enabled"] and entry["loopable"]
-            else "disabled" if entry["loopable"]
-            else "no-doc"
-        )
+        state = "enabled" if entry["enabled"] else "disabled"
         repos[repo] = {
             "repo": repo,
             "state": state,
@@ -476,8 +472,6 @@ def gather_loops(connection: dict) -> dict:
     remote_states = _loop_hosts_from_heartbeat(state.get("machines", []), local_host)
     entries = []
     for repo_info in code_repos():
-        if not repo_info["loopable"]:
-            continue
         repo = repo_info["repo"]
         entry = local_states.get(repo)
         machine = local_host
@@ -986,12 +980,9 @@ def render_dashboard(state: dict) -> bytes:
     oneoffs = [t for t in state["timers"] if t["unit"] != "delegation-loop.timer"]
     nxt = recurring[0]["next"] if recurring and recurring[0]["next"] else None
 
-    no_doc = [r for r in state["repos"] if r["state"] == "no-doc"]
     attention = []
     if not state["timer_active"]:
         attention.append("timer paused")
-    if no_doc:
-        attention.append(f"{len(no_doc)} repo(s) missing docs/delegation-loop.md")
 
     body = [f'<header><h1>{icon("M3 11l9-8 9 8M5 10v10h14V10")}Overview</h1></header>']
 
@@ -1127,17 +1118,12 @@ def render_dashboard(state: dict) -> bytes:
         pill = {
             "enabled": "<span class='pill on'>enabled</span>",
             "disabled": "<span class='pill off'>disabled</span>",
-            "no-doc": "<span class=pill>no docs/delegation-loop.md</span>",
         }[r["state"]]
         if r.get("local", True):
             sess = "live" if r["repo"] in live else "<span class=dim>-</span>"
-            queue = (
-                f"<a href='/roadmap?repo={quote(r['repo'], safe='')}'>open</a>"
-                if r["loopable"]
-                else "<span class=dim>-</span>"
-            )
+            queue = f"<a href='/roadmap?repo={quote(r['repo'], safe='')}'>open</a>"
             once = ""
-            if r["state"] == "enabled" and r["loopable"]:
+            if r["state"] == "enabled":
                 command = f"lupin once now {r['repo']}"
                 once = (
                     f"<span data-once-repo='{esc(r['repo'])}'>"
@@ -1789,7 +1775,6 @@ def render_machines(records: list[dict], slot_status: dict) -> bytes:
 STATE_PILL = {
     "enabled": "<span class='pill on'>enabled</span>",
     "disabled": "<span class=pill>disabled</span>",
-    "no-doc": "<span class='pill off'>no doc</span>",
 }
 REPOS_ICON = "M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6zM18 9a9 9 0 01-9 9"
 
@@ -1861,22 +1846,28 @@ def _render_add_panel(tab: str, repos: list[dict]) -> str:
         if r["state"] == "enabled":
             continue
         repo = r["repo"]
-        if r["loopable"]:
-            rows.append(
-                "<div class=row style='justify-content:space-between;border-top:1px solid var(--line2);padding:.4rem 0'>"
-                f"<span><b>{esc(repo)}</b> <span class=dim>has {esc(LOOP_DOC)}</span></span>"
-                "<form method=post action=/repos/add style='display:inline'>"
-                f"<input type=hidden name=repo value='{esc(repo)}'>"
-                "<button type=submit>Add to schedule</button></form></div>"
-            )
-        else:
-            rows.append(
-                "<div class=row style='justify-content:space-between;border-top:1px solid var(--line2);padding:.4rem 0'>"
-                f"<span><b>{esc(repo)}</b> <span class=dim>missing {esc(LOOP_DOC)}</span></span>"
-                "<form method=post action=/repos/generate-docs style='display:inline'>"
-                f"<input type=hidden name=repo value='{esc(repo)}'>"
-                "<button type=submit>Generate docs and add</button></form></div>"
-            )
+        doc_status = (
+            f"has {esc(LOOP_DOC)}"
+            if r.get("has_doc")
+            else "no delegation doc (optional)"
+        )
+        add_form = (
+            "<form method=post action=/repos/add style='display:inline'>"
+            f"<input type=hidden name=repo value='{esc(repo)}'>"
+            "<button type=submit>Add to schedule</button></form>"
+        )
+        generate_form = (
+            "<form method=post action=/repos/generate-docs style='display:inline'>"
+            f"<input type=hidden name=repo value='{esc(repo)}'>"
+            "<button type=submit>Generate docs and add</button></form>"
+            if not r.get("has_doc")
+            else ""
+        )
+        rows.append(
+            "<div class=row style='justify-content:space-between;border-top:1px solid var(--line2);padding:.4rem 0'>"
+            f"<span><b>{esc(repo)}</b> <span class=dim>{doc_status}</span></span>"
+            f"{add_form}{generate_form}</div>"
+        )
     if rows:
         picker = "".join(rows)
     elif local_repos:
@@ -1973,19 +1964,16 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
                 "<td class=dim>Read-only fleet entry</td></tr>"
             )
             continue
-        if not r["loopable"]:
-            rows.append(
-                f"<tr><td><b>{esc(repo)}</b></td><td>{pill}</td>"
-                "<td class=dim>-</td><td class=dim>-</td><td class=dim>-</td>"
-                '<td class=dim>generate docs via "Add repo" to enable</td></tr>'
-            )
-            continue
         dot = "ok" if r["running"] else "idle"
         sess_label = "running" if r["running"] else "stopped"
         current_max = r["max"] if r["max"] is not None else 1
         stepper = _repo_slot_controls(repo, current_max)
         roadmap_link = f"<a href='/roadmap?repo={quote(repo, safe='')}'>Roadmap</a>"
-        doc_link = f"<a href='/repos?doc={quote(repo, safe='')}'>doc</a>"
+        doc_action = (
+            f"<a href='/repos?doc={quote(repo, safe='')}'>doc</a>"
+            if r.get("has_doc")
+            else "<span class=dim>no doc (optional)</span>"
+        )
         schedule_link = f"<a href='/repos?schedule={quote(repo, safe='')}'>Schedule&hellip;</a>"
         if r["state"] == "enabled":
             # Posts straight to the existing, tested /schedule/run route --
@@ -2000,14 +1988,14 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
                 "<button type=submit>Run now</button></form>"
             )
             remove_link = f"<a href='/repos?remove={quote(repo, safe='')}'>Remove</a>"
-            actions = f"{run_form} {schedule_link} &middot; {doc_link} &middot; {remove_link}"
+            actions = f"{run_form} {schedule_link} &middot; {doc_action} &middot; {remove_link}"
         else:
             add_btn = (
                 "<form method=post action=/repos/add style='display:inline'>"
                 f"<input type=hidden name=repo value='{esc(repo)}'>"
                 "<button type=submit>Add to schedule</button></form>"
             )
-            actions = f"{add_btn} {schedule_link} &middot; {doc_link}"
+            actions = f"{add_btn} {schedule_link} &middot; {doc_action}"
         rows.append(
             f"<tr><td><b>{esc(repo)}</b></td><td>{pill}</td>"
             f"<td><span class='dot {dot}'></span> {esc(sess_label)} {stepper}</td>"
@@ -2507,7 +2495,7 @@ class Handler(BaseHTTPRequestHandler):
             repos = roadmap.repository_names(code_repos())
             selected = query.get("repo", "").strip()
             if selected and selected not in repos:
-                self.reply(render_error("unknown or non-loopable repository"), 404)
+                self.reply(render_error("unknown repository"), 404)
                 return
             state = "closed" if query.get("state") == "closed" else "open"
             if query.get("view") == "list" and state == "open":
@@ -2592,18 +2580,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _repo_loopable(self, repo: str) -> bool:
-        """A repo name that is both well-formed and actually has a
-        delegation doc on this machine -- the one check every `/repos/*`
-        write route that touches a repo starts with."""
-        return bool(repo) and _valid_repo_name(repo) and os.path.isfile(os.path.join(CODE_DIR, repo, LOOP_DOC))
+    def _repo_exists(self, repo: str) -> bool:
+        """A valid repo name with a directory on this machine."""
+        return (
+            bool(repo)
+            and _valid_repo_name(repo)
+            and os.path.isdir(os.path.join(CODE_DIR, repo))
+        )
+
+    def _repo_has_doc(self, repo: str) -> bool:
+        return self._repo_exists(repo) and os.path.isfile(
+            os.path.join(CODE_DIR, repo, LOOP_DOC)
+        )
 
     def do_repos(self, query: dict) -> None:
         doc_repo = (query.get("doc") or "").strip()
         doc_text = None
         if doc_repo:
-            if not self._repo_loopable(doc_repo):
-                self.reply(render_error("unknown or non-loopable repository"), 404)
+            if not self._repo_has_doc(doc_repo):
+                self.reply(render_error("unknown repository or missing delegation doc"), 404)
                 return
             try:
                 with open(os.path.join(CODE_DIR, doc_repo, LOOP_DOC), encoding="utf-8") as fh:
@@ -2628,8 +2623,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_repos_add(self, form: dict) -> None:
         repo = form.get("repo", [""])[0].strip()
-        if not self._repo_loopable(repo):
-            self.reply(render_error("unknown or non-loopable repository"), 400)
+        if not self._repo_exists(repo):
+            self.reply(render_error("unknown repository"), 400)
             return
         enabled = enabled_repos()
         if repo not in enabled:
@@ -2671,8 +2666,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_repos_doc_save(self, form: dict) -> None:
         repo = form.get("repo", [""])[0].strip()
         text = form.get("text", [""])[0]
-        if not self._repo_loopable(repo):
-            self.reply(render_error("unknown or non-loopable repository"), 400)
+        if not self._repo_has_doc(repo):
+            self.reply(render_error("unknown repository or missing delegation doc"), 400)
             return
         if len(text) > 200_000:
             self.reply(render_error("doc is too long"), 400)
@@ -2692,7 +2687,7 @@ class Handler(BaseHTTPRequestHandler):
             max_value = int(raw_max)
         except ValueError:
             max_value = None
-        if not self._repo_loopable(repo) or max_value is None or max_value < 1:
+        if not self._repo_exists(repo) or max_value is None or max_value < 1:
             self.reply(render_error("bad slot-max request"), 400)
             return
         try:
@@ -2706,8 +2701,8 @@ class Handler(BaseHTTPRequestHandler):
         """Schedule one local one-off run through Lupin."""
         repo = form.get("repo", [""])[0].strip()
         when = form.get("when", [""])[0].strip()
-        if not self._repo_loopable(repo):
-            self.reply(render_error("unknown or non-loopable repository"), 400)
+        if not self._repo_exists(repo):
+            self.reply(render_error("unknown repository"), 400)
             return
         if not when or len(when) > 200:
             self.reply(render_error("missing or too-long schedule time"), 400)

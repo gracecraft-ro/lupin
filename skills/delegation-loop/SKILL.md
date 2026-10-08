@@ -12,8 +12,9 @@ compatibility: >-
 
 # Run a Lupin delegation loop
 
-Read the repository's `AGENTS.md` and delegation notes first. Follow its
-branch, worktree, test, and release rules. Read the latest issue comments.
+Read the root `AGENTS.md` first. If `docs/delegation-loop.md` exists, read
+it; Lupin can run without it. Follow the repo's branch, worktree, test, and
+release rules. Read the latest issue comments.
 
 Use an isolated worktree for each worker. Do not let parallel workers edit the
 same checkout. Record the machine, worktree path, branch, and issue in the

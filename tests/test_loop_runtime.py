@@ -212,16 +212,44 @@ def test_schedule_once_rejects_empty_repo_list_before_systemd(monkeypatch, tmp_p
 
 
 
-def test_start_loop_starts_herdr_worker_and_skips_duplicate(
+def test_repo_catalog_includes_repo_without_delegation_doc(monkeypatch, tmp_path: Path):
+    code_dir = tmp_path / "code"
+    (code_dir / "widgets").mkdir(parents=True)
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {})
+
+    assert loop_runtime.repo_catalog() == [
+        {
+            "repo": "widgets",
+            "loopable": True,
+            "has_doc": False,
+            "state": "disabled",
+            "platform": "claude",
+        }
+    ]
+
+
+def test_start_loop_skips_missing_checkout(monkeypatch, tmp_path: Path):
+    code_dir = tmp_path / "code"
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {})
+    monkeypatch.setattr(
+        loop_runtime, "_run",
+        lambda *args, **kwargs: pytest.fail("systemd must not run without a checkout"),
+    )
+
+    started, message = loop_runtime.start_loop("widgets")
+
+    assert not started
+    assert message == f"skip widgets: no checkout at {code_dir / 'widgets'}"
+
+
+def test_start_loop_starts_without_delegation_doc_and_skips_duplicate(
     monkeypatch, tmp_path: Path
 ):
     state_dir = tmp_path / "state"
     code_dir = tmp_path / "code"
-    repo_dir = code_dir / "widgets"
-    (repo_dir / "docs").mkdir(parents=True)
-    (repo_dir / "docs" / "delegation-loop.md").write_text(
-        "loop prompt\n", encoding="utf-8"
-    )
+    (code_dir / "widgets").mkdir(parents=True)
     monkeypatch.setattr(loop_runtime, "STATE_DIR", state_dir)
     monkeypatch.setattr(loop_runtime, "LOOPS_DIR", state_dir / "herdr-loops")
     monkeypatch.setattr(loop_runtime, "REPOS_FILE", state_dir / "repos")
@@ -259,6 +287,7 @@ def test_start_loop_starts_herdr_worker_and_skips_duplicate(
     assert metadata["state"] == "starting"
     assert metadata["platform"] == "omp"
     prompt = Path(metadata["prompt_file"]).read_text(encoding="utf-8")
+    assert "If docs/delegation-loop.md exists, read it" in prompt
     assert prompt.endswith("review\n")
     assert command[1:] == [
         "loop",

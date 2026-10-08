@@ -1,7 +1,7 @@
 # lupin — the delegation loop
 
-This file is the loop's entry point for this repo. Read the root
-`AGENTS.md` first.
+This file gives loop-specific guidance for this repo. It is optional; Lupin
+can run without it. Read the root `AGENTS.md` first.
 
 ## Where this repo lives
 
