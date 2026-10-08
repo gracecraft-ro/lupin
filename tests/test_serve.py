@@ -1654,27 +1654,50 @@ class TestMachinesPageIntegration:
     would be caught here, not just a call-was-made assertion.
     """
 
-    def test_page_renders_machine_records_and_fleet_wide_slot_data_once(
+    def test_page_renders_mockup_machine_cards_and_shared_slots_once(
         self, redis_port, flush_redis, tmp_path, monkeypatch
     ):
         # join() before acquire() on purpose -- join's own written `slots`
         # snapshot would be empty at this point. The page still has to show
-        # the lease below, so it must be reading slots_redis.status() live,
-        # not that stale per-record field.
+        # the lease below, so it must read slots_redis.status() live.
         kw = _kw(redis_port)
         names = ["jesus", "pihome", "ralpha"]
         for name in names:
             monkeypatch.setattr(machines, "hostname", lambda name=name: name)
-            machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
+            loops = (
+                [{"repo": "lupin", "platform": "omp", "state": "running"}]
+                if name == "pihome"
+                else []
+            )
+            machines.join(
+                f"127.0.0.1:{redis_port}",
+                config_path=tmp_path / "fleet.json",
+                loops=loops,
+            )
+        monkeypatch.setattr(machines, "hostname", lambda: "pihome")
+        machines.drain(kw)
+        monkeypatch.setattr(
+            serve,
+            "timers",
+            lambda: [{"unit": "delegation-loop.timer", "next": time.time() + 60}],
+        )
+        monkeypatch.setattr(serve, "timer_active", lambda: True)
         slots_redis.acquire("bmo", "worker-a", max_holders=1, **kw)
+
         handler = _get_handler("/machines", kw)
         handler.do_GET()
 
         body = handler.reply.call_args.args[0].decode()
         for name in names:
             assert name in body
-        assert body.count("<h2>Fleet-wide slots</h2>") == 1
-        assert body.count("<td>bmo</td><td>1</td><td>1</td>") == 1
+        assert "2 of 3 machines online" in body
+        assert "This machine" in body
+        assert "Timer running" in body
+        assert "Fleet-wide capacity" in body
+        assert body.count("<b>bmo</b><span class=mono>1 / 1</span>") == 1
+        assert body.count("class=machine-card") == 3
+        assert "lupin · omp" in body
+        assert "Draining. Running loops can finish" in body
 
     def test_unreachable_coordinator_is_502(self, closed_port):
         handler = _get_handler("/machines", {"redis_host": "127.0.0.1", "redis_port": closed_port})

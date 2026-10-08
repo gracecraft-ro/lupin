@@ -38,6 +38,9 @@ doesn't change the shape of any key that already exists.
 **Release** is a compare-and-delete script. Only the current holder can
 release its own entry.
 
+Each Redis slot is fleet-wide. Its holders and limit are shared across all
+machines. The Machines page shows each slot once, apart from machine status.
+
 ## Repository ledger
 
 `lupin ledger append OWNER/REPO` adds one event to the shared stream.

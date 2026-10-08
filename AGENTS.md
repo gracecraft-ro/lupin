@@ -199,6 +199,15 @@ in `once/`. `locks/` serializes local start and stop actions. Herdr keeps
 its own session and workspace state.
 The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 
+
+## Dashboard mockups
+
+`ui.dc.html` contains dashboard mockups. Read the matching section before
+changing a dashboard page. For example, the Machines page is section `1k`.
+Use the mockup for layout and content. Treat its values as sample data.
+Keep real data and controls accurate. Do not show shared fleet capacity as a
+per-machine limit or add controls that the current code cannot support.
+
 ## Code layout
 
 - `src/lupin/route.py`, `src/lupin/classify.py`, `src/lupin/model-tiers.json`

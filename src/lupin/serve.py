@@ -1779,11 +1779,7 @@ def _heartbeat_epoch(stamp: str | None) -> float | None:
 
 
 def _slot_controls(slot: str, current_max: int) -> str:
-    """Two tiny forms, not one with a number input -- a GET-free "fewer" /
-    "more" button pair needs no JS and matches the mockup's control shape.
-    Posting the already-computed next value (not a +1/-1 delta) means the
-    route has no read-modify-write race to get wrong.
-    """
+    """Fleet-wide slot limit controls with race-free next values."""
     fewer = max(1, current_max - 1)
     more = current_max + 1
     fewer_disabled = " disabled" if current_max <= 1 else ""
@@ -1791,54 +1787,159 @@ def _slot_controls(slot: str, current_max: int) -> str:
         "<form method=post action='/machines/slot-max' style='display:inline'>"
         f"<input type=hidden name=slot value='{esc(slot)}'>"
         f"<input type=hidden name=max value='{fewer}'>"
-        f"<button type=submit{fewer_disabled}>fewer slots</button></form> "
+        f"<button type=submit aria-label='Fewer slots'{fewer_disabled}>−</button></form>"
         "<form method=post action='/machines/slot-max' style='display:inline'>"
         f"<input type=hidden name=slot value='{esc(slot)}'>"
         f"<input type=hidden name=max value='{more}'>"
-        "<button type=submit>more slots</button></form>"
+        "<button type=submit aria-label='More slots'>+</button></form>"
     )
 
 
-def render_machines(records: list[dict], slot_status: dict) -> bytes:
-    """Render fleet-wide slot controls once, then one status card per machine.
-
-    Slot leases and limits live in shared Redis keys. Repeating them inside
-    each machine card suggests that each machine has a separate limit.
-    """
-    body = [f'<header><h1>{icon("M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01")}Machines</h1></header>']
+def render_machines(
+    records: list[dict],
+    slot_status: dict,
+    *,
+    recurring_timer: dict | None = None,
+    timer_running: bool | None = None,
+) -> bytes:
+    """Render machine health separately from the fleet-wide slot limits."""
+    local_host = machines.hostname()
+    online = sum(record["state"] == "online" for record in records)
+    timer_html = ""
+    if timer_running is not None:
+        timer_state = "running" if timer_running else "paused"
+        timer_dot = "online" if timer_running else "offline"
+        timer_html = (
+            f"<span class=machine-timer><span class='machine-dot {timer_dot}'></span>"
+            f"Timer {timer_state}</span>"
+        )
+        next_run = recurring_timer.get("next") if recurring_timer else None
+        if next_run:
+            timer_html += (
+                f"<span class=machine-timer>Next run "
+                f"<b class=mono data-until='{next_run:.0f}'></b></span>"
+            )
+    body = [
+        f'<header><h1>{icon("M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01")}Machines</h1>'
+        f'<span class=sp></span>{timer_html}'
+        f'<span class="dim machine-count">{online} of {len(records)} machines online</span></header>'
+    ]
     if slot_status:
-        body.append("<div class=card><h2>Fleet-wide slots</h2>")
-        body.append("<table><tr><th>slot</th><th>holders</th><th>max</th><th></th></tr>")
+        body.append("<section class=machine-slots><h2>Fleet-wide capacity</h2>")
+        body.append(
+            "<p class=dim>Each slot has one shared limit across all machines.</p>"
+            "<div class=machine-slot-list>"
+        )
         for slot_name, info in sorted(slot_status.items()):
             used = info.get("holders", 0)
             slot_max = info.get("max")
             controls = _slot_controls(slot_name, slot_max if slot_max is not None else 1)
             body.append(
-                f"<tr><td>{esc(slot_name)}</td><td>{esc(used)}</td>"
-                f"<td>{esc(slot_max) if slot_max is not None else '-'}</td>"
-                f"<td>{controls}</td></tr>"
+                f"<div class=machine-slot><b>{esc(slot_name)}</b>"
+                f"<span class=mono>{esc(used)} / {esc(slot_max) if slot_max is not None else '-'}</span>"
+                f"<span class=slot-controls>{controls}</span></div>"
             )
-        body.append("</table></div>")
-    for record in sorted(records, key=lambda r: r["name"]):
-        state = record["state"]
-        pill_class = {"online": "on", "offline": "off"}.get(state, "")
-        body.append("<div class=card>")
-        body.append("<div class=row>")
-        body.append(f"<span class=big>{esc(record['name'])}</span>")
-        body.append(f"<span class='pill {pill_class}'>{esc(state)}</span>")
-        if record["version_mismatch"]:
-            body.append(f"<span class='pill off'>version mismatch: {esc(record['version'] or '-')}</span>")
-        else:
-            body.append(f"<span class=dim>{esc(record['version'] or '-')}</span>")
-        hb = _heartbeat_epoch(record.get("heartbeat"))
-        if hb is not None:
-            body.append(f"<span class=dim>heartbeat <span data-since='{hb:.0f}'></span></span>")
-        else:
-            body.append("<span class=dim>no heartbeat</span>")
-        body.append("</div></div>")
-    if not records:
+        body.append("</div></section>")
+
+    if records:
+        body.append("<div class=machine-grid>")
+        for record in sorted(records, key=lambda r: r["name"]):
+            state = record["state"]
+            state_class = {"online": "online", "draining": "draining"}.get(state, "offline")
+            body.append("<article class=machine-card>")
+            body.append("<div class=machine-heading>")
+            body.append(f"<span class='machine-dot {state_class}'></span>")
+            body.append(f"<b>{esc(record['name'])}</b>")
+            if record["name"] == local_host:
+                body.append("<span class=machine-local>This machine</span>")
+            body.append(f"<span class=machine-state>{esc(state)}</span></div>")
+            detail = [f"lupin {esc(record.get('version') or '-')}"]
+            hb = _heartbeat_epoch(record.get("heartbeat"))
+            if hb is not None:
+                detail.append(f"<span data-since='{hb:.0f}'></span> since heartbeat")
+            body.append(f"<div class='machine-meta mono'>{' · '.join(detail)}</div>")
+
+            loops = record.get("loops") or []
+            body.append("<div class=machine-loops><b>Loops</b>")
+            if loops:
+                for loop in loops:
+                    label = loop.get("repo") or "Unknown repo"
+                    if loop.get("platform"):
+                        label += f" · {loop['platform']}"
+                    body.append(
+                        f"<div class=machine-loop><span>{esc(label)}</span>"
+                        f"<span class=mono>{esc(loop.get('state') or 'unknown')}</span></div>"
+                    )
+            else:
+                body.append("<div class=dim>No active loops.</div>")
+            body.append("</div>")
+
+            if state == "draining":
+                body.append(
+                    "<p class=machine-notice>Draining. Running loops can finish, "
+                    "but Lupin will not place new work here.</p>"
+                )
+            if record.get("version_mismatch"):
+                body.append(
+                    f"<p class=machine-notice>Version mismatch. This machine runs "
+                    f"{esc(record.get('version') or 'an unknown version')}.</p>"
+                )
+            providers = record.get("providers") or []
+            if providers:
+                body.append("<div class=machine-providers><span class=dim>Signed in</span>")
+                for provider in providers:
+                    body.append(f"<span class=machine-provider>{esc(provider)}</span>")
+                body.append("</div>")
+            body.append("</article>")
+        body.append("</div>")
+    else:
         body.append("<div class='card dim'>No machine has joined the fleet yet.</div>")
-    return page("Machines", "".join(body), active="machines")
+
+    body.append(
+        "<p class='dim machine-join'>To add a machine, run "
+        "<code>lupin join &lt;redis-host&gt;[:port]</code> on it.</p>"
+    )
+    extra_css = """
+.machine-timer{display:flex;align-items:center;gap:6px;white-space:nowrap;font-size:13px;color:var(--ink2)}
+.machine-timer .machine-dot{width:7px;height:7px}
+.machine-timer b{font-weight:500;color:var(--ink);font-size:12px}
+.machine-count{font-size:13px}
+.machine-slots{margin:1rem 0 1.2rem}
+.machine-slots h2{margin:0 0 .25rem}
+.machine-slots>p{margin:.2rem 0 .65rem;font-size:13px}
+.machine-slot-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:.6rem}
+.machine-slot{display:flex;align-items:center;gap:.8rem;background:var(--surface);
+border:1px solid var(--line);border-radius:12px;padding:.65rem .8rem}
+.slot-controls{display:flex;gap:4px}
+.slot-controls button{width:24px;height:24px;padding:0;border:1px solid var(--line);
+border-radius:6px;background:var(--surface);color:var(--ink);cursor:pointer;font:500 14px var(--sans)}
+.slot-controls button:disabled{opacity:.45;cursor:default}
+.slot-controls button:focus-visible{outline:2px solid var(--ok);outline-offset:2px}
+.machine-slot>b{flex:1;overflow-wrap:anywhere}
+.machine-slot .mono{font-size:13px;white-space:nowrap}
+.slot-controls{white-space:nowrap}
+.machine-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}
+.machine-card{display:grid;gap:.7rem;align-content:start;background:var(--surface);
+border:1px solid var(--line);border-radius:18px;box-shadow:0 3px 0 var(--line);padding:1rem 1.1rem}
+.machine-heading{display:flex;align-items:center;gap:.6rem;min-width:0}
+.machine-heading>b{font-size:16px;overflow-wrap:anywhere}
+.machine-dot{width:8px;height:8px;flex:none;border-radius:2px;background:var(--warn)}
+.machine-dot.online{background:var(--ok)}
+.machine-dot.draining{background:var(--warn)}
+.machine-local,.machine-provider{font-size:12px;padding:1px 8px;border-radius:6px;
+background:var(--lavbg);color:var(--lav)}
+.machine-state{margin-left:auto;font-size:13px;color:var(--ink2)}
+.machine-meta{margin-top:-.6rem;color:var(--ink3);font-size:12px}
+.machine-loops{display:grid;gap:.35rem;font-size:13px}
+.machine-loops>b{margin-bottom:.1rem}
+.machine-loop{display:flex;justify-content:space-between;gap:.6rem}
+.machine-notice{margin:0;padding:.55rem .7rem;background:var(--warnbg);
+border:1px solid var(--warnline);border-radius:10px;color:var(--warnink);font-size:13px}
+.machine-providers{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;font-size:12px}
+.machine-join{margin-top:1.1rem;font-size:13px}
+@media(max-width:760px){.machine-grid{grid-template-columns:1fr}}
+"""
+    return page("Machines", "".join(body), extra_css=extra_css, active="machines")
 
 
 STATE_PILL = {
@@ -2636,10 +2737,23 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 records = machines.machines(self.fleet_connection)
                 slot_status = slots_redis.status(**self.fleet_connection)
+                timer_list = timers()
+                recurring_timer = next(
+                    (timer for timer in timer_list if timer["unit"] == "delegation-loop.timer"),
+                    None,
+                )
+                timer_is_running = timer_active()
             except machines.CoordinatorUnreachable:
                 self.reply(render_error("cannot reach the machine registry"), 502)
                 return
-            self.reply(render_machines(records, slot_status))
+            self.reply(
+                render_machines(
+                    records,
+                    slot_status,
+                    recurring_timer=recurring_timer,
+                    timer_running=timer_is_running,
+                )
+            )
         elif url.path == "/api/state":
             self.reply_json(gather(self.peek_lines, self.fleet_connection))
         elif url.path == "/repos":
