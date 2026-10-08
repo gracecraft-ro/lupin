@@ -2020,6 +2020,8 @@ class LoopsRouteUnitTests(unittest.TestCase):
         with mock.patch.object(serve.loops, "ssh_target_for", return_value="ghosta@jesus.local"):
             page = serve.render_loops(data, group="repo", selected_repo="a", selected_tail=None, lines=60).decode()
         self.assertIn("herdr --remote ghosta@jesus.local --session session-a", page)
+        # Also offered: a command that needs only ssh, so Herdr versions cannot differ.
+        self.assertIn("ssh -t ghosta@jesus.local herdr --session session-a", page)
 
     def test_stopped_loop_form_offers_online_machine_targets(self):
         data = {

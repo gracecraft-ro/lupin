@@ -2526,6 +2526,12 @@ def render_loops(
                     )
                 if attach_argv:
                     main.append(f"<p>Attach: <code>{esc(shlex.join(attach_argv))}</code></p>")
+                    if selected["machine"] != local_host:
+                        # `herdr --remote` asks to restart the far server if the Herdr versions differ.
+                        ssh_argv = ["ssh", "-t", target, "herdr", "--session", selected["session"]]
+                        main.append(
+                            f"<p>Or, with only ssh: <code>{esc(shlex.join(ssh_argv))}</code></p>"
+                        )
                 else:
                     main.append(f"<p class=dim>No SSH target is set for {esc(selected['machine'])}.</p>")
         elif selected["status"] == "stopped":
