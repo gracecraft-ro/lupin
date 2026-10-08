@@ -788,6 +788,15 @@ def launch_agent(
     workspace = _workspace_by_id(session, workspace_id)
     if workspace is None:
         return 0
+    if not _pane_id(workspace):
+        # Some Herdr versions list workspaces without their root pane.
+        panes = _herdr_json(session, "pane", "list").get("panes", [])
+        pane = next(
+            (row for row in panes if isinstance(row, dict) and row.get("workspace_id") == workspace_id),
+            None,
+        )
+        if pane:
+            workspace = {**workspace, "root_pane": pane}
     return _launch_agent(session, platform, workspace, prompt_file, resume)
 
 

@@ -341,6 +341,33 @@ def test_start_loop_starts_without_delegation_doc_and_skips_duplicate(
     assert len(launches) == 1
 
 
+def test_launch_agent_finds_the_pane_when_workspace_list_has_no_root_pane(monkeypatch, tmp_path: Path):
+    # Herdr 0.9.3 `workspace list` rows carry `workspace_id` but no `root_pane`.
+    prompt_file = tmp_path / "prompt"
+    prompt_file.write_text("finish the handoff\n", encoding="utf-8")
+    session = "lupin-widgets-abc123"
+    calls = []
+    monkeypatch.setattr(
+        loop_runtime, "_workspaces",
+        lambda got_session: [{"workspace_id": "w1", "label": "widgets", "pane_count": 1}],
+    )
+    monkeypatch.setattr(
+        loop_runtime, "_herdr_json",
+        lambda got_session, *args: {"panes": [
+            {"pane_id": "w9:p1", "workspace_id": "w9"},
+            {"pane_id": "w1:p1", "workspace_id": "w1"},
+        ]} if args == ("pane", "list") else {},
+    )
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: calls.append(argv) or (0, ""))
+    monkeypatch.setattr(loop_runtime, "_wait_agent", lambda got_session, workspace_id: 0)
+
+    assert loop_runtime.launch_agent(
+        "widgets", session, "w1", "claude", str(prompt_file), resume=False
+    ) == 0
+
+    assert calls[0][calls[0].index("--pane") + 1] == "w1:p1"
+
+
 def test_launch_agent_uses_herdr_start_api(monkeypatch, tmp_path: Path):
     prompt_file = tmp_path / "prompt"
     prompt_file.write_text("finish the handoff\n", encoding="utf-8")
