@@ -347,17 +347,16 @@ def test_launch_agent_finds_the_pane_when_workspace_list_has_no_root_pane(monkey
     prompt_file.write_text("finish the handoff\n", encoding="utf-8")
     session = "lupin-widgets-abc123"
     calls = []
-    monkeypatch.setattr(
-        loop_runtime, "_workspaces",
-        lambda got_session: [{"workspace_id": "w1", "label": "widgets", "pane_count": 1}],
-    )
-    monkeypatch.setattr(
-        loop_runtime, "_herdr_json",
-        lambda got_session, *args: {"panes": [
+    answers = {
+        ("workspace", "list"): {"workspaces": [
+            {"workspace_id": "w1", "label": "widgets", "pane_count": 1},
+        ]},
+        ("pane", "list"): {"panes": [
             {"pane_id": "w9:p1", "workspace_id": "w9"},
             {"pane_id": "w1:p1", "workspace_id": "w1"},
-        ]} if args == ("pane", "list") else {},
-    )
+        ]},
+    }
+    monkeypatch.setattr(loop_runtime, "_herdr_json", lambda got_session, *args: answers.get(args, {}))
     monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: calls.append(argv) or (0, ""))
     monkeypatch.setattr(loop_runtime, "_wait_agent", lambda got_session, workspace_id: 0)
 

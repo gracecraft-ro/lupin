@@ -160,8 +160,19 @@ def _server_running(session: str) -> bool:
 
 def _workspaces(session: str) -> list[dict]:
     result = _herdr_json(session, "workspace", "list")
-    rows = result.get("workspaces", [])
-    return [row for row in rows if isinstance(row, dict)]
+    rows = [row for row in result.get("workspaces", []) if isinstance(row, dict)]
+    if any("root_pane" not in row for row in rows):
+        # Some Herdr versions list workspaces without their root pane.
+        panes = [
+            pane for pane in _herdr_json(session, "pane", "list").get("panes", [])
+            if isinstance(pane, dict)
+        ]
+        for row in rows:
+            if "root_pane" not in row:
+                pane = next((p for p in panes if p.get("workspace_id") == _workspace_id(row)), None)
+                if pane:
+                    row["root_pane"] = pane
+    return rows
 
 
 def _agents(session: str) -> list[dict]:
@@ -788,15 +799,6 @@ def launch_agent(
     workspace = _workspace_by_id(session, workspace_id)
     if workspace is None:
         return 0
-    if not _pane_id(workspace):
-        # Some Herdr versions list workspaces without their root pane.
-        panes = _herdr_json(session, "pane", "list").get("panes", [])
-        pane = next(
-            (row for row in panes if isinstance(row, dict) and row.get("workspace_id") == workspace_id),
-            None,
-        )
-        if pane:
-            workspace = {**workspace, "root_pane": pane}
     return _launch_agent(session, platform, workspace, prompt_file, resume)
 
 
