@@ -28,6 +28,7 @@ PR #44. A final handoff event was written to fleet Redis (ID
 Review and merge PR #44.
 
 ## Known Blockers
-GitHub refused screenshot attachments because this account lacks write access
-to the upstream repo. Screenshots remain local in `evidence/42/`. The main
-checkout user change in `tests/test_gh_cache.py` remains untouched.
+The active OAuth account cannot upload to the upstream repo. A PAT with
+upstream push permission returned HTTP 403: the attachment endpoint does not
+accept personal access tokens. Screenshots remain local in `evidence/42/`.
+The main checkout user change in `tests/test_gh_cache.py` remains untouched.
