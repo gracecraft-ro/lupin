@@ -125,20 +125,31 @@ def append_event(
 def read_events(
     repo: str,
     *,
+    limit: int | None = 10,
     redis_host: str | None = None,
     redis_port: int | None = None,
     redis_username: str | None = None,
     redis_password: str | None = None,
 ) -> list[dict]:
-    """Return every event for `OWNER/REPO`, oldest first.
+    """Return the latest `limit` events, oldest first.
 
-    An empty stream returns an empty list. Raises `CoordinatorUnreachable`
-    when Redis cannot be reached.
+    `limit` defaults to 10 and must be positive. Pass `None` to read the full
+    stream. An empty stream returns an empty list. Raises
+    `CoordinatorUnreachable` when Redis cannot be reached.
     """
     key = _stream_key(repo)
+    if limit is not None and (
+        not isinstance(limit, int) or isinstance(limit, bool) or limit < 1
+    ):
+        raise ValueError("limit must be a positive integer")
     client = _client(redis_host, redis_port, redis_username, redis_password)
     try:
-        entries = _call_with_retry(lambda: client.xrange(key))
+        if limit is None:
+            entries = _call_with_retry(lambda: client.xrange(key))
+        else:
+            entries = _call_with_retry(lambda: client.xrevrange(key, count=limit))
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(repo) from exc
+    if limit is not None:
+        entries = reversed(entries)
     return [_decode(stream_id, fields) for stream_id, fields in entries]

@@ -41,8 +41,9 @@ release its own entry.
 ## Repository ledger
 
 `lupin ledger append OWNER/REPO` adds one event to the shared stream.
-`lupin ledger read OWNER/REPO` returns events from oldest to newest. Add
-`--json` for a JSON array. An empty stream returns `[]`.
+`lupin ledger read OWNER/REPO` returns up to the latest 10 events, oldest
+first. Use `--limit N` to choose another positive count. Add `--json` for a
+JSON array. An empty stream returns `[]`.
 
 Each event has a UTC `ts`, a `host`, and an event name. Optional fields are
 an issue number, status, branch, summary, and digest lists: highlights,
@@ -56,8 +57,11 @@ lupin ledger append OWNER/REPO --event handoff --issue 42 \
   --status done --branch BRANCH --summary TEXT \
   --highlights TEXT --evidence TEXT --decisions TEXT --next TEXT \
   --child 43
-lupin ledger read OWNER/REPO --json
+lupin ledger read OWNER/REPO --limit 50 --json
 ```
+
+The Python API accepts `limit=None` to read all events. The roadmap does this
+because older events can hold the current status for an issue.
 
 Ledger commands exit 3 when Redis is unavailable. The roadmap then shows no
 ledger annotations and adds a warning. Lupin does not read or copy the old

@@ -37,7 +37,7 @@ lupin status [--json]
 lupin ledger append OWNER/REPO --event EVENT [--issue N] [--status S] \
   [--branch B] [--summary TEXT] [--highlights TEXT] [--evidence TEXT] \
   [--decisions TEXT] [--next TEXT] [--child N] [--json]
-lupin ledger read OWNER/REPO [--json]
+lupin ledger read OWNER/REPO [--limit N] [--json]
 lupin serve [--bind 127.0.0.1] [--port 8788] [--roadmap REPO]
 lupin stop <repo> [--machine M] [--wait S] [--json]
 lupin peek <repo> [LINES] [--machine M] [--json]
@@ -54,9 +54,10 @@ lupin resume [--machine M | --all] [--json]
 
 `ledger append` stores events in Redis. It records the time and host. Repeat
 digest options to add more than one item. Repeat `--child` for each split
-issue. `ledger read --json` returns all events, oldest first. Both commands
-exit 3 if Redis is unavailable. The roadmap then shows no ledger annotations
-and a warning. It ignores `.loop/loop-state.json`.
+issue. `ledger read --json` returns the latest 10 events, oldest first.
+Use `--limit N` to choose another positive count. Both commands exit 3 if
+Redis is unavailable. The roadmap shows no ledger annotations and a warning.
+It ignores `.loop/loop-state.json`.
 
 `review-route --prefetch` fetches issue/PR text up front -- body, comments,
 and (for a PR) reviews and a diff stat (changed files, additions/deletions,

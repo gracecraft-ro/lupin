@@ -77,6 +77,29 @@ def test_append_does_not_retry_after_ambiguous_timeout(connection, monkeypatch):
 
     assert attempts == 1
     assert len(events) == 1
+
+
+def test_read_returns_latest_ten_and_honors_custom_limit(connection):
+    for number in range(1, 13):
+        ledger.append_event(
+            "acme/repo", {"event": "work", "issue": number}, **connection
+        )
+
+    recent = ledger.read_events("acme/repo", **connection)
+    smaller = ledger.read_events("acme/repo", limit=3, **connection)
+    full_stream = ledger.read_events("acme/repo", limit=None, **connection)
+
+    assert [event["issue"] for event in recent] == list(range(3, 13))
+    assert [event["issue"] for event in smaller] == [10, 11, 12]
+    assert [event["issue"] for event in full_stream] == list(range(1, 13))
+
+
+@pytest.mark.parametrize("limit", [0, -1, True, "2"])
+def test_read_rejects_invalid_limit(limit):
+    with pytest.raises(ValueError, match="limit must be a positive integer"):
+        ledger.read_events("acme/repo", limit=limit)
+
+
 def test_read_of_empty_ledger_returns_no_events(connection):
     assert ledger.read_events("acme/empty", **connection) == []
 
@@ -111,6 +134,32 @@ def test_cli_appends_and_reads_shared_event(connection, capsys, isolated_cli_arg
     read_args.extend(isolated_cli_args)
     assert cli.main(read_args) == 0
     assert json.loads(capsys.readouterr().out) == [appended]
+
+
+def test_cli_read_uses_default_and_custom_limits(
+    connection, capsys, isolated_cli_args
+):
+    for number in range(1, 13):
+        ledger.append_event(
+            "acme/repo", {"event": "work", "issue": number}, **connection
+        )
+
+    read_args = [
+        "ledger", "read", "acme/repo", "--redis-host", connection["redis_host"],
+        "--redis-port", str(connection["redis_port"]), "--json", *isolated_cli_args,
+    ]
+    assert cli.main(read_args) == 0
+    recent = json.loads(capsys.readouterr().out)
+    assert [event["issue"] for event in recent] == list(range(3, 13))
+
+    limited_args = [
+        "ledger", "read", "acme/repo", "--limit", "3",
+        "--redis-host", connection["redis_host"],
+        "--redis-port", str(connection["redis_port"]), "--json", *isolated_cli_args,
+    ]
+    assert cli.main(limited_args) == 0
+    limited = json.loads(capsys.readouterr().out)
+    assert [event["issue"] for event in limited] == [10, 11, 12]
 
 
 def test_cli_reports_unavailable_coordinator(closed_port, capsys, isolated_cli_args):

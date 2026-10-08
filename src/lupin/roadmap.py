@@ -194,8 +194,9 @@ def _read_ledger(repo_path: str, *, connection: dict | None = None):
     if error:
         return [], f"Could not identify repository for Redis ledger: {error}"
     try:
+        # Roadmap status can depend on events older than the default limit.
         events = ledger_store.read_events(
-            f"{owner}/{name}", **(connection or {})
+            f"{owner}/{name}", limit=None, **(connection or {})
         )
         return events, None
     except ledger_store.CoordinatorUnreachable as error:

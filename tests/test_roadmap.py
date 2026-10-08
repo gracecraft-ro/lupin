@@ -1420,6 +1420,16 @@ def test_roadmap_reads_latest_shared_events(redis_port, flush_redis, monkeypatch
         },
         **connection,
     )
+    for issue_number in range(100, 110):
+        ledger.append_event(
+            "acme/repo",
+            {
+                "event": "dispatch", "issue": issue_number,
+                "status": "running",
+            },
+            **connection,
+        )
+
     ledger.append_event(
         "acme/repo",
         {

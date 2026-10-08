@@ -339,6 +339,10 @@ def _ledger_args(parser: argparse.ArgumentParser) -> None:
 
     read = modes.add_parser("read", help="read a repository ledger")
     read.add_argument("repo", help="OWNER/REPO")
+    read.add_argument(
+        "--limit", type=int, default=10, metavar="N",
+        help="number of latest events to return (default: 10)",
+    )
     read.add_argument("--json", action="store_true")
     _fleet_connection_args(read)
 
@@ -1266,7 +1270,7 @@ def _cmd_ledger(args: argparse.Namespace) -> int:
                 event["children"] = args.child
             result = ledger.append_event(args.repo, event, **connection)
         else:
-            result = ledger.read_events(args.repo, **connection)
+            result = ledger.read_events(args.repo, limit=args.limit, **connection)
     except ValueError as exc:
         print(f"invalid ledger request: {exc}", file=sys.stderr)
         return 1
