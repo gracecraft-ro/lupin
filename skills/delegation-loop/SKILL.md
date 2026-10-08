@@ -21,19 +21,35 @@ dispatch and the repository's handoff record.
 
 ## Install skills on loop hosts
 
-The `skills/` folders are source files. Installing Lupin does not install
-them. Each host that runs a loop must make all four skills available to its
-agent runner:
+The `skills/` tree is the source. Installing the Lupin command does not
+install these files. A Nix host flake maps the four required directories from
+its pinned Lupin input into each runner's skill set. A rebuild creates or
+updates the links; do not copy the files by hand. The `ui-pressure-test`
+skill is optional. Add it to a selected runner when a task needs visual QA.
 
 - Claude Code: `~/.claude/skills/`
 - Pi: `~/.pi/agent/skills/`
 - OMP: `~/.omp/agent/skills/`
 
-Manage these paths in the host's config. For another runner, use its native
-skill path. After deployment, check that each required `SKILL.md` is readable
-on every target host. Start a new agent session and confirm it loads
-`/triage`, `/ship`, and `/code-review` before dispatch. Do not start a worker
-if one of these skills is missing.
+Add all four required names to each host's skill set, including any curated
+subset. Add `ui-pressure-test` to hosts that run UI pressure tests. After a
+rebuild, check that every required `SKILL.md` is readable:
+
+```sh
+for root in "$HOME/.claude/skills" "$HOME/.pi/agent/skills" "$HOME/.omp/agent/skills"; do
+  for name in delegation-loop triage ship code-review; do
+    test -r "$root/$name/SKILL.md" || {
+      echo "Missing $root/$name/SKILL.md" >&2
+      exit 1
+    }
+  done
+done
+```
+
+Start a new agent session and confirm it loads `/delegation-loop`, `/triage`,
+`/ship`, and `/code-review`. If the task needs UI pressure testing, also
+confirm it loads `/ui-pressure-test`. Do not start a worker if a skill it
+needs is missing.
 
 ## Read the backlog
 
@@ -68,13 +84,18 @@ lupin renew-claim OWNER/REPO#123 --holder SESSION
 lupin release-claim OWNER/REPO#123 --holder SESSION
 ```
 
-Lupin stores claims in Redis. A claim does not add a GitHub label, comment,
-or assignment. It also does not store the worktree path.
+By default, Lupin expires a claim after 10 minutes. Use `--ttl SECONDS` to
+change this limit. Renew every 2 minutes while work continues. Each renewal
+starts the timer again. If the claim is not renewed, Redis removes it when the
+timer ends. `lupin reconcile` runs once per call. It releases claims with no
+renewal for 10 minutes, even when `--ttl` is longer. Its schedule sets the
+cleanup delay.
 
-After a claim succeeds, the claim owner must mark the issue in GitHub. Use the
-repo's `claimed` label. Add it during repo setup if it does not exist. If you
-cannot add it, post the comment and report that the label is missing. Include
-the machine, worktree, branch, and holder:
+Lupin does not yet sync claims to GitHub. Issue #43 tracks automatic
+`claimed` label updates. Until it ships, the claim owner must update the issue
+manually. Use the repo's `claimed` label. Add it during repo setup if it does
+not exist. If you cannot add it, post the comment and report that the label is
+missing. Include the machine, worktree, branch, and holder:
 
 ```sh
 gh issue edit 123 --repo OWNER/REPO --add-label claimed
@@ -114,7 +135,15 @@ Give each worker a short brief with:
 - Machine, absolute worktree path, and branch.
 - Required tests and smoke checks.
 
-Tell the worker to use `/ship`. Do not repeat its implementation checklist.
+Tell implementation workers to use `/ship`. Do not repeat its implementation
+checklist.
+
+When an issue makes a major change to a web app's user interface or key user
+journey, and a preview is ready, dispatch a separate QA task with
+`ui-pressure-test`. Keep the test agent read-only with respect to source code,
+and keep its browser data separate from implementation work. Ask for evidence,
+prioritized tickets, and a list of untested items. Do not ask the test agent to
+fix findings.
 Use the runner's worktree isolation feature when it has one. Otherwise, create
 a separate worktree and verify the worker's working directory.
 

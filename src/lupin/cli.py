@@ -30,24 +30,16 @@ quest that is done/down (issue #14; see `reconcile.py`). `cmd` sends,
 checks, or lists signed cross-machine commands; `agent` is the
 long-running process that polls its own queue and runs them through a
 fixed action table (issue #28, implementing #27's design; see
-`commands.py`/`agent.py`). `stop`/`peek`/`schedule`/`pause`/`resume`/
-`attach` (issue #2 phase A) control a loop from any fleet machine. If the
-target is this machine, they run `loopctl` directly. If not, they send
-the action through the signed queue, using `loops.py`'s shared dispatch
-code. `attach` is the one exception -- it opens a live terminal instead
-of running a one-shot command. See `loops.py`'s `ssh_target_for` for the
-file that maps a remote machine to its ssh target. All of
-them share one process so a caller has one binary to find and one `lupin
---help` to read; the concerns stay as separate modules underneath, same
-as this project's other CLIs split "decide" from "do" (see
-review_dispatch.py).
+`run` starts a loop, `once` starts or schedules one, and `enable`/`disable`
+edit the local repo list. `loops` reads Herdr's agent state. `stop`/`peek`/
+`schedule`/`pause`/`resume` can target any fleet machine. Local actions run
+through Lupin. Remote actions use the signed Redis queue and `agent.py`.
+`attach` is direct: it runs the Herdr terminal here or connects to the
+remote Herdr server over SSH. It never uses the queue. `loops.py` owns the
+shared local-or-remote dispatch.
 
-Backend choice: `--backend local|redis` on each slot subcommand, default
-from the `LUPIN_BACKEND` env var, falling back to `local` if neither is
-set. An env var as the default (not a required flag) means a host's own
-config (a systemd `Environment=`, a shell profile) picks the backend once,
-and every call site -- `delegation-launch`, `loopctl`, an interactive
-`lupin status` -- doesn't need its own copy of that choice.
+Slot commands use `--backend local|redis`, or `LUPIN_BACKEND` if the flag is
+not set. A host can set the default once in its systemd environment.
 
 Exit codes, by design (see #198's architecture plan):
   0  done
@@ -118,6 +110,7 @@ from . import route as route_mod
 from . import serve
 from . import slots
 from . import slots_redis
+from . import loop_runtime
 
 DEFAULT_RESULT_WAIT_S = 20.0  # how long stop/peek/schedule/pause/resume
 # wait, by default, for a remote result before they report exit code 4
@@ -626,6 +619,38 @@ def _build_parser() -> argparse.ArgumentParser:
     _reconcile_args(sub.add_parser("reconcile", help="apply the automatic release rules once"))
     _cmd_group_args(sub.add_parser("cmd", help="send, check, or list cross-machine commands"))
     _agent_args(sub.add_parser("agent", help="run the command-queue poll loop for this machine"))
+    run_parser = sub.add_parser("run", help="start one loop or all enabled loops")
+    run_parser.add_argument("repo", nargs="?")
+    run_parser.add_argument("--all", action="store_true")
+    run_parser.add_argument("--platform", choices=("claude", "omp"))
+    run_parser.add_argument("--note")
+    run_parser.add_argument("--resume", action="store_true")
+    run_parser.add_argument("--machine", help="run on a fleet machine")
+    run_parser.add_argument("--json", action="store_true")
+    _wait_arg(run_parser)
+    _signing_key_arg(run_parser)
+    _fleet_connection_args(run_parser)
+    once_parser = sub.add_parser("once", help="start now or schedule a one-off loop run")
+    once_parser.add_argument("when")
+    once_parser.add_argument("repos", nargs="*")
+    once_parser.add_argument("--platform", choices=("claude", "omp"))
+    once_parser.add_argument("--note")
+    once_parser.add_argument("--resume", action="store_true")
+    once_parser.add_argument("--json", action="store_true")
+    enable_parser = sub.add_parser("enable", help="add a repo to the loop schedule")
+    enable_parser.add_argument("repo")
+    enable_parser.add_argument("--platform", choices=("claude", "omp"), default="claude")
+    disable_parser = sub.add_parser("disable", help="remove a repo from the loop schedule")
+    disable_parser.add_argument("repo")
+    loops_parser = sub.add_parser("loops", help="show Herdr loop state")
+    loops_parser.add_argument("repo", nargs="?")
+    loops_parser.add_argument("--machine")
+    loops_parser.add_argument("--json", action="store_true")
+    _wait_arg(loops_parser)
+    _signing_key_arg(loops_parser)
+    _fleet_connection_args(loops_parser)
+    loop_parser = sub.add_parser("loop", help=argparse.SUPPRESS)
+    loop_parser.add_argument("loop_args", nargs=argparse.REMAINDER)
     _stop_args(sub.add_parser("stop", help="stop a repo's loop, on whichever machine runs it"))
     _peek_args(sub.add_parser("peek", help="show recent pane output for a repo's loop"))
     _attach_args(sub.add_parser("attach", help="attach a terminal to a repo's loop session"))
@@ -913,7 +938,7 @@ def _cmd_join(args: argparse.Namespace) -> int:
             redis_username=args.redis_username,
             redis_password=args.redis_password,
             config_path=args.config_path,
-            loops=serve.local_loops(),
+            loops=loop_runtime.local_loops(),
             repos=serve.local_repo_inventory(),
         )
     except machines.CoordinatorUnreachable as exc:
@@ -927,7 +952,7 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
     try:
         record = machines.heartbeat(
             _fleet_connection(args),
-            loops=serve.local_loops(),
+            loops=loop_runtime.local_loops(),
             repos=serve.local_repo_inventory(),
         )
     except machines.CoordinatorUnreachable as exc:
@@ -1059,7 +1084,7 @@ def _cmd_place(args: argparse.Namespace) -> int:
         else:
             print(f"no online machine runs provider {result['provider']!r}", file=sys.stderr)
         return 2
-    print(result["run_command"])
+    print(result["pick"])
     return 0
 
 
@@ -1367,6 +1392,194 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_run(args: argparse.Namespace) -> int:
+    if args.all == bool(args.repo):
+        print("run needs one repo or --all", file=sys.stderr)
+        return 1
+    if args.all and (args.platform or args.resume):
+        print("run --all uses each repo's configured platform and cannot resume", file=sys.stderr)
+        return 1
+    local_host = machines.hostname()
+    machine = args.machine or local_host
+    if machine != local_host:
+        queue_action = "loop.run-all" if args.all else "loop.run"
+        queue_params = {"note": args.note} if args.all else {
+            "repo": args.repo,
+            "platform": args.platform,
+            "note": args.note,
+            "resume": args.resume,
+        }
+        local_argv = ["lupin", "run", "--all"] if args.all else ["lupin", "run", args.repo]
+        if args.note is not None:
+            local_argv.extend(["--note", args.note])
+        if args.platform:
+            local_argv.extend(["--platform", args.platform])
+        if args.resume:
+            local_argv.append("--resume")
+        try:
+            result = loops_mod.dispatch_loop_action(
+                machine=machine,
+                local_host=local_host,
+                local_argv=local_argv,
+                queue_action=queue_action,
+                queue_params=queue_params,
+                connection=_fleet_connection(args),
+                signing_key=args.signing_key,
+                actor=os.environ.get("USER", "lupin"),
+                issuer=local_host,
+                wait_s=args.wait,
+            )
+        except slots.CoordinatorUnreachable as exc:
+            print(f"cannot reach the redis coordinator to start a loop on {machine!r}: {exc}", file=sys.stderr)
+            return 3
+        except loops_mod.MissingSigningKey:
+            print("run needs --signing-key or $LUPIN_CMD_SIGNING_KEY to reach another machine", file=sys.stderr)
+            return 1
+        code, payload = _exit_for_dispatch(result)
+        if args.json:
+            _print_dispatch_result(payload, as_json=True)
+        elif payload.get("output"):
+            print(payload["output"].rstrip())
+        else:
+            print(f"{payload.get('state', 'queued')} ({payload['id']})")
+        return code
+    try:
+        targets = list(loop_runtime.enabled_repos()) if args.all else [args.repo]
+        results = []
+        failed = False
+        for repo in targets:
+            ok, message = loop_runtime.start_loop(
+                repo, platform=args.platform, note=args.note, resume=args.resume
+            )
+            results.append({"repo": repo, "started": ok, "message": message})
+            failed |= not ok and not message.startswith("skip ")
+    except loop_runtime.LoopError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(results))
+    else:
+        for item in results:
+            print(item["message"])
+    if failed:
+        return 1
+    if not args.all and results and not results[0]["started"]:
+        return 2 if results[0]["message"].startswith("skip ") else 1
+    return 0
+
+
+def _cmd_once(args: argparse.Namespace) -> int:
+    try:
+        if args.when == "now":
+            targets = args.repos or list(loop_runtime.enabled_repos())
+            results = []
+            failed = False
+            for repo in targets:
+                ok, message = loop_runtime.start_loop(
+                    repo, platform=args.platform, note=args.note, resume=args.resume
+                )
+                results.append({"repo": repo, "started": ok, "message": message})
+                failed |= not ok and not message.startswith("skip ")
+            if args.json:
+                print(json.dumps(results))
+            else:
+                for item in results:
+                    print(item["message"])
+            return 1 if failed else 0
+        targets = args.repos or list(loop_runtime.enabled_repos())
+        message = loop_runtime.schedule_once(
+            args.when, targets, platform=args.platform, note=args.note, resume=args.resume
+        )
+    except loop_runtime.LoopError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({"scheduled": True, "message": message}))
+    else:
+        print(message)
+    return 0
+
+
+def _cmd_enable(args: argparse.Namespace) -> int:
+    try:
+        loop_runtime.enable_repo(args.repo, args.platform)
+    except loop_runtime.LoopError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"enabled {args.repo} ({args.platform})")
+    return 0
+
+
+def _cmd_disable(args: argparse.Namespace) -> int:
+    try:
+        loop_runtime.disable_repo(args.repo)
+    except loop_runtime.LoopError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"disabled {args.repo}")
+    return 0
+
+
+def _cmd_loop_internal(args: argparse.Namespace) -> int:
+    return loop_runtime.main(args.loop_args)
+
+
+def _cmd_loops(args: argparse.Namespace) -> int:
+    local_host = machines.hostname()
+    machine = args.machine or local_host
+    if machine == local_host:
+        if args.repo:
+            rows = [loop_runtime.loop_state(args.repo)]
+        else:
+            rows = loop_runtime.status_rows()
+    elif args.repo:
+        try:
+            result = loops_mod.dispatch_loop_action(
+                machine=machine,
+                local_host=local_host,
+                local_argv=["lupin", "loop", "local-action", "state", args.repo],
+                queue_action="loop.state",
+                queue_params={"repo": args.repo},
+                connection=_fleet_connection(args),
+                signing_key=args.signing_key,
+                actor=os.environ.get("USER", "lupin"),
+                issuer=local_host,
+                wait_s=args.wait,
+            )
+        except (slots.CoordinatorUnreachable, loops_mod.MissingSigningKey) as exc:
+            print(str(exc), file=sys.stderr)
+            return 3 if isinstance(exc, slots.CoordinatorUnreachable) else 1
+        code, payload = _exit_for_dispatch(result)
+        if code:
+            _print_dispatch_result(payload, as_json=args.json)
+            return code
+        output = payload.get("output") or ""
+        if result["mode"] == "queued":
+            output = result["result"].get("output") or ""
+        try:
+            rows = [json.loads(output)]
+        except json.JSONDecodeError:
+            print("remote loop state returned invalid JSON", file=sys.stderr)
+            return 1
+    else:
+        try:
+            records = machines.machines(_fleet_connection(args))
+        except machines.CoordinatorUnreachable as exc:
+            print(f"cannot reach the {exc}", file=sys.stderr)
+            return 3
+        record = next((item for item in records if item["name"] == machine), None)
+        if record is None:
+            print(f"no machine named {machine!r}", file=sys.stderr)
+            return 1
+        rows = record.get("loops", [])
+    if args.json:
+        print(json.dumps(rows))
+    else:
+        for row in rows:
+            print(f"{row.get('repo', '?')}: {row.get('state', 'unknown')} ({row.get('backend', 'unknown')})")
+    return 0
+
+
 def _exit_for_dispatch(result: dict) -> tuple[int, dict]:
     """Turn a `loops.dispatch_loop_action()` result into an exit code and
     a result dict. Shared by `stop`/`peek`/`schedule`/`pause`/`resume`.
@@ -1414,7 +1627,7 @@ def _cmd_stop(args: argparse.Namespace) -> int:
     try:
         result = loops_mod.dispatch_loop_action(
             machine=machine, local_host=local_host,
-            local_argv=["loopctl", "stop", args.repo],
+            local_argv=["lupin", "loop", "local-action", "stop", args.repo],
             queue_action="loop.stop", queue_params={"repo": args.repo},
             connection=connection, signing_key=args.signing_key,
             actor=os.environ.get("USER", "lupin"), issuer=local_host, wait_s=args.wait,
@@ -1447,7 +1660,7 @@ def _cmd_peek(args: argparse.Namespace) -> int:
     try:
         result = loops_mod.dispatch_loop_action(
             machine=machine, local_host=local_host,
-            local_argv=["loopctl", "peek", args.repo, str(args.lines)],
+            local_argv=["lupin", "loop", "local-action", "peek", args.repo, str(args.lines)],
             queue_action="loop.peek", queue_params={"repo": args.repo, "lines": args.lines},
             connection=connection, signing_key=args.signing_key,
             actor=os.environ.get("USER", "lupin"), issuer=local_host, wait_s=args.wait,
@@ -1482,17 +1695,12 @@ def _cmd_attach(args: argparse.Namespace) -> int:
             print(f"cannot reach the {exc}", file=sys.stderr)
             return 3
 
-    if machine == local_host:
-        argv = ["loopctl", "attach", args.repo]
-    else:
-        target = loops_mod.ssh_target_for(machine)
-        if target is None:
-            print(
-                f"no ssh target for {machine!r} -- add one to {loops_mod.SSH_TARGETS_PATH}",
-                file=sys.stderr,
-            )
-            return 1
-        argv = ["ssh", "-t", target, "loopctl", "attach", args.repo]
+    target = loops_mod.ssh_target_for(machine) if machine != local_host else None
+    try:
+        argv = loop_runtime.attach_argv(args.repo, machine, local_host, target)
+    except loop_runtime.LoopError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
     if args.print_only:
         print(" ".join(shlex.quote(a) for a in argv))
@@ -1507,7 +1715,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
     machine = args.machine or local_host
 
     if mode == "show":
-        local_argv = ["loopctl", "schedule"]
+        local_argv = ["lupin", "loop", "local-action", "schedule"]
         queue_action, queue_params = "schedule.show", {}
     elif mode == "first":
         if args.every_literal != "every":
@@ -1519,7 +1727,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         except agent_mod.RejectedCommand as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        local_argv = ["loopctl", "schedule", "first", when, "every", interval]
+        local_argv = ["lupin", "loop", "local-action", "schedule", "first", when, "every", interval]
         queue_action, queue_params = "schedule.set", {"mode": "first", "when": when, "interval": interval}
     else:  # cal
         try:
@@ -1527,7 +1735,7 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
         except agent_mod.RejectedCommand as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        local_argv = ["loopctl", "schedule", "cal", expr]
+        local_argv = ["lupin", "loop", "local-action", "schedule", "cal", expr]
         queue_action, queue_params = "schedule.set", {"mode": "cal", "expr": expr}
 
     try:
@@ -1583,7 +1791,7 @@ def _cmd_pause_resume(args: argparse.Namespace, verb: str) -> int:
         try:
             result = loops_mod.dispatch_loop_action(
                 machine=machine, local_host=local_host,
-                local_argv=["loopctl", verb],
+                local_argv=["lupin", "loop", "local-action", verb],
                 queue_action=f"schedule.{verb}", queue_params={},
                 connection=connection, signing_key=args.signing_key,
                 actor=os.environ.get("USER", "lupin"), issuer=local_host, wait_s=args.wait,
@@ -1689,6 +1897,18 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_cmd(args)
     if args.cmd == "agent":
         return _cmd_agent(args)
+    if args.cmd == "loop":
+        return _cmd_loop_internal(args)
+    if args.cmd == "run":
+        return _cmd_run(args)
+    if args.cmd == "once":
+        return _cmd_once(args)
+    if args.cmd == "enable":
+        return _cmd_enable(args)
+    if args.cmd == "disable":
+        return _cmd_disable(args)
+    if args.cmd == "loops":
+        return _cmd_loops(args)
     if args.cmd == "stop":
         return _cmd_stop(args)
     if args.cmd == "peek":

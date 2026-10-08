@@ -1,20 +1,15 @@
-"""Run a loop-control action on the machine that should run it (issue
-#2, phase A).
+"""Run a loop action on the machine that owns the loop.
 
-If the target is this machine, this module runs `loopctl` directly. If
-the target is another machine, it sends a signed command on the Redis
-queue from `commands.py`. That machine's `lupin agent` picks the command
-up and runs it.
+If the target is this machine, this module runs the given Lupin command.
+If the target is another machine, it sends a signed command on the Redis
+queue from `commands.py`. That machine's `lupin agent` runs the command.
 
-Both `cli.py`'s `stop`/`peek`/`schedule`/`pause`/`resume` commands and
-`serve.py`'s dashboard use this one module to make that decision, so the
-two places can't drift apart.
+The CLI and dashboard use this module for local and remote actions.
 
-`attach` does not use this module. It opens a terminal directly instead
--- either `loopctl attach` on this machine, or `ssh -t <target> loopctl
-attach` on another one. It never goes through the Redis queue. See
-`ssh_target_for` below for the file that maps a machine name to its ssh
-target.
+`attach` does not use this module. It runs `herdr --session <session>` on
+this machine, or `herdr --remote <target> --session <session>` for a remote
+host. Herdr uses SSH for the remote connection. See `ssh_target_for` below
+for the file that maps a machine name to its SSH target.
 """
 
 from __future__ import annotations

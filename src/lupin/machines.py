@@ -24,24 +24,14 @@ write. `providers` is still a stub (`[]`) -- nothing populates it yet, but
 `_write_record` carries over whatever is already there instead of
 overwriting it, so a future writer's value survives the next heartbeat.
 
-`loops` (issue #2 phase A) lists this machine's live loops. Each entry
-looks like `{"repo", "platform", "state", "since"}`. `state` is always
-`None` for now -- there is no signal yet that reports a loop's own state
-on the tmux backend.
+`loops` lists the live loops on this machine. Each entry includes its
+repo, platform, and state from the Herdr agent API.
 
-Like `providers`, a write that does not recompute `loops`
-(`join`/`drain`/`undrain`) leaves the existing value alone instead of
-wiping it out. `heartbeat()` is meant to be the one call that keeps
-`loops` fresh.
+`join()` and `heartbeat()` receive loop state from Herdr and repo inventory
+from their caller. They do not infer loop state from pane text. `drain()`
+and `undrain()` keep their last known values.
 
-This module has no way to read tmux or run `loopctl` itself -- that code
-lives in `serve.py`. `serve.py` already imports this module, so this
-module cannot import `serve.py` back (that would be a cycle). Instead,
-the caller (`cli.py`) reads the loop list itself and passes it in.
-
-`session_backend` is always `"tmux"` for now, on every machine. This
-will change once ghostbook.nix's `LOOP_BACKEND` setting ships (issue #2,
-phase B).
+`session_backend` is `"herdr"` on every machine.
 
 `actions` is the list of queue actions this machine's `lupin agent`
 accepts. It is read straight from `agent.ACTIONS`, so it always matches
@@ -69,11 +59,8 @@ RECORD_TTL = int(OFFLINE_AFTER * 20)
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "lupin" / "fleet.json"
 _REDIS_ERRORS = (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)
 
-# Issue #2, phase A: every machine runs loops over tmux right now. This
-# will become a per-machine setting once ghostbook.nix's `LOOP_BACKEND`
-# setting ships (phase B). Until then, this module does not need to
-# decide it.
-SESSION_BACKEND = "tmux"
+# Herdr owns local loop sessions on every machine.
+SESSION_BACKEND = "herdr"
 
 
 def package_version() -> str:
@@ -268,8 +255,8 @@ def heartbeat(
 ) -> dict:
     """Refresh this machine's record and keep its state.
 
-    `loops` lists live loops. `repos` lists local repos. The caller reads
-    both lists and passes them in.
+    `loops` lists live Herdr loops; `repos` lists local repos. The caller
+    reads both values and passes them in.
     """
     client = slots_redis._client(
         connection.get("redis_host"),

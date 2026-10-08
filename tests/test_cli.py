@@ -1,19 +1,14 @@
-"""Tests for the 6 new `lupin` CLI verbs from issue #2 phase A: `stop`,
-`peek`, `attach`, `schedule`, `pause`, `resume`. All mock
-`loops.dispatch_loop_action`/`resolve_machine_for_repo`/`ssh_target_for`
-directly, so none of these need a real Redis or a real fleet machine --
-that's `test_loops.py`'s job for the dispatch function itself, and
-`test_agent.py`'s for the queue actions it talks to.
-"""
+"""Tests for Lupin loop commands and their fleet routing."""
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest import mock
 
 import pytest
 
-from lupin import cli, loops, machines, slots
+from lupin import cli, loop_runtime, loops, machines, slots
 
 
 @pytest.fixture(autouse=True)
@@ -21,6 +16,119 @@ def local_host(monkeypatch):
     monkeypatch.setattr(machines, "hostname", lambda: "h")
     yield "h"
 
+
+def test_run_creates_herdr_worker_metadata_and_systemd_unit(monkeypatch, tmp_path, capsys):
+    state_dir = tmp_path / "state"
+    code_dir = tmp_path / "code"
+    repo_dir = code_dir / "widgets"
+    (repo_dir / "docs").mkdir(parents=True)
+    (repo_dir / "docs" / "delegation-loop.md").write_text("run this repo\n", encoding="utf-8")
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", state_dir)
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", state_dir / "herdr-loops")
+    monkeypatch.setattr(loop_runtime, "REPORTS_DIR", state_dir / "reports")
+    monkeypatch.setattr(loop_runtime, "REPOS_FILE", state_dir / "repos")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {})
+    monkeypatch.setattr(
+        loop_runtime,
+        "_run",
+        lambda argv, **kwargs: (
+            (1, "inactive") if argv[0] in {"systemctl", "tmux"} else (0, '{"running": false}')
+        ),
+    )
+    launched = []
+    monkeypatch.setattr(
+        loop_runtime,
+        "_systemd_run",
+        lambda repo, kind, command, **kwargs: launched.append((repo, kind, command, kwargs)) or (0, ""),
+    )
+
+    assert cli.main(["run", "widgets", "--json"]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result[0]["started"] is True
+    assert result[0]["repo"] == "widgets"
+    assert result[0]["message"].startswith("started widgets (claude) in Herdr session ")
+    repo, kind, command, options = launched[0]
+    assert repo == "widgets"
+    assert kind == "loop"
+    assert command[1:3] == ["loop", "worker"]
+    assert "--session" in command
+    assert options["claude_limits"] is True
+    metadata = json.loads((state_dir / "herdr-loops" / "widgets.json").read_text(encoding="utf-8"))
+    assert metadata["state"] == "starting"
+    assert metadata["platform"] == "claude"
+    assert Path(metadata["prompt_file"]).is_file()
+
+def test_future_once_defaults_to_enabled_repos(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(
+        loop_runtime,
+        "enabled_repos",
+        lambda: {"widgets": "claude", "gizmos": "omp"},
+    )
+    monkeypatch.setattr(loop_runtime, "_service_environment", lambda: [])
+    monkeypatch.setattr(loop_runtime, "_run", lambda *args, **kwargs: (0, ""))
+
+    assert cli.main(["once", "+2h"]) == 0
+
+    schedules = list((tmp_path / "once").glob("*.json"))
+    assert len(schedules) == 1
+    assert json.loads(schedules[0].read_text(encoding="utf-8"))["repos"] == [
+        "widgets",
+        "gizmos",
+    ]
+    assert capsys.readouterr().out == "scheduled widgets, gizmos for +2h\n"
+
+
+def test_future_once_without_enabled_repos_does_not_schedule(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {})
+    monkeypatch.setattr(
+        loop_runtime, "_run", lambda *args, **kwargs: pytest.fail("systemd must not run")
+    )
+
+    assert cli.main(["once", "+2h"]) == 1
+
+    assert "at least one repo is required" in capsys.readouterr().err
+    assert not (tmp_path / "once").exists()
+
+
+
+@pytest.mark.parametrize(
+    "argv, action, params",
+    [
+        (
+            ["run", "widgets", "--machine", "remote", "--platform", "omp", "--note", "review", "--resume"],
+            "loop.run",
+            {"repo": "widgets", "platform": "omp", "note": "review", "resume": True},
+        ),
+        (
+            ["run", "--all", "--machine", "remote", "--note", "review"],
+            "loop.run-all",
+            {"note": "review"},
+        ),
+    ],
+)
+def test_run_routes_remote_start_through_signed_queue(argv, action, params, capsys):
+    queued = {
+        "mode": "queued",
+        "id": "command-1",
+        "result": {"id": "command-1", "state": "ok", "host": "remote", "output": "started widgets"},
+    }
+    argv.extend(["--signing-key", "target-key", "--json"])
+    with (
+        mock.patch.object(cli, "_fleet_connection", return_value={"redis_host": "redis"}),
+        mock.patch.object(loops, "dispatch_loop_action", return_value=queued) as dispatch,
+    ):
+        code = cli.main(argv)
+
+    assert code == 0
+    assert dispatch.call_args.kwargs["machine"] == "remote"
+    assert dispatch.call_args.kwargs["queue_action"] == action
+    assert dispatch.call_args.kwargs["queue_params"] == params
+    assert dispatch.call_args.kwargs["signing_key"] == "target-key"
+    assert json.loads(capsys.readouterr().out)["output"] == "started widgets"
 
 # --------------------------------------------------------------------------
 # stop
@@ -144,7 +252,7 @@ def test_peek_default_lines_is_sixty():
     ) as dispatch:
         code = cli.main(["peek", "widgets", "--machine", "h"])
     assert code == 0
-    assert dispatch.call_args.kwargs["local_argv"] == ["loopctl", "peek", "widgets", "60"]
+    assert dispatch.call_args.kwargs["local_argv"] == ["lupin", "loop", "local-action", "peek", "widgets", "60"]
     assert dispatch.call_args.kwargs["queue_params"] == {"repo": "widgets", "lines": 60}
 
 
@@ -153,7 +261,7 @@ def test_peek_custom_lines():
         loops, "dispatch_loop_action", return_value={"mode": "local", "returncode": 0, "output": ""}
     ) as dispatch:
         cli.main(["peek", "widgets", "20", "--machine", "h"])
-    assert dispatch.call_args.kwargs["local_argv"] == ["loopctl", "peek", "widgets", "20"]
+    assert dispatch.call_args.kwargs["local_argv"] == ["lupin", "loop", "local-action", "peek", "widgets", "20"]
 
 
 def test_peek_prints_pane_output(capsys):
@@ -169,17 +277,19 @@ def test_peek_prints_pane_output(capsys):
 # --------------------------------------------------------------------------
 
 
-def test_attach_local_print_shows_loopctl_argv(capsys):
+def test_attach_local_print_shows_herdr_argv(capsys):
     code = cli.main(["attach", "widgets", "--machine", "h", "--print"])
     assert code == 0
-    assert capsys.readouterr().out.strip() == "loopctl attach widgets"
+    assert capsys.readouterr().out.strip() == f"{loop_runtime.HERDR} --session {loop_runtime.session_name('widgets')}"
 
 
-def test_attach_remote_print_shows_ssh_argv(capsys):
+def test_attach_remote_print_shows_herdr_remote_argv(capsys):
     with mock.patch.object(loops, "ssh_target_for", return_value="ghosta@jesus.local"):
         code = cli.main(["attach", "widgets", "--machine", "jesus", "--print"])
     assert code == 0
-    assert capsys.readouterr().out.strip() == "ssh -t ghosta@jesus.local loopctl attach widgets"
+    assert capsys.readouterr().out.strip() == (
+        f"{loop_runtime.HERDR} --remote ghosta@jesus.local --session {loop_runtime.session_name('widgets')}"
+    )
 
 
 def test_attach_remote_without_ssh_target_exits_one(capsys):
@@ -214,7 +324,8 @@ def test_attach_execs_when_not_print(monkeypatch):
     monkeypatch.setattr(cli.os, "execvp", lambda prog, argv: calls.append((prog, argv)))
     code = cli.main(["attach", "widgets", "--machine", "h"])
     assert code is None
-    assert calls == [("loopctl", ["loopctl", "attach", "widgets"])]
+    command = [loop_runtime.HERDR, "--session", loop_runtime.session_name("widgets")]
+    assert calls == [(loop_runtime.HERDR, command)]
 
 
 # --------------------------------------------------------------------------
@@ -228,7 +339,7 @@ def test_schedule_bare_means_show():
     ) as dispatch:
         code = cli.main(["schedule", "--machine", "h"])
     assert code == 0
-    assert dispatch.call_args.kwargs["local_argv"] == ["loopctl", "schedule"]
+    assert dispatch.call_args.kwargs["local_argv"] == ["lupin", "loop", "local-action", "schedule"]
     assert dispatch.call_args.kwargs["queue_action"] == "schedule.show"
 
 
@@ -238,7 +349,9 @@ def test_schedule_cal_builds_expected_argv():
     ) as dispatch:
         code = cli.main(["schedule", "--machine", "h", "cal", "*-*-* 00/5:00:00"])
     assert code == 0
-    assert dispatch.call_args.kwargs["local_argv"] == ["loopctl", "schedule", "cal", "*-*-* 00/5:00:00"]
+    assert dispatch.call_args.kwargs["local_argv"] == [
+        "lupin", "loop", "local-action", "schedule", "cal", "*-*-* 00/5:00:00"
+    ]
     assert dispatch.call_args.kwargs["queue_params"] == {"mode": "cal", "expr": "*-*-* 00/5:00:00"}
 
 
@@ -256,7 +369,9 @@ def test_schedule_first_builds_expected_argv():
     ) as dispatch:
         code = cli.main(["schedule", "--machine", "h", "first", "+2h5m", "every", "5h15m"])
     assert code == 0
-    assert dispatch.call_args.kwargs["local_argv"] == ["loopctl", "schedule", "first", "+2h5m", "every", "5h15m"]
+    assert dispatch.call_args.kwargs["local_argv"] == [
+        "lupin", "loop", "local-action", "schedule", "first", "+2h5m", "every", "5h15m"
+    ]
     assert dispatch.call_args.kwargs["queue_params"] == {"mode": "first", "when": "+2h5m", "interval": "5h15m"}
 
 
@@ -302,7 +417,7 @@ def test_pause_single_machine_default_local():
         code = cli.main(["pause"])
     assert code == 0
     assert dispatch.call_args.kwargs["machine"] == "h"
-    assert dispatch.call_args.kwargs["local_argv"] == ["loopctl", "pause"]
+    assert dispatch.call_args.kwargs["local_argv"] == ["lupin", "loop", "local-action", "pause"]
     assert dispatch.call_args.kwargs["queue_action"] == "schedule.pause"
 
 
