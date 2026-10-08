@@ -28,7 +28,7 @@ lupin classify --issue-json FILE [--diff-stat FILE] [--json]
 lupin fetch-models [--snapshot-file FILE] [--no-write] [--json]
 lupin fetch-benchmarks [--force] [--json]
 lupin quota [--json]
-lupin review-route (--category C --size S | --issue-json FILE) [--mode M] [--json]
+lupin review-route (--category C --size S | --issue-json FILE) [--mode M]
 lupin review-route --prefetch N[,N...] [--repo OWNER/REPO]
 lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
 lupin hold (--lease ID | <slot> --holder H --wait S) [--ttl SECONDS] -- <command>
