@@ -218,7 +218,7 @@ def test_dispatch_fleet_runs_uses_each_targets_key_and_skips_unsafe_targets(redi
     keys = {"pihome": "local-key", "jesus": "jesus-key", "ralpha": "ralpha-key"}
 
     results = loops.dispatch_fleet_runs(
-        {"widgets": "omp", "roundsmith": None, "not-enabled": "claude"},
+        ["widgets", "roundsmith", "not-enabled"],
         records,
         local_host="pihome",
         signing_keys=keys,
@@ -235,10 +235,7 @@ def test_dispatch_fleet_runs_uses_each_targets_key_and_skips_unsafe_targets(redi
         if not result["queued"]:
             continue
         payload = json.loads(client.get(commands.cmd_key(result["id"])))
-        expected_params = {"repo": result["repo"]}
-        if result["repo"] == "widgets":
-            expected_params["platform"] = "omp"
-        assert payload["params"] == expected_params
+        assert payload["params"] == {"repo": result["repo"]}
         assert commands.verify(payload, keys[result["machine"]])
 
 # --------------------------------------------------------------------------

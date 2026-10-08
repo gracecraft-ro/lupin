@@ -2395,10 +2395,7 @@ class TestLoopsPageIntegration:
         kw = _kw(redis_port)
         handler = _post_handler("/loops/start", b"repo=widgets&machine=jesus", kw)
         handler.cmd_signing_key = "secret"
-        with (
-            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
-            mock.patch.object(serve, "_repo_platforms", return_value={"widgets": "omp"}),
-        ):
+        with mock.patch.object(serve.machines, "hostname", return_value="pihome"):
             handler.do_POST()
 
         raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
@@ -2406,7 +2403,7 @@ class TestLoopsPageIntegration:
         assert len(queued) == 1
         stored = json.loads(raw.get(f"lupin:v1:cmd:{queued[0]}"))
         assert stored["action"] == "loop.run"
-        assert stored["params"] == {"repo": "widgets", "platform": "omp"}
+        assert stored["params"] == {"repo": "widgets"}
 
     def test_peek_enqueues_a_signed_remote_action(self, redis_port, flush_redis):
         kw = _kw(redis_port)
@@ -3331,12 +3328,12 @@ class TestReposPageRoutes:
 
     def test_remove_route_removes_a_confirmed_repo(self, monkeypatch):
         monkeypatch.setattr(serve, "enabled_repos", lambda: ["widgets", "other"])
-        written = {}
-        monkeypatch.setattr(serve, "write_enabled_repos", lambda names: written.setdefault("names", names))
+        disabled = []
+        monkeypatch.setattr(serve.loop_runtime, "disable_repo", disabled.append)
         handler = _repos_handler()
         _post_body(handler, "/repos/remove", {"repo": "widgets", "confirm": "widgets"})
         handler.do_POST()
-        assert written["names"] == ["other"]
+        assert disabled == ["widgets"]
         handler.redirect.assert_called_once()
 
     def test_doc_save_route_rejects_a_missing_repository(self, tmp_path, monkeypatch):

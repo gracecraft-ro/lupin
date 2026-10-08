@@ -155,7 +155,7 @@ def dispatch_loop_action(
 
 
 def dispatch_fleet_runs(
-    repos: dict[str, str | None],
+    repos: list[str],
     records: list[dict],
     *,
     local_host: str,
@@ -173,7 +173,7 @@ def dispatch_fleet_runs(
     ]
     queued = []
     assigned: dict[str, int] = {}
-    for repo, platform in sorted(repos.items()):
+    for repo in sorted(repos):
         candidates = [
             worker
             for worker in workers
@@ -205,8 +205,6 @@ def dispatch_fleet_runs(
         )
         worker = candidates[0]
         params = {"repo": repo}
-        if platform is not None:
-            params["platform"] = platform
         command_id = commands.enqueue(
             worker["name"],
             "loop.run",

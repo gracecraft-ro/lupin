@@ -1414,6 +1414,20 @@ def _cmd_agent(args: argparse.Namespace) -> int:
     return 0
 
 
+def _start_loop_with_result(repo: str, args: argparse.Namespace) -> tuple[bool, str]:
+    try:
+        return loop_runtime.start_loop(
+            repo,
+            platform=args.platform,
+            provider=args.provider,
+            model=args.model,
+            note=args.note,
+            resume=args.resume,
+        )
+    except loop_runtime.LoopError as exc:
+        return False, f"could not start loop for {repo}: {exc}"
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     if args.all == bool(args.repo):
         print("run needs one repo or --all", file=sys.stderr)
@@ -1483,14 +1497,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         results = []
         failed = False
         for repo in targets:
-            ok, message = loop_runtime.start_loop(
-                repo,
-                platform=args.platform,
-                provider=args.provider,
-                model=args.model,
-                note=args.note,
-                resume=args.resume,
-            )
+            ok, message = _start_loop_with_result(repo, args)
             results.append({"repo": repo, "started": ok, "message": message})
             failed |= not ok and not message.startswith("skip ")
     except loop_runtime.LoopError as exc:
@@ -1511,8 +1518,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
 def _cmd_fleet_run(args: argparse.Namespace) -> int:
     """Dispatch the local enabled-repo list to eligible fleet workers."""
     try:
-        repos = loop_runtime.enabled_repos()
-        repos = {repo: None for repo in repos}
+        repos = list(loop_runtime.enabled_repos())
         if not repos:
             print("no enabled repos to dispatch", file=sys.stderr)
             return 1
@@ -1558,14 +1564,7 @@ def _cmd_once(args: argparse.Namespace) -> int:
             results = []
             failed = False
             for repo in targets:
-                ok, message = loop_runtime.start_loop(
-                    repo,
-                    platform=args.platform,
-                    provider=args.provider,
-                    model=args.model,
-                    note=args.note,
-                    resume=args.resume,
-                )
+                ok, message = _start_loop_with_result(repo, args)
                 results.append({"repo": repo, "started": ok, "message": message})
                 failed |= not ok and not message.startswith("skip ")
             if args.json:

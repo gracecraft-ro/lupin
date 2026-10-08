@@ -457,7 +457,11 @@ def disable_repo(repo: str) -> None:
     repo = validate_repo(repo)
     values = enabled_repos()
     values.pop(repo, None)
+    profiles = orchestrator_profiles()
+    profiles.pop(repo, None)
     write_repos(sorted(values.items()))
+    if ORCHESTRATORS_FILE.exists():
+        _write_orchestrator_profiles(profiles)
 
 
 def repo_catalog() -> list[dict]:
@@ -1409,14 +1413,18 @@ def once_fire(identifier: str) -> list[str]:
         raise LoopError(f"could not read one-off schedule: {exc}") from exc
     results = []
     for repo in entry.get("repos", []):
-        ok, message = start_loop(
-            repo,
-            platform=entry.get("platform"),
-            provider=entry.get("provider"),
-            model=entry.get("model"),
-            note=entry.get("note"),
-            resume=entry.get("resume", False),
-        )
+        try:
+            ok, message = start_loop(
+                repo,
+                platform=entry.get("platform"),
+                provider=entry.get("provider"),
+                model=entry.get("model"),
+                note=entry.get("note"),
+                resume=entry.get("resume", False),
+            )
+        except LoopError as exc:
+            ok = False
+            message = f"could not start loop for {repo}: {exc}"
         results.append(message)
         if not ok:
             print(message, file=sys.stderr)
