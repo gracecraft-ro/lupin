@@ -112,6 +112,8 @@ Give the worker a short brief:
 - Likely files and known parallel work.
 - Lupin's model, effort, and machine recommendation.
 - Claim or quest ID, machine, worktree path, and branch.
+- For a worker in a Herdr pane: agent name, workspace ID, pane ID, tab ID,
+  and cwd. Read them from `herdr agent list`.
 - Repository instructions and required verification.
 
 Tell the worker to use `/ship`. Record dispatches, handoffs, and split links

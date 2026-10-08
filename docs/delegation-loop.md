@@ -41,6 +41,16 @@ To work on an issue:
 
 3. Use `/ship`. It runs `git push -u fork <branch>` and opens the PR.
 
+On a Herdr worker you can use a Herdr worktree instead of a clone:
+
+```bash
+herdr worktree list --cwd /code/lupin
+herdr worktree create --branch <branch> --base main --cwd /code/lupin
+```
+
+The worktree is a linked Git worktree, not a clone. It has no `fork` remote,
+so `/ship` must add one before it pushes.
+
 ## Pull request and review
 
 Every change goes through a pull request. The shared steps are in "Review and

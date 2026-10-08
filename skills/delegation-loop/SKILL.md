@@ -18,7 +18,10 @@ release rules. Read the latest issue comments.
 
 Use an isolated worktree for each worker. Do not let parallel workers edit the
 same checkout. Record the machine, worktree path, branch, and issue in the
-dispatch and the repository's handoff record.
+dispatch and the repository's handoff record. When a worker runs in a Herdr
+pane, also record the agent name, workspace ID, pane ID, tab ID, and cwd.
+`herdr agent list` reports all of them. See "Talk to an agent in a Herdr
+pane" below.
 
 ## Install skills on loop hosts
 
@@ -146,30 +149,92 @@ and keep its browser data separate from implementation work. Ask for evidence,
 prioritized tickets, and a list of untested items. Do not ask the test agent to
 fix findings.
 Use the runner's worktree isolation feature when it has one. Otherwise, create
-a separate worktree and verify the worker's working directory.
+a separate worktree and verify the worker's working directory. On a Herdr
+worker, use the Herdr worktree commands:
+
+```sh
+herdr worktree list --cwd "$PWD"
+herdr worktree create --branch BRANCH --base REF --cwd "$PWD"
+herdr worktree open --path PATH --cwd "$PWD"
+```
+
+`--trust-repository` gives Git trust for one command. Use it only after the
+owner verified the repository. Do not use it as a retry for a failed worktree
+command.
 
 ## Communicate with workers
 
 Use the agent runner's prompt and message tools for its own workers. Lupin's
 remote commands control loops. They do not send free-form messages.
 
-For workers started in Herdr-managed panes, Herdr can prompt, read, and wait:
+### Talk to an agent in a Herdr pane
+
+A Lupin loop runs in one Herdr session on its machine. That session is
+`lupin-loops`. Every loop is one workspace in it, and every workspace has one
+named agent in it. A worker that the runner starts itself runs in the runner's
+own session instead.
+
+Herdr is the only way to send a message to a running agent. Read the agent
+name from `herdr agent list`; do not guess it. An agent name is valid only
+while that agent is running.
 
 ```sh
-herdr agent prompt NAME "Please report progress" --wait --timeout 120000
-herdr agent wait NAME --until idle --timeout 120000
-herdr agent read NAME --source recent-unwrapped --lines 120
-herdr --machine MACHINE agent list
+herdr agent list                                   # read the name from the output
+herdr agent prompt REPO_NAME "report progress" --wait --timeout 120000
+herdr agent read REPO_NAME --source recent-unwrapped --lines 120
 ```
 
-For a remote worker, add `--machine MACHINE` after `herdr` in each command.
+The timeout value is in milliseconds. Omit `--timeout` only for a wait that
+can last a long time; a prompt without it can wait forever.
 
-Use Herdr only for agents that run in Herdr panes. Lupin loops run in tmux
-panes; Herdr cannot see those sessions.
+Use `--wait` for normal work. It returns when the agent is ready for input.
+Add `--until blocked` only when you want to wait for a question or an
+approval. Use `--source detection` only when you check why Herdr does not
+recognize the agent.
 
-Use Lupin to watch or control a loop on another machine:
+Agent states:
+
+|State|Meaning|What to do|
+|---|---|---|
+|`idle`|Ready for input|Send the next prompt|
+|`done`|Ready for input|Send the next prompt. The CLI state decides this, not the badge in the app|
+|`working`|The agent is busy|Wait or read output|
+|`blocked`|The agent stopped on a question or an approval|Read the output, then ask the owner. Do not answer for the owner|
+|`unknown`|Herdr cannot tell what the agent does|Not proof that it finished. Check the pane yourself|
+
+A timeout does not prove the text arrived, and a timeout does not prove it
+did not arrive. A prompt that reports a stall can also be delivered. Read the
+agent before you send the text again.
+
+To read output from a pane, or to run a test or a smoke check beside the
+worker, use the pane commands. `pane run` sends one command, and
+`pane wait-output` returns when the output matches:
 
 ```sh
+herdr pane run <pane_id> "pytest -q"
+herdr pane wait-output <pane_id> --match "passed" --timeout 120000
+herdr pane read <pane_id> --source recent-unwrapped --lines 120
+```
+
+Address panes by pane ID, or with `--current` for your own pane. Never use
+another client's focused pane.
+
+To start a worker in a Herdr pane, make the pane first, then start the agent
+in it. `agent start` needs a shell that waits at its prompt. It never makes,
+splits, or moves a pane:
+
+```sh
+herdr pane split --current --direction right --cwd "$PWD" --no-focus
+herdr agent start worker-1 --kind omp --pane <pane-id-from-above>
+```
+
+The kind must be an installed one. `herdr integration status` lists them. An
+agent with a kind that Herdr does not know shows as `unknown`.
+
+### Read or control a loop on another machine
+
+```sh
+herdr --machine MACHINE agent list
 lupin peek REPO --machine MACHINE
 lupin attach REPO --machine MACHINE
 lupin stop REPO --machine MACHINE
@@ -179,7 +244,19 @@ lupin resume --machine MACHINE
 ```
 
 `peek` reads output. `attach` opens the loop terminal. The other commands
-control the loop or its schedule. Use the agent runner or Herdr for messages.
+control the loop or its schedule.
+
+`herdr --machine MACHINE` must come before the subcommand on every command,
+including the discovery command. It cannot be used with `--session` or
+`--remote`. It uses the saved machine profile and its default session, so it
+does not reach the `lupin-loops` session. To reach the loops on another
+machine, use `lupin attach REPO --machine MACHINE`.
+
+Locally, address a loop with the session name:
+
+```sh
+herdr --session lupin-loops agent list
+```
 
 ## Review and merge each pull request
 
@@ -217,10 +294,11 @@ the repo's merge rules. The reviewer and worker do not merge their own PR.
 
 ## Monitor and finish
 
-Use `lupin machines`, `lupin peek`, and `lupin attach` to check live work.
-Read the final diff and run the repo's required gate and a smoke check. A
-worker's success report is not proof. Re-read issue and PR comments before
-closure.
+Use `lupin machines`, `lupin peek`, and `lupin attach` to check live work. On
+a Herdr worker, `herdr --session lupin-loops agent list` shows each loop's
+state, workspace, and pane in one call. Read the final diff and run the
+repo's required gate and a smoke check. A worker's success report is not
+proof. Re-read issue and PR comments before closure.
 
 Append dispatch and handoff events to the shared Redis ledger:
 
