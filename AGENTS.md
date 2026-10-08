@@ -201,6 +201,12 @@ in `once/`. `locks/` serializes local start and stop actions. Herdr keeps
 its own session and workspace state.
 The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 
+The Repos and Roadmap pages read the checkouts in `LUPIN_LOOP_CODE_DIR`
+(default `/code`) on the machine that runs `lupin serve`. A repo with no
+checkout there does not appear. The serving user must be able to read each
+checkout. If a different user owns it, Git reports "dubious ownership" and
+the page shows no issues. Add the checkout to Git's `safe.directory` list.
+
 
 ## Dashboard mockups
 
