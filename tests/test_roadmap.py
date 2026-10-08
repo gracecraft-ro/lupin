@@ -1,6 +1,7 @@
 import importlib
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -183,6 +184,115 @@ class RoadmapTests(unittest.TestCase):
         query = run_json.call_args.args[0][4]
         self.assertIn("states:CLOSED", query)
         self.assertNotIn("states:OPEN", query)
+
+    def test_repo_identity_asks_gh_once_per_remote_url(self):
+        roadmap._IDENTITY_CACHE.clear()
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(
+                    roadmap, "_git_remote_url",
+                    return_value="https://github.com/acme/repo.git",
+                ),
+                mock.patch.object(
+                    roadmap, "_gh_identity", return_value=("acme", "repo", None)
+                ) as gh_identity,
+                mock.patch.object(roadmap, "_persist_cache"),
+            ):
+                first = roadmap._repo_identity(directory)
+                second = roadmap._repo_identity(directory)
+
+            self.assertEqual(first, ("acme", "repo", None))
+            self.assertEqual(second, ("acme", "repo", None))
+            gh_identity.assert_called_once_with(directory)
+
+    def test_repo_identity_asks_gh_again_when_the_remote_changes(self):
+        roadmap._IDENTITY_CACHE.clear()
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(
+                    roadmap, "_git_remote_url",
+                    side_effect=[
+                        "https://github.com/acme/repo.git",
+                        "https://github.com/other/repo.git",
+                    ],
+                ),
+                mock.patch.object(
+                    roadmap, "_gh_identity",
+                    side_effect=[("acme", "repo", None), ("other", "repo", None)],
+                ) as gh_identity,
+                mock.patch.object(roadmap, "_persist_cache"),
+            ):
+                first = roadmap._repo_identity(directory)
+                second = roadmap._repo_identity(directory)
+
+            self.assertEqual(first, ("acme", "repo", None))
+            self.assertEqual(second, ("other", "repo", None))
+            self.assertEqual(gh_identity.call_count, 2)
+
+    def test_repo_identity_without_a_remote_is_not_cached(self):
+        """A path that is not a real directory is a one-shot lookup: it is
+        asked every time, never remembered."""
+        roadmap._IDENTITY_CACHE.clear()
+        with (
+            mock.patch.object(roadmap, "_git_remote_url", return_value=None),
+            mock.patch.object(
+                roadmap, "_gh_identity", return_value=(None, None, "no remote")
+            ) as gh_identity,
+            mock.patch.object(roadmap, "_persist_cache"),
+        ):
+            first = roadmap._repo_identity("/repo")
+            second = roadmap._repo_identity("/repo")
+
+        self.assertEqual(first[2], "no remote")
+        self.assertEqual(gh_identity.call_count, 2)
+        self.assertEqual(roadmap._IDENTITY_CACHE, {})
+
+    def test_repo_identity_of_a_checkout_without_a_remote_is_remembered(self):
+        """`gh` denies the same denial on every render for a checkout with
+        no `origin`, so the answer is kept for the retry window."""
+        roadmap._IDENTITY_CACHE.clear()
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(roadmap, "_git_remote_url", return_value=None),
+                mock.patch.object(
+                    roadmap, "_gh_identity",
+                    return_value=(None, None, "GitHub repository data is unavailable: no git remotes found"),
+                ) as gh_identity,
+                mock.patch.object(roadmap, "_persist_cache"),
+            ):
+                roadmap._repo_identity(directory)
+                roadmap._repo_identity(directory)
+
+            self.assertEqual(gh_identity.call_count, 1)
+
+    def test_repo_identity_failure_is_not_persisted(self):
+        roadmap._IDENTITY_CACHE.clear()
+        with (
+            mock.patch.object(
+                roadmap, "_git_remote_url", return_value="https://github.com/acme/repo.git"
+            ),
+            mock.patch.object(
+                roadmap, "_gh_identity", return_value=(None, None, "GitHub repository data is unavailable: denied")
+            ),
+            mock.patch.object(roadmap, "_persist_cache") as persist,
+        ):
+            result = roadmap._repo_identity("/repo")
+
+        self.assertIsNone(result[0])
+        persist.assert_not_called()
+
+    def test_git_remote_url_reads_the_origin_of_a_real_checkout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            subprocess.run(["git", "init", "-q", directory], check=True)
+            subprocess.run(
+                ["git", "-C", directory, "remote", "add", "origin", "https://github.com/acme/repo.git"],
+                check=True,
+            )
+            self.assertEqual(
+                roadmap._git_remote_url(directory), "https://github.com/acme/repo.git"
+            )
+
+        self.assertIsNone(roadmap._git_remote_url("/definitely/not/a/checkout"))
 
     def test_completed_page_is_separate_from_active_board_and_has_round_trip_links(self):
         active_issue = {
