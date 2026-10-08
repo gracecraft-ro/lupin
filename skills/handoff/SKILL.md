@@ -70,6 +70,9 @@ GitHub issue. It does not read this conversation.
    and does not check it again.
 
 6. Remove the worktrees that you made in this session. Do not leave them for
-   the next agent.
+   the next agent. In Herdr, also close the tab, workspace, and worktree that
+   you made. Close a pane with `herdr pane close <pane_id>`, and remove a
+   worktree with `herdr worktree remove --workspace <workspace_id>`. Do not
+   close anything that you did not make.
 
 7. Stop. Do not take new work. The loop can stop this session at any time.
