@@ -126,4 +126,4 @@ lupin ledger read OWNER/REPO --json
 ```
 
 Add `--child N` for each split issue. If Redis is unavailable, ledger commands
-exit 3. Do not write `.loop/loop-state.json`.
+exit 3. Write `.loop/loop-state.json` only as the `handoff` skill describes.

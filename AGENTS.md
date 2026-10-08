@@ -249,3 +249,15 @@ The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 nix flake check                                    # build + test, all systems
 nix shell nixpkgs#python3Packages.pytest -c pytest -v
 ```
+
+## Pull requests, review, and handoff
+
+Every change goes through a pull request. The base branch is `main`.
+
+1. Use `/ship`. It pushes the branch and opens a PR with `Closes #N`. If the
+   push is denied, it pushes to a fork. If that fails, report the branch name
+   and commit range. That branch is the PR.
+2. Do not merge your own work. A reviewer who is not the author runs
+   `/code-review`. The orchestrator merges after approval and a passing gate.
+3. At the end of a session, run `/handoff`. It runs `lupin ledger append`.
+4. Loop details for this repo: `docs/delegation-loop.md`.

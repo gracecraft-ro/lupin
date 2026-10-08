@@ -6,7 +6,7 @@ description: >-
   handing off a loop run.
 compatibility: >-
   Requires Lupin, GitHub CLI, an agent runner, and the `delegation-loop`,
-  `triage`, `ship`, and `code-review` skills on each worker host. Redis is
+  `triage`, `ship`, `code-review`, and `handoff` skills on each worker host. Redis is
   required for fleet claims.
 ---
 
@@ -23,7 +23,7 @@ dispatch and the repository's handoff record.
 ## Install skills on loop hosts
 
 The `skills/` tree is the source. Installing the Lupin command does not
-install these files. A Nix host flake maps the four required directories from
+install these files. A Nix host flake maps the five required directories from
 its pinned Lupin input into each runner's skill set. A rebuild creates or
 updates the links; do not copy the files by hand. The `ui-pressure-test`
 skill is optional. Add it to a selected runner when a task needs visual QA.
@@ -32,13 +32,13 @@ skill is optional. Add it to a selected runner when a task needs visual QA.
 - Pi: `~/.pi/agent/skills/`
 - OMP: `~/.omp/agent/skills/`
 
-Add all four required names to each host's skill set, including any curated
+Add all five required names to each host's skill set, including any curated
 subset. Add `ui-pressure-test` to hosts that run UI pressure tests. After a
 rebuild, check that every required `SKILL.md` is readable:
 
 ```sh
 for root in "$HOME/.claude/skills" "$HOME/.pi/agent/skills" "$HOME/.omp/agent/skills"; do
-  for name in delegation-loop triage ship code-review; do
+  for name in delegation-loop triage ship code-review handoff; do
     test -r "$root/$name/SKILL.md" || {
       echo "Missing $root/$name/SKILL.md" >&2
       exit 1
@@ -48,7 +48,7 @@ done
 ```
 
 Start a new agent session and confirm it loads `/delegation-loop`, `/triage`,
-`/ship`, and `/code-review`. If the task needs UI pressure testing, also
+`/ship`, `/code-review`, and `/handoff`. If the task needs UI pressure testing, also
 confirm it loads `/ui-pressure-test`. Do not start a worker if a skill it
 needs is missing.
 
@@ -187,6 +187,13 @@ Dispatch `/code-review` for every pull request, including docs-only changes.
 Review the current PR diff, not only the issue or a worker's report. Re-fetch
 the latest PR comments and reviews before merge.
 
+A worker opens the PR with `/ship`. `/ship` tries a direct push first, then a
+push to a fork. If neither works, the worker reports the local branch name and
+commit range. Treat that branch as the PR. The reviewer reviews
+`git diff BASE...BRANCH`. The orchestrator posts the verdict as a comment on
+the issue, because there is no PR to post on. Merge the branch locally only
+after approval.
+
 Use `lupin review-route --category CATEGORY --size SIZE --mode separate` for
 a reviewer recommendation. Compare it with the issue's implementation route
 and the worker's model tier.
@@ -203,7 +210,7 @@ it costs more.
 If the review finds a problem, dispatch a `fix` worker with the exact finding.
 Tell it to use `/ship` and update the same PR. Review the latest PR commit.
 Repeat until the reviewer approves it.
-The orchestrator posts the verdict and findings on the PR.
+The orchestrator posts the verdict and findings on the PR (or on the issue for a branch).
 
 After approval and required checks pass, the orchestrator merges locally using
 the repo's merge rules. The reviewer and worker do not merge their own PR.
@@ -227,7 +234,9 @@ lupin ledger read OWNER/REPO --json
 
 Add `--child N` for each split issue. If Redis is unavailable, ledger
 commands exit 3. The roadmap shows no ledger annotations and adds a warning.
-Do not use `.loop/loop-state.json`.
+Use `.loop/loop-state.json` only when a ledger command exits 3. The
+`handoff` skill gives the format. At the start of a session, read the ledger
+and that file.
 
 Keep working while requested, unblocked work remains. Hand off when the
 backlog is done, work is dispatched up to capacity, or the rest is blocked.
