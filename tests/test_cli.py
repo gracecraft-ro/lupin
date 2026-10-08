@@ -68,6 +68,11 @@ def test_fleet_run_uses_only_per_machine_signing_keys(monkeypatch, tmp_path, cap
     monkeypatch.setenv("LUPIN_CMD_SIGNING_KEYS_DIR", str(key_dir))
     monkeypatch.setenv("LUPIN_CMD_SIGNING_KEY", "shared-secret")
     monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
+    monkeypatch.setattr(
+        loop_runtime,
+        "orchestrator_profiles",
+        lambda: {"widgets": ["opencode-go/step-5-preview-free:xhigh"]},
+    )
     monkeypatch.setattr(machines, "hostname", lambda: "pihome")
     monkeypatch.setattr(machines, "machines", lambda connection: [{"name": "jesus"}, {"name": "ralpha"}])
     monkeypatch.setattr(cli, "_fleet_connection", lambda args: {"redis_host": "redis"})
@@ -83,6 +88,7 @@ def test_fleet_run_uses_only_per_machine_signing_keys(monkeypatch, tmp_path, cap
 
     assert dispatched["signing_keys"] == {"jesus": "jesus-secret"}
     assert dispatched["local_host"] == "pihome"
+    assert dispatched["repos"] == {"widgets": None}
     assert json.loads(capsys.readouterr().out) == [
         {"repo": "widgets", "machine": "jesus", "queued": True, "id": "cmd-1"}
     ]
@@ -116,7 +122,7 @@ def test_fleet_run_queues_signed_run_to_worker(redis_port, flush_redis, monkeypa
 
     queue = commands.get_queue("jesus", **connection)
     assert len(queue) == 1
-    assert queue[0]["params"] == {"repo": "widgets", "platform": "omp"}
+    assert queue[0]["params"] == {"repo": "widgets"}
     assert commands.get_queue("ralpha", **connection) == []
     stored = commands._client(**connection).get(commands.cmd_key(queue[0]["id"]))
     assert commands.verify(json.loads(stored), "jesus-secret")
@@ -165,6 +171,21 @@ def test_future_once_without_enabled_repos_does_not_schedule(monkeypatch, tmp_pa
             ["run", "widgets", "--machine", "remote", "--platform", "omp", "--note", "review", "--resume"],
             "loop.run",
             {"repo": "widgets", "platform": "omp", "note": "review", "resume": True},
+        ),
+        (
+            [
+                "run", "widgets", "--machine", "remote", "--platform", "omp",
+                "--provider", "opencode-go", "--model", "opencode-go/step-5-preview-free:xhigh",
+            ],
+            "loop.run",
+            {
+                "repo": "widgets",
+                "platform": "omp",
+                "provider": "opencode-go",
+                "model": "opencode-go/step-5-preview-free:xhigh",
+                "note": None,
+                "resume": False,
+            },
         ),
         (
             ["run", "--all", "--machine", "remote", "--note", "review"],

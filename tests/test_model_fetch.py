@@ -218,6 +218,8 @@ class SnapshotTests(unittest.TestCase):
             mock.patch.object(
                 model_fetch, "codex_models", return_value={"subscription": "codex", "live": False, "models": []}
             ),
+            mock.patch.object(model_fetch, "read_shared_snapshot", return_value=None),
+            mock.patch.object(model_fetch, "_read_local_snapshot", return_value=None),
         ):
             data = model_fetch.snapshot()
 
@@ -225,6 +227,87 @@ class SnapshotTests(unittest.TestCase):
         self.assertIsNone(data["promo_source"])
         self.assertEqual(set(data["subscriptions"]), {"claude", "opencode-go", "codex"})
         self.assertIn("fetched_at", data)
+
+    def test_failed_subscription_keeps_the_last_verified_list_marked_stale(self):
+        previous = {
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "subscription": "claude",
+                    "live": True,
+                    "source": "https://api.anthropic.com/v1/models",
+                    "fetched_at": "2026-10-07T00:00:00+00:00",
+                    "models": [{"id": "claude-opus-5-5", "price": {"input": 4, "output": 20}}],
+                },
+                "opencode-go": {
+                    "subscription": "opencode-go",
+                    "live": True,
+                    "models": [{"id": "glm-5.3", "price": {"input": 1.4, "output": 4.4}}],
+                },
+            },
+        }
+        fresh = {
+            "fetched_at": "2026-10-08T00:00:00+00:00",
+            "subscriptions": {
+                # Expired OAuth token: no live list today.
+                "claude": {
+                    "subscription": "claude",
+                    "live": False,
+                    "error": "unavailable (HTTPError)",
+                    "models": [],
+                },
+                "opencode-go": {
+                    "subscription": "opencode-go",
+                    "live": True,
+                    "models": [{"id": "glm-5.4", "price": None}],
+                },
+            },
+        }
+
+        merged = model_fetch._merge_previous_subscriptions(fresh, previous)
+
+        claude = merged["subscriptions"]["claude"]
+        self.assertEqual([model["id"] for model in claude["models"]], ["claude-opus-5-5"])
+        self.assertFalse(claude["live"])
+        self.assertEqual(claude["fetched_at"], "2026-10-07T00:00:00+00:00")
+        self.assertIn("unavailable (HTTPError)", claude["stale_reason"])
+        # A subscription that fetched fine today is replaced outright.
+        self.assertEqual([model["id"] for model in merged["subscriptions"]["opencode-go"]["models"]], ["glm-5.4"])
+
+    def test_failed_subscription_with_no_previous_list_stays_empty(self):
+        fresh = {
+            "subscriptions": {
+                "claude": {"subscription": "claude", "live": False, "error": "no credentials", "models": []},
+            }
+        }
+        merged = model_fetch._merge_previous_subscriptions(fresh, {})
+        self.assertEqual(merged["subscriptions"]["claude"]["models"], [])
+
+    def test_snapshot_merges_from_the_fleet_cache_when_a_subscription_fails(self):
+        previous = {
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "subscription": "claude",
+                    "live": True,
+                    "models": [{"id": "claude-opus-5-5", "price": None}],
+                },
+            },
+        }
+        with (
+            mock.patch.object(model_fetch, "fetch_price_catalog", return_value=(None, None)),
+            mock.patch.object(
+                model_fetch, "claude_models", return_value={"subscription": "claude", "live": False, "error": "boom", "models": []}
+            ),
+            mock.patch.object(model_fetch, "opencode_go_models", return_value={"subscription": "opencode-go", "live": True, "models": []}),
+            mock.patch.object(model_fetch, "codex_models", return_value={"subscription": "codex", "live": True, "models": []}),
+            mock.patch.object(model_fetch, "read_shared_snapshot", return_value=previous),
+            mock.patch.object(model_fetch, "_read_local_snapshot", return_value=None),
+        ):
+            data = model_fetch.snapshot()
+
+        self.assertEqual([model["id"] for model in data["subscriptions"]["claude"]["models"]], ["claude-opus-5-5"])
+        self.assertFalse(data["subscriptions"]["claude"]["live"])
 
 
 class SaveSnapshotTests(unittest.TestCase):

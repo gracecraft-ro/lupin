@@ -41,10 +41,10 @@ lupin ledger append OWNER/REPO --event EVENT [--issue N] [--status S] \
 lupin ledger read OWNER/REPO [--limit N] [--json]
 lupin serve [--bind 127.0.0.1] [--port 8788] [--roadmap REPO]
 lupin agent [--machine M] [--batch N] [--poll-interval S]
-lupin run <repo> [--machine M] [--platform claude|omp] [--note TEXT] [--resume]
+lupin run <repo> [--machine M] [--platform claude|omp] [--provider P] [--model M] [--note TEXT] [--resume]
 lupin fleet-run [--json]
-lupin once <when> [repo ...] [--platform claude|omp] [--note TEXT] [--resume]
-lupin enable <repo> [--platform claude|omp]
+lupin once <when> [repo ...] [--platform claude|omp] [--provider P] [--model M] [--note TEXT] [--resume]
+lupin enable <repo> [--platform claude|omp] [--orchestrator SELECTOR ...] [--clear-orchestrators]
 lupin disable <repo>
 lupin loops [repo] [--machine M] [--json]
 lupin stop <repo> [--machine M] [--force] [--wait S] [--json]
@@ -95,19 +95,55 @@ models.dev and is marked `live: false`. Prices
 come from models.dev, matched by model ID. A model with no match has
 `price: null`. Promo pricing has no live source, so `promo` stays `null`.
 
+A subscription whose fetch fails — an expired OAuth token, a missing key —
+does not empty its row in the fleet snapshot. The fetch keeps that
+subscription's last verified list, marks it `live: false` with the reason,
+and the Models page shows the rows with that reason under each one.
+
 `run <repo>` starts a Lupin worker and a Herdr workspace. `run --all`
 starts every enabled repo. Add `--machine M` to use the signed fleet queue
 on another machine; `run --all --machine M` starts its enabled repos.
+Without a profile, Lupin uses the repo's configured platform. To let Lupin
+choose among orchestrators, add a profile when you enable the repo. Repeat
+`--orchestrator` for each allowed choice:
+
+```
+lupin enable my-repo --platform omp \
+  --orchestrator openai/gpt-5 \
+  --orchestrator opencode-go/step-5-preview-free:xhigh \
+  --orchestrator claude
+```
+
+Profiles are local to each worker. Set them on each worker that can start the
+repo. At loop start, Lupin uses quota data from the shared cache. The data
+must be less than five minutes old and include usable quota for a candidate.
+Lupin skips blocked providers, then picks the candidate with the most quota
+headroom across its known windows. Profile order breaks ties. If no candidate
+has fresh, usable quota, Lupin refuses to start the loop.
+
+Explicit `--platform`, `--provider`, or `--model` options select a fixed
+orchestrator for that run and skip profile routing. For OMP, use
+`--platform omp` and optionally `--provider openai|opencode-go` or
+`--model MODEL`. For example, use
+`--model opencode-go/step-5-preview-free:xhigh`. Set auto-compaction for the
+selected model in OMP, near 200k tokens. Lupin passes the model to OMP; it
+does not set or check OMP's compaction settings. These options work with
+`run` and `once`; future one-off runs keep them. `run --all` applies them to
+each repo.
 `once now` starts the listed repos. If you omit repos, it starts every
 enabled repo. A future `once` run uses the same default. It fails if no repo
 is enabled. `schedule first` sets the first timer run. Use `+2h` for a
 relative time or a calendar expression such as `tomorrow 09:00`. The
 interval controls later runs.
 `enable` and `disable` edit the local repo list.
+Use `--clear-orchestrators` with `enable` to remove a profile.
 
 `fleet-run` sends each enabled repo to one online worker. It skips the local
 machine, workers with an active loop for that repo, and workers without that
 repo's checkout.
+Fleet and dashboard run-now actions use the target worker's local platform
+and orchestrator profile. Configure the profile on each worker that can start
+the repo.
 
 The coordinator needs one signing key file per worker. Lupin reads these
 files from `LUPIN_CMD_SIGNING_KEYS_DIR`, or from systemd's
@@ -117,6 +153,11 @@ command queues runs but does not wait for them to start.
 
 On PiHome, the systemd timer runs `fleet-run` every 5h15m. The dashboard can
 start or stop that timer.
+
+PiHome sends work to other machines. It does not run loops, and it has no
+Herdr. Only worker machines (for example `jesus` and `ralpha`) run loops.
+Use the dashboard to see all machines. Use Herdr on a worker to see its
+loops.
 
 `loops` reads state from the Herdr API. It reports the agent state, backend,
 session, workspace and pane IDs. It does not infer state from pane text.
@@ -154,24 +195,31 @@ minutes.
 `attach` never uses the queue. It opens Herdr here or connects to the remote
 Herdr server over SSH. `--print` shows the command instead of running it.
 Remote attach needs a local SSH target in `~/.config/lupin/ssh-targets`, one
-`<machine> <target>` pair per line. Blank lines and `#` comments are ignored:
+`<machine> <target>` pair per line. Blank lines and `#` comments are ignored.
+Add one line for each worker machine. Do not add PiHome. It has no Herdr:
 
 ```
-jesus   ghosta@jesus.local
-mini    ghosta@mini.tailnet.ts.net
+jesus   ghosta@jesus.orb.local
+ralpha  user@192.168.44.217
 ```
 
 This file is local config, not fleet state. Herdr must be installed on both
 machines. SSH must allow key-based access. A missing target makes `attach`
 fail instead of guessing a hostname.
 
-`fetch-benchmarks` gets public benchmark scores. It does not run models. It
-uses a restricted Claude agent to search the web, then shares the result in
-Redis. Use `--force` to fetch now. Plain output lists each unscored model and
-the reason from the agent. Older cached results may only say `not found`
-until the next fetch. Model IDs come from the latest `fetch-models` snapshot.
-If that snapshot is missing or empty, Lupin uses the active picks in
-`model-tiers.json`.
+To also use these machines in Herdr itself, run `herdr machine add <target>`
+for each one. `herdr machine list` shows the saved machines.
+
+`fetch-benchmarks` gets public benchmark scores. It does not run models.
+The lookup worker is a free opencode-go model (`step-5-preview-free`) run
+through `omp -p` with maximum thinking and one tool, web search. The model
+list is split into calls of 3 models, up to 4 at a time, and each score is
+cached with its own timestamp, so a refresh asks only about the models
+whose score is missing, unscored, or older than 20 hours, and a failed
+call loses only its own models. Use `--force` to fetch everything now.
+Plain output lists each unscored model and the reason from the agent.
+Model IDs come from the latest `fetch-models` snapshot. If that snapshot is
+missing or empty, Lupin uses the active picks in `model-tiers.json`.
 
 A fresh result may include a short, source-linked note about a model's
 publicly reported strengths or limits. The agent gets zero-price model IDs
@@ -210,10 +258,11 @@ expiry time. The `redis` backend (`slots_redis.py`) covers leases that
 several machines must see. Its schema is in `docs/redis-schema.md`.
 
 Loop state is stored under `$LUPIN_LOOP_STATE_DIR` or
-`/var/lib/delegation-loop`. Lupin keeps repo metadata in `herdr-loops/`,
-run prompts in `notes/`, stop reports in `reports/`, and one-off schedules
-in `once/`. `locks/` serializes local start and stop actions. Herdr keeps
-its own session and workspace state.
+`/var/lib/delegation-loop`. Lupin stores enabled repos in `repos`, per-repo
+orchestrator profiles in `orchestrators.json`, loop metadata in
+`herdr-loops/`, run prompts in `notes/`, stop reports in `reports/`, and
+one-off schedules in `once/`. `locks/` serializes local start and stop
+actions. Herdr keeps its own session and workspace state.
 The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 
 The Repos and Roadmap pages read the checkouts in `LUPIN_LOOP_CODE_DIR`

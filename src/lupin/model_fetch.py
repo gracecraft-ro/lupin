@@ -316,6 +316,57 @@ def codex_models(catalog: dict | None = None) -> dict:
     }
 
 
+def _read_local_snapshot(path: str = SNAPSHOT_FILE) -> dict | None:
+    """The last snapshot this machine saved to disk, or `None`.
+
+    `read_shared_snapshot()` covers a fleet-wide Redis cache; this is the
+    same idea for a machine that cannot reach it.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _merge_previous_subscriptions(fresh: dict, previous: dict | None) -> dict:
+    """Keep a failed subscription's last known model list, marked stale.
+
+    An expired OAuth token on one machine used to publish
+    `claude: {live: false, models: []}` over the whole fleet snapshot, so
+    the dashboard's All models table lost every Claude row -- the same
+    "degrade, don't erase" rule `quota_cache.py` merges per provider and
+    `benchmark_fetch.py` merges per score. A subscription that fetched
+    fine today is replaced outright; one that failed keeps the previous
+    list, its own old `fetched_at`, and a reason saying today's fetch
+    could not verify it. It stays `live: False`: the rows shown are the
+    last verified list, not today's.
+    """
+    if not isinstance(previous, dict):
+        return fresh
+    previous_subscriptions = previous.get("subscriptions")
+    if not isinstance(previous_subscriptions, dict):
+        return fresh
+    for name, entry in list(fresh.get("subscriptions", {}).items()):
+        if entry.get("live") or not isinstance(entry, dict):
+            continue
+        old = previous_subscriptions.get(name)
+        if not isinstance(old, dict) or not old.get("models"):
+            continue
+        reason = entry.get("error") or entry.get("stale_reason") or "today's fetch failed"
+        fresh["subscriptions"][name] = {
+            **old,
+            "live": False,
+            "error": reason,
+            "fetched_at": previous.get("fetched_at"),
+            "stale_reason": (
+                f"not refreshed ({reason}); showing the last verified list"
+            ),
+        }
+    return fresh
+
+
 def snapshot() -> dict:
     """One day's record: model list + price per subscription.
 
@@ -324,9 +375,13 @@ def snapshot() -> dict:
     "promo|discount" src/lupin/*.py` found nothing to build on, and neither
     opencode.ai, Anthropic's API, nor models.dev expose one). The field
     stays in the shape so issue #18 has somewhere real to put it.
+
+    A subscription whose fetch fails keeps its last verified list, merged
+    from the fleet cache (or this machine's file when Redis is
+    unreachable) -- see `_merge_previous_subscriptions`.
     """
     catalog, catalog_error = fetch_price_catalog()
-    return {
+    fresh = {
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "price_catalog_source": MODELS_DEV_CATALOG_URL,
         "price_catalog_error": catalog_error,
@@ -337,6 +392,8 @@ def snapshot() -> dict:
             "codex": codex_models(catalog),
         },
     }
+    previous = read_shared_snapshot() or _read_local_snapshot()
+    return _merge_previous_subscriptions(fresh, previous)
 
 
 def save_snapshot(data: dict, path: str = SNAPSHOT_FILE) -> None:

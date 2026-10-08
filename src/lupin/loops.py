@@ -155,7 +155,7 @@ def dispatch_loop_action(
 
 
 def dispatch_fleet_runs(
-    repos: dict[str, str],
+    repos: dict[str, str | None],
     records: list[dict],
     *,
     local_host: str,
@@ -204,10 +204,13 @@ def dispatch_fleet_runs(
             )
         )
         worker = candidates[0]
+        params = {"repo": repo}
+        if platform is not None:
+            params["platform"] = platform
         command_id = commands.enqueue(
             worker["name"],
             "loop.run",
-            {"repo": repo, "platform": platform},
+            params,
             key=signing_keys[worker["name"]],
             actor="lupin-fleet-scheduler",
             issuer=local_host,

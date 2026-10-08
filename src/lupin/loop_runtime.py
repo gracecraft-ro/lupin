@@ -25,6 +25,7 @@ SESSION_NAME = "lupin-loops"
 STATE_DIR = Path(os.environ.get("LUPIN_LOOP_STATE_DIR", "/var/lib/delegation-loop"))
 CODE_DIR = Path(os.environ.get("LUPIN_LOOP_CODE_DIR", "/code"))
 REPOS_FILE = STATE_DIR / "repos"
+ORCHESTRATORS_FILE = STATE_DIR / "orchestrators.json"
 LOOPS_DIR = STATE_DIR / "herdr-loops"
 REPORTS_DIR = STATE_DIR / "reports"
 HERDR = os.environ.get("LUPIN_HERDR_BIN", "herdr")
@@ -44,6 +45,96 @@ HANDOFF_TEXT = (
     "status) and update the relevant GitHub issue. Lupin stops this loop when you "
     "finish, or after the wait time ends."
 )
+
+def validate_orchestrator(selector: str) -> str:
+    if not isinstance(selector, str):
+        raise LoopError("orchestrator selector must be text")
+    if selector == "claude":
+        return selector
+    provider, separator, model = selector.partition("/")
+    if not separator or provider not in {"openai", "opencode-go"}:
+        raise LoopError("orchestrator must be claude, openai/MODEL, or opencode-go/MODEL")
+    validate_omp_options("omp", provider, model)
+    return selector
+
+
+def orchestrator_profiles() -> dict[str, list[str]]:
+    if not ORCHESTRATORS_FILE.exists():
+        return {}
+    try:
+        values = json.loads(ORCHESTRATORS_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LoopError(f"could not read {ORCHESTRATORS_FILE}: {exc}") from exc
+    if not isinstance(values, dict):
+        raise LoopError(f"invalid orchestrator profiles in {ORCHESTRATORS_FILE}")
+    profiles: dict[str, list[str]] = {}
+    for repo, selectors in values.items():
+        repo = validate_repo(repo)
+        if not isinstance(selectors, list) or not selectors:
+            raise LoopError(f"invalid orchestrator profile for {repo}")
+        profiles[repo] = list(dict.fromkeys(validate_orchestrator(item) for item in selectors))
+    return profiles
+
+
+def _write_orchestrator_profiles(profiles: dict[str, list[str]]) -> None:
+    ORCHESTRATORS_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+    content = json.dumps(profiles, indent=2, sort_keys=True) + "\n"
+    fd, temporary = tempfile.mkstemp(prefix=".orchestrators.", dir=ORCHESTRATORS_FILE.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o640)
+        os.replace(temporary, ORCHESTRATORS_FILE)
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def select_orchestrator(
+    candidates: list[str], snapshot: dict, *, now: float | None = None
+) -> dict[str, str | None]:
+    from . import pace, quota_cache
+
+    now = time.time() if now is None else now
+    now_ms = now * 1000
+    choices: list[tuple[float, int, dict[str, str | None]]] = []
+    for index, raw in enumerate(candidates):
+        selector = validate_orchestrator(raw)
+        if selector == "claude":
+            provider, model = "claude", None
+            platform = "claude"
+        else:
+            provider, model = selector.split("/", 1)[0], selector
+            platform = "omp"
+        entry = snapshot.get(provider)
+        if not isinstance(entry, dict) or not quota_cache.is_fresh(entry, now):
+            continue
+        rows = entry.get("rows", [])
+        if not isinstance(rows, list):
+            continue
+        rows = [row for row in rows if isinstance(row, dict)]
+        usable = [
+            row for row in rows
+            if row.get("provider") == provider
+            and isinstance(row.get("used_pct"), (int, float))
+            and isinstance(row.get("resets_at"), (int, float))
+        ]
+        if not usable or pace.blocked(rows, provider, now_ms):
+            continue
+        headroom = min(100 - row["used_pct"] for row in usable)
+        choices.append((headroom, -index, {
+            "platform": platform,
+            "provider": provider if platform == "omp" else None,
+            "model": model,
+        }))
+    if not choices:
+        raise LoopError("no configured orchestrator has fresh, usable quota")
+    return max(choices, key=lambda choice: (choice[0], choice[1]))[2]
 
 
 class LoopError(Exception):
@@ -334,12 +425,32 @@ def write_repos(values: list[tuple[str, str]]) -> None:
         raise
 
 
-def enable_repo(repo: str, platform: str = "claude") -> None:
+def enable_repo(
+    repo: str,
+    platform: str = "claude",
+    orchestrators: list[str] | None = None,
+    *,
+    clear_orchestrators: bool = False,
+) -> None:
     repo = validate_repo(repo)
     platform = validate_platform(platform)
+    if orchestrators is not None and clear_orchestrators:
+        raise LoopError("use --orchestrator or --clear-orchestrators, not both")
+    profiles = None
+    if orchestrators is not None or clear_orchestrators:
+        profiles = orchestrator_profiles()
+        if clear_orchestrators:
+            profiles.pop(repo, None)
+        else:
+            candidates = list(dict.fromkeys(validate_orchestrator(item) for item in orchestrators))
+            if not candidates:
+                raise LoopError("at least one orchestrator is required")
+            profiles[repo] = candidates
     values = enabled_repos()
     values[repo] = platform
     write_repos(sorted(values.items()))
+    if profiles is not None:
+        _write_orchestrator_profiles(profiles)
 
 
 def disable_repo(repo: str) -> None:
@@ -497,15 +608,37 @@ def _write_prompt(repo: str, note: str | None, resume: bool) -> str:
     return str(path)
 
 
+def validate_omp_options(
+    platform: str, provider: str | None, model: str | None
+) -> tuple[str | None, str | None]:
+    if provider is not None and (
+        not isinstance(provider, str) or provider not in {"openai", "opencode-go"}
+    ):
+        raise LoopError("OMP provider must be openai or opencode-go")
+    if model is not None and (
+        not isinstance(model, str)
+        or not model
+        or len(model) > 256
+        or any(ord(character) < 32 or ord(character) == 127 for character in model)
+    ):
+        raise LoopError("invalid OMP model")
+    if platform != "omp" and (provider is not None or model is not None):
+        raise LoopError("--provider and --model require --platform omp")
+    return provider, model
+
+
 def start_loop(
     repo: str,
     *,
     platform: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
     note: str | None = None,
     resume: bool = False,
 ) -> tuple[bool, str]:
     repo = validate_repo(repo)
     selected = validate_platform(platform or enabled_repos().get(repo, "claude"))
+    provider, model = validate_omp_options(selected, provider, model)
     directory = CODE_DIR / repo
     if not directory.is_dir():
         return False, f"skip {repo}: no checkout at {directory}"
@@ -541,11 +674,23 @@ def start_loop(
         legacy = _session_info(legacy_session_name(repo))
         if legacy and legacy.get("running"):
             return False, f"skip {repo}: an old Herdr session is still running; use lupin stop first"
+        if platform is None and provider is None and model is None:
+            candidates = orchestrator_profiles().get(repo)
+            if candidates:
+                from . import quota_cache
+
+                choice = select_orchestrator(candidates, quota_cache.read_snapshot(**_redis_kwargs()))
+                selected = choice["platform"]
+                provider = choice["provider"]
+                model = choice["model"]
+        provider, model = validate_omp_options(selected, provider, model)
         prompt_file = _write_prompt(repo, note, resume)
         value = {
             "version": 1,
             "repo": repo,
             "platform": selected,
+            "provider": provider,
+            "model": model,
             "session": session,
             "state": "starting",
             "started_at": _now(),
@@ -714,7 +859,7 @@ def _wait_agent(session: str, workspace_id: str) -> int:
 
 def _launch_agent(
     session: str, platform: str, workspace: dict, prompt_file: str, resume: bool,
-    name: str = AGENT_NAME,
+    name: str = AGENT_NAME, provider: str | None = None, model: str | None = None,
 ) -> int:
     pane = _pane_id(workspace)
     workspace_id = _workspace_id(workspace)
@@ -728,6 +873,11 @@ def _launch_agent(
     ]
     if resume and platform == "claude":
         argv.append("--continue")
+    if platform == "omp":
+        if provider:
+            argv.extend(["--provider", provider])
+        if model:
+            argv.extend(["--model", model])
     argv.append(prompt)
     rc, output = _run(argv, timeout=310.0, env=_herdr_env())
     if rc:
@@ -740,7 +890,7 @@ def _wait_existing_agent(session: str, workspace_id: str) -> int:
 
 def _agent_command(
     repo: str, session: str, workspace_id: str, platform: str, prompt_file: str,
-    resume: bool, launch: bool,
+    resume: bool, launch: bool, provider: str | None = None, model: str | None = None,
 ) -> list[str]:
     args = [
         "launch-agent" if launch else "wait-agent",
@@ -748,9 +898,15 @@ def _agent_command(
     ]
     if launch:
         args.extend(["--platform", platform, "--prompt-file", prompt_file])
+        if provider:
+            args.extend(["--provider", provider])
+        if model:
+            args.extend(["--model", model])
     if resume:
         args.append("--resume")
     return _lupin_command(*args)
+
+
 
 
 def _monitor_loop(
@@ -779,7 +935,10 @@ def _monitor_loop(
     workspace_id = _workspace_id(workspace)
     if not workspace_id:
         raise HerdrError("Herdr workspace has no ID")
-    command = _agent_command(repo, session, workspace_id, platform, prompt_file, resume, launch)
+    command = _agent_command(
+        repo, session, workspace_id, platform, prompt_file, resume, launch,
+        provider=metadata.get("provider"), model=metadata.get("model"),
+    )
     max_holders = (
         int(os.environ.get("LUPIN_LOOP_CLAUDE_MAX_CONCURRENT", "1"))
         if platform == "claude" else 1
@@ -876,13 +1035,14 @@ def herdr_server(session: str) -> int:
 
 
 def launch_agent(
-    repo: str, session: str, workspace_id: str, platform: str, prompt_file: str, resume: bool
+    repo: str, session: str, workspace_id: str, platform: str, prompt_file: str, resume: bool,
+    provider: str | None = None, model: str | None = None,
 ) -> int:
     workspace = _workspace_by_id(session, workspace_id)
     if workspace is None:
         return 0
-    return _launch_agent(session, platform, workspace, prompt_file, resume, _agent_name_for(repo, session))
-
+    provider, model = validate_omp_options(platform, provider, model)
+    return _launch_agent(session, platform, workspace, prompt_file, resume, _agent_name_for(repo, session), provider, model)
 
 def wait_agent(session: str, workspace_id: str) -> int:
     return _wait_existing_agent(session, workspace_id)
@@ -1188,16 +1348,31 @@ def schedule_once(
     platform: str | None = None,
     note: str | None = None,
     resume: bool = False,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> str:
     if note is not None and (not isinstance(note, str) or len(note) > 8000 or "\x00" in note):
         raise LoopError("note is invalid or too long")
     selected = validate_platform(platform) if platform else None
+    provider, model = validate_omp_options(selected, provider, model) if selected else (provider, model)
+    if (provider is not None or model is not None) and selected != "omp":
+        raise LoopError("--provider and --model require --platform omp")
     repos = [validate_repo(repo) for repo in repos]
     if not repos:
         raise LoopError("at least one repo is required for a one-off run")
     when_value, relative = _event_time(when)
     identifier = hashlib.sha256(f"{time.time_ns()}:{os.getpid()}:{repos}".encode()).hexdigest()[:16]
-    entry = {"id": identifier, "repos": repos, "platform": selected, "note": note, "resume": bool(resume), "when": when, "created_at": _now()}
+    entry = {
+        "id": identifier,
+        "repos": repos,
+        "platform": selected,
+        "provider": provider,
+        "model": model,
+        "note": note,
+        "resume": bool(resume),
+        "when": when,
+        "created_at": _now(),
+    }
     directory = STATE_DIR / "once"
     directory.mkdir(parents=True, exist_ok=True, mode=0o750)
     path = directory / f"{identifier}.json"
@@ -1234,7 +1409,14 @@ def once_fire(identifier: str) -> list[str]:
         raise LoopError(f"could not read one-off schedule: {exc}") from exc
     results = []
     for repo in entry.get("repos", []):
-        ok, message = start_loop(repo, platform=entry.get("platform"), note=entry.get("note"), resume=entry.get("resume", False))
+        ok, message = start_loop(
+            repo,
+            platform=entry.get("platform"),
+            provider=entry.get("provider"),
+            model=entry.get("model"),
+            note=entry.get("note"),
+            resume=entry.get("resume", False),
+        )
         results.append(message)
         if not ok:
             print(message, file=sys.stderr)
@@ -1349,6 +1531,8 @@ def main(argv: list[str] | None = None) -> int:
     launch_parser.add_argument("--workspace", required=True)
     launch_parser.add_argument("--platform", required=True)
     launch_parser.add_argument("--prompt-file", required=True)
+    launch_parser.add_argument("--provider", choices=("openai", "opencode-go"))
+    launch_parser.add_argument("--model")
     launch_parser.add_argument("--resume", action="store_true")
     wait_parser = sub.add_parser("wait-agent", help=argparse.SUPPRESS)
     wait_parser.add_argument("--repo", required=True)
@@ -1368,11 +1552,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.action == "herdr-server":
             return herdr_server(args.session)
-        if args.action == "monitor":
-            return monitor(args.repo, args.platform, args.session, args.prompt_file, args.resume)
         if args.action == "launch-agent":
             return launch_agent(
-                args.repo, args.session, args.workspace, args.platform, args.prompt_file, args.resume
+                args.repo,
+                args.session,
+                args.workspace,
+                args.platform,
+                args.prompt_file,
+                args.resume,
+                args.provider,
+                args.model,
             )
         if args.action == "wait-agent":
             return wait_agent(args.session, args.workspace)

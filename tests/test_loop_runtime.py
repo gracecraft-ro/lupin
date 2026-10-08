@@ -242,6 +242,22 @@ def test_schedule_once_rejects_empty_repo_list_before_systemd(monkeypatch, tmp_p
     assert not (tmp_path / "once").exists()
 
 
+def test_schedule_once_keeps_omp_provider_and_model(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "_event_time", lambda when: ("2h", True))
+    monkeypatch.setattr(loop_runtime, "_run", lambda *args, **kwargs: (0, ""))
+
+    assert loop_runtime.schedule_once(
+        "+2h", ["widgets"], platform="omp", provider="openai", model="openai/gpt-5.2"
+    ) == "scheduled widgets for +2h"
+
+    schedule, = (tmp_path / "once").glob("*.json")
+    entry = json.loads(schedule.read_text(encoding="utf-8"))
+    assert (entry["platform"], entry["provider"], entry["model"]) == (
+        "omp", "openai", "openai/gpt-5.2"
+    )
+
+
 
 def test_repo_catalog_includes_repo_without_delegation_doc(monkeypatch, tmp_path: Path):
     code_dir = tmp_path / "code"
@@ -305,7 +321,8 @@ def test_start_loop_starts_without_delegation_doc_and_skips_duplicate(
     monkeypatch.setattr(loop_runtime, "_systemd_run", systemd_run)
 
     started, message = loop_runtime.start_loop(
-        "widgets", platform="omp", note="review", resume=True
+        "widgets", platform="omp", provider="openai", model="openai/gpt-5.2",
+        note="review", resume=True
     )
 
     assert started
@@ -317,8 +334,9 @@ def test_start_loop_starts_without_delegation_doc_and_skips_duplicate(
     metadata = loop_runtime._read_metadata("widgets")
     assert metadata["state"] == "starting"
     assert metadata["platform"] == "omp"
+    assert metadata["provider"] == "openai"
+    assert metadata["model"] == "openai/gpt-5.2"
     prompt = Path(metadata["prompt_file"]).read_text(encoding="utf-8")
-    assert "If docs/delegation-loop.md exists, read it" in prompt
     assert prompt.endswith("review\n")
     assert command[1:] == [
         "loop",
@@ -429,6 +447,42 @@ def test_launch_agent_uses_herdr_start_api(monkeypatch, tmp_path: Path):
     assert options["timeout"] == 310.0
     assert options["env"]["HERDR_ENV"] == "1"
     assert waited == [(session, "workspace-1")]
+def test_launch_agent_passes_omp_provider_and_model(monkeypatch, tmp_path: Path):
+    prompt_file = tmp_path / "prompt"
+    prompt_file.write_text("finish the handoff\n", encoding="utf-8")
+    session = "lupin-widgets-abc123"
+    workspace = {
+        "id": "workspace-1",
+        "root_pane": {"pane_id": "pane-1", "workspace_id": "workspace-1"},
+    }
+    calls = []
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: calls.append(argv) or (0, ""))
+    monkeypatch.setattr(loop_runtime, "_wait_agent", lambda got_session, workspace_id: 0)
+
+    assert loop_runtime._launch_agent(
+        session, "omp", workspace, str(prompt_file), resume=False,
+        provider="opencode-go", model="opencode-go/step-5-preview-free:xhigh",
+    ) == 0
+
+    assert calls[0][-5:] == [
+        "--provider", "opencode-go",
+        "--model", "opencode-go/step-5-preview-free:xhigh",
+        "finish the handoff",
+    ]
+
+
+@pytest.mark.parametrize(
+    "platform, provider, model",
+    [
+        ("claude", "openai", None),
+        ("omp", "unsupported", None),
+        ("omp", None, "bad\nmodel"),
+    ],
+)
+def test_validate_omp_options_rejects_invalid_options(platform, provider, model):
+    with pytest.raises(loop_runtime.LoopError):
+        loop_runtime.validate_omp_options(platform, provider, model)
+
 
 
 def test_start_loop_refuses_an_open_legacy_session(monkeypatch, tmp_path: Path):
@@ -715,7 +769,11 @@ def test_start_loop_works_while_the_shared_session_runs_other_loops(monkeypatch,
     assert loop_runtime._read_metadata("widgets")["session"] == loop_runtime.SESSION_NAME
 
 
-def test_start_loop_refuses_while_the_old_per_repo_session_runs(monkeypatch, tmp_path: Path):
+def test_start_loop_selects_profile_candidate_and_persists_it_for_recovery(
+    monkeypatch, tmp_path: Path
+):
+    from lupin import quota_cache
+
     state_dir = tmp_path / "state"
     code_dir = tmp_path / "code"
     (code_dir / "widgets").mkdir(parents=True)
@@ -723,16 +781,40 @@ def test_start_loop_refuses_while_the_old_per_repo_session_runs(monkeypatch, tmp
     monkeypatch.setattr(loop_runtime, "LOOPS_DIR", state_dir / "herdr-loops")
     monkeypatch.setattr(loop_runtime, "REPOS_FILE", state_dir / "repos")
     monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
-    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {})
-    old = loop_runtime.legacy_session_name("widgets")
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "claude"})
     monkeypatch.setattr(
-        loop_runtime, "_session_info", lambda session: {"name": session, "running": True} if session == old else None
+        loop_runtime,
+        "orchestrator_profiles",
+        lambda: {"widgets": ["opencode-go/step-5-preview-free:xhigh"]},
     )
+    monkeypatch.setattr(loop_runtime.time, "time", lambda: 1735689600)
+    now_ms = 1735689600 * 1000
     monkeypatch.setattr(
-        loop_runtime, "_run", lambda argv, **kwargs: (3, "inactive") if argv[0] == "systemctl" else (1, "no session")
+        quota_cache,
+        "read_snapshot",
+        lambda **kwargs: {
+            "opencode-go": {
+                "fetched_at": "2025-01-01T00:00:00+00:00",
+                "rows": [{
+                    "provider": "opencode-go",
+                    "used_pct": 10,
+                    "resets_at": now_ms + 60_000,
+                }],
+            }
+        },
     )
+    monkeypatch.setattr(loop_runtime, "_session_info", lambda session: None)
+    monkeypatch.setattr(
+        loop_runtime,
+        "_run",
+        lambda argv, **kwargs: (3, "inactive") if argv[0] == "systemctl" else (1, "no session"),
+    )
+    monkeypatch.setattr(loop_runtime, "_systemd_run", lambda *args, **kwargs: (0, ""))
 
-    started, message = loop_runtime.start_loop("widgets", platform="omp")
+    started, _ = loop_runtime.start_loop("widgets")
 
-    assert not started
-    assert "old Herdr session" in message
+    assert started
+    metadata = loop_runtime._read_metadata("widgets")
+    assert metadata["platform"] == "omp"
+    assert metadata["provider"] == "opencode-go"
+    assert metadata["model"] == "opencode-go/step-5-preview-free:xhigh"
