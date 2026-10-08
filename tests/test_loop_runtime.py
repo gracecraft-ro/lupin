@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -564,3 +565,174 @@ def test_stop_closes_nothing_when_the_agent_cannot_be_asked(monkeypatch, tmp_pat
         loop_runtime.stop_loop("widgets")
 
     assert ("workspace", "close", "workspace-1") not in actions
+
+
+# --- one Herdr session per machine -------------------------------------------
+
+HERDR_AGENT_NAME = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")  # the rule `herdr agent start` reports
+
+
+def test_every_repo_shares_one_session():
+    assert loop_runtime.session_name("lupin") == loop_runtime.SESSION_NAME
+    assert loop_runtime.session_name("ghostbook.nix") == loop_runtime.SESSION_NAME
+
+
+@pytest.mark.parametrize(
+    "repo, expected",
+    [
+        # Session names `herdr session list` showed on ralpha before the change.
+        ("lupin", "lupin-lupin-9f955a0544"),
+        ("roundsmith", "lupin-roundsmith-87403ef076"),
+        ("ghostbook.nix", "lupin-ghostbook.nix-d80c71b78e"),
+    ],
+)
+def test_legacy_session_name_matches_the_old_per_repo_names(repo, expected):
+    assert loop_runtime.legacy_session_name(repo) == expected
+
+
+@pytest.mark.parametrize("repo", ["lupin", "field-trip_2.0", "ghostbook.nix", "UPPER.Case", "a" * 100])
+def test_agent_name_obeys_the_herdr_rule(repo):
+    assert HERDR_AGENT_NAME.fullmatch(loop_runtime.agent_name(repo))
+
+
+def test_agent_name_differs_for_repos_with_the_same_slug():
+    assert loop_runtime.agent_name("Foo.bar") != loop_runtime.agent_name("foo-bar")
+
+
+def test_a_repo_owns_the_shared_session_and_its_own_old_one_only():
+    assert loop_runtime._owns_session("lupin", loop_runtime.SESSION_NAME)
+    assert loop_runtime._owns_session("lupin", "lupin-lupin-9f955a0544")
+    assert not loop_runtime._owns_session("lupin", "lupin-roundsmith-87403ef076")
+
+
+def test_agent_lookup_matches_lupin_agents_in_the_workspace_only(monkeypatch):
+    agents = [
+        {"name": "scratch", "workspace_id": "w1"},
+        {"name": "lupin-lupin-12345678", "workspace_id": "w2"},
+        {"name": "lupin-loop", "workspace_id": "w3"},
+    ]
+    monkeypatch.setattr(loop_runtime, "_agents", lambda session: agents)
+
+    assert loop_runtime._agent_for_workspace("s", "w1") is None
+    assert loop_runtime._agent_for_workspace("s", "w2")["name"] == "lupin-lupin-12345678"
+    assert loop_runtime._agent_for_workspace("s", "w3")["name"] == "lupin-loop"
+
+
+def test_machine_server_unit_is_not_named_for_a_repo(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", tmp_path)
+    launched = []
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: launched.append(argv) or (0, ""))
+
+    loop_runtime._systemd_run(None, "herdr", ["lupin", "loop", "herdr-server"])
+
+    assert "--unit=lupin-herdr-machine" in launched[0]
+    assert launched[0][launched[0].index("--working-directory") + 1] == str(tmp_path)
+
+
+def test_shared_server_starts_once_with_no_repo_credentials(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    running = []
+    monkeypatch.setattr(loop_runtime, "_server_running", lambda session: bool(running))
+    started = []
+
+    def systemd_run(repo, kind, command, **kwargs):
+        started.append((repo, kind, command, kwargs))
+        running.append(True)
+        return 0, ""
+
+    monkeypatch.setattr(loop_runtime, "_systemd_run", systemd_run)
+
+    loop_runtime._ensure_server("widgets", loop_runtime.SESSION_NAME, "claude")
+    loop_runtime._ensure_server("gadgets", loop_runtime.SESSION_NAME, "claude")
+
+    assert len(started) == 1
+    repo, kind, command, options = started[0]
+    assert (repo, kind) == (None, "herdr")
+    assert command[-2:] == ["--session", loop_runtime.SESSION_NAME]
+    assert options == {}
+
+
+def test_shared_server_start_error_is_ignored_when_another_start_won_the_race(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    states = iter([False, True, True])
+    monkeypatch.setattr(loop_runtime, "_server_running", lambda session: next(states))
+    monkeypatch.setattr(loop_runtime, "_systemd_run", lambda *args, **kwargs: (1, "unit already exists"))
+
+    loop_runtime._ensure_server("widgets", loop_runtime.SESSION_NAME, "claude")
+
+
+def test_workspace_in_shared_session_gets_the_repo_token(monkeypatch, tmp_path: Path):
+    token = tmp_path / "token"
+    token.write_text("ghp_abc\n", encoding="utf-8")
+    monkeypatch.setattr(loop_runtime, "_runtime_paths", lambda repo: {"gh-token": str(token)})
+
+    assert loop_runtime._workspace_env(loop_runtime.SESSION_NAME, "widgets") == ["--env", "GH_TOKEN=ghp_abc"]
+    assert loop_runtime._workspace_env("lupin-widgets-abc123", "widgets") == []
+
+
+def test_workspace_in_shared_session_without_a_token_gets_no_env(monkeypatch):
+    monkeypatch.setattr(loop_runtime, "_runtime_paths", lambda repo: {})
+
+    assert loop_runtime._workspace_env(loop_runtime.SESSION_NAME, "widgets") == []
+
+
+def test_stop_leaves_the_shared_session_running(monkeypatch, tmp_path: Path):
+    actions = _stop_harness(monkeypatch, tmp_path, agent=None)
+    monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: {
+        "repo": "widgets", "platform": "claude", "session": loop_runtime.SESSION_NAME,
+        "state": "running", "workspace_id": "workspace-1", "pane_id": "pane-1",
+    })
+    monkeypatch.setattr(loop_runtime, "_start_server_for_read", lambda repo, data: data["session"])
+
+    loop_runtime.stop_loop("widgets")
+
+    assert ("workspace", "close", "workspace-1") in actions
+    assert not any(a[:2] == ("session", "stop") for a in actions)
+
+
+def test_start_loop_works_while_the_shared_session_runs_other_loops(monkeypatch, tmp_path: Path):
+    state_dir = tmp_path / "state"
+    code_dir = tmp_path / "code"
+    (code_dir / "widgets").mkdir(parents=True)
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", state_dir)
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", state_dir / "herdr-loops")
+    monkeypatch.setattr(loop_runtime, "REPOS_FILE", state_dir / "repos")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {})
+    # The shared session is running; no old per-repo session exists.
+    monkeypatch.setattr(
+        loop_runtime, "_session_info",
+        lambda session: {"name": session, "running": True} if session == loop_runtime.SESSION_NAME else None,
+    )
+    monkeypatch.setattr(
+        loop_runtime, "_run", lambda argv, **kwargs: (3, "inactive") if argv[0] == "systemctl" else (1, "no session")
+    )
+    monkeypatch.setattr(loop_runtime, "_systemd_run", lambda *args, **kwargs: (0, ""))
+
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
+
+    assert started, message
+    assert loop_runtime._read_metadata("widgets")["session"] == loop_runtime.SESSION_NAME
+
+
+def test_start_loop_refuses_while_the_old_per_repo_session_runs(monkeypatch, tmp_path: Path):
+    state_dir = tmp_path / "state"
+    code_dir = tmp_path / "code"
+    (code_dir / "widgets").mkdir(parents=True)
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", state_dir)
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", state_dir / "herdr-loops")
+    monkeypatch.setattr(loop_runtime, "REPOS_FILE", state_dir / "repos")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {})
+    old = loop_runtime.legacy_session_name("widgets")
+    monkeypatch.setattr(
+        loop_runtime, "_session_info", lambda session: {"name": session, "running": True} if session == old else None
+    )
+    monkeypatch.setattr(
+        loop_runtime, "_run", lambda argv, **kwargs: (3, "inactive") if argv[0] == "systemctl" else (1, "no session")
+    )
+
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
+
+    assert not started
+    assert "old Herdr session" in message

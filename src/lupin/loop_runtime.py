@@ -20,6 +20,8 @@ from . import slots, slots_redis
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 PLATFORMS = {"claude", "omp"}
 AGENT_NAME = "lupin-loop"
+# One Herdr session per machine. Each loop is one workspace in it.
+SESSION_NAME = "lupin-loops"
 STATE_DIR = Path(os.environ.get("LUPIN_LOOP_STATE_DIR", "/var/lib/delegation-loop"))
 CODE_DIR = Path(os.environ.get("LUPIN_LOOP_CODE_DIR", "/code"))
 REPOS_FILE = STATE_DIR / "repos"
@@ -73,10 +75,33 @@ def validate_platform(platform: Any) -> str:
 
 
 def session_name(repo: str) -> str:
+    validate_repo(repo)
+    return SESSION_NAME
+
+
+def legacy_session_name(repo: str) -> str:
+    """The session name used before loops shared one session per machine."""
     repo = validate_repo(repo)
     slug = re.sub(r"[^A-Za-z0-9._-]", "-", repo)[:38].strip(".-") or "repo"
     digest = hashlib.sha256(repo.encode()).hexdigest()[:10]
     return f"lupin-{slug}-{digest}"
+
+
+def agent_name(repo: str) -> str:
+    """A Herdr agent name for one repo: lowercase, digits, - and _, up to 32 characters."""
+    repo = validate_repo(repo)
+    slug = re.sub(r"[^a-z0-9_-]", "-", repo.lower())[:15].strip("-_") or "repo"
+    digest = hashlib.sha256(repo.encode()).hexdigest()[:8]
+    return f"lupin-{slug}-{digest}"
+
+
+def _owns_session(repo: str, session: Any) -> bool:
+    return session in (SESSION_NAME, legacy_session_name(repo))
+
+
+def _agent_name_for(repo: str, session: str) -> str:
+    """Loops in the shared session need their own agent name. Old loops keep AGENT_NAME."""
+    return agent_name(repo) if session == SESSION_NAME else AGENT_NAME
 
 
 def unit_name(repo: str, kind: str = "loop") -> str:
@@ -190,7 +215,8 @@ def _agents(session: str) -> list[dict]:
 
 def _agent_for_workspace(session: str, workspace_id: str) -> dict | None:
     for agent in _agents(session):
-        if agent.get("workspace_id") == workspace_id and agent.get("name") == AGENT_NAME:
+        name = agent.get("name")
+        if agent.get("workspace_id") == workspace_id and isinstance(name, str) and name.startswith("lupin-"):
             return agent
     return None
 
@@ -396,7 +422,7 @@ def _service_environment() -> list[str]:
 
 
 def _systemd_run(
-    repo: str,
+    repo: str | None,
     kind: str,
     command: list[str],
     *,
@@ -405,7 +431,7 @@ def _systemd_run(
 ) -> tuple[int, str]:
     user = os.environ.get("LUPIN_LOOP_USER", os.environ.get("USER", "ghosta"))
     group = os.environ.get("LUPIN_LOOP_GROUP", "users")
-    unit = unit_name(repo, kind)
+    unit = unit_name(repo, kind) if repo else f"lupin-{kind}-machine"
     argv = _sudo_argv(
         "systemd-run", f"--unit={unit}", "--collect",
         f"--uid={user}", f"--gid={group}", "--property=KillMode=control-group",
@@ -422,7 +448,8 @@ def _systemd_run(
         argv.extend(["--property=OOMPolicy=kill", "--property=MemoryMax=5G"])
     argv.extend(_service_environment())
     argv.extend(_credential_properties(credentials or {}))
-    argv.extend(["--working-directory", str(CODE_DIR / validate_repo(repo)), "--", *command])
+    directory = CODE_DIR / validate_repo(repo) if repo else CODE_DIR
+    argv.extend(["--working-directory", str(directory), "--", *command])
     return _run(argv, timeout=HERDR_TIMEOUT)
 
 
@@ -432,6 +459,12 @@ def _lock_file(repo: str):
     return (locks / f"{validate_repo(repo)}.lock").open("a+")
 
 
+def _machine_lock():
+    locks = STATE_DIR / "locks"
+    locks.mkdir(parents=True, exist_ok=True, mode=0o750)
+    return (locks / "herdr-server.lock").open("a+")
+
+
 def _legacy_tmux_exists(repo: str) -> bool:
     rc, _ = _run(["tmux", "has-session", "-t", f"=loop-{validate_repo(repo)}:"], timeout=2.0)
     return rc == 0
@@ -439,6 +472,11 @@ def _legacy_tmux_exists(repo: str) -> bool:
 
 def _session_info(session: str) -> dict | None:
     return next((row for row in herdr_sessions() if row.get("name") == session), None)
+
+
+def _session_running(session: str) -> bool:
+    info = _session_info(session)
+    return bool(info and info.get("running"))
 
 
 def _write_prompt(repo: str, note: str | None, resume: bool) -> str:
@@ -496,13 +534,13 @@ def start_loop(
                 "drain it before starting Herdr"
             )
         metadata = _read_metadata(repo)
-        session_info = _session_info(session)
         if metadata and metadata.get("state") in {"running", "starting", "needs_attention"}:
-            if session_info and session_info.get("running"):
-                return False, f"skip {repo}: Herdr session is already running; use lupin stop first"
+            if _session_running(metadata.get("session") or session):
+                return False, f"skip {repo}: Herdr loop is already running; use lupin stop first"
             return False, f"skip {repo}: saved Herdr state needs review; use lupin stop before starting again"
-        if session_info and session_info.get("running"):
-            return False, f"skip {repo}: Herdr session is already running; use lupin stop first"
+        legacy = _session_info(legacy_session_name(repo))
+        if legacy and legacy.get("running"):
+            return False, f"skip {repo}: an old Herdr session is still running; use lupin stop first"
         prompt_file = _write_prompt(repo, note, resume)
         value = {
             "version": 1,
@@ -565,20 +603,43 @@ def _redis_kwargs() -> dict:
     }
 
 
+def _wait_for_server(session: str, label: str) -> None:
+    deadline = time.monotonic() + SERVER_START_TIMEOUT
+    while time.monotonic() < deadline:
+        if _server_running(session):
+            return
+        time.sleep(0.25)
+    raise LoopError(f"Herdr server did not start for {label} within {SERVER_START_TIMEOUT:g}s")
+
+
+def _ensure_shared_server(session: str) -> None:
+    """Start the machine's one Herdr server. The lock stops two starts racing."""
+    lock = _machine_lock()
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if _server_running(session):
+            return
+        command = _lupin_command("herdr-server", "--session", session)
+        rc, output = _systemd_run(None, "herdr", command)
+        if rc and not _server_running(session):
+            raise LoopError(output or "could not start the Herdr server")
+        _wait_for_server(session, "this machine")
+    finally:
+        lock.close()
+
+
 def _ensure_server(repo: str, session: str, platform: str) -> None:
     if _server_running(session):
+        return
+    if session == SESSION_NAME:
+        _ensure_shared_server(session)
         return
     credentials = _runtime_paths(repo)
     command = _lupin_command("herdr-server", "--session", session)
     rc, output = _systemd_run(repo, "herdr", command, credentials=credentials, claude_limits=platform == "claude")
     if rc:
         raise LoopError(output or f"could not start Herdr server for {repo}")
-    deadline = time.monotonic() + SERVER_START_TIMEOUT
-    while time.monotonic() < deadline:
-        if _server_running(session):
-            return
-        time.sleep(0.25)
-    raise LoopError(f"Herdr server did not start for {repo} within {SERVER_START_TIMEOUT:g}s")
+    _wait_for_server(session, repo)
 
 
 def _metadata_for_session(repo: str, session: str) -> dict:
@@ -597,10 +658,22 @@ def _metadata_for_session(repo: str, session: str) -> dict:
     return value
 
 
+def _workspace_env(session: str, repo: str) -> list[str]:
+    """The shared server has no per-repo token, so give the repo's token to its workspace."""
+    if session != SESSION_NAME:
+        return []
+    path = _runtime_paths(repo).get("gh-token")
+    if not path:
+        return []
+    token = Path(path).read_text(encoding="utf-8").strip()
+    return ["--env", f"GH_TOKEN={token}"] if token else []
+
+
 def _create_workspace(session: str, directory: Path, repo: str) -> dict:
     result = _herdr_json(
         session,
         "workspace", "create", "--cwd", str(directory), "--label", repo, "--no-focus",
+        *_workspace_env(session, repo),
     )
     workspace = result.get("workspace")
     root = result.get("root_pane")
@@ -640,7 +713,8 @@ def _wait_agent(session: str, workspace_id: str) -> int:
 
 
 def _launch_agent(
-    session: str, platform: str, workspace: dict, prompt_file: str, resume: bool
+    session: str, platform: str, workspace: dict, prompt_file: str, resume: bool,
+    name: str = AGENT_NAME,
 ) -> int:
     pane = _pane_id(workspace)
     workspace_id = _workspace_id(workspace)
@@ -649,7 +723,7 @@ def _launch_agent(
     # Herdr rejects newlines in agent arguments, so send the prompt as one line.
     prompt = " ".join(Path(prompt_file).read_text(encoding="utf-8").split())
     argv = [
-        HERDR, "--session", session, "agent", "start", AGENT_NAME, "--kind", platform,
+        HERDR, "--session", session, "agent", "start", name, "--kind", platform,
         "--pane", pane, "--timeout", "300000", "--",
     ]
     if resume and platform == "claude":
@@ -747,7 +821,7 @@ def worker(
 ) -> int:
     repo = validate_repo(repo)
     platform = validate_platform(platform)
-    if session != session_name(repo):
+    if not _owns_session(repo, session):
         raise LoopError("Herdr session name does not match repo")
     if not (CODE_DIR / repo).is_dir():
         raise LoopError(f"repo directory does not exist: {CODE_DIR / repo}")
@@ -807,7 +881,7 @@ def launch_agent(
     workspace = _workspace_by_id(session, workspace_id)
     if workspace is None:
         return 0
-    return _launch_agent(session, platform, workspace, prompt_file, resume)
+    return _launch_agent(session, platform, workspace, prompt_file, resume, _agent_name_for(repo, session))
 
 
 def wait_agent(session: str, workspace_id: str) -> int:
@@ -845,11 +919,12 @@ def _request_handoff(repo: str, session: str, workspace: dict, grace: float) -> 
     nothing is closed. `--force` skips this step.
     """
     workspace_id = _workspace_id(workspace)
-    if not workspace_id or _agent_for_workspace(session, workspace_id) is None:
+    agent = _agent_for_workspace(session, workspace_id) if workspace_id else None
+    if agent is None:
         return ""
     try:
         _herdr(
-            session, "agent", "prompt", AGENT_NAME, HANDOFF_TEXT,
+            session, "agent", "prompt", agent.get("name") or AGENT_NAME, HANDOFF_TEXT,
             "--wait", "--timeout", str(int(grace * 1000)),
             timeout=grace + HERDR_TIMEOUT,
         )
@@ -891,7 +966,7 @@ def stop_loop(repo: str, *, force: bool = False, grace: float = HANDOFF_GRACE_S)
             )
             if rc:
                 raise LoopError(output or f"could not stop Lupin worker for {repo}")
-        if not _workspaces(session):
+        if session != SESSION_NAME and not _workspaces(session):
             _herdr_json(None, "session", "stop", session, "--json")
         metadata["state"] = "stopped"
         metadata["stopped_at"] = _now()
@@ -1059,7 +1134,7 @@ def recover() -> list[str]:
         if metadata.get("state") not in {"running", "starting"}:
             continue
         if (
-            session != session_name(repo)
+            not _owns_session(repo, session)
             or not isinstance(prompt_file, str)
             or not Path(prompt_file).is_file()
         ):

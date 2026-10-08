@@ -120,10 +120,15 @@ start or stop that timer.
 
 `loops` reads state from the Herdr API. It reports the agent state, backend,
 session, workspace and pane IDs. It does not infer state from pane text.
-Each repo has one Herdr session. Each run has one workspace. A completed
-workspace stays open for review and blocks another run until you stop it.
-A Herdr state of `needs_attention` means the workspace needs review. If
-Herdr cannot provide state, Lupin reports `unknown`. Both states block a
+Each machine has one Herdr session, `lupin-loops`, and one Herdr server for
+it. Each run has one workspace in that session. Each workspace gets its
+repo's GitHub token as `GH_TOKEN`. `stop` closes the workspace and leaves
+the session running. The loops on a machine share the server's memory.
+Loops that started before this change keep their own session until you
+stop them. A completed workspace stays open for review and blocks another
+run until you stop it. A Herdr state of `needs_attention` means the
+workspace needs review. If Herdr cannot provide state, Lupin reports
+`unknown`. Both states block a
 new run until you resolve the state.
 
 `run`, `stop`, `peek`, `schedule`, `pause`, and `resume` can target any
