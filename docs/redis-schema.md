@@ -239,10 +239,15 @@ the same "stored timestamp, not Redis TTL" convention as `machine:<name>`'s
 offline detection above.
 
 The lookup worker is a free opencode-go model (`step-5-preview-free`) run
-through `omp -p` with `--thinking max` and one tool, `web_search`; the
-model list is sharded 3 models per call, up to 4 calls at a time
-(`benchmark_fetch.SHARD_SIZE`, `MAX_PARALLEL_SHARDS`). See
-`benchmark_fetch.py`'s docstring for the measurement that led there.
+through `omp -p` with `--thinking max` and two tools, `read` and
+`web_search`: `read` fetches each model's own `artificialanalysis.ai`
+page, which states the Intelligence Index in plain text and costs no
+search quota, and `web_search` is the fallback for a model the site does
+not list. The list is sharded 6 models per call, up to 2 calls at a time
+(`benchmark_fetch.SHARD_SIZE`, `MAX_PARALLEL_SHARDS`); a wider fan-out
+measured 2026-10-08 exhausted the free search providers and every shard
+returned `score: null`. A null never overwrites a verified score. See
+`benchmark_fetch.py`'s docstring for the measurements.
 
 Only one machine fetches at a time: `lupin fetch-benchmarks` wraps the
 actual dispatch in `slot:benchmark-fetch` (max 1 holder, no renewal — the

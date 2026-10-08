@@ -212,14 +212,18 @@ for each one. `herdr machine list` shows the saved machines.
 
 `fetch-benchmarks` gets public benchmark scores. It does not run models.
 The lookup worker is a free opencode-go model (`step-5-preview-free`) run
-through `omp -p` with maximum thinking and one tool, web search. The model
-list is split into calls of 3 models, up to 4 at a time, and each score is
-cached with its own timestamp, so a refresh asks only about the models
-whose score is missing, unscored, or older than 20 hours, and a failed
-call loses only its own models. Use `--force` to fetch everything now.
+through `omp -p` with maximum thinking. It reads each model's own
+Artificial Analysis page directly -- the page states the Intelligence
+Index score in plain text, and one page read costs no search quota --
+and falls back to web search for a model the site does not list. The
+model list is split into calls of 6 models, up to 2 at a time, and each
+score is cached with its own timestamp, so a refresh asks only about the
+models whose score is missing, unscored, or older than 20 hours, and a
+failed call loses only its own models. A lookup that finds nothing does
+not erase a verified score. Use `--force` to fetch everything now.
 Plain output lists each unscored model and the reason from the agent.
-Model IDs come from the latest `fetch-models` snapshot. If that snapshot is
-missing or empty, Lupin uses the active picks in `model-tiers.json`.
+Model IDs come from the latest `fetch-models` snapshot. If that snapshot
+is missing or empty, Lupin uses the active picks in `model-tiers.json`.
 
 A fresh result may include a short, source-linked note about a model's
 publicly reported strengths or limits. The agent gets zero-price model IDs
