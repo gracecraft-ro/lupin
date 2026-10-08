@@ -22,6 +22,7 @@ This is the data model `lupin` uses once the `redis` backend exists
 | `model-snapshot` | string (JSON), with a TTL | latest model list and prices from `lupin fetch-models` | nothing today |
 | `gh-cache:<owner>/<repo>:<cache-key>` | string (JSON: `{"data": ...}`), with a TTL | one read-only `gh` lookup's cached result — see Fleet keys below | each machine's own direct `gh` call for the same lookup |
 | `quota-snapshot` | string (JSON), with a TTL | one fleet-wide quota reading per provider — see Fleet keys below | nothing today |
+| `usage-snapshot:<machine>` | string (JSON), with a TTL | one machine's 7-day usage rows — see Fleet keys below | nothing today |
 These are new keys for the fleet CLI (issues #6–#14, split from #2) and the
 cross-machine command queue (issue #28, split from #27). They stay under
 `v1`: `v1` is the shape of each key, not the whole file, and adding a key
@@ -323,6 +324,16 @@ Guarded by `slot:quota-fetch/<provider>` (max 1 holder, non-blocking, no
 wait) — only stops two `lupin` processes on the *same* machine from
 publishing the same provider at once, same narrow job the `gh-fetch`/
 `benchmark-fetch` locks do.
+
+### `usage-snapshot:<machine>`
+
+`lupin quota` writes one 7-day usage snapshot per machine. It contains that
+machine's local Claude and OMP rows, the publish time, and the machine name.
+Each machine updates only its own key.
+
+The `/usage` page reads all snapshots and adds token and cost totals by
+provider. It shows the publish age and marks a snapshot stale after 5 minutes.
+Each key expires after 24 hours. A missing snapshot is not shown as zero.
 
 ## Command queue keys
 

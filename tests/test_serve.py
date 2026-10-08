@@ -21,7 +21,7 @@ import redis as redis_lib
 
 from lupin import (
     cli, claims, commands, ledger, machines, quest, quota_cache, roadmap, serve, slots,
-    slots_redis,
+    slots_redis, usage_cache,
 )
 
 
@@ -188,14 +188,8 @@ class TimeFormattingTests(unittest.TestCase):
 
 
 class QuotaRenderingTests(unittest.TestCase):
-    """`/usage` rendering only. The real quota readers moved to `quota.py`
-    (issue #8) and are tested in `test_quota.py`; the fleet-shared cache
-    they publish through is tested in `test_quota_cache.py` (issue #38).
-    Here, `quota_cache.read_snapshot` (what `render_usage` now reads
-    instead of calling a provider directly) and `claude_usage`/
-    `omp_usage` (still local, for the 7-day totals table only) are
-    mocked, so these tests cover only how `render_usage`/`render_quota_row`
-    turn rows into HTML.
+    """`/usage` rendering only. The shared quota and 7-day usage snapshots
+    are mocked, so these tests cover how rows become HTML.
     """
 
     def test_quota_bar_marks_window_time_and_quota_progress(self):
@@ -235,8 +229,7 @@ class QuotaRenderingTests(unittest.TestCase):
         }
         with (
             mock.patch.object(quota_cache, "read_snapshot", return_value=snapshot),
-            mock.patch.object(serve, "claude_usage", return_value=[]),
-            mock.patch.object(serve, "omp_usage", return_value=[]),
+            mock.patch.object(usage_cache, "read_snapshot", return_value={}),
         ):
             page = serve.render_usage().decode()
 
@@ -256,6 +249,7 @@ class QuotaRenderingTests(unittest.TestCase):
         # Staleness is visible, per provider -- fetched via this fake "jesus".
         self.assertIn("fetched", page)
         self.assertIn("via jesus", page)
+        self.assertIn("stale", page)
 
     def test_quota_note_and_error_rows_render_as_dim_text(self):
         omp_snapshot = {
@@ -267,8 +261,7 @@ class QuotaRenderingTests(unittest.TestCase):
         }
         with (
             mock.patch.object(quota_cache, "read_snapshot", return_value=omp_snapshot),
-            mock.patch.object(serve, "claude_usage", return_value=[]),
-            mock.patch.object(serve, "omp_usage", return_value=[]),
+            mock.patch.object(usage_cache, "read_snapshot", return_value={}),
         ):
             page = serve.render_usage().decode()
         self.assertIn("<h3>omp</h3>", page)
@@ -283,52 +276,84 @@ class QuotaRenderingTests(unittest.TestCase):
         }
         with (
             mock.patch.object(quota_cache, "read_snapshot", return_value=claude_snapshot),
-            mock.patch.object(serve, "claude_usage", return_value=[]),
-            mock.patch.object(serve, "omp_usage", return_value=[]),
+            mock.patch.object(usage_cache, "read_snapshot", return_value={}),
         ):
             page = serve.render_usage().decode()
         self.assertIn("<h3>claude</h3>", page)
         self.assertIn("quota unavailable", page)
 
-    def test_seven_day_totals_table_formats_rows_and_errors(self):
-        claude_rows = [{
-            "provider": "claude",
-            "input_tokens": 130,
-            "output_tokens": None,
-            "cost": None,
-            "period": "last 7 days",
-            "source": "/claude/stats.json",
-            "last_update": "2026-01-01",
-        }]
-        omp_rows = [
-            {
-                "provider": "openai-codex",
-                "input_tokens": 15,
-                "output_tokens": 10,
-                "cost": 0.5,
-                "period": "last 7 days",
-                "source": "/omp/stats.db",
-                "last_update": "2026-01-01 00:00:00",
+    def test_seven_day_totals_aggregate_machine_snapshots_and_show_staleness(self):
+        now = serve.datetime.now(serve.timezone.utc).isoformat()
+        snapshots = {
+            "jesus": {
+                "rows": [
+                    {
+                        "provider": "claude",
+                        "input_tokens": 130,
+                        "output_tokens": None,
+                        "cost": None,
+                        "period": "last 7 days",
+                        "source": "/claude/stats.json",
+                        "last_update": "2026-10-08",
+                    },
+                    {
+                        "provider": "openai-codex",
+                        "input_tokens": 15,
+                        "output_tokens": 10,
+                        "cost": 0.5,
+                        "period": "last 7 days",
+                        "source": "/omp/stats.db",
+                        "last_update": "2026-10-08 00:00:00",
+                    },
+                    {
+                        "provider": "opencode-go",
+                        "error": "unavailable (FileNotFoundError)",
+                        "source": "/opencode/stats.db",
+                    },
+                ],
+                "fetched_at": now,
+                "fetched_by": "jesus",
             },
-            {
-                "provider": "opencode-go",
-                "error": "unavailable (FileNotFoundError)",
-                "source": "/opencode/stats.db",
+            "ralpha": {
+                "rows": [{
+                    "provider": "openai-codex",
+                    "input_tokens": 6,
+                    "output_tokens": 5,
+                    "cost": 0.25,
+                    "period": "last 7 days",
+                    "source": "/omp/stats.db",
+                    "last_update": "2026-10-08 00:00:00",
+                }],
+                "fetched_at": "2000-01-01T00:00:00+00:00",
+                "fetched_by": "ralpha",
             },
-        ]
+        }
         with (
             mock.patch.object(quota_cache, "read_snapshot", return_value={}),
-            mock.patch.object(serve, "claude_usage", return_value=claude_rows),
-            mock.patch.object(serve, "omp_usage", return_value=omp_rows),
+            mock.patch.object(usage_cache, "read_snapshot", return_value=snapshots),
         ):
             page = serve.render_usage().decode()
 
         self.assertIn("<td>claude</td><td>130</td><td>-</td><td>not tracked</td>", page)
-        self.assertIn("<td>openai-codex</td><td>15</td><td>10</td><td>$0.50</td>", page)
+        self.assertIn("<td>openai-codex</td><td>21</td><td>15</td><td>$0.75</td>", page)
         self.assertIn(
             "<td>opencode-go</td><td colspan=3>unavailable (FileNotFoundError)</td>",
             page,
         )
+        self.assertIn("Usage snapshots:", page)
+        self.assertIn("jesus fetched", page)
+        self.assertIn("ralpha fetched", page)
+        self.assertIn("stale", page)
+
+    def test_missing_usage_snapshot_is_not_rendered_as_zero_totals(self):
+        with (
+            mock.patch.object(quota_cache, "read_snapshot", return_value={}),
+            mock.patch.object(usage_cache, "read_snapshot", return_value={}),
+        ):
+            page = serve.render_usage().decode()
+
+        self.assertIn("No shared 7-day usage data cached yet", page)
+        self.assertNotIn("<td>claude</td><td>0</td>", page)
 
 
 class BindAddressTests(unittest.TestCase):
@@ -807,7 +832,6 @@ class AllModelsTableTests(unittest.TestCase):
             page = serve.render_model_tiers(connection={"redis_host": "fleet"}).decode()
 
         self.assertIn("claude-opus-4-5", page)
-        self.assertIn("<span data-since='1791331200'></span> ago", page)
         self.assertNotIn("Last pulled: never pulled", page)
 
     def test_no_snapshot_file_shows_placeholder_not_a_crash(self):

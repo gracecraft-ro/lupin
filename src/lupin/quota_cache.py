@@ -80,7 +80,7 @@ def _client(connection: dict):
     )
 
 
-def _is_fresh(entry: dict | None) -> bool:
+def is_fresh(entry: dict | None, now: float | None = None) -> bool:
     if not entry:
         return False
     fetched_at = entry.get("fetched_at")
@@ -88,9 +88,10 @@ def _is_fresh(entry: dict | None) -> bool:
         return False
     try:
         epoch = datetime.fromisoformat(fetched_at).timestamp()
-    except ValueError:
+    except (TypeError, ValueError):
         return False
-    return (datetime.now(timezone.utc).timestamp() - epoch) < CACHE_TTL
+    now = datetime.now(timezone.utc).timestamp() if now is None else now
+    return now - epoch < CACHE_TTL
 
 
 def _has_real_data(rows: list[dict] | None) -> bool:
@@ -185,7 +186,7 @@ def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connec
     for provider, rows in local_rows.items():
         if not _has_real_data(rows):
             continue
-        if not force and _is_fresh(cached.get(provider)):
+        if not force and is_fresh(cached.get(provider)):
             # Someone else's reading for this provider is still fresh --
             # don't pay for a redundant publish.
             continue

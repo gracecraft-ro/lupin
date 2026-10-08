@@ -29,12 +29,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
 from . import benchmark_catalog, benchmark_fetch, claims, commands, loop_runtime, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
+from . import usage_cache
 from .slots import CoordinatorUnreachable
 from .quota import (
     QuotaDuration,
-    claude_usage,
     epoch_ms_to_local,
-    omp_usage,
     quota_source_label,
 )
 
@@ -728,6 +727,7 @@ header h1 svg{color:var(--ok)}
 header .sp{flex:1}
 header a{font-size:13px}
 .dim{color:var(--ink3)}
+.stale{color:var(--warn)}
 .mono{font-family:var(--mono)}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:18px;
 box-shadow:0 3px 0 var(--line);padding:.9rem 1.1rem;margin-bottom:.7rem}
@@ -1313,15 +1313,14 @@ def render_quota_row(row: dict, now_ms: int) -> str:
 
 
 def render_usage(*, connection: dict | None = None) -> bytes:
-    """Quota comes from the fleet-shared cache (issue #38), read fresh on
-    every render -- never a local provider call, and never cached in this
-    process -- same pattern `render_model_tiers` already uses for
-    `benchmark_fetch.read_snapshot`. This is what lets this page show real
-    quota on a machine with no provider credentials of its own (the
-    dashboard is pinned to one such machine, issue #35): whichever machine
-    actually has credentials publishes here, via `lupin quota`.
+    """Read quota and 7-day usage snapshots from Redis on each page render.
+
+    Scheduled `lupin quota` runs publish the data; this page does not call
+    provider APIs or read machine-local usage files.
     """
-    snapshot = quota_cache.read_snapshot(**(connection or {}))
+    connection = connection or {}
+    snapshot = quota_cache.read_snapshot(**connection)
+    usage_snapshots = usage_cache.read_snapshot(**connection)
     quota_rows: list[dict] = []
     fetched_by_provider: dict[str, dict] = {}
     for provider, entry in snapshot.items():
@@ -1351,12 +1350,14 @@ def render_usage(*, connection: dict | None = None) -> bytes:
     for row in quota_rows:
         groups.setdefault(row["provider"], []).append(row)
     for provider, rows in groups.items():
-        age = _snapshot_age((fetched_by_provider.get(provider) or {}).get("fetched_at"))
-        fetched_by = (fetched_by_provider.get(provider) or {}).get("fetched_by", "-")
+        entry = fetched_by_provider.get(provider) or {}
+        age = _snapshot_age(entry.get("fetched_at"))
+        fetched_by = entry.get("fetched_by", "-")
+        stale = "" if quota_cache.is_fresh(entry) else " &middot; <span class=stale>stale</span>"
         body.append(
             f"<section class='card quota-group'><div class=quota-group-heading>"
             f"<h3>{esc(provider)}</h3><span class=dim>"
-            f"{esc(quota_source_label(provider))} &middot; fetched {age} via {esc(fetched_by)}"
+            f"{esc(quota_source_label(provider))} &middot; fetched {age} via {esc(fetched_by)}{stale}"
             "</span></div>"
         )
         for row in rows:
@@ -1372,16 +1373,29 @@ def render_usage(*, connection: dict | None = None) -> bytes:
         "omp or Orca's usage API; Claude uses Anthropic's OAuth usage API. "
         "OpenAI uses omp or Codex's latest local snapshot, which only updates "
         "when Codex writes a session event.</p>"
-        "<h2>7-day totals</h2>"
-        "<p class=dim>Sources are read locally. Claude's local cache reports "
-        "one combined token total per day, not an input/output split, and no "
-        "daily cost -- shown in the input-tokens column with cost as "
-        "'not tracked'.</p>"
+    )
+    body.append("<h2>7-day totals</h2>")
+    if usage_snapshots:
+        sources = "; ".join(
+            f"{esc(machine)} fetched {_snapshot_age(entry.get('fetched_at'))}"
+            + ("" if usage_cache.is_fresh(entry, now=now_ms / 1000) else " &middot; <span class=stale>stale</span>")
+            for machine, entry in sorted(usage_snapshots.items())
+        )
+        body.append(f"<p class=dim>Usage snapshots: {sources}</p>")
+    else:
+        body.append(
+            "<p class=dim>No shared 7-day usage data cached yet -- run "
+            "<code>lupin quota</code> on a machine with local usage data.</p>"
+        )
+    body.append(
+        "<p class=dim>Totals combine the last 7 days from each machine's local "
+        "Claude and OMP statistics. Claude's local cache reports one combined "
+        "token total per day, not an input/output split, and no daily cost.</p>"
         "<div class='card scroll'><table><tr><th>provider</th>"
         "<th>input tokens</th><th>output tokens</th><th>cost</th>"
         "<th>period</th><th>source</th><th>last update</th></tr>"
     )
-    rows = claude_usage() + omp_usage()
+    rows = usage_cache.aggregate_rows(usage_snapshots)
     for row in rows:
         if "error" in row:
             body.append(
@@ -1390,11 +1404,12 @@ def render_usage(*, connection: dict | None = None) -> bytes:
                 f"<td>{esc(row['source'])}</td><td>-</td></tr>"
             )
             continue
+        input_tokens = "-" if row["input_tokens"] is None else esc(row["input_tokens"])
         output_tokens = "-" if row["output_tokens"] is None else esc(row["output_tokens"])
         cost = "not tracked" if row["cost"] is None else f"${row['cost']:.2f}"
         body.append(
             f"<tr><td>{esc(row['provider'])}</td>"
-            f"<td>{esc(row['input_tokens'])}</td>"
+            f"<td>{input_tokens}</td>"
             f"<td>{output_tokens}</td>"
             f"<td>{cost}</td><td>{esc(row['period'])}</td>"
             f"<td>{esc(row['source'])}</td><td>{esc(row['last_update'])}</td></tr>"
@@ -1565,7 +1580,7 @@ def _snapshot_age(fetched_at: str | None) -> str:
         epoch = datetime.fromisoformat(fetched_at).timestamp()
     except ValueError:
         return "never pulled"
-    return f"<span data-since='{epoch:.0f}'></span> ago"
+    return f"<span data-since='{epoch:.0f}'></span>"
 
 
 def _format_score(scores: list[dict]) -> str:

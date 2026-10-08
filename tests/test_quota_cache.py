@@ -16,7 +16,7 @@ from unittest import mock
 
 import redis as redis_lib
 
-from lupin import cli, quota, quota_cache, slots_redis
+from lupin import cli, quota, quota_cache, slots_redis, usage_cache
 
 
 def _kw(redis_port):
@@ -244,7 +244,10 @@ class CliQuotaTests(unittest.TestCase):
         fixed = {"claude": {"rows": [{"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS,
                                        "used_pct": 10, "resets_at": 1}],
                              "fetched_at": "2026-01-01T00:00:00+00:00", "fetched_by": "jesus"}}
-        with mock.patch.object(quota_cache, "refresh_snapshot", return_value=fixed) as refresh:
+        with (
+            mock.patch.object(quota_cache, "refresh_snapshot", return_value=fixed) as refresh,
+            mock.patch.object(usage_cache, "refresh_snapshot"),
+        ):
             code = cli.main(["quota", "--json"])
         self.assertEqual(code, 0)
         refresh.assert_called_once()
@@ -265,7 +268,10 @@ class CliQuotaTests(unittest.TestCase):
                 "fetched_by": "jesus",
             }
         }
-        with mock.patch.object(quota_cache, "refresh_snapshot", return_value=fixed):
+        with (
+            mock.patch.object(quota_cache, "refresh_snapshot", return_value=fixed),
+            mock.patch.object(usage_cache, "refresh_snapshot"),
+        ):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 code = cli.main(["quota"])
@@ -280,7 +286,10 @@ class CliQuotaTests(unittest.TestCase):
         import io
         import contextlib
 
-        with mock.patch.object(quota_cache, "refresh_snapshot", return_value={}):
+        with (
+            mock.patch.object(quota_cache, "refresh_snapshot", return_value={}),
+            mock.patch.object(usage_cache, "refresh_snapshot"),
+        ):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 code = cli.main(["quota"])

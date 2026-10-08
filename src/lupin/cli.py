@@ -6,9 +6,8 @@ which model IDs each subscription can call today and what they cost
 (issue #16; see `model_fetch.py`). `fetch-benchmarks` fetches (or reads the
 fleet-shared cache of) a daily benchmark/quality score per model, via a
 restricted dispatched agent, not a local file (issue #17's reopen; see
-`benchmark_fetch.py`). `quota` prints quota per provider -- real data read
-locally on a machine with credentials, published to a fleet-shared cache
-that any other machine then reads (issue #38; see `quota_cache.py`).
+`benchmark_fetch.py`). `quota` publishes provider quota and this machine's
+`7-day usage totals to shared Redis for the dashboard.
 `acquire`/`hold`/`release`/`status` are the
 slot-lease commands (issue #205 for the `local` backend, #210 for
 `redis`). `ledger` appends and reads shared repository events in Redis
@@ -102,6 +101,7 @@ from . import place as place_mod
 from . import quest as quest_mod
 from . import quota
 from . import quota_cache
+from . import usage_cache
 from . import reconcile as reconcile_mod
 from . import review_dispatch
 from . import roadmap
@@ -749,13 +749,10 @@ def _ago(fetched_at: str | None) -> str:
 
 
 def _cmd_quota(args: argparse.Namespace) -> int:
-    """`lupin quota`: publishes this machine's real quota readings (if it
-    has credentials for any provider) to the fleet-shared cache, then
-    prints the merged view -- same data `/usage` shows, for a terminal.
-    See `quota_cache.py` for why "canonical fetcher" is decided per
-    provider by who actually has real data, not a fixed machine name.
-    """
-    merged = quota_cache.refresh_snapshot(**_fleet_connection(args))
+    """Publish quota and this machine's 7-day totals, then print shared quota."""
+    connection = _fleet_connection(args)
+    merged = quota_cache.refresh_snapshot(**connection)
+    usage_cache.refresh_snapshot(**connection)
     if args.json:
         print(json.dumps(merged))
         return 0
