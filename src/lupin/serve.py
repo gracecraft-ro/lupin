@@ -15,11 +15,13 @@ import html
 import ipaddress
 import json
 import os
+import concurrent.futures
 import re
 import shlex
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -229,6 +231,108 @@ def local_repo_inventory() -> list[dict]:
         }
         for repo in code_repos()
     ]
+
+
+# The Roadmap page is a fleet view: one model per repo, and each model can
+# wait on Redis, the ledger, or `gh`. Build them side by side so the page
+# takes as long as the slowest repo, not the sum of all of them.
+_ROADMAP_WORKERS = 8
+
+
+def _parallel(repos: list[str], build):
+    """Run `build(repo)` for every repo, side by side."""
+    if len(repos) < 2:
+        return [build(repo) for repo in repos]
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(len(repos), _ROADMAP_WORKERS)
+    ) as pool:
+        return list(pool.map(build, repos))
+
+
+def _roadmap_models(repos: list[str], connection: dict) -> dict:
+    """One combined model per repo, built in parallel."""
+
+    def build(repo: str):
+        return roadmap.cached_combined_model(
+            repo, os.path.join(CODE_DIR, repo), connection=connection
+        )
+
+    return dict(zip(repos, _parallel(repos, build)))
+
+
+# Rendered board/list HTML. The key holds the repos shown and the whole
+# query, because every filter changes the output. The lifetime stays short
+# so ledger events and GitHub data remain near-live, while a reload inside
+# the window costs nothing -- including no GitHub call.
+_FRAGMENT_TTL = float(os.environ.get("LUPIN_ROADMAP_FRAGMENT_TTL", "30"))
+_FRAGMENT_MAX = 64
+_FRAGMENT_CACHE: dict[tuple, tuple[float, bytes]] = {}
+_FRAGMENT_LOCK = threading.Lock()
+
+
+def _fragment_key(repos: list[str], query: dict) -> tuple:
+    return (tuple(repos), tuple(sorted(query.items())))
+
+
+def _cached_fragment(key: tuple, build) -> bytes:
+    now = time.monotonic()
+    with _FRAGMENT_LOCK:
+        cached = _FRAGMENT_CACHE.get(key)
+        if cached and now - cached[0] < _FRAGMENT_TTL:
+            return cached[1]
+    body = build()
+    with _FRAGMENT_LOCK:
+        _FRAGMENT_CACHE[key] = (time.monotonic(), body)
+        if len(_FRAGMENT_CACHE) > _FRAGMENT_MAX:
+            # The key holds the query, so a crawl of filter URLs would grow
+            # this without a bound. Drop the oldest entry.
+            oldest = min(_FRAGMENT_CACHE, key=lambda item: _FRAGMENT_CACHE[item][0])
+            del _FRAGMENT_CACHE[oldest]
+    return body
+
+
+def roadmap_fragment(query: dict, connection: dict, quest_state) -> tuple[bytes, int]:
+    """Render the board or list view as a bare HTML fragment (no page)."""
+    repos = roadmap.repository_names(code_repos())
+    selected = query.get("repo", "").strip()
+    if selected and selected not in repos:
+        return render_error("unknown repository"), 404
+
+    def build() -> bytes:
+        models = _roadmap_models(repos, connection)
+        issue_count = sum(
+            len(model.get("nodes", []))
+            for repo, model in models.items()
+            if not selected or repo == selected
+        )
+        if query.get("view") == "list" or (
+            query.get("view") != "board"
+            and issue_count > roadmap.BOARD_MAX_ISSUES
+        ):
+            body, _css = roadmap.list_fragment(repos, models, query, quest_state)
+        else:
+            body, _css = roadmap.board_fragment(repos, models, query, quest_state)
+        return body.encode("utf-8")
+
+    return _cached_fragment(_fragment_key(repos, query), build), 200
+
+
+def _roadmap_loader_script() -> str:
+    """Swap the placeholder from `/roadmap/board` after first paint."""
+    return """
+(function(){
+  var box=document.getElementById('roadmap-fragment');
+  if(!box)return;
+  fetch(box.dataset.src,{credentials:'same-origin'}).then(function(response){
+    if(!response.ok)throw new Error('status '+response.status);
+    return response.text();
+  }).then(function(html){
+    var holder=document.createElement('template');
+    holder.innerHTML=html;
+    box.replaceWith(holder.content);
+  }).catch(function(){location.href=box.dataset.full;});
+})();
+"""
 
 
 
@@ -2708,6 +2812,60 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("%s %s\n" % (time.strftime("%H:%M:%S"), fmt % args))
 
+    def render_roadmap_page(self, query, repos, selected, state, roadmap_page) -> bytes:
+        """Render a whole Roadmap page: closed, detail, or `full=1`."""
+        if query.get("view") == "list" and state == "open":
+            models = dict(
+                zip(
+                    repos,
+                    _parallel(
+                        repos,
+                        lambda repo: roadmap.cached_model(
+                            repo,
+                            os.path.join(CODE_DIR, repo),
+                            connection=self.fleet_connection,
+                        ),
+                    ),
+                )
+            )
+            quest_state = self.quest_state(query.get("quest", "").strip()) if selected else None
+            return roadmap.render_list_page(repos, models, roadmap_page, query, quest_state)
+        if state == "closed":
+            names = [selected] if selected else repos
+            issues_by_repo = dict(
+                zip(
+                    names,
+                    _parallel(
+                        names,
+                        lambda name: roadmap.cached_github(
+                            name,
+                            os.path.join(CODE_DIR, name),
+                            "closed",
+                            connection=self.fleet_connection,
+                        ),
+                    ),
+                )
+            )
+            return roadmap.render_completed_page(
+                selected, repos, issues_by_repo, roadmap_page
+            )
+        if query.get("view") == "detail" and selected:
+            model = roadmap.cached_model(
+                selected, os.path.join(CODE_DIR, selected), connection=self.fleet_connection
+            )
+            quest_state = self.quest_state(query.get("quest", "").strip())
+            return roadmap.render_page(selected, repos, model, roadmap_page, quest_state)
+        models = _roadmap_models(repos, self.fleet_connection)
+        quest_state = self.quest_state(query.get("quest", "").strip()) if selected else None
+        issue_count = sum(
+            len(model.get("nodes", []))
+            for repo, model in models.items()
+            if not selected or repo == selected
+        )
+        if query.get("view") != "board" and issue_count > roadmap.BOARD_MAX_ISSUES:
+            return roadmap.render_list_page(repos, models, roadmap_page, query, quest_state)
+        return roadmap.render_combined_page(repos, models, roadmap_page, query, quest_state)
+
     def do_GET(self):  # noqa: N802
         if not self.host_ok():
             self.reply(render_error("bad Host header"), 421)
@@ -2769,59 +2927,39 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(render_error("unknown repository"), 404)
                 return
             state = "closed" if query.get("state") == "closed" else "open"
-            if query.get("view") == "list" and state == "open":
-                models = {
-                    repo: roadmap.cached_model(
-                        repo, os.path.join(CODE_DIR, repo), connection=self.fleet_connection
-                    )
-                    for repo in repos
-                }
-                quest_state = self.quest_state(query.get("quest", "").strip()) if selected else None
-                body = roadmap.render_list_page(
-                    repos, models, roadmap_page, query, quest_state
+            if query.get("full") == "1" or state == "closed" or query.get("view") == "detail":
+                self.reply(
+                    self.render_roadmap_page(query, repos, selected, state, roadmap_page)
                 )
-            elif state == "closed":
-                issues_by_repo = {
-                    name: roadmap.cached_github(
-                        name, os.path.join(CODE_DIR, name), "closed",
-                        connection=self.fleet_connection,
-                    )
-                    for name in ([selected] if selected else repos)
-                }
-                body = roadmap.render_completed_page(
-                    selected, repos, issues_by_repo, roadmap_page
+                return
+            # Board and list fill in after first paint, so the shell paints
+            # at once. `full=1` renders the same page without the extra
+            # request, for clients without JavaScript.
+            suffix = f"?{url.query}" if url.query else ""
+            full_query = f"{url.query}&full=1" if url.query else "full=1"
+            shell = (
+                "<div id='roadmap-fragment' "
+                f"data-src='/roadmap/board{suffix}' data-full='/roadmap?{full_query}'>"
+                "<p class='dim'>Loading the roadmap&hellip;</p></div>"
+                "<noscript><p class='dim'>The Roadmap fills in with JavaScript. "
+                f"<a href='/roadmap?{full_query}'>Open it whole</a> instead.</p></noscript>"
+            )
+            self.reply(
+                roadmap_page(
+                    "Roadmap",
+                    shell,
+                    roadmap.BOARD_CSS + roadmap.LIST_CSS,
+                    _roadmap_loader_script(),
                 )
-            elif query.get("view") == "detail" and selected:
-                model = roadmap.cached_model(
-                    selected, os.path.join(CODE_DIR, selected), connection=self.fleet_connection
-                )
-                quest_state = self.quest_state(query.get("quest", "").strip())
-                body = roadmap.render_page(selected, repos, model, roadmap_page, quest_state)
-            else:
-                models = {
-                    repo: roadmap.cached_combined_model(
-                        repo, os.path.join(CODE_DIR, repo), connection=self.fleet_connection
-                    )
-                    for repo in repos
-                }
-                quest_state = self.quest_state(query.get("quest", "").strip()) if selected else None
-                issue_count = sum(
-                    len(model.get("nodes", []))
-                    for repo, model in models.items()
-                    if not selected or repo == selected
-                )
-                if (
-                    query.get("view") != "board"
-                    and issue_count > roadmap.BOARD_MAX_ISSUES
-                ):
-                    body = roadmap.render_list_page(
-                        repos, models, roadmap_page, query, quest_state
-                    )
-                else:
-                    body = roadmap.render_combined_page(
-                        repos, models, roadmap_page, query, quest_state
-                    )
-            self.reply(body)
+            )
+        elif url.path == "/roadmap/board":
+            quest_state = (
+                self.quest_state(query.get("quest", "").strip())
+                if query.get("repo", "").strip()
+                else None
+            )
+            fragment, status = roadmap_fragment(query, self.fleet_connection, quest_state)
+            self.reply(fragment, status)
         elif url.path == "/usage":
             self.reply(render_usage(connection=self.fleet_connection))
         elif url.path == "/model-tiers":

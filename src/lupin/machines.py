@@ -171,6 +171,11 @@ def _write_record(
     """Keep the last `providers`, `loops`, and `repos` values when a writer does not refresh them.
 
     `quota` is recalculated on every write.
+    `usage_detail` carries the full per-window quota rows and 7-day token
+    totals -- `quota` only keeps one summarized row per provider, which is
+    enough for `place`'s scoring but not for the `/usage` page's richer
+    tables. Reported here, by whichever host actually has the provider
+    logins, so a reader (pihome, which has none) never needs its own.
     `actions` is read live from `agent.py`'s own `ACTIONS` table (imported
     here, not at module load, to avoid a top-level import cycle -- `agent.py`
     imports this module to check `draining` state). This way the list can
@@ -186,6 +191,10 @@ def _write_record(
         "slots": _slot_summary(connection),
         "providers": existing.get("providers", []) if existing else [],
         "quota": quota.snapshot(),
+        "usage_detail": {
+            "quota_rows": quota.quota_usage(),
+            "token_rows": quota.claude_usage() + quota.omp_usage(),
+        },
         "loops": loops if loops is not None else (existing.get("loops", []) if existing else []),
         "repos": repos if repos is not None else (existing.get("repos", []) if existing else []),
         "session_backend": SESSION_BACKEND,
@@ -298,7 +307,8 @@ def undrain(connection: dict) -> dict:
 def machines(connection: dict) -> list[dict]:
     """Every registered machine, each as:
     `{"name", "state", "version", "heartbeat", "version_mismatch", "slots",
-    "providers", "quota", "loops", "repos", "session_backend", "actions"}`.
+    "providers", "quota", "usage_detail", "loops", "session_backend",
+    "actions"}`.
 
     `state` is the record's own `online`/`draining`, overridden to
     `offline` once `OFFLINE_AFTER` seconds have passed since `heartbeat`
@@ -345,6 +355,7 @@ def machines(connection: dict) -> list[dict]:
                     "slots": record.get("slots", {}),
                     "providers": record.get("providers", []),
                     "quota": record.get("quota", {}),
+                    "usage_detail": record.get("usage_detail", {}),
                     "loops": record.get("loops", []),
                     "repos": record.get("repos", []),
                     "session_backend": record.get("session_backend"),
