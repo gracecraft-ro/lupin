@@ -7,7 +7,7 @@ This is the data model `lupin` uses once the `redis` backend exists
 
 | Key | Type | Holds | Replaces |
 | --- | --- | --- | --- |
-| `slot:<name>` | sorted set (member = holder, score = expiry in ms) | fleet slots: `bmo` (max 1 holder), and `repo:<repo>` per loopable repo (a declared loop-concurrency cap, not yet enforced by loopctl — issue #23). | `omp.lock` |
+| `slot:<name>` | sorted set (member = holder, score = expiry in ms) | `bmo`, the declared `repo:<repo>` UI cap, and enforced `loop-<repo>` fleet locks (one active worker per repo). | `omp.lock` |
 | `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since), with a TTL | one claim per GitHub issue | nothing today |
 | `ledger:<owner>/<repo>` | stream (`XADD`) | `ts host issue branch status body` | `.loop/loop-state.json`, once more than one host writes it |
 | `machine:<name>` | string (JSON), with a TTL | one fleet machine's status — see Fleet keys below | nothing today |
@@ -64,21 +64,39 @@ online/offline.
   "quota": {
     "claude": {"pct_left": 42, "resets_at": "2026-10-05T18:00:00Z"}
   },
-  "actions": ["loop.peek", "loop.run", "loop.stop", "schedule.pause", "schedule.resume", "schedule.set", "schedule.show"]
+  "loops": [{
+    "repo": "lupin",
+    "platform": "claude",
+    "state": "working",
+    "since": "2026-10-05T11:00:00Z",
+    "backend": "herdr",
+    "session": "lupin-lupin-1234567890",
+    "workspace_id": "workspace-1",
+    "pane_id": "pane-1"
+  }],
+  "session_backend": "herdr",
+  "repos": [{"repo": "field-trip", "enabled": true, "loopable": true}],
+  "actions": ["loop.peek", "loop.run", "loop.run-all", "loop.state", "loop.stop", "schedule.pause", "schedule.resume", "schedule.set", "schedule.show"]
 }
 ```
 
-`state` is `"online"` or `"draining"` (`lupin drain`/`undrain` set it). A
-draining machine's `agent.py` still accepts actions in its own
-`DRAIN_ALLOWED` set (`loop.stop`, `loop.peek`, `schedule.show`,
-`schedule.pause`) but rejects the rest -- it can wind work down or read
-state, not start anything new. `loop.run` starts a loop outright;
-`schedule.set`/`schedule.resume` arm a timer to start one later, which
-still counts as new work, just deferred.
+Each `loops` entry reports Herdr's agent state and workspace IDs. `since`
+is an ISO 8601 UTC time. The heartbeat does not infer state from pane text.
+
+`state` is `"online"` or `"draining"` (`lupin drain`/`undrain` set it).
+A draining machine accepts only its `DRAIN_ALLOWED` actions: `loop.stop`,
+`loop.peek`, `loop.state`, `schedule.show`, and `schedule.pause`. It can
+stop work or read state, but it cannot start work. `loop.run` starts a loop;
+`schedule.set` and `schedule.resume` can start one later.
 
 `actions` is this machine's `agent.py` `ACTIONS` table (issue #27/#28),
 written by `_write_record` so it can never list an action the agent here
 doesn't actually run.
+
+`repos` lists directories under `/code` on this machine. Each item has a
+repo name, whether it is enabled, and whether it has a loop doc. The
+dashboard combines these lists. Each machine must run the Lupin version
+that sends this field before its repos appear.
 
 ### `focus:<quest>`
 
@@ -268,10 +286,10 @@ publishing the same provider at once, same narrow job the `gh-fetch`/
 
 These back the cross-machine command queue (`lupin cmd send|status|queue`,
 `lupin agent` — issue #28, implementing #27's design). One machine enqueues
-a signed command; the target machine's `lupin agent` process claims and
-runs it through a fixed action table: `loop.stop`, `loop.run`, `loop.peek`,
-`schedule.show`, `schedule.set`, `schedule.pause`, `schedule.resume` (issue
-#2 phase A), all wrapping `loopctl`.
+a signed command; the target machine's `lupin agent` runs it through a
+fixed action table: `loop.stop`, `loop.run`, `loop.run-all`, `loop.peek`,
+`loop.state`, `schedule.show`, `schedule.set`, `schedule.pause`, and
+`schedule.resume`.
 
 ### `cmd:<id>`
 

@@ -171,11 +171,10 @@ def _build_argv(prompt: str, schema_text: str) -> list[str]:
       WebFetch too, unless `--tools` names them. It also ignores this
       machine's own settings files (hooks, custom permissions), so a
       human's interactive setup cannot leak into this unattended call.
-    - `--tools WebSearch,WebFetch` is the only tool set given. A real test
-      run confirmed this means only those two tools, not those two plus
-      the normal default set — it never touched Bash, Edit, or Write.
-    - `--permission-prompts none` denies anything that would still ask for
-      approval, instead of hanging with no one there to answer.
+    - `--tools WebSearch,WebFetch` exposes only these built-in tools. It
+      does not grant permission to use them.
+    - `--allowedTools WebSearch,WebFetch` grants those two tools without a
+      prompt. All other permission prompts stay denied.
     - `--strict-mcp-config`, with no `--mcp-config` given, loads no MCP
       server at all. One less thing this call could reach.
     - `--json-schema` needs the schema's JSON text itself, not a file
@@ -189,6 +188,7 @@ def _build_argv(prompt: str, schema_text: str) -> list[str]:
         "--output-format", "json",
         "--restricted",
         "--tools", "WebSearch,WebFetch",
+        "--allowedTools", "WebSearch,WebFetch",
         "--permission-prompts", "none",
         "--strict-mcp-config",
         "--json-schema", schema_text,

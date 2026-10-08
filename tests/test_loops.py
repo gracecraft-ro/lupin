@@ -68,18 +68,18 @@ def test_dispatch_local_runs_local_argv_and_never_touches_the_queue():
         return 0, "done"
 
     result = loops.dispatch_loop_action(
-        machine="h", local_host="h", local_argv=["loopctl", "stop", "widgets"],
+        machine="h", local_host="h", local_argv=["lupin", "loop", "local-action", "stop", "widgets"],
         queue_action="loop.stop", queue_params={"repo": "widgets"},
         connection={}, run_local=fake_run_local,
     )
-    assert calls == [["loopctl", "stop", "widgets"]]
+    assert calls == [["lupin", "loop", "local-action", "stop", "widgets"]]
     assert result == {"mode": "local", "returncode": 0, "output": "done"}
 
 
 def test_dispatch_local_uses_default_runner_when_none_given(monkeypatch):
     monkeypatch.setattr(loops, "run_subprocess", lambda argv: (1, "boom"))
     result = loops.dispatch_loop_action(
-        machine="h", local_host="h", local_argv=["loopctl", "stop", "widgets"],
+        machine="h", local_host="h", local_argv=["lupin", "loop", "local-action", "stop", "widgets"],
         queue_action="loop.stop", queue_params={"repo": "widgets"}, connection={},
     )
     assert result == {"mode": "local", "returncode": 1, "output": "boom"}
@@ -93,7 +93,7 @@ def test_dispatch_local_uses_default_runner_when_none_given(monkeypatch):
 def test_dispatch_remote_enqueues_the_expected_command_shape(redis_port, flush_redis):
     connection = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     result = loops.dispatch_loop_action(
-        machine="jesus", local_host="pihome", local_argv=["loopctl", "stop", "widgets"],
+        machine="jesus", local_host="pihome", local_argv=["lupin", "loop", "local-action", "stop", "widgets"],
         queue_action="loop.stop", queue_params={"repo": "widgets"},
         connection=connection, signing_key="secret", actor="lupin-dashboard",
     )
@@ -109,7 +109,7 @@ def test_dispatch_remote_enqueues_the_expected_command_shape(redis_port, flush_r
 def test_dispatch_remote_without_signing_key_raises():
     with pytest.raises(loops.MissingSigningKey):
         loops.dispatch_loop_action(
-            machine="jesus", local_host="pihome", local_argv=["loopctl", "stop", "widgets"],
+            machine="jesus", local_host="pihome", local_argv=["lupin", "loop", "local-action", "stop", "widgets"],
             queue_action="loop.stop", queue_params={"repo": "widgets"}, connection={},
         )
 
@@ -118,7 +118,7 @@ def test_dispatch_remote_unreachable_coordinator_raises(closed_port):
     connection = {"redis_host": "127.0.0.1", "redis_port": closed_port}
     with pytest.raises(machines.CoordinatorUnreachable):
         loops.dispatch_loop_action(
-            machine="jesus", local_host="pihome", local_argv=["loopctl", "stop", "widgets"],
+            machine="jesus", local_host="pihome", local_argv=["lupin", "loop", "local-action", "stop", "widgets"],
             queue_action="loop.stop", queue_params={"repo": "widgets"},
             connection=connection, signing_key="secret",
         )
@@ -126,7 +126,7 @@ def test_dispatch_remote_unreachable_coordinator_raises(closed_port):
 
 def test_dispatch_remote_waits_and_reports_ok(redis_port, flush_redis, monkeypatch):
     """`wait_s` big enough for one 0.5s poll tick -- the first status read
-    is still "running", the second (after `loopctl` "finishes") is "ok".
+    is still "running", then the signed remote command finishes and reports "ok".
     """
     connection = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     call_count = {"n": 0}
@@ -139,7 +139,7 @@ def test_dispatch_remote_waits_and_reports_ok(redis_port, flush_redis, monkeypat
 
     monkeypatch.setattr(loops.commands, "get_status", fake_get_status)
     result = loops.dispatch_loop_action(
-        machine="jesus", local_host="pihome", local_argv=["loopctl", "stop", "widgets"],
+        machine="jesus", local_host="pihome", local_argv=["lupin", "loop", "local-action", "stop", "widgets"],
         queue_action="loop.stop", queue_params={"repo": "widgets"},
         connection=connection, signing_key="secret", wait_s=5.0,
     )
@@ -156,7 +156,7 @@ def test_dispatch_remote_wait_times_out_with_unknown_result(redis_port, flush_re
     monkeypatch.setattr(loops.commands, "get_status", lambda cmd_id, **kw: {"id": cmd_id, "state": "queued"})
 
     result = loops.dispatch_loop_action(
-        machine="jesus", local_host="pihome", local_argv=["loopctl", "stop", "widgets"],
+        machine="jesus", local_host="pihome", local_argv=["lupin", "loop", "local-action", "stop", "widgets"],
         queue_action="loop.stop", queue_params={"repo": "widgets"},
         connection=connection, signing_key="secret", wait_s=0.05,
     )

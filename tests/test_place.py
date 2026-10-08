@@ -198,7 +198,6 @@ def test_place_has_no_pick_when_every_matching_machine_is_draining(redis_port, f
     result = place.place("retry backoff", _kw(redis_port))
 
     assert result["pick"] is None
-    assert result["run_command"] is None
     assert result["candidates"][0]["result"] == "draining"
 
 
@@ -292,7 +291,6 @@ def test_place_reports_a_wait_without_filtering_machines(redis_port, flush_redis
     assert result["model"] == "opus"
     assert result["provider"] == "claude"
     assert result["pick"] is None
-    assert result["run_command"] is None
     assert result["downgraded_from"] is None
     assert result["wait_seconds"] == 295.0
     assert result["candidates"] == []
@@ -324,9 +322,7 @@ def test_place_reports_routes_downgrade_and_ranks_the_new_provider(redis_port, f
 
 
 def test_place_normal_pick_has_no_wait_or_downgrade_fields(redis_port, flush_redis):
-    """Non-exhausted path: unchanged shape and values, plus the new fields
-    present and empty -- no regression from #32.
-    """
+    """A normal placement picks an available machine without a wait or downgrade."""
     _write_machine(redis_port, "mac-studio", quota=_CLAUDE_QUOTA)
 
     result = place.place("retry backoff", _kw(redis_port))
@@ -345,7 +341,7 @@ def test_place_raises_coordinator_unreachable(closed_port):
 # --- cli wiring ---
 
 
-def test_cli_place_prints_run_command(redis_port, flush_redis, tmp_path, capsys, clean_fleet_env):
+def test_cli_place_prints_selected_machine(redis_port, flush_redis, tmp_path, capsys, clean_fleet_env):
     _write_machine(redis_port, "mac-studio", quota=_CLAUDE_QUOTA)
     common = [
         "--redis-host", "127.0.0.1", "--redis-port", str(redis_port),
@@ -356,7 +352,7 @@ def test_cli_place_prints_run_command(redis_port, flush_redis, tmp_path, capsys,
     captured = capsys.readouterr()
 
     assert code == 0
-    assert captured.out.strip() == "lupin run --machine mac-studio retry backoff"
+    assert captured.out.strip() == "mac-studio"
 
 
 def test_cli_place_no_pick_exits_2(redis_port, flush_redis, tmp_path, capsys, clean_fleet_env):

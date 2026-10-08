@@ -18,46 +18,20 @@ ever reaches `subprocess.run`:
 6. Per-action parameter validation (e.g. `repo` against a strict regex,
    defense in depth independent of whatever a future dashboard checks).
 
-`ACTIONS` wraps `loopctl` rather than reimplementing it -- the design's
-decision: `loopctl` already has the hard-won edge cases (scrollback save,
-keepalive session, exact tmux target match). Every handler returns a list
-argv, never a shell string -- execution is always
-`subprocess.run(argv, shell=False)`.
+`ACTIONS` calls Lupin commands rather than reimplementing loop behavior.
+Every handler returns a list of argv, never a shell string. Execution is
+always `subprocess.run(argv, shell=False)`.
 
-There are three kinds of action:
-- Short actions that change something (`loop.stop`, `schedule.set`,
-  `schedule.pause`, `schedule.resume`). These run as:
-  `sudo -n systemd-run --unit=lupin-cmd-<id8> --collect --wait --pipe loopctl ...`
-  They need `sudo -n` because every other `systemd-run` call in
-  ghostbook.nix needs it too. This process's own user cannot run
-  `systemd-run` on its own.
-  They need `--wait --pipe` so the reported exit code is the real exit
-  code of the action, not just "the unit started". An earlier version of
-  this code skipped `--wait`. It then reported success as soon as the
-  unit *launched*, even if the action inside later failed.
-- The one long-running action that changes something (`loop.run`). It
-  uses the same `sudo -n systemd-run ... loopctl run ...` command, but
-  without `--wait`/`--pipe`. `loopctl run` hands off straight to
-  `delegation-launch`, a process meant to keep running long after this
-  command reports its result. This module must not wait for it to
-  finish. It still runs inside its own systemd unit, so restarting the
-  `lupin-agent` service (`KillMode=process`, issue #29) cannot kill it.
-- Read-only actions (`loop.peek`, `schedule.show`). These run `loopctl`
-  directly, with no `systemd-run` wrapper. There is nothing to isolate,
-  and `subprocess.run`'s own timeout already covers the wait.
+- Loop actions run Lupin directly as this machine's service user. `run`
+  starts a separate systemd worker, so the queue action can return at once.
+  Stop and schedule commands manage their own systemd units.
+- Read-only actions (`loop.peek`, `loop.state`, `schedule.show`) also run
+  Lupin directly.
 
-`schedule.set`'s `cal` mode is checked before it reaches `loopctl`.
-`loopctl schedule cal "<expr>"` (in ghostbook.nix) writes `<expr>`
-straight into a systemd timer file, using a plain `printf` with no
-escaping. If `expr` had a newline in it, it could add extra lines to
-that file that nobody asked for. `validate_cal_expr` rejects a newline,
-another control character, or a string that is too long. This check
-uses only string operations, no subprocess call, so it still runs where
-`systemd-analyze` is not installed. `_check_cal_expr_with_systemd_analyze`
-adds a real syntax check on top, using `systemd-analyze calendar`, when
-that program is available.
+`schedule.set` values are checked before Lupin writes a timer drop-in.
+Lupin checks them again before writing. `systemd-analyze` checks calendar
+syntax when it is available.
 """
-
 from __future__ import annotations
 
 import json
@@ -77,11 +51,8 @@ DEFAULT_POLL_INTERVAL = 2.0
 EXEC_TIMEOUT_S = 120.0
 OUTPUT_CAP = 8192  # 8 KiB, combined stdout+stderr -- design's "last 8 KiB combined"
 
-# Stricter than loopctl's own `check_repo_name` (which still also runs) --
-# the design's explicit defense-in-depth requirement, checked here even
-# though nothing upstream validates yet either.
+# Defense in depth: queue commands must pass this strict repo-name check.
 _REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
-
 # These limits are big enough for a real value. They are small enough to
 # stop someone from hiding something else inside a long string.
 _CAL_EXPR_MAX_LEN = 256
@@ -115,7 +86,7 @@ def _validate_peek_lines(value) -> int:
 
 def _reject_unsafe_text(label: str, value, max_len: int) -> str:
     """Check one string field before it is written into a config file or
-    passed as a `loopctl` argument. Several fields share this check. A
+    passed as a Lupin argument. Several fields share this check. A
     newline or other control character in any of them is the same kind
     of injection risk as the `cal` expression described in the module
     docstring."""
@@ -157,53 +128,63 @@ def _check_cal_expr_with_systemd_analyze(expr: str) -> None:
         raise RejectedCommand(f"not a valid calendar expression: {expr!r}")
 
 
-def _unit_name(cmd_id: str) -> str:
-    return f"lupin-cmd-{cmd_id[:8]}"
-
-
-def _sudo_systemd_run(cmd_id: str, *loopctl_args: str, wait: bool = True) -> list[str]:
-    """Build the argv for an action that changes something:
-    `sudo -n systemd-run ... loopctl <loopctl_args>`.
-
-    It uses `sudo -n` because every other `systemd-run` call in
-    ghostbook.nix needs it too -- this process's own user has no right
-    to run `systemd-run` on its own.
-
-    By default (`wait=True`) it adds `--wait --pipe`, so
-    `subprocess.run`'s returncode is the real exit code of the action,
-    not just "the unit started". `wait=False` is only for `loop.run` --
-    see the module docstring for why that one action must not block.
-    """
-    argv = ["sudo", "-n", "systemd-run", f"--unit={_unit_name(cmd_id)}", "--collect"]
-    if wait:
-        argv += ["--wait", "--pipe"]
-    argv += ["loopctl", *loopctl_args]
-    return argv
-
-
 def _handle_loop_stop(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
-    return _sudo_systemd_run(cmd_id, "stop", repo)
+    return ["lupin", "loop", "local-action", "stop", repo]
+
+
+def _validate_platform(value) -> str:
+    if not isinstance(value, str) or value not in {"claude", "omp"}:
+        raise RejectedCommand("platform must be claude or omp")
+    return value
+
+
+def _validate_note(value) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > 8000 or "\x00" in value:
+        raise RejectedCommand("note is invalid or too long")
+    return value
 
 
 def _handle_loop_run(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
-    # No --wait/--pipe: `loopctl run` hands off to a loop that keeps
-    # running long after this command reports its result (see module
-    # docstring).
-    return _sudo_systemd_run(cmd_id, "run", repo, wait=False)
+    argv = ["lupin", "run", repo]
+    platform = params.get("platform")
+    if platform is not None:
+        argv.extend(["--platform", _validate_platform(platform)])
+    note = _validate_note(params.get("note"))
+    if note is not None:
+        argv.extend(["--note", note])
+    resume = params.get("resume", False)
+    if not isinstance(resume, bool):
+        raise RejectedCommand("resume must be a boolean")
+    if resume:
+        argv.append("--resume")
+    return argv
+
+
+def _handle_loop_run_all(params: dict, cmd_id: str) -> list[str]:
+    argv = ["lupin", "run", "--all"]
+    note = _validate_note(params.get("note"))
+    if note is not None:
+        argv.extend(["--note", note])
+    return argv
 
 
 def _handle_loop_peek(params: dict, cmd_id: str) -> list[str]:
-    # Read-only action -- run loopctl directly, no systemd-run wrapper
-    # (see the module docstring's three kinds of action).
     repo = _validate_repo(params.get("repo"))
     lines = _validate_peek_lines(params.get("lines"))
-    return ["loopctl", "peek", repo, str(lines)]
+    return ["lupin", "loop", "local-action", "peek", repo, str(lines)]
+
+
+def _handle_loop_state(params: dict, cmd_id: str) -> list[str]:
+    repo = _validate_repo(params.get("repo"))
+    return ["lupin", "loop", "local-action", "state", repo]
 
 
 def _handle_schedule_show(params: dict, cmd_id: str) -> list[str]:
-    return ["loopctl", "schedule"]
+    return ["lupin", "schedule"]
 
 
 def _handle_schedule_set(params: dict, cmd_id: str) -> list[str]:
@@ -211,20 +192,20 @@ def _handle_schedule_set(params: dict, cmd_id: str) -> list[str]:
     if mode == "cal":
         expr = validate_cal_expr(params.get("expr"))
         _check_cal_expr_with_systemd_analyze(expr)
-        return _sudo_systemd_run(cmd_id, "schedule", "cal", expr)
+        return ["lupin", "schedule", "cal", expr]
     if mode == "first":
         when = validate_schedule_token("when", params.get("when"))
         interval = validate_schedule_token("interval", params.get("interval"))
-        return _sudo_systemd_run(cmd_id, "schedule", "first", when, "every", interval)
+        return ["lupin", "schedule", "first", when, "every", interval]
     raise RejectedCommand(f"unknown schedule mode {mode!r}")
 
 
 def _handle_schedule_pause(params: dict, cmd_id: str) -> list[str]:
-    return _sudo_systemd_run(cmd_id, "pause")
+    return ["lupin", "pause"]
 
 
 def _handle_schedule_resume(params: dict, cmd_id: str) -> list[str]:
-    return _sudo_systemd_run(cmd_id, "resume")
+    return ["lupin", "resume"]
 
 
 # Fixed, explicit allowlist -- the only actions this process will ever run.
@@ -232,22 +213,17 @@ def _handle_schedule_resume(params: dict, cmd_id: str) -> list[str]:
 ACTIONS = {
     "loop.stop": _handle_loop_stop,
     "loop.run": _handle_loop_run,
+    "loop.run-all": _handle_loop_run_all,
     "loop.peek": _handle_loop_peek,
+    "loop.state": _handle_loop_state,
     "schedule.show": _handle_schedule_show,
     "schedule.set": _handle_schedule_set,
     "schedule.pause": _handle_schedule_pause,
     "schedule.resume": _handle_schedule_resume,
 }
 
-# Actions a draining machine still accepts. Issue #27's design: draining
-# blocks anything that starts new work. It does not block actions that
-# wind work down, or actions that only read state.
-# `loop.stop` and `schedule.pause` wind down -- they stop a loop, or stop
-# a timer from firing again. `loop.peek` and `schedule.show` only read
-# state. `loop.run` starts a loop, so it is blocked. `schedule.set` and
-# `schedule.resume` are blocked too -- both arm a timer to start a loop
-# later, which still counts as starting new work, just delayed.
-DRAIN_ALLOWED = {"loop.stop", "loop.peek", "schedule.show", "schedule.pause"}
+# Draining hosts accept actions that stop work or read its state.
+DRAIN_ALLOWED = {"loop.stop", "loop.peek", "loop.state", "schedule.show", "schedule.pause"}
 
 
 def _write_result(client, cmd_id: str, payload: dict, *, overwrite: bool = False) -> bool:

@@ -15,8 +15,8 @@
    registry, and quests (a set of issues worked together on one machine).
    Commands: `claim`, `renew-claim`, `release-claim`, `join`, `heartbeat`,
    `drain`, `undrain`, `machines`, `place`, `quest`, `reconcile`, `roadmap`.
-   Loop control from any machine: `stop`, `peek`, `attach`, `schedule`,
-   `pause`, `resume`.
+   Loop lifecycle: `run`, `once`, `enable`, `disable`, `loops`, `stop`,
+   `peek`, `attach`, `schedule`, `pause`, `resume`.
 
 One program, `lupin`, with subcommands. Run `lupin --help` for the full list.
 
@@ -28,13 +28,20 @@ lupin classify --issue-json FILE [--diff-stat FILE] [--json]
 lupin fetch-models [--snapshot-file FILE] [--no-write] [--json]
 lupin fetch-benchmarks [--force] [--json]
 lupin quota [--json]
-lupin review-route (--category C --size S | --issue-json FILE) [--mode M] [--json]
+lupin review-route (--category C --size S | --issue-json FILE) [--mode M]
 lupin review-route --prefetch N[,N...] [--repo OWNER/REPO]
 lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
 lupin hold (--lease ID | <slot> --holder H --wait S) [--ttl SECONDS] -- <command>
 lupin release --lease ID
 lupin status [--json]
 lupin serve [--bind 127.0.0.1] [--port 8788] [--roadmap REPO]
+lupin agent [--machine M] [--batch N] [--poll-interval S]
+lupin run <repo> [--machine M] [--platform claude|omp] [--note TEXT] [--resume]
+lupin run --all [--machine M] [--note TEXT]
+lupin once <when> [repo ...] [--platform claude|omp] [--note TEXT] [--resume]
+lupin enable <repo> [--platform claude|omp]
+lupin disable <repo>
+lupin loops [repo] [--machine M] [--json]
 lupin stop <repo> [--machine M] [--wait S] [--json]
 lupin peek <repo> [LINES] [--machine M] [--json]
 lupin attach <repo> [--machine M] [--print]
@@ -76,29 +83,47 @@ models.dev and is marked `live: false`. Prices
 come from models.dev, matched by model ID. A model with no match has
 `price: null`. Promo pricing has no live source, so `promo` stays `null`.
 
-`stop`/`peek`/`schedule`/`pause`/`resume`/`attach` (issue #2 phase A)
-control a loop from any fleet machine. Local target: run `loopctl`
-directly. Remote target: send a signed command over the Redis queue
-(needs `--signing-key` or `$LUPIN_CMD_SIGNING_KEY`) and wait up to `--wait`
-seconds (default 20) for a result. Two exit codes besides the usual ones:
-4 means sent but the result is still unknown after the wait (check later
-with `lupin cmd status <id>`); 5 means `stop`/`peek` couldn't tell which
-machine runs `<repo>` (0 or more than 1 match) -- pass `--machine`.
-`attach` never goes through the queue; it execs a terminal directly, and
-`--print` shows the command instead of running it.
+`run <repo>` starts a Lupin worker and a Herdr workspace. `run --all`
+starts every enabled repo. Add `--machine M` to use the signed fleet queue
+on another machine; `run --all --machine M` starts its enabled repos.
+`once now` starts the listed repos. If you omit repos, it starts every
+enabled repo. A future `once` run uses the same default. It fails if no repo
+is enabled. `schedule first` sets the first timer run. Use `+2h` for a
+relative time or a calendar expression such as `tomorrow 09:00`. The
+interval controls later runs.
+`enable` and `disable` edit the local repo list.
 
-A remote `attach` needs to know which host to `ssh` into. That mapping
-lives in a plain text file, `~/.config/lupin/ssh-targets` -- one machine
-per line, `<machine> <target>`, blank lines and `#` comments ignored:
+`loops` reads state from the Herdr API. It reports the agent state, backend,
+session, workspace and pane IDs. It does not infer state from pane text.
+Each repo has one Herdr session. Each run has one workspace. A completed
+workspace stays open for review and blocks another run until you stop it.
+A Herdr state of `needs_attention` means the workspace needs review. If
+Herdr cannot provide state, Lupin reports `unknown`. Both states block a
+new run until you resolve the state.
+
+`run`, `stop`, `peek`, `schedule`, `pause`, and `resume` can target any
+fleet machine. Local actions run through Lupin. Remote actions use the signed
+Redis queue and wait up to `--wait` seconds (default 20). The target must run
+`lupin agent` with Redis access and its own signing key. The sender also needs
+that key. Inject it only into the Lupin process with protected secret
+management. Do not pass it in command arguments or save it in global
+environment settings. Exit code 4 means the result is unknown after the
+wait; check it with `lupin cmd status <id>`. `stop`, `peek`, and `attach`
+need `--machine` if Lupin cannot find one machine for the repo.
+
+`attach` never uses the queue. It opens Herdr here or connects to the remote
+Herdr server over SSH. `--print` shows the command instead of running it.
+Remote attach needs a local SSH target in `~/.config/lupin/ssh-targets`, one
+`<machine> <target>` pair per line. Blank lines and `#` comments are ignored:
 
 ```
 jesus   ghosta@jesus.local
 mini    ghosta@mini.tailnet.ts.net
 ```
 
-This file is local, per-machine config (written by Nix in practice), not
-fleet state. No line for a machine: `attach` fails with an error instead
-of guessing a hostname.
+This file is local config, not fleet state. Herdr must be installed on both
+machines. SSH must allow key-based access. A missing target makes `attach`
+fail instead of guessing a hostname.
 
 `fetch-benchmarks` gets a quality score for each model. It does not call a
 benchmark API. Instead it runs a sandboxed Claude agent once a day. That
@@ -107,6 +132,9 @@ never a guess. The result goes into one shared Redis key, not a file on
 disk, so every machine sees the same score and only one machine does the
 work each day. Use `--force` to pull fresh data right now, skipping the
 daily cache (it still waits its turn if another machine is mid-pull).
+Plain output shows numeric score count and snapshot age. "Live" means the
+agent returned a valid snapshot. It does not mean every model has a score or
+that this command fetched the snapshot.
 
 `quota` shows how much of each provider's quota is left: percent left,
 which window (5 hours, 7 days, 30 days), and time to reset. Quota is one
@@ -131,6 +159,11 @@ directory; each active holder is one file inside it, holding a PID and an
 expiry time. The `redis` backend (`slots_redis.py`) covers leases that
 several machines must see. Its schema is in `docs/redis-schema.md`.
 
+Loop state is stored under `$LUPIN_LOOP_STATE_DIR` or
+`/var/lib/delegation-loop`. Lupin keeps repo metadata in `herdr-loops/`,
+run prompts in `notes/`, stop reports in `reports/`, and one-off schedules
+in `once/`. `locks/` serializes local start and stop actions. Herdr keeps
+its own session and workspace state.
 The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 
 ## Code layout
@@ -159,9 +192,10 @@ The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
   issue claimed by one host at a time.
 - `src/lupin/machines.py` — `join`/`heartbeat`/`drain`/`undrain`/`machines`:
   the fleet's machine registry.
-- `src/lupin/loops.py` — shared local-or-remote dispatch for
-  `stop`/`peek`/`schedule`/`pause`/`resume`, used by both `cli.py` and
-  `serve.py` so the two don't drift.
+- `src/lupin/loops.py` — signed local-or-remote dispatch for loop controls.
+  Attach uses Herdr directly over SSH.
+- `src/lupin/loop_runtime.py` — Herdr sessions, workspaces, state, reports,
+  schedules, and systemd worker lifecycle.
 - `src/lupin/quest.py` — `quest start`/`stop`/`focus`/`release`: a set of
   issues worked together on one machine.
 - `src/lupin/place.py` — `place`: picks which fleet machine should run a

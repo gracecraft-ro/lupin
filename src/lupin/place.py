@@ -65,13 +65,9 @@ fails (no repo, not authed, issue missing) this falls back to classifying
 on the bare number alone rather than erroring out -- a placement decision
 is still useful even with a generic category/size.
 
-Judgment call -- the printed "run" command: #2's own design notes say
-loop control (`run`/`once`/...) stays in `loopctl`, not `lupin` -- but this
-issue still asks `place` to print a `lupin run ...` line. There is no repo
-to put in it (see above), so the line names the picked machine and the
-task, not a repo: `lupin run --machine <name> <task>`. Whatever actually
-consumes this line decides how to turn "run this task on this machine"
-into its own invocation; this module does not execute anything.
+This module picks a machine; it does not start an agent or loop. The result
+contains the selected machine name in `pick`. A task is not a repository,
+so `lupin run` cannot start it.
 """
 
 from __future__ import annotations
@@ -334,7 +330,6 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
         skipped, candidates, pick = _filter_candidates(records, provider, quest_focus, now)
 
     quota = _quota_for_provider(records, provider)
-    run_command = f"lupin run --machine {pick['name']} {task}" if pick else None
 
     return {
         "task": task,
@@ -349,7 +344,6 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
         "quota": quota,
         "candidates": candidates,
         "pick": pick["name"] if pick else None,
-        "run_command": run_command,
         "skipped": skipped,
         "wait_seconds": wait_seconds,
         "downgraded_from": downgraded_from,

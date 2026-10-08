@@ -96,10 +96,10 @@ class RoadmapTests(unittest.TestCase):
             "title": "Visible issue",
             "body": "",
             "labels": [],
-            "url": "https://github.com/gracecraft/bodysmith/issues/4",
+            "url": "https://github.com/gracecraft-software/bodysmith/issues/4",
         }
         responses = [
-            ({"owner": {"login": "gracecraft"}, "name": "bodysmith"}, None),
+            ({"owner": {"login": "gracecraft-software"}, "name": "bodysmith"}, None),
             ([issue], None),
         ]
         with tempfile.TemporaryDirectory() as directory:

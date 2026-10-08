@@ -1,43 +1,12 @@
 #!/usr/bin/env python3
-"""lupin serve - a mostly read-only web dashboard for the loopctl delegation loops.
+"""Serve the Lupin dashboard.
 
-The server binds a loopback or tailnet address (100.64.0.0/10); it refuses
-to start on any other address. A tailnet bind relies on the headscale ACL
-and the host firewall as its boundary (same model as this project's Redis
-deployment, docs/redis-schema.md) -- the DNS-rebinding check below still
-only accepts the Host header matching what was actually bound. The POST
-routes are /quest/start, /quest/stop (both only write to Redis via
-quest.py), /machines/slot-max (changes one Redis slot's max holder count --
-a validated slot name and a positive integer, nothing else), /loops/close,
-/loops/start (issue #21: stop or (re)start one loop), /schedule/timer
-(issue #22: start or stop delegation-loop.timer -- always local, this
-process never controls another machine's timer), /schedule/run (issue #22:
-"Run now" -- dispatch one or more `loop.run`s to a chosen machine or spread
-of machines), and /repos/add, /repos/generate-docs, /repos/remove,
-/repos/doc/save, /repos/slot-max, /repos/schedule (issue #23: the Repos
-page -- add or remove a repo from the local schedule file, view or edit
-its delegation doc, raise or lower its loop concurrency cap, and run
-`loopctl once` for a one-off, local-only schedule). /loops/start,
-/loops/close, /schedule/run, and /repos/schedule run `loopctl
-stop|run|once <repo>` as a fixed argv list -- repo name checked against a
-strict pattern first, never a shell string -- but only when the loop is on
-this machine. For a loop on another fleet machine /loops/start,
-/loops/close, and /schedule/run enqueue a signed command instead
-(commands.py, issue #28); /repos/schedule has no remote form (agent.py's
-ACTIONS table has no `loop.once`) and always runs locally. This process
-never touches another machine's loopctl directly. Read probes use fixed
-argv lists too, run without a shell. GitHub attachment images use an
-authenticated, fixed-host proxy; it sends the GitHub token only to
-github.com and strips it before a validated storage redirect. None of
-these write routes carry auth of their own -- a reverse proxy in front of
-this server is expected to gate write access before a request reaches here.
+The dashboard reads local loop state from Herdr. It reads remote loop state
+from machine heartbeats. It sends remote loop actions through signed commands.
+It runs local loop actions through Lupin.
 
-Every other page reads loop state but does not change it. The installed
-CLI can be older than this dashboard; direct reads of tmux and systemd
-avoid version skew.
-
-Python standard library only. GitHub image bytes are fetched only when the
-browser requests a validated attachment ID.
+The server binds to loopback or a tailnet address. A reverse proxy must
+control access to write routes.
 """
 
 from __future__ import annotations
@@ -59,7 +28,7 @@ from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
-from . import benchmark_fetch, claims, commands, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
+from . import benchmark_fetch, claims, commands, loop_runtime, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
 from .slots import CoordinatorUnreachable
 from .quota import (
     QuotaDuration,
@@ -147,11 +116,10 @@ def github_attachment(attachment_id: str) -> tuple[bytes, str] | None:
         return None
 
 
-STATE_DIR = "/var/lib/delegation-loop"
-REPOS_FILE = os.path.join(STATE_DIR, "repos")
-CODE_DIR = "/code"
+STATE_DIR = str(loop_runtime.STATE_DIR)
+REPOS_FILE = str(loop_runtime.REPOS_FILE)
+CODE_DIR = str(loop_runtime.CODE_DIR)
 LOOP_DOC = "docs/delegation-loop.md"
-SESSION_PREFIX = "loop-"
 
 # Tailscale's CGNAT range (100.64.0.0/10). A bind address in this range is a
 # tailnet interface, gated by the headscale ACL and the host firewall -- the
@@ -177,7 +145,7 @@ MODEL_TIER_ORDER = ("tier0", "tier1", "tier2")
 
 
 def run(argv: list[str], timeout: float = 10.0) -> tuple[int, str]:
-    """Run a fixed read-only probe. Never a shell, never browser input."""
+    """Run a fixed argv command without a shell."""
     return loops.run_subprocess(argv, timeout=timeout)
 
 
@@ -187,13 +155,7 @@ def run(argv: list[str], timeout: float = 10.0) -> tuple[int, str]:
 
 
 def enabled_repos() -> list[str]:
-    """Repo names enabled for the schedule -- the first whitespace-
-    separated field of each line in `REPOS_FILE`. `loopctl enable` writes
-    `"<repo> <platform>"` (two fields); the dashboard's own `/repos/add`
-    writes a bare name (one field). Reuses `_repo_platforms()`'s parsing
-    of that same file so the two-field format is only handled in one
-    place.
-    """
+    """Repo names enabled for the schedule, from `REPOS_FILE`."""
     return list(_repo_platforms().keys())
 
 
@@ -208,16 +170,7 @@ def write_enabled_repos(names: list[str]) -> None:
         fh.writelines(f"{name}\n" for name in names)
 
 
-# A per-repo loop concurrency cap (the Repos page's "Loops - max" stepper,
-# issue #23) is new ground: docs/redis-schema.md's only slot today is
-# `bmo`, fleet-wide, not per repo. slots_redis.py already supports any slot
-# name (`status()` reports whichever `slot:<name>:max` keys exist), so this
-# reuses that mechanism under a new name instead of inventing a second
-# schema -- `repo:<repo>`, not a bare repo name, so it can never collide
-# with `bmo` or a future machine-scoped slot. Nothing acquires this slot
-# yet (loopctl does not check it before starting a loop), so the number is
-# a declared cap only, not an enforced one -- the same kind of gap issue
-# #22 documented for "Run now"'s note field.
+# A per-repo loop concurrency cap uses the existing Redis slot schema.
 REPO_SLOT_PREFIX = "repo:"
 
 
@@ -266,40 +219,40 @@ def code_repos() -> list[dict]:
     return out
 
 
-def tmux_sessions() -> list[dict]:
-    fmt = "#{session_name}\t#{session_created}\t#{session_attached}\t#{session_windows}\t#{session_activity}"
-    rc, out = run(["tmux", "ls", "-F", fmt])
-    sessions = []
-    if rc != 0:
-        return sessions
-    for line in out.splitlines():
-        parts = line.split("\t")
-        if len(parts) < 5:
-            continue
-        name, created, attached, windows, activity = parts[:5]
-        sessions.append(
-            {
-                "name": name,
-                "repo": name[len(SESSION_PREFIX):] if name.startswith(SESSION_PREFIX) else None,
-                "created": int(created) if created.isdigit() else 0,
-                "attached": attached == "1",
-                "windows": int(windows) if windows.isdigit() else 0,
-                "activity": int(activity) if activity.isdigit() else 0,
-            }
-        )
-    return sorted(sessions, key=lambda s: (s["repo"] is None, s["name"]))
+def local_repo_inventory() -> list[dict]:
+    """Return repo names and loop readiness for this machine's heartbeat."""
+    enabled = set(enabled_repos())
+    return [
+        {
+            "repo": repo["repo"],
+            "enabled": repo["repo"] in enabled,
+            "loopable": repo["loopable"],
+        }
+        for repo in code_repos()
+    ]
 
 
-def session_tail(session: str, lines: int) -> str:
-    rc, out = run(["tmux", "capture-pane", "-pt", session, "-S", f"-{lines}"])
-    return out if rc == 0 else f"(could not read pane: {out.strip()})"
+
+def loop_tail(repo: str, machine: str, lines: int, connection: dict, signing_key: str | None) -> str:
+    local_host = machines.hostname()
+    result = loops.dispatch_loop_action(
+        machine=machine,
+        local_host=local_host,
+        local_argv=["lupin", "loop", "local-action", "peek", repo, str(lines)],
+        queue_action="loop.peek",
+        queue_params={"repo": repo, "lines": lines},
+        connection=connection,
+        signing_key=signing_key,
+        actor="lupin-dashboard",
+        issuer=local_host,
+        run_local=lambda argv: run(argv, timeout=20.0),
+    )
+    return result.get("output", "")
 
 
 def _repo_platforms() -> dict[str, str]:
-    """repo -> platform, read straight from `REPOS_FILE` -- the same file
-    loopctl.nix's own `repo_platform` reads, second whitespace-separated
-    token per line (`"claude"` if a line has none). `enabled_repos()`
-    reuses this for its own list of repo names (the dict's keys).
+    """Repo to platform, read from `REPOS_FILE`.
+    Lines use `repo` or `repo platform`.
     """
     result: dict[str, str] = {}
     try:
@@ -312,32 +265,6 @@ def _repo_platforms() -> dict[str, str]:
         pass
     return result
 
-
-def local_loops() -> list[dict]:
-    """This machine's live loops, for the fleet heartbeat (issue #2 phase
-    A, `machines.py`'s `loops` field): one entry per live tmux loop
-    session, `{"repo", "platform", "state", "since"}`. `state` is always
-    `None` -- there's no Herdr/agent-state signal on the tmux backend yet.
-    """
-    platforms = _repo_platforms()
-    out = []
-    for s in tmux_sessions():
-        if not s["repo"]:
-            continue
-        since = (
-            datetime.fromtimestamp(s["created"], tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            if s["created"]
-            else None
-        )
-        out.append(
-            {
-                "repo": s["repo"],
-                "platform": platforms.get(s["repo"], "claude"),
-                "state": None,
-                "since": since,
-            }
-        )
-    return out
 
 
 def timers() -> list[dict]:
@@ -352,7 +279,9 @@ def timers() -> list[dict]:
     result = []
     for row in rows:
         unit = row.get("unit") or ""
-        if unit != "delegation-loop.timer" and not unit.startswith("delegation-loop-once-"):
+        if unit != "delegation-loop.timer" and not re.fullmatch(
+            r"lupin-once-[a-f0-9]{16}\.timer", unit
+        ):
             continue
         nxt = row.get("next")
         last = row.get("last")
@@ -368,38 +297,23 @@ def timers() -> list[dict]:
 
 
 def oneoff_repositories(unit: str) -> str:
-    """Read repo arguments from a one-off timer's launch command."""
-    rc, output = run(
-        ["systemctl", "show", unit, "--property=ExecStart", "--value"]
-    )
-    if rc != 0:
-        return unit
-    match = re.search(r"(?:^|\s)argv\[\]=(.+?)(?:\s*;\s*[^;{}]+=|}\s*$)", output)
+    """Read repo names from Lupin's one-off schedule file."""
+    match = re.fullmatch(r"lupin-once-([a-f0-9]{16})\.timer", unit)
     if not match:
         return unit
+    path = loop_runtime.STATE_DIR / "once" / f"{match.group(1)}.json"
     try:
-        argv = shlex.split(match.group(1))
-    except ValueError:
+        entry = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return unit
-    launcher = next(
-        (index for index, arg in enumerate(argv) if arg.endswith("/delegation-launch")),
-        None,
-    )
-    if launcher is None:
+    repos = entry.get("repos") if isinstance(entry, dict) else None
+    if not isinstance(repos, list) or not repos:
         return unit
-    args = argv[launcher + 1 :]
-    repos = []
-    index = 0
-    while index < len(args):
-        arg = args[index]
-        if arg in ("--note", "--platform"):
-            index += 2
-        elif arg.startswith("--"):
-            return unit
-        else:
-            repos.extend(args[index:])
-            break
-    return ", ".join(repos) if repos else unit
+    try:
+        names = [loop_runtime.validate_repo(repo) for repo in repos]
+    except loop_runtime.LoopError:
+        return unit
+    return ", ".join(names)
 
 
 def timer_repository(unit: str) -> str:
@@ -452,16 +366,75 @@ def fleet_state(connection: dict) -> dict:
     return {"machines": machine_list, "claims": claims_data, "fleet_error": None}
 
 
-# Mirrors agent.py's own _REPO_RE. Kept as a separate copy, not imported --
-# this is a second, independent check (defense in depth, same reasoning
-# agent.py gives for checking a repo name even though loopctl checks its
-# own too): this process should refuse a bad repo name before it ever
-# reaches loopctl or the command queue, not rely on the far end alone.
+# Check repo names before local or remote loop actions.
 REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
 def _valid_repo_name(repo: str) -> bool:
     return bool(REPO_NAME_RE.match(repo))
+
+
+def merge_repo_inventory(
+    local_repos: list[dict], machine_records: list[dict], local_host: str
+) -> list[dict]:
+    """Add repo inventories from other machines to this machine's repo list."""
+    repos = {repo["repo"]: {**repo, "local": True} for repo in local_repos}
+    remote = {}
+    for record in machine_records:
+        host = record.get("name")
+        if not isinstance(host, str) or host == local_host:
+            continue
+        reported = record.get("repos", [])
+        if not isinstance(reported, list):
+            continue
+        loops = record.get("loops", [])
+        running_repos = (
+            {
+                loop.get("repo")
+                for loop in loops
+                if isinstance(loop, dict) and isinstance(loop.get("repo"), str)
+            }
+            if isinstance(loops, list)
+            else set()
+        )
+        active = record.get("state") in ("online", "draining")
+        for item in reported:
+            if not isinstance(item, dict):
+                continue
+            repo = item.get("repo")
+            if not isinstance(repo, str) or not _valid_repo_name(repo):
+                continue
+            entry = remote.setdefault(
+                repo,
+                {"enabled": False, "loopable": False, "hosts": set(), "running_hosts": set()},
+            )
+            entry["enabled"] |= item.get("enabled") is True
+            entry["loopable"] |= item.get("loopable") is True
+            label = f"{host} (offline)" if record.get("state") == "offline" else host
+            entry["hosts"].add(label)
+            if active and repo in running_repos:
+                entry["running_hosts"].add(host)
+
+    for repo, entry in remote.items():
+        if repo in repos:
+            repos[repo]["fleet_enabled"] = entry["enabled"]
+            continue
+        state = (
+            "enabled" if entry["enabled"] and entry["loopable"]
+            else "disabled" if entry["loopable"]
+            else "no-doc"
+        )
+        repos[repo] = {
+            "repo": repo,
+            "state": state,
+            "enabled": entry["enabled"],
+            "loopable": entry["loopable"],
+            "local": False,
+            "running": bool(entry["running_hosts"]),
+            "running_machines": ", ".join(sorted(entry["running_hosts"])),
+            "machine": ", ".join(sorted(entry["hosts"])),
+        }
+    return sorted(repos.values(), key=lambda repo: repo["repo"])
 
 
 def _repo_full_names() -> dict[str, str]:
@@ -478,136 +451,119 @@ def _repo_full_names() -> dict[str, str]:
     return full_names
 
 
-def remote_loop_hosts(claims_data: dict, full_names: dict[str, str], local_host: str) -> dict[str, str]:
-    """repo -> host, for a repo whose issue is claimed by a machine other
-    than this one.
-
-    This is a guess, not a real signal (issue #2 phase A): a claim's
-    `host` field is not proof a loop is still running there, just the
-    best guess available before `_loop_hosts_from_heartbeat`'s real
-    signal existed. `gather_loops` merges this result with that one --
-    for a repo `_loop_hosts_from_heartbeat` already has an answer for,
-    this guess is ignored; for any other repo, this guess fills in.
-    """
-    hosts: dict[str, str] = {}
-    for repo, owner_repo in full_names.items():
-        for target, info in claims_data.items():
-            if target.rpartition("#")[0] != owner_repo:
-                continue
-            host = info.get("host")
-            if host and host != local_host:
-                hosts[repo] = host
-                break
-    return hosts
-
-
-def _loop_hosts_from_heartbeat(machine_records: list[dict], local_host: str) -> dict[str, str]:
-    """repo -> host, read straight from every other machine's own
-    heartbeat `loops` list (issue #2 phase A). This is the real signal,
-    once a machine runs a build that publishes `loops`. A machine that
-    doesn't publish it yet contributes nothing here -- `gather_loops`
-    merges this result with `remote_loop_hosts`'s guess to cover those
-    repos too.
-    """
-    hosts: dict[str, str] = {}
+def _loop_hosts_from_heartbeat(machine_records: list[dict], local_host: str) -> dict[str, dict]:
+    """Map each remote repo to its Herdr state and host."""
+    hosts = {}
     for record in machine_records:
         if record.get("name") == local_host:
             continue
         for loop in record.get("loops", []):
             repo = loop.get("repo")
             if repo:
-                hosts[repo] = record["name"]
+                state = loop.get("state") or "unknown"
+                if record.get("state") == "offline":
+                    state = "unknown"
+                hosts[repo] = {**loop, "state": state, "machine": record["name"]}
     return hosts
 
 
 def gather_loops(connection: dict) -> dict:
-    """Every loopable repo, with where (if anywhere) its loop looks like it
-    is running.
-
-    `status` is `"running"` (a live tmux session on this machine),
-    `"remote"` (claimed by a different fleet machine -- see
-    `remote_loop_hosts`), or `"stopped"` (neither). `machine` is this
-    host's name for `"running"`/`"stopped"`, or the claiming host for
-    `"remote"`.
-    """
+    """Return local Herdr state and remote Herdr heartbeat state."""
     local_host = machines.hostname()
-    sessions_by_repo = {s["repo"]: s for s in tmux_sessions() if s["repo"]}
+    local_states = {row["repo"]: row for row in loop_runtime.local_loops()}
     enabled = set(enabled_repos())
     state = fleet_state(connection)
-    # Merge, not all-or-nothing: a heartbeat-reported loop wins for the
-    # repo it names, but a repo the heartbeat set says nothing about still
-    # falls back to the claims-based guess (e.g. a machine running an
-    # older `lupin` that doesn't publish `loops` yet).
-    claims_hosts = remote_loop_hosts(state.get("claims", {}), _repo_full_names(), local_host)
-    heartbeat_hosts = _loop_hosts_from_heartbeat(state.get("machines", []), local_host)
-    remote_hosts = {**claims_hosts, **heartbeat_hosts}
-
+    remote_states = _loop_hosts_from_heartbeat(state.get("machines", []), local_host)
     entries = []
-    for r in code_repos():
-        if not r["loopable"]:
+    for repo_info in code_repos():
+        if not repo_info["loopable"]:
             continue
-        repo = r["repo"]
-        session = sessions_by_repo.get(repo)
-        if session is not None:
-            status, machine = "running", local_host
-        elif repo in remote_hosts:
-            status, machine = "remote", remote_hosts[repo]
-        else:
-            status, machine = "stopped", local_host
-        entries.append(
-            {
-                "repo": repo,
-                "enabled": repo in enabled,
-                "status": status,
-                "machine": machine,
-                "session": session,
-            }
-        )
-    entries.sort(key=lambda e: e["repo"])
+        repo = repo_info["repo"]
+        entry = local_states.get(repo)
+        machine = local_host
+        if entry is None:
+            entry = remote_states.get(repo)
+            if entry is not None:
+                machine = entry["machine"]
+        entry = entry or {"repo": repo, "backend": "herdr", "state": "stopped"}
+        status = entry.get("state") or "unknown"
+        entries.append({
+            "repo": repo,
+            "enabled": repo in enabled,
+            "status": status,
+            "agent_status": status,
+            "machine": machine,
+            "backend": entry.get("backend", "herdr"),
+            "session": entry.get("session"),
+            "workspace_id": entry.get("workspace_id"),
+            "pane_id": entry.get("pane_id"),
+            "platform": entry.get("platform"),
+            "since": entry.get("since"),
+        })
+    entries.sort(key=lambda entry: entry["repo"])
     return {
         "entries": entries,
         "machines": state.get("machines", []),
+        "claims": state.get("claims", {}),
         "fleet_error": state.get("fleet_error"),
         "local_host": local_host,
     }
 
 
 def gather(peek_lines: int, connection: dict | None = None) -> dict:
-    sessions = tmux_sessions()
-    for s in sessions:
-        s["tail"] = session_tail(s["name"], peek_lines) if s["repo"] else ""
+    del peek_lines
+    connection = connection or {}
+    loop_state = gather_loops(connection)
     state = {
         "now": time.time(),
         "enabled": enabled_repos(),
         "repos": code_repos(),
-        "sessions": sessions,
+        "loops": loop_state["entries"],
         "timers": timers(),
         "timer_active": timer_active(),
     }
-    state.update(fleet_state(connection or {}))
+    state.update({
+        "machines": loop_state["machines"],
+        "claims": loop_state["claims"],
+        "fleet_error": loop_state["fleet_error"],
+    })
+    state["repos"] = merge_repo_inventory(
+        state["repos"], state["machines"], machines.hostname()
+    )
+    state["enabled"] = sorted(
+        set(state["enabled"])
+        | {
+            repo["repo"]
+            for repo in state["repos"]
+            if repo.get("enabled") is True or repo.get("fleet_enabled") is True
+        }
+    )
     return state
 
 
 def gather_repos(connection: dict) -> dict:
-    """Everything the Repos page (issue #23) reads: every /code directory
-    tagged enabled/disabled/no-doc (`code_repos()`), each one's live loop
-    status folded in from `gather_loops()` (one fleet read, not a second
-    one), and each loopable repo's concurrency cap from the generic slot
-    registry (see `_repo_slot_name`'s docstring for why that's a new slot
-    name, not a new schema).
-    """
+    """Return local repos and repos reported by other fleet machines."""
     loops = gather_loops(connection)
-    by_repo = {e["repo"]: e for e in loops["entries"]}
+    by_repo = {entry["repo"]: entry for entry in loops["entries"]}
     slot_status = slots_redis.status(**connection)
     repos = []
-    for r in code_repos():
-        entry = by_repo.get(r["repo"])
-        slot = slot_status.get(_repo_slot_name(r["repo"]), {})
+    inventory = merge_repo_inventory(
+        code_repos(), loops.get("machines", []), loops["local_host"]
+    )
+    for repo in inventory:
+        entry = by_repo.get(repo["repo"])
+        slot = slot_status.get(_repo_slot_name(repo["repo"]), {})
+        if repo["local"]:
+            running = entry is not None and entry["status"] not in ("stopped", "unknown")
+            machine = entry["machine"] if entry else loops["local_host"]
+        else:
+            running = repo["running"]
+            machine = repo["machine"]
         repos.append(
             {
-                **r,
-                "running": entry is not None and entry["status"] in ("running", "remote"),
-                "machine": entry["machine"] if entry else loops["local_host"],
+                **repo,
+                "running": running,
+                "machine": machine,
                 "max": slot.get("max"),
             }
         )
@@ -684,17 +640,9 @@ def _machine_available(name: str, records: list[dict], local_host: str) -> bool:
 
 
 def _timer_loop_count(unit: str, repo_label: str, enabled: list[str]) -> int:
-    """How many separate loops one timer's next firing starts -- the
-    Schedule table's "Loops" column. `delegation-loop.timer` runs every
-    enabled repo; a one-off timer runs whatever repos were passed on its
-    command line, already resolved into `repo_label` by
-    `timer_repository()`/`oneoff_repositories()`.
-
-    `repo_label == unit` is `oneoff_repositories()`'s own "could not parse
-    this unit's ExecStart" fallback (it returns the unit name itself) -- a
-    real repo list is never equal to its timer's unit name, so this is a
-    safe way to detect that case and report "at least one" instead of
-    guessing a count from an unparsed string.
+    """Count runs scheduled by a timer. The recurring timer starts every
+    enabled repo. A one-off timer uses its saved repo list. If the saved
+    list is missing, show a count of one rather than guess.
     """
     if unit == "delegation-loop.timer":
         return len(enabled)
@@ -909,7 +857,7 @@ if(box){box.checked=localStorage.getItem("lupin-auto")==="1";
 document.querySelectorAll("[data-once-repo]").forEach(function(row){
  var when=row.querySelector("input"),command=row.querySelector("code"),
      status=row.querySelector("[data-copy-status]");
- function update(){command.textContent="loopctl once "+row.dataset.onceRepo+" "+when.value;}
+ function update(){command.textContent="lupin once "+when.value+" "+row.dataset.onceRepo;}
  when.addEventListener("input",update);
  row.querySelector("button").addEventListener("click",function(){
    Promise.resolve().then(function(){
@@ -1031,8 +979,7 @@ def page(
 
 
 def render_dashboard(state: dict) -> bytes:
-    loops = [s for s in state["sessions"] if s["repo"]]
-    others = [s for s in state["sessions"] if not s["repo"]]
+    loops = [entry for entry in state.get("loops", []) if entry["status"] not in ("stopped", "unknown")]
     enabled = set(state["enabled"])
 
     recurring = [t for t in state["timers"] if t["unit"] == "delegation-loop.timer"]
@@ -1076,13 +1023,13 @@ def render_dashboard(state: dict) -> bytes:
     )
     body.append("</div>")
 
-    # ---- live sessions ----------------------------------------------------
+    # ---- live loops ----------------------------------------------------
     body.append(
         f'<div class="section-head">{icon("M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3", 15)}<h2>Live loops</h2></div>'
     )
     if not loops:
         body.append(
-            "<div class='card loop-empty dim'>No loop session is open."
+            "<div class='card loop-empty dim'>No live loops."
             + (
                 f" Next run <span data-until='{nxt:.0f}'></span>."
                 if nxt
@@ -1091,29 +1038,24 @@ def render_dashboard(state: dict) -> bytes:
             + "</div>"
         )
     body.append('<div class="loop-grid">')
-    for s in loops:
-        dot = "ok" if s["attached"] or s["activity"] else "idle"
+    for entry in loops:
         body.append(
-            f"<a class='card loop-card' href='/loops?repo={esc(s['repo'])}&lines=400'>"
+            f"<a class='card loop-card' href='/loops?repo={quote(entry['repo'], safe='')}&lines=400'>"
         )
         body.append('<div class="loop-head">')
-        body.append(f"<span class='dot {dot}'></span>")
-        body.append(f"<b>{esc(s['repo'])}</b>")
-        body.append(f"<span class=dim>started <span data-since='{s['created']}'></span></span>")
-        body.append(f"<span class=dim>output <span data-since='{s['activity']}'></span></span>")
-        if s["attached"]:
-            body.append("<span class='pill on'>attached</span>")
-        if s["repo"] not in enabled:
-            body.append("<span class='pill off'>not in the scheduled set</span>")
-        body.append("</div>")
-        body.append(f"<pre class=loop-tail>{esc(s['tail'].rstrip() or '(no output)')}</pre>")
-        body.append("</a>")
+        body.append(f"<span class='dot {LOOP_STATUS_DOT.get(entry['status'], 'idle')}'></span>")
+        body.append(f"<b>{esc(entry['repo'])}</b>")
+        body.append(f"<span class=dim>{esc(entry['status'])}</span>")
+        body.append(f"<span class=dim>{esc(entry.get('backend') or 'herdr')}</span>")
+        body.append(f"<span class=dim>platform {esc(entry.get('platform') or '-')}</span>")
+        if entry.get("workspace_id"):
+            body.append(f"<span class=dim>workspace {esc(entry['workspace_id'])}</span>")
+        if entry.get("pane_id"):
+            body.append(f"<span class=dim>pane {esc(entry['pane_id'])}</span>")
+        if entry["machine"] != machines.hostname():
+            body.append(f"<span class=dim>on {esc(entry['machine'])}</span>")
+        body.append("</div></a>")
     body.append("</div>")
-
-    if others:
-        names = ", ".join(esc(s["name"]) for s in others)
-        body.append(f"<div class='card dim'>Other tmux sessions (not loops): {names}</div>")
-
     # ---- coming up --------------------------------------------------------
     body.append(
         f'<div class="section-head">{icon("M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z", 15)}<h2>Coming up</h2></div>'
@@ -1187,35 +1129,36 @@ def render_dashboard(state: dict) -> bytes:
             "disabled": "<span class='pill off'>disabled</span>",
             "no-doc": "<span class=pill>no docs/delegation-loop.md</span>",
         }[r["state"]]
-        sess = "live" if r["repo"] in live else "<span class=dim>-</span>"
-        queue = (
-            f"<a href='/roadmap?repo={quote(r['repo'], safe='')}'>open</a>"
-            if r["loopable"]
-            else "<span class=dim>-</span>"
-        )
-        once = ""
-        if r["state"] == "enabled" and r["loopable"]:
-            command = f"loopctl once {r['repo']} now"
-            once = (
-                f"<span data-once-repo='{esc(r['repo'])}'>"
-                f"<code>{esc(command)}</code> "
-                "<label>when <input value=now aria-label='one-off loop time'></label> "
-                "<button type=button>copy</button> "
-                "<span class=dim data-copy-status aria-live=polite></span></span>"
+        if r.get("local", True):
+            sess = "live" if r["repo"] in live else "<span class=dim>-</span>"
+            queue = (
+                f"<a href='/roadmap?repo={quote(r['repo'], safe='')}'>open</a>"
+                if r["loopable"]
+                else "<span class=dim>-</span>"
             )
+            once = ""
+            if r["state"] == "enabled" and r["loopable"]:
+                command = f"lupin once now {r['repo']}"
+                once = (
+                    f"<span data-once-repo='{esc(r['repo'])}'>"
+                    f"<code>{esc(command)}</code> "
+                    "<label>when <input value=now aria-label='one-off loop time'></label> "
+                    "<button type=button>copy</button> "
+                    "<span class=dim data-copy-status aria-live=polite></span></span>"
+                )
+        else:
+            sess = (
+                f"running on {esc(r['running_machines'])}"
+                if r["running"]
+                else f"available on {esc(r['machine'])}"
+            )
+            queue = once = "<span class=dim>-</span>"
         body.append(
             f"<tr><td>{esc(r['repo'])}</td><td>{pill}</td><td>{sess}</td>"
             f"<td>{queue}</td><td>{once}</td></tr>"
         )
     body.append("</table></div>")
 
-    body.append(
-        "<p class=dim style='margin-top:2rem'>Read-only. To change anything - "
-        "start a loop, stop one, change the schedule - use "
-        "<code>loopctl</code> over SSH. See docs/loopctl-gui-scope.md for "
-        "why writes are not here yet. For recent issue activity across "
-        "repos, see <a href='/roadmap'>Roadmap</a>.</p>"
-    )
     return page("Overview", "".join(body), active="overview")
 
 
@@ -1695,6 +1638,10 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
     models = snapshot_models(snapshot)
     benchmark_snapshot = benchmark_fetch.read_snapshot(**(connection or {}))
     benchmark_scores = (benchmark_snapshot or {}).get("scores") or []
+    scored_benchmarks = sum(
+        1 for score in benchmark_scores
+        if isinstance(score, dict) and score.get("score") is not None
+    )
     body = [
         f'<header><h1>{icon("M7 7h10v10H7zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3")}Models</h1></header>',
     ]
@@ -1703,7 +1650,7 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
     body.append(
         "<div class='card' style='display:flex;align-items:center;gap:1rem'>"
         f"<span class=dim>Last pulled: {_snapshot_age(snapshot.get('fetched_at') if snapshot else None)}</span>"
-        f"<span class=dim>Benchmarks: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)}</span>"
+        f"<span class=dim>Benchmarks: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)} ({scored_benchmarks}/{len(benchmark_scores)} scored)</span>"
         "<span style='flex:1'></span>"
         "<form method=post action='/model-tiers/refresh'>"
         "<button type=submit>Pull models</button></form>"
@@ -1756,10 +1703,7 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
 
 
 def _heartbeat_epoch(stamp: str | None) -> float | None:
-    """`machines()`'s `heartbeat` field is an ISO stamp; the page's
-    `data-since` ticker (see `JS` above) wants epoch seconds, same as
-    `tmux_sessions()`'s `created`/`activity` fields.
-    """
+    """Return epoch seconds for a machine heartbeat timestamp."""
     if not stamp:
         return None
     try:
@@ -1912,7 +1856,8 @@ def _render_add_panel(tab: str, repos: list[dict]) -> str:
         "<p class=dim>Not implemented yet.</p>"
     )
     rows = []
-    for r in repos:
+    local_repos = [repo for repo in repos if repo.get("local", True)]
+    for r in local_repos:
         if r["state"] == "enabled":
             continue
         repo = r["repo"]
@@ -1934,8 +1879,10 @@ def _render_add_panel(tab: str, repos: list[dict]) -> str:
             )
     if rows:
         picker = "".join(rows)
-    elif repos:
+    elif local_repos:
         picker = "<p class=dim>Every repo under /code is already on the schedule.</p>"
+    elif repos:
+        picker = "<p class=dim>No local repos under /code. Fleet repos are listed below.</p>"
     else:
         picker = "<p class=dim>No repos found under /code.</p>"
     body = (
@@ -1975,14 +1922,7 @@ def _render_doc_panel(repo: str, text: str, edit: bool) -> str:
 
 
 def _render_schedule_panel(repo: str) -> str:
-    """A one-off run, via `loopctl once` -- a real command, already used
-    the same way by the Overview page's own "one-off command" widget. Not
-    `lupin once`: `lupin`'s own `cli.py` has no such subcommand (see this
-    issue's report), but `loopctl once <when> [repo...]` already exists and
-    does the same job, so this dispatches it for real instead of inventing
-    a fake success path -- see `do_repos_schedule`'s docstring for why it's
-    local-machine only.
-    """
+    """Render the local Lupin command for a one-off run."""
     return (
         "<div class=card>"
         "<form method=post action=/repos/schedule class=row>"
@@ -1993,7 +1933,7 @@ def _render_schedule_panel(repo: str) -> str:
         "<a href='/repos'>Cancel</a>"
         "</form>"
         "<p class=dim>Runs once, in addition to the recurring schedule. Same as "
-        f"<code>loopctl once &lt;when&gt; {esc(repo)}</code>.</p>"
+        f"<code>lupin once &lt;when&gt; {esc(repo)}</code>.</p>"
         "</div>"
     )
 
@@ -2021,6 +1961,18 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
     for r in repos:
         repo = r["repo"]
         pill = STATE_PILL[r["state"]]
+        if not r.get("local", True):
+            dot = "ok" if r["running"] else "idle"
+            loop_status = (
+                f"running on {r['running_machines']}" if r["running"] else "stopped"
+            )
+            rows.append(
+                f"<tr><td><b>{esc(repo)}</b></td><td>{pill}</td>"
+                f"<td><span class='dot {dot}'></span> {esc(loop_status)}</td>"
+                f"<td>{esc(r['machine'])}</td><td class=dim>-</td>"
+                "<td class=dim>Read-only fleet entry</td></tr>"
+            )
+            continue
         if not r["loopable"]:
             rows.append(
                 f"<tr><td><b>{esc(repo)}</b></td><td>{pill}</td>"
@@ -2075,19 +2027,10 @@ def render_repos(
     remove_repo: str | None = None,
     sent: str | None = None,
 ) -> bytes:
-    """The Repos page (issue #23): add/remove a repo from the local
-    schedule, view or edit its delegation doc, raise/lower its loop
-    concurrency cap, and run or one-off-schedule a loop.
+    """Show local repos and repos reported by other machines.
 
-    `data` is `gather_repos()`'s output. Query-string flags (`add`, `doc`,
-    `schedule`, `remove`) open the matching panel -- the same convention
-    `/roadmap`'s `state=closed` and `/loops`'s `group=`/`repo=` already use:
-    a plain link, no client-side state.
-
-    The mockup's filter pills ("All/Enabled/Disabled/No doc") are not
-    built here -- they only narrow which rows of an already-read table are
-    shown, no state to mutate, and this page's scope is already large
-    (add/remove/doc/run/schedule/slot-max). Left out, not silently cut.
+    Local rows support page actions. Fleet rows are read-only.
+    `data` comes from `gather_repos()`. Query flags open a panel.
     """
     repos = data["repos"]
     local_host = data["local_host"]
@@ -2249,8 +2192,7 @@ def render_schedule(data: dict, *, sent: str | None = None) -> bytes:
     body.append(
         '<div class=card><div class=row style="margin-bottom:.4rem">'
         "<b>Run now</b><span class=dim>Starts loops on free machines. "
-        "The note is kept with the request but is not yet passed into the loop "
-        "-- loopctl has no way to receive one today.</span></div>"
+        "The note is kept with the request but is not passed into the loop.</span></div>"
         f"{error_note}"
         "<form method=post action=/schedule/run class=row>"
         f"<select name=repo><option value=all>all enabled repos</option>{repo_options}</select>"
@@ -2262,17 +2204,15 @@ def render_schedule(data: dict, *, sent: str | None = None) -> bytes:
     )
 
     body.append(
-        "<p class=dim>To schedule a one-off run: "
-        "<code>lupin once &lt;when&gt; [repo...] [--note TEXT] [--platform P]</code> "
-        "-- this command does not exist yet, this line only names the intended "
-        "shape.</p>"
+        "<p class=dim>To schedule a one-off run, use "
+        "<code>lupin once &lt;when&gt; [repo...] [--note TEXT] [--platform P]</code>.</p>"
     )
 
     return page("Schedule", "".join(body), active="schedule")
 
 
-LOOP_STATUS_DOT = {"running": "ok", "remote": "ok", "stopped": "idle"}
-LOOP_STATUS_LABEL = {"running": "running", "remote": "running elsewhere", "stopped": "stopped"}
+LOOP_STATUS_DOT = {"running": "ok", "working": "ok", "needs_attention": "warn", "starting": "warn", "blocked": "warn", "stopped": "idle", "done": "idle", "idle": "idle", "unknown": "idle"}
+LOOP_STATUS_LABEL = {"running": "running", "working": "working", "needs_attention": "needs attention", "starting": "starting", "blocked": "blocked", "stopped": "stopped", "done": "done", "idle": "idle", "unknown": "unknown"}
 
 
 def _loops_url(repo: str, group: str, lines: int) -> str:
@@ -2318,10 +2258,8 @@ def render_loops(
         by_machine: dict[str, list[dict]] = {}
         for entry in entries:
             by_machine.setdefault(entry["machine"], []).append(entry)
-        # A machine with a live loop isn't always in the registry (it may
-        # not have `join`ed yet) -- include it anyway, or a claim-derived
-        # "remote" entry would silently vanish from this grouping while
-        # still showing up under "by repo".
+        # Include machines named by loop state, even when they are not in
+        # the registry.
         known = sorted({m["name"] for m in fleet_machines} | {local_host} | {e["machine"] for e in entries})
         for name in known:
             label = "this machine" if name == local_host else name
@@ -2343,50 +2281,79 @@ def render_loops(
             f"<span class=dim>on {esc(selected['machine'])}</span>"
             "</div>"
         )
-        if selected["status"] == "running":
-            # Preset lengths, same three the mockup's line-count picker
-            # offers, plus whatever `lines=` the caller already asked for
-            # (a direct link with an arbitrary count still works).
+        active = selected["status"] not in ("stopped", "unknown")
+        main.append(f"<div class=dim>Herdr state: {esc(selected['agent_status'])}</div>")
+        main.append(f"<div class=dim>backend: {esc(selected['backend'])}; platform: {esc(selected.get('platform') or '-')}</div>")
+        for label, key in (("session", "session"), ("workspace", "workspace_id"), ("pane", "pane_id")):
+            if selected.get(key):
+                main.append(f"<div class=dim>{label}: {esc(selected[key])}</div>")
+        if active:
+            if selected["machine"] == local_host:
+                main.append(f"<pre style='max-height:none'>{esc((selected_tail or '').rstrip() or '(no output)')}</pre>")
+            else:
+                main.append("<p class=dim>Use peek output to request the remote log.</p>")
+            main.append(
+                f"<a href='/peek?repo={quote(selected_repo, safe='')}&machine={quote(selected['machine'], safe='')}&lines={lines}'>peek output</a>"
+            )
             presets = sorted({25, 400, 2000, lines})
             picker = " ".join(
                 f"<a href='{_loops_url(selected_repo, group, n)}'>"
                 f"{'<b>' if n == lines else ''}{n} lines{'</b>' if n == lines else ''}</a>"
                 for n in presets
             )
-            main.append(
-                f"<div style='margin:.6rem 0'>{picker} &middot; "
-                f"<a href='{_loops_url(selected_repo, group, lines)}&fullscreen=1'>fullscreen</a></div>"
-            )
-            main.append(f"<pre style='max-height:none'>{esc((selected_tail or '').rstrip() or '(no output)')}</pre>")
-        elif selected["status"] == "remote":
-            main.append(
-                "<p class=dim>This loop looks like it is running on "
-                f"{esc(selected['machine'])}. This dashboard cannot read "
-                "another machine's terminal yet, so there is no tail to "
-                "show here.</p>"
-            )
-        else:
+            main.append(f"<div style='margin:.6rem 0'>{picker}</div>")
+            if selected.get("session"):
+                if selected["machine"] == local_host:
+                    attach_argv = ["herdr", "--session", selected["session"]]
+                else:
+                    target = loops.ssh_target_for(selected["machine"])
+                    attach_argv = (
+                        ["herdr", "--remote", target, "--session", selected["session"]]
+                        if target
+                        else None
+                    )
+                if attach_argv:
+                    main.append(f"<p>Attach: <code>{esc(shlex.join(attach_argv))}</code></p>")
+                else:
+                    main.append(f"<p class=dim>No SSH target is set for {esc(selected['machine'])}.</p>")
+        elif selected["status"] == "stopped":
             main.append("<p class=dim>Not running.</p>")
-
+        else:
+            main.append("<p class=dim>State cannot be verified; actions are disabled.</p>")
         main.append("<div class=row style='margin-top:1rem'>")
-        if selected["status"] in ("running", "remote"):
+        if active:
             main.append(
+                "<form method=post action=/loops/state style='display:inline'>"
+                f"<input type=hidden name=repo value='{esc(selected_repo)}'>"
+                f"<input type=hidden name=machine value='{esc(selected['machine'])}'>"
+                "<button type=submit>refresh state</button></form>"
                 "<form method=post action=/loops/close style='display:inline'>"
                 f"<input type=hidden name=repo value='{esc(selected_repo)}'>"
                 f"<input type=hidden name=machine value='{esc(selected['machine'])}'>"
-                "<select name=scope>"
-                "<option value=repo>this repo</option>"
-                "<option value=all>every loop on this machine</option>"
-                "</select> "
-                "<button type=submit>close gracefully</button></form>"
+                "<select name=scope><option value=repo>this repo</option>"
+                "<option value=all>every loop on this machine</option></select> "
+                "<button type=submit>stop loop</button></form>"
             )
         if selected["status"] == "stopped":
-            main.append(
-                "<form method=post action=/loops/start style='display:inline'>"
-                f"<input type=hidden name=repo value='{esc(selected_repo)}'>"
-                f"<input type=hidden name=machine value='{esc(selected['machine'])}'>"
-                "<button type=submit>start again</button></form>"
-            )
+            targets = _rank_candidates(fleet_machines, local_host)
+            if targets:
+                options = []
+                for target in targets:
+                    name = target["name"]
+                    label = "this machine" if name == local_host else name
+                    selected_attr = " selected" if name == selected["machine"] else ""
+                    options.append(
+                        f"<option value='{esc(name)}'{selected_attr}>{esc(label)}</option>"
+                    )
+                main.append(
+                    "<form method=post action=/loops/start style='display:inline'>"
+                    f"<input type=hidden name=repo value='{esc(selected_repo)}'>"
+                    "<label>Start on <select name=machine>"
+                    f"{''.join(options)}</select></label> "
+                    "<button type=submit>start loop</button></form>"
+                )
+            else:
+                main.append("<p class=dim>No online machine can start a loop.</p>")
         main.append("</div>")
     main.append("</div>")
 
@@ -2736,13 +2703,7 @@ class Handler(BaseHTTPRequestHandler):
         self.redirect("/repos")
 
     def do_repos_schedule(self, form: dict) -> None:
-        """One-off run via `loopctl once <when> <repo>` -- a real command
-        (see `_render_schedule_panel`'s docstring for why this is not the
-        fake-success path issue #22 avoided for `lupin once`). Local
-        machine only: `agent.py`'s ACTIONS table has no `loop.once`, so
-        there is no way to enqueue this for another fleet machine, the same
-        scope call `do_schedule_timer` makes for the recurring timer.
-        """
+        """Schedule one local one-off run through Lupin."""
         repo = form.get("repo", [""])[0].strip()
         when = form.get("when", [""])[0].strip()
         if not self._repo_loopable(repo):
@@ -2751,9 +2712,9 @@ class Handler(BaseHTTPRequestHandler):
         if not when or len(when) > 200:
             self.reply(render_error("missing or too-long schedule time"), 400)
             return
-        rc, out = run(["loopctl", "once", when, repo], timeout=20.0)
+        rc, out = run(["lupin", "once", when, repo], timeout=20.0)
         if rc != 0:
-            self.reply(render_error(f"loopctl once failed: {out.strip()}"), 502)
+            self.reply(render_error(f"lupin once failed: {out.strip()}"), 502)
             return
         sent = f"scheduled a one-off run for {repo} at {when}"
         self.redirect(f"/repos?sent={quote(sent, safe='')}")
@@ -2810,8 +2771,16 @@ class Handler(BaseHTTPRequestHandler):
             selected_repo = selected["repo"]
 
         tail = None
-        if selected is not None and selected["status"] == "running":
-            tail = session_tail(selected["session"]["name"], lines)
+        if (
+            selected is not None
+            and selected["machine"] == data["local_host"]
+            and selected["status"] not in ("stopped", "unknown")
+        ):
+            try:
+                tail = loop_tail(selected["repo"], selected["machine"], lines, self.fleet_connection, self.cmd_signing_key)
+            except CoordinatorUnreachable:
+                self.reply(render_error("cannot reach the redis coordinator"), 502)
+                return
 
         if query.get("fullscreen") == "1":
             if selected is None:
@@ -2823,20 +2792,12 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(render_loops(data, group=group, selected_repo=selected_repo, selected_tail=tail, lines=lines))
 
     def _loop_targets(self, machine: str, scope: str, repo: str) -> list[str]:
-        """Repos to act on for one close request. `"all"` means every loop
-        this dashboard currently believes is on `machine` -- there's no
-        broader fleet-wide scope, and no finer scope below one repo either:
-        loopctl only ever stops or starts a whole repo's loop (see `loopctl
-        --help` -- `stop`/`run` both take a repo name, nothing smaller). The
-        mockup's "this issue"/"this loop" options aren't offered here
-        because neither corresponds to anything loopctl or agent.py's
-        ACTIONS table can actually act on.
-        """
+        """Return active Herdr loops on a machine for an all-stop request."""
         if scope != "all":
             return [repo]
         entries = gather_loops(self.fleet_connection)["entries"]
         targets = [
-            e["repo"] for e in entries if e["machine"] == machine and e["status"] in ("running", "remote")
+            e["repo"] for e in entries if e["machine"] == machine and e["status"] not in ("stopped", "unknown")
         ]
         return targets or [repo]
 
@@ -2866,7 +2827,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 result = loops.dispatch_loop_action(
                     machine=machine, local_host=local_host,
-                    local_argv=["loopctl", "stop", target],
+                    local_argv=["lupin", "loop", "local-action", "stop", target],
                     queue_action="loop.stop", queue_params={"repo": target},
                     connection=self.fleet_connection, signing_key=self.cmd_signing_key,
                     actor="lupin-dashboard", issuer=local_host,
@@ -2878,7 +2839,7 @@ class Handler(BaseHTTPRequestHandler):
             if result["mode"] == "local" and result["returncode"] != 0:
                 errors.append(f"{target}: {result['output'].strip()}")
         if errors:
-            self.reply(render_error("loopctl stop failed:\n" + "\n".join(errors)), 502)
+            self.reply(render_error("stop failed:\n" + "\n".join(errors)), 502)
             return
         self.redirect(f"/loops?repo={quote(repo, safe='')}")
 
@@ -2901,7 +2862,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             result = loops.dispatch_loop_action(
                 machine=machine, local_host=local_host,
-                local_argv=["loopctl", "run", repo],
+                local_argv=["lupin", "run", repo],
                 queue_action="loop.run", queue_params={"repo": repo},
                 connection=self.fleet_connection, signing_key=self.cmd_signing_key,
                 actor="lupin-dashboard", issuer=local_host,
@@ -2911,7 +2872,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("cannot reach the redis coordinator"), 502)
             return
         if result["mode"] == "local" and result["returncode"] != 0:
-            self.reply(render_error(f"loopctl run failed: {result['output'].strip()}"), 502)
+            self.reply(render_error(f"run failed: {result['output'].strip()}"), 502)
             return
         self.redirect(f"/loops?repo={quote(repo, safe='')}")
 
@@ -2960,11 +2921,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             targets_repos = sorted(enabled)[:cnt]
         else:
-            # A specific repo always means exactly one loop -- loopctl runs
-            # one tmux session per repo, so "N loops" of the same repo has
-            # nothing to mean; the loop-count field only matters for "all
-            # enabled repos", where it picks how many distinct repos to
-            # start. See this handler's issue report for the full reasoning.
+            # The count applies when "all enabled repos" is selected.
             if not _valid_repo_name(repo_choice) or repo_choice not in enabled:
                 self.reply(render_error("unknown or non-enabled repository"), 400)
                 return
@@ -3016,7 +2973,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 result = loops.dispatch_loop_action(
                     machine=machine, local_host=local_host,
-                    local_argv=["loopctl", "run", repo],
+                    local_argv=["lupin", "run", repo],
                     queue_action="loop.run", queue_params={"repo": repo},
                     connection=self.fleet_connection, signing_key=self.cmd_signing_key,
                     actor="lupin-dashboard", issuer=local_host,
@@ -3037,21 +2994,70 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_peek(self, query: dict) -> None:
         repo = query.get("repo", "").strip()
-        if not repo or "/" in repo or repo in (".", ".."):
+        machine = query.get("machine", "").strip()
+        if not repo or not _valid_repo_name(repo):
             self.reply(render_error("bad repo name"), 400)
             return
         lines = query.get("lines", "60").strip() or "60"
         if not lines.isdigit() or not (1 <= int(lines) <= 5000):
             self.reply(render_error("lines must be a number from 1 to 5000"), 400)
             return
-        session = f"{SESSION_PREFIX}{repo}"
-        out = session_tail(session, int(lines))
+        if not machine:
+            entry = next((row for row in gather_loops(self.fleet_connection)["entries"] if row["repo"] == repo), None)
+            if entry is None:
+                self.reply(render_error("unknown loop"), 404)
+                return
+            machine = entry["machine"]
+        if machine != machines.hostname() and not self.cmd_signing_key:
+            self.reply(render_error("reading output on another machine needs --cmd-signing-key or $LUPIN_CMD_SIGNING_KEY"), 400)
+            return
+        try:
+            out = loop_tail(repo, machine, int(lines), self.fleet_connection, self.cmd_signing_key)
+        except CoordinatorUnreachable:
+            self.reply(render_error("cannot reach the redis coordinator"), 502)
+            return
+        except loops.MissingSigningKey:
+            self.reply(render_error("a signing key is required for a remote action"), 400)
+            return
         body = (
             f"<header><h1>{esc(repo)}</h1><span class=sp></span>"
-            "<a href='/'>back to dashboard</a></header>"
-            f"<pre style='max-height:none'>{esc(out.rstrip() or '(no output)')}</pre>"
+            "<a href='/loops'>back to loops</a></header>"
+            f"<pre style='max-height:none'>{esc(out.rstrip() or '(request sent; no output returned)')}</pre>"
         )
-        self.reply(page(f"peek {repo}", body, active="overview"))
+        self.reply(page(f"peek {repo}", body, active="loops"))
+
+
+    def do_loops_state(self, form: dict) -> None:
+        repo = form.get("repo", [""])[0].strip()
+        machine = form.get("machine", [""])[0].strip()
+        if not repo or not _valid_repo_name(repo) or not machine:
+            self.reply(render_error("bad state request"), 400)
+            return
+        local_host = machines.hostname()
+        if machine != local_host and not self.cmd_signing_key:
+            self.reply(render_error("reading state on another machine needs --cmd-signing-key or $LUPIN_CMD_SIGNING_KEY"), 400)
+            return
+        try:
+            result = loops.dispatch_loop_action(
+                machine=machine,
+                local_host=local_host,
+                local_argv=["lupin", "loop", "local-action", "state", repo],
+                queue_action="loop.state",
+                queue_params={"repo": repo},
+                connection=self.fleet_connection,
+                signing_key=self.cmd_signing_key,
+                actor="lupin-dashboard",
+                issuer=local_host,
+                run_local=lambda argv: run(argv, timeout=20.0),
+            )
+        except CoordinatorUnreachable:
+            self.reply(render_error("cannot reach the redis coordinator"), 502)
+            return
+        output = result.get("output") if result["mode"] == "local" else "state request sent"
+        if result["mode"] == "local" and result["returncode"] != 0:
+            self.reply(render_error(f"state request failed: {output.strip()}"), 502)
+            return
+        self.reply(page(f"state {repo}", f"<div class=card><pre>{esc(output)}</pre></div>", active="loops"))
 
     def quest_state(self, quest_id: str) -> dict | None:
         """Read `quest:<quest_id>` and work out which of its issues are
@@ -3116,6 +3122,8 @@ class Handler(BaseHTTPRequestHandler):
             self.do_set_slot_max(form)
         elif url.path == "/loops/close":
             self.do_loops_close(form)
+        elif url.path == "/loops/state":
+            self.do_loops_state(form)
         elif url.path == "/loops/start":
             self.do_loops_start(form)
         elif url.path == "/schedule/timer":

@@ -97,6 +97,8 @@ class BuildArgvTests(unittest.TestCase):
         self.assertIn("--restricted", argv)
         tools_index = argv.index("--tools")
         self.assertEqual(argv[tools_index + 1], "WebSearch,WebFetch")
+        allowed_index = argv.index("--allowedTools")
+        self.assertEqual(argv[allowed_index + 1], "WebSearch,WebFetch")
         self.assertIn("--permission-prompts", argv)
         self.assertIn("none", argv)
         self.assertIn("--strict-mcp-config", argv)
@@ -320,6 +322,26 @@ class CliFetchBenchmarksTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse(refresh.call_args.kwargs["force"])
 
+
+    def test_cli_plain_summary_reports_numeric_scores_and_snapshot_age(self):
+        fixed = {
+            "fetched_at": "2000-01-01T00:00:00+00:00",
+            "live": True,
+            "scores": [
+                {"id": "missing", "score": None},
+                {"id": "x", "score": 1},
+            ],
+        }
+        with (
+            mock.patch.object(benchmark_fetch, "refresh_snapshot", return_value=fixed),
+            mock.patch("builtins.print") as output,
+        ):
+            self.assertEqual(cli.main(["fetch-benchmarks"]), 0)
+        output.assert_called_once()
+        self.assertRegex(
+            output.call_args.args[0],
+            r"benchmarks: 1/2 scored \(live; fetched \d+h ago\)",
+        )
 
 if __name__ == "__main__":
     unittest.main()

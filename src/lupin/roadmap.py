@@ -1722,7 +1722,7 @@ def render_combined_page(repos: list[str], models: dict, page_fn) -> bytes:
     body = (
         "<header><h1>Work across repositories</h1><span class='sp'></span>"
         "<a href='/roadmap?view=list'>list view</a> · "
-        "<a href='/'>loopctl dashboard</a></header>"
+        "<a href='/'>Lupin dashboard</a></header>"
         "<form class='queue-filter'><label for='repo'>Repository</label>"
         f"<select id='repo' onchange='location.href=this.value'>{''.join(selector)}</select>"
         "<label for='roadmap-labels'>Labels</label>"

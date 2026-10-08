@@ -2,8 +2,8 @@
 
 This is the wiring for issue #185: `route.route()` (issue #184) already picks
 a {model, effort} pair; this module picks which lock that pair needs, so the
-shell dispatch code in hosts/jesus/configuration.nix/loopctl.nix can reuse
-the existing claude-dispatch.lock/omp.lock machinery instead of a hardcoded
+shell dispatch code in `hosts/jesus/configuration.nix` can reuse the
+existing claude-dispatch.lock/omp.lock machinery instead of a hardcoded
 model. It decides; it never touches a lock or a process itself -- same
 division of work as route.py.
 

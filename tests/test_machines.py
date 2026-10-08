@@ -144,19 +144,20 @@ def test_heartbeat_does_not_wipe_out_of_band_providers(redis_port, flush_redis, 
 
 
 def test_join_writes_session_backend_and_actions(redis_port, flush_redis, tmp_path):
-    """Issue #2 phase A: every heartbeat record publishes a fixed
-    `session_backend` and the actual `agent.ACTIONS` table -- never a
-    hand-maintained copy that could drift from what the agent really runs.
-    """
+    """Every heartbeat record publishes the active backend and the
+    actions in `agent.ACTIONS`."""
     record = machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
-    assert record["session_backend"] == "tmux"
+    assert record["session_backend"] == "herdr"
     assert record["actions"] == sorted(agent_mod.ACTIONS)
 
 
 def test_heartbeat_writes_the_loops_list_given(redis_port, flush_redis, tmp_path):
     kw = _kw(redis_port)
     machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
-    loops_payload = [{"repo": "widgets", "platform": "claude", "state": None, "since": "2026-01-01T00:00:00Z"}]
+    loops_payload = [{
+        "repo": "widgets", "platform": "claude", "state": "running", "since": "2026-01-01T00:00:00Z",
+        "backend": "herdr", "session": "widgets", "workspace_id": "workspace-1", "pane_id": "pane-1",
+    }]
 
     record = machines.heartbeat(kw, loops=loops_payload)
 
@@ -166,7 +167,7 @@ def test_heartbeat_writes_the_loops_list_given(redis_port, flush_redis, tmp_path
 def test_heartbeat_does_not_wipe_out_of_band_loops_when_not_given(redis_port, flush_redis, tmp_path):
     kw = _kw(redis_port)
     machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
-    loops_payload = [{"repo": "widgets", "platform": "claude", "state": None, "since": None}]
+    loops_payload = [{"repo": "widgets", "platform": "claude", "state": "running", "since": None}]
     machines.heartbeat(kw, loops=loops_payload)
 
     # A later heartbeat that doesn't recompute loops (e.g. a caller that
@@ -174,6 +175,24 @@ def test_heartbeat_does_not_wipe_out_of_band_loops_when_not_given(redis_port, fl
     refreshed = machines.heartbeat(kw)
 
     assert refreshed["loops"] == loops_payload
+
+
+def test_machine_repo_inventory_is_updated_and_kept(redis_port, flush_redis, tmp_path):
+    kw = _kw(redis_port)
+    initial = [{"repo": "widgets", "enabled": False, "loopable": True}]
+    updated = [{"repo": "widgets", "enabled": True, "loopable": True}]
+    machines.join(
+        f"127.0.0.1:{redis_port}",
+        config_path=tmp_path / "fleet.json",
+        repos=initial,
+    )
+
+    refreshed = machines.heartbeat(kw, repos=updated)
+    machines.drain(kw)
+
+    assert refreshed["repos"] == updated
+    record = {row["name"]: row for row in machines.machines(kw)}[machines.hostname()]
+    assert record["repos"] == updated
 
 
 def test_drain_and_undrain_flip_state(redis_port, flush_redis, tmp_path):
@@ -210,13 +229,18 @@ def test_machines_surfaces_actions_field(redis_port, flush_redis, tmp_path):
 def test_machines_lists_loops_session_backend_and_actions(redis_port, flush_redis, tmp_path):
     kw = _kw(redis_port)
     machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
-    machines.heartbeat(kw, loops=[{"repo": "widgets", "platform": "claude", "state": None, "since": None}])
+    loops_payload = [{
+        "repo": "widgets", "platform": "claude", "state": "running", "since": None,
+        "backend": "herdr", "session": "widgets", "workspace_id": "workspace-1", "pane_id": "pane-1",
+    }]
+
+    machines.heartbeat(kw, loops=loops_payload)
 
     result = {m["name"]: m for m in machines.machines(kw)}
     record = result[machines.hostname()]
 
-    assert record["loops"] == [{"repo": "widgets", "platform": "claude", "state": None, "since": None}]
-    assert record["session_backend"] == "tmux"
+    assert record["loops"] == loops_payload
+    assert record["session_backend"] == "herdr"
     assert record["actions"] == sorted(agent_mod.ACTIONS)
 
 
@@ -230,6 +254,7 @@ def test_machines_defaults_loops_fields_for_an_old_heartbeat_shape(redis_port, f
     assert result[0]["loops"] == []
     assert result[0]["session_backend"] is None
     assert result[0]["actions"] == []
+    assert result[0]["repos"] == []
 
 
 def test_machines_reports_version_mismatch_without_raising(redis_port, flush_redis):
@@ -254,13 +279,16 @@ def test_cli_join_heartbeat_drain_undrain_machines_roundtrip(
     config_path = str(tmp_path / "fleet.json")
     common = ["--config-path", config_path, "--redis-host", "127.0.0.1", "--redis-port", str(redis_port)]
 
-    # `join` takes the coordinator as a positional host:port, not
-    # --redis-host/--redis-port -- only --config-path applies to it.
-    assert cli.main(["join", f"127.0.0.1:{redis_port}", "--config-path", config_path]) == 0
-    capsys.readouterr()
-
-    assert cli.main(["heartbeat", *common]) == 0
-    capsys.readouterr()
+    # `join` takes the coordinator as a positional host:port.
+    repo_inventory = [{"repo": "widgets", "enabled": True, "loopable": True}]
+    with (
+        mock.patch.object(cli.loop_runtime, "local_loops", return_value=[]),
+        mock.patch.object(cli.serve, "local_repo_inventory", return_value=repo_inventory),
+    ):
+        assert cli.main(["join", f"127.0.0.1:{redis_port}", "--config-path", config_path]) == 0
+        capsys.readouterr()
+        assert cli.main(["heartbeat", *common]) == 0
+        capsys.readouterr()
 
     assert cli.main(["drain", *common]) == 0
     capsys.readouterr()
@@ -271,6 +299,7 @@ def test_cli_join_heartbeat_drain_undrain_machines_roundtrip(
     listed = json.loads(captured.out)
     assert len(listed) == 1
     assert listed[0]["name"] == machines.hostname()
+    assert listed[0]["repos"] == repo_inventory
     assert listed[0]["state"] == "draining"
 
     assert cli.main(["undrain", *common]) == 0

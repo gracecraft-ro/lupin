@@ -6,6 +6,7 @@ fixtures in `conftest.py`, same as `test_claims.py`/`test_slots_redis.py`.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 import redis as redis_lib
@@ -122,8 +123,10 @@ def test_get_status_returns_cmdres_when_present(redis_port, flush_redis):
     assert status["state"] == "ok"
 
 
-def test_get_queue_lists_pending_oldest_first(redis_port, flush_redis):
+def test_get_queue_lists_pending_oldest_first(redis_port, flush_redis, monkeypatch):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    timestamps = iter((1_800_000_000.001, 1_800_000_000.002))
+    monkeypatch.setattr(commands, "time", SimpleNamespace(time=lambda: next(timestamps)))
     first = commands.enqueue("jesus", "loop.stop", {"repo": "a"}, key="secret", **ACTOR_KW, **kw)
     second = commands.enqueue("jesus", "loop.run", {"repo": "b"}, key="secret", **ACTOR_KW, **kw)
     entries = commands.get_queue("jesus", **kw)
