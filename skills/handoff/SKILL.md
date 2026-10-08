@@ -40,12 +40,26 @@ GitHub issue. It does not read this conversation.
 
    Lupin records the time and host. Do not edit or remove old entries.
 
-3. If `lupin ledger append` exits 3, Redis is not available. Append the same
-   entry to `.loop/loop-state.json` in the repo root instead. Create the file
-   as a JSON array if it does not exist. Use these keys: `timestamp`,
-   `issue`, `branch`, `status`, `summary`, `highlights`, `evidence`,
-   `decisions`, `next`. Say in the issue comment (step 4) that the ledger was
-   not available. The next orchestrator reads both places.
+3. Run step 2 on a machine that can reach Redis. If `lupin` is not found
+   (exit 127), or the command cannot connect, you are probably on the wrong
+   machine. Do not use the file yet. Run the command on a fleet machine, for
+   example over ssh. Set the `LUPIN_REDIS_*` variables there if its shell
+   does not have them.
+
+   Use the file only when `lupin ledger append` runs and exits 3. That exit
+   code means Redis is not available. Then add the same entry to
+   `.loop/loop-state.json` in the repo root:
+
+   - If the file exists, add the entry to its `entries` list. Copy the keys of
+     the entries that are already there.
+   - If the file does not exist, create `{"entries": []}` and add the entry.
+   - Use these keys: `ts` (UTC, ISO 8601), `event` (`"handoff"`), `issue`,
+     `branch`, `status`, `summary`, `highlights`, `evidence`, `decisions`,
+     `next`.
+
+   Say in the issue comment (step 4) that the ledger was not available. Append
+   the entry to the ledger when Redis is back. The next orchestrator reads both
+   places.
 
 4. Comment on the GitHub issue: what is done, what is left, and that this is
    a handoff. Use `gh issue comment N --repo OWNER/REPO --body-file -`. If the
