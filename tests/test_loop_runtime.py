@@ -487,3 +487,80 @@ def test_send_loop_refuses_a_loop_that_is_not_running(monkeypatch):
 
     with pytest.raises(loop_runtime.LoopError):
         loop_runtime.send_loop("widgets", "hello")
+
+
+def _stop_harness(monkeypatch, tmp_path: Path, *, agent: dict | None, prompt_error: str | None = None):
+    """Patch stop_loop's Herdr and systemd calls; return the ordered action list."""
+    metadata = {
+        "repo": "widgets",
+        "platform": "claude",
+        "session": "lupin-widgets-abc123",
+        "state": "running",
+        "workspace_id": "workspace-1",
+        "pane_id": "pane-1",
+    }
+    actions = []
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: dict(metadata))
+    monkeypatch.setattr(loop_runtime, "_start_server_for_read", lambda repo, data: data["session"])
+    monkeypatch.setattr(loop_runtime, "_find_workspace", lambda session, data: {"id": "workspace-1"})
+    monkeypatch.setattr(loop_runtime, "_save_report", lambda repo, session, workspace: tmp_path / "report.log")
+    monkeypatch.setattr(loop_runtime, "_workspace_id", lambda workspace: workspace["id"])
+    monkeypatch.setattr(loop_runtime, "_agent_for_workspace", lambda session, workspace_id: agent)
+    monkeypatch.setattr(loop_runtime, "_herdr_json", lambda session, *args: actions.append(args) or {})
+    monkeypatch.setattr(loop_runtime, "_workspaces", lambda session: [])
+    monkeypatch.setattr(loop_runtime, "_write_metadata", lambda repo, value: None)
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: (0, "inactive"))
+
+    def herdr(session, *args, timeout=loop_runtime.HERDR_TIMEOUT):
+        actions.append(args)
+        if args[:2] == ("agent", "prompt") and prompt_error:
+            raise loop_runtime.HerdrError(prompt_error)
+        return ""
+
+    monkeypatch.setattr(loop_runtime, "_herdr", herdr)
+    return actions
+
+
+def test_stop_asks_the_agent_for_a_handoff_before_closing(monkeypatch, tmp_path: Path):
+    actions = _stop_harness(monkeypatch, tmp_path, agent={"name": "lupin-loop"})
+
+    result = loop_runtime.stop_loop("widgets")
+
+    prompt = next(a for a in actions if a[:2] == ("agent", "prompt"))
+    assert prompt[2] == loop_runtime.AGENT_NAME
+    assert "/handoff" in prompt[3]
+    assert prompt[4:] == ("--wait", "--timeout", "600000")
+    assert actions.index(prompt) < actions.index(("workspace", "close", "workspace-1"))
+    assert result == "stopped widgets; report saved to " + str(tmp_path / "report.log")
+
+
+def test_stop_force_skips_the_handoff(monkeypatch, tmp_path: Path):
+    actions = _stop_harness(monkeypatch, tmp_path, agent={"name": "lupin-loop"})
+
+    loop_runtime.stop_loop("widgets", force=True)
+
+    assert not any(a[:2] == ("agent", "prompt") for a in actions)
+    assert ("workspace", "close", "workspace-1") in actions
+
+
+def test_stop_still_closes_when_the_handoff_wait_times_out(monkeypatch, tmp_path: Path):
+    actions = _stop_harness(
+        monkeypatch, tmp_path, agent={"name": "lupin-loop"}, prompt_error="timeout waiting for agent"
+    )
+
+    result = loop_runtime.stop_loop("widgets", grace=30)
+
+    assert ("workspace", "close", "workspace-1") in actions
+    assert result.endswith("; the agent did not finish its handoff in 30s")
+
+
+def test_stop_closes_nothing_when_the_agent_cannot_be_asked(monkeypatch, tmp_path: Path):
+    actions = _stop_harness(
+        monkeypatch, tmp_path, agent={"name": "lupin-loop"}, prompt_error="agent_blocked"
+    )
+
+    with pytest.raises(loop_runtime.LoopError, match="Add --force"):
+        loop_runtime.stop_loop("widgets")
+
+    assert ("workspace", "close", "workspace-1") not in actions

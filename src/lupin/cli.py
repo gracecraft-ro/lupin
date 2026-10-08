@@ -115,7 +115,7 @@ from . import loop_runtime
 DEFAULT_RESULT_WAIT_S = 20.0  # how long stop/peek/schedule/pause/resume
 # wait, by default, for a remote result before they report exit code 4
 # ("sent, result unknown"). This is not how long the action itself is
-# allowed to run -- that limit is agent.py's own EXEC_TIMEOUT_S (120s). A
+# allowed to run -- that limit is agent.py's own EXEC_TIMEOUT_S (120s; 900s for stop). A
 # caller who wants to wait longer than 20 seconds passes --wait.
 
 
@@ -517,6 +517,10 @@ def _wait_arg(parser: argparse.ArgumentParser) -> None:
 def _stop_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("repo")
     parser.add_argument("--machine", default=None, help="skip resolving which machine runs repo's loop")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="stop now; do not ask the agent to run /handoff first",
+    )
     parser.add_argument("--json", action="store_true")
     _wait_arg(parser)
     _signing_key_arg(parser)
@@ -1673,8 +1677,8 @@ def _cmd_stop(args: argparse.Namespace) -> int:
     try:
         result = loops_mod.dispatch_loop_action(
             machine=machine, local_host=local_host,
-            local_argv=["lupin", "loop", "local-action", "stop", args.repo],
-            queue_action="loop.stop", queue_params={"repo": args.repo},
+            local_argv=["lupin", "loop", "local-action", "stop", args.repo, *(["--force"] if args.force else [])],
+            queue_action="loop.stop", queue_params={"repo": args.repo, "force": args.force},
             connection=connection, signing_key=args.signing_key,
             actor=os.environ.get("USER", "lupin"), issuer=local_host, wait_s=args.wait,
         )

@@ -2132,7 +2132,7 @@ class LoopsRouteUnitTests(unittest.TestCase):
         ):
             handler.do_POST()
         fake_run.assert_called_once_with(
-            ["lupin", "loop", "local-action", "stop", "a"], timeout=20.0
+            ["lupin", "loop", "local-action", "stop", "a", "--force"], timeout=20.0
         )
         handler.redirect.assert_called_once_with("/loops?repo=a")
 
@@ -2152,8 +2152,8 @@ class LoopsRouteUnitTests(unittest.TestCase):
             handler.do_POST()
         self.assertEqual(
             [call.args[0] for call in fake_run.call_args_list],
-            [["lupin", "loop", "local-action", "stop", "a"],
-             ["lupin", "loop", "local-action", "stop", "b"]],
+            [["lupin", "loop", "local-action", "stop", "a", "--force"],
+             ["lupin", "loop", "local-action", "stop", "b", "--force"]],
         )
 
     def test_stop_route_reports_a_local_lupin_failure(self):
@@ -2276,7 +2276,7 @@ class TestLoopsPageIntegration:
         assert len(queued) == 1
         stored = json.loads(raw.get(f"lupin:v1:cmd:{queued[0]}"))
         assert stored["action"] == "loop.stop"
-        assert stored["params"] == {"repo": "widgets"}
+        assert stored["params"] == {"repo": "widgets", "force": True}
         assert stored["target"] == "jesus"
         assert stored["issuer"] == "pihome"
         assert commands.verify(stored, "secret") is True

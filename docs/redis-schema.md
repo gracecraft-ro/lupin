@@ -344,6 +344,10 @@ fixed action table: `loop.stop`, `loop.run`, `loop.run-all`, `loop.peek`,
 `loop.state`, `schedule.show`, `schedule.set`, `schedule.pause`, and
 `schedule.resume`.
 
+`loop.stop` takes `repo` and an optional boolean `force`. Without `force`, the
+stop asks the agent for a handoff first, so the agent allows `loop.stop` 900
+seconds to run. Other actions get 120 seconds.
+
 ### `cmd:<id>`
 
 Written once by `lupin cmd send`, via one `EVAL` that does `SET ... NX`

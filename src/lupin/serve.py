@@ -3130,8 +3130,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 result = loops.dispatch_loop_action(
                     machine=machine, local_host=local_host,
-                    local_argv=["lupin", "loop", "local-action", "stop", target],
-                    queue_action="loop.stop", queue_params={"repo": target},
+                    local_argv=["lupin", "loop", "local-action", "stop", target, "--force"],
+                    queue_action="loop.stop", queue_params={"repo": target, "force": True},
                     connection=self.fleet_connection, signing_key=signing_key,
                     actor="lupin-dashboard", issuer=local_host,
                     run_local=lambda argv: run(argv, timeout=20.0),

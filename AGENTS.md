@@ -47,7 +47,7 @@ lupin once <when> [repo ...] [--platform claude|omp] [--note TEXT] [--resume]
 lupin enable <repo> [--platform claude|omp]
 lupin disable <repo>
 lupin loops [repo] [--machine M] [--json]
-lupin stop <repo> [--machine M] [--wait S] [--json]
+lupin stop <repo> [--machine M] [--force] [--wait S] [--json]
 lupin peek <repo> [LINES] [--machine M] [--json]
 lupin attach <repo> [--machine M] [--print]
 lupin schedule [--machine M] [--json]
@@ -135,6 +135,16 @@ management. Do not pass it in command arguments or save it in global
 environment settings. Exit code 4 means the result is unknown after the
 wait; check it with `lupin cmd status <id>`. `stop`, `peek`, and `attach`
 need `--machine` if Lupin cannot find one machine for the repo.
+
+`stop` asks the agent to run `/handoff` before it closes anything. It waits up
+to 10 minutes for the agent to finish. Then it saves a report, closes the
+workspace, and stops the worker. If the wait ends first, `stop` continues and
+says so in its output. If Herdr cannot send the request (for example, the
+agent waits for your answer), `stop` closes nothing and exits non-zero. Use
+`--force` to stop at once without a handoff. A remote `stop` can take longer
+than `--wait`. Then it exits with code 4. Check it with `lupin cmd status <id>`.
+The dashboard Stop button always uses `--force`. Its request cannot wait 10
+minutes.
 
 `attach` never uses the queue. It opens Herdr here or connects to the remote
 Herdr server over SSH. `--print` shows the command instead of running it.

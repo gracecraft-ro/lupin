@@ -196,6 +196,49 @@ def test_valid_repo_format_is_passed_to_lupin(redis_port, flush_redis, monkeypat
     assert fake.calls == [["lupin", "loop", "local-action", "stop", "field-trip_2.0"]]
 
 
+def test_loop_stop_force_is_passed_to_lupin(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    commands.enqueue("jesus", "loop.stop", {"repo": "lupin", "force": True}, key=KEY, **ACTOR_KW, **kw)
+
+    fake = _fake_run()
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    agent.poll_once("jesus", KEY, **kw)
+
+    assert fake.calls == [["lupin", "loop", "local-action", "stop", "lupin", "--force"]]
+
+
+def test_loop_stop_rejects_a_force_that_is_not_a_boolean(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    cmd_id = commands.enqueue("jesus", "loop.stop", {"repo": "lupin", "force": "yes"}, key=KEY, **ACTOR_KW, **kw)
+
+    fake = _fake_run()
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert fake.calls == []
+    assert touched == [{"id": cmd_id, "state": "rejected"}]
+    assert "force must be true or false" in commands.get_status(cmd_id, **kw)["reason"]
+
+
+def test_loop_stop_gets_more_time_than_other_actions(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    commands.enqueue("jesus", "loop.stop", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)
+    timeouts = []
+
+    def run(argv, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(agent.subprocess, "run", run)
+
+    agent.poll_once("jesus", KEY, **kw)
+
+    assert timeouts == [agent.ACTION_TIMEOUT_S["loop.stop"]]
+    assert timeouts[0] > agent.EXEC_TIMEOUT_S
+
+
 def test_command_for_a_different_machine_is_never_picked_up(redis_port, flush_redis, monkeypatch):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     commands.enqueue("ralpha", "loop.stop", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)

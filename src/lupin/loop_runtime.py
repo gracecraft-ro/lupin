@@ -35,6 +35,13 @@ DEFAULT_PROMPT = (
 HERDR_TIMEOUT = 20.0
 SERVER_START_TIMEOUT = 30.0
 LEASE_TTL = 60.0
+HANDOFF_GRACE_S = 600.0
+HANDOFF_TEXT = (
+    "Lupin will stop this loop shortly. Run /handoff now: write an entry to the "
+    ".loop/loop-state.json ledger (issue number if any, repo, branch, last known "
+    "status) and update the relevant GitHub issue. Lupin stops this loop when you "
+    "finish, or after the wait time ends."
+)
 
 
 class LoopError(Exception):
@@ -829,7 +836,34 @@ def _start_server_for_read(repo: str, metadata: dict) -> str:
     return session
 
 
-def stop_loop(repo: str) -> str:
+def _request_handoff(repo: str, session: str, workspace: dict, grace: float) -> str:
+    """Ask the loop's agent to run /handoff and wait until it settles.
+
+    Returns a note for the stop message, or "" when nothing needs saying.
+    A wait that ends without a settled agent is not an error: the text sent
+    to the agent says the stop happens anyway. Any other failure raises, so
+    nothing is closed. `--force` skips this step.
+    """
+    workspace_id = _workspace_id(workspace)
+    if not workspace_id or _agent_for_workspace(session, workspace_id) is None:
+        return ""
+    try:
+        _herdr(
+            session, "agent", "prompt", AGENT_NAME, HANDOFF_TEXT,
+            "--wait", "--timeout", str(int(grace * 1000)),
+            timeout=grace + HERDR_TIMEOUT,
+        )
+    except HerdrError as exc:
+        if "timeout" in str(exc).lower():
+            return f"; the agent did not finish its handoff in {int(grace)}s"
+        raise LoopError(
+            f"could not ask the agent for {repo} to hand off: {exc}. "
+            "Nothing was stopped. Add --force to stop it anyway."
+        ) from exc
+    return ""
+
+
+def stop_loop(repo: str, *, force: bool = False, grace: float = HANDOFF_GRACE_S) -> str:
     repo = validate_repo(repo)
     lock = _lock_file(repo)
     try:
@@ -840,7 +874,10 @@ def stop_loop(repo: str) -> str:
         session = _start_server_for_read(repo, metadata)
         workspace = _find_workspace(session, metadata)
         report = None
+        handoff_note = ""
         if workspace is not None:
+            if not force:
+                handoff_note = _request_handoff(repo, session, workspace, grace)
             report = _save_report(repo, session, workspace)
             workspace_id = _workspace_id(workspace)
             if not workspace_id:
@@ -861,7 +898,7 @@ def stop_loop(repo: str) -> str:
         metadata["workspace_id"] = None
         metadata["pane_id"] = None
         _write_metadata(repo, metadata)
-        return f"stopped {repo}" + (f"; report saved to {report}" if report else "")
+        return f"stopped {repo}" + (f"; report saved to {report}" if report else "") + handoff_note
     finally:
         lock.close()
 
@@ -1274,7 +1311,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.action == "local-action":
             if args.local_action == "stop":
-                print(stop_loop(args.action_args[0]))
+                print(stop_loop(args.action_args[0], force="--force" in args.action_args[1:]))
             elif args.local_action == "peek":
                 lines = int(args.action_args[1]) if len(args.action_args) > 1 else 60
                 print(peek_loop(args.action_args[0], lines))

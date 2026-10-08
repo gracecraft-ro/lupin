@@ -220,6 +220,20 @@ def test_stop_json_shape(capsys):
     assert json.loads(captured.out) == {"mode": "local", "returncode": 0, "output": "ok"}
 
 
+@pytest.mark.parametrize(
+    "extra, local_tail, force",
+    [([], [], False), (["--force"], ["--force"], True)],
+)
+def test_stop_passes_force_to_local_and_queued_stops(extra, local_tail, force):
+    with mock.patch.object(
+        loops, "dispatch_loop_action", return_value={"mode": "local", "returncode": 0, "output": ""}
+    ) as dispatch:
+        cli.main(["stop", "widgets", "--machine", "h", *extra])
+    kwargs = dispatch.call_args.kwargs
+    assert kwargs["local_argv"] == ["lupin", "loop", "local-action", "stop", "widgets", *local_tail]
+    assert kwargs["queue_params"] == {"repo": "widgets", "force": force}
+
+
 def test_stop_ambiguous_machine_exits_five(capsys):
     with mock.patch.object(loops, "resolve_machine_for_repo", side_effect=loops.AmbiguousMachine("widgets", [])):
         code = cli.main(["stop", "widgets"])

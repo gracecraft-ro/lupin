@@ -49,6 +49,9 @@ from .slots_redis import _call_with_retry, _client
 DEFAULT_BATCH = 20  # design: "ZRANGE the oldest 20"
 DEFAULT_POLL_INTERVAL = 2.0
 EXEC_TIMEOUT_S = 120.0
+# A stop that asks the agent for a handoff waits up to loop_runtime.HANDOFF_GRACE_S
+# (600s) for it, so it gets more time than other actions.
+ACTION_TIMEOUT_S = {"loop.stop": 900.0}
 OUTPUT_CAP = 8192  # 8 KiB, combined stdout+stderr -- design's "last 8 KiB combined"
 
 # Defense in depth: queue commands must pass this strict repo-name check.
@@ -135,7 +138,10 @@ def _handle_repo_enable(params: dict, cmd_id: str) -> list[str]:
 
 def _handle_loop_stop(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
-    return ["lupin", "loop", "local-action", "stop", repo]
+    force = params.get("force", False)
+    if not isinstance(force, bool):
+        raise RejectedCommand("force must be true or false")
+    return ["lupin", "loop", "local-action", "stop", repo, *(["--force"] if force else [])]
 
 
 def _validate_platform(value) -> str:
@@ -332,7 +338,7 @@ def _process_one(client, machine: str, key: str, cmd_id: str) -> dict:
         return {"id": cmd_id, "state": "lost-race"}
 
     try:
-        proc = subprocess.run(argv, shell=False, capture_output=True, text=True, timeout=EXEC_TIMEOUT_S)
+        proc = subprocess.run(argv, shell=False, capture_output=True, text=True, timeout=ACTION_TIMEOUT_S.get(action, EXEC_TIMEOUT_S))
         combined = (proc.stdout or "") + (proc.stderr or "")
         payload = {
             "id": cmd_id,
