@@ -37,11 +37,9 @@ counts as unreachable too). Every other slot name raises
 for a hypothetical second fleet slot, v1 only has `bmo`, so this module does
 not invent a rule for a slot that does not exist yet.
 
-Claims (`claim:<owner>/<repo>#<n>`) and the ledger stream are schema v1
-concepts this module does not implement -- claims are issue #212, the
-ledger is a later sub-issue. `cli.py` has no `claim`/`ledger` subcommands to
-wire a fallback into, so there is no fallback code path to stub out here
-either; this comment is the marker for both.
+Claims and ledger streams are fleet keys. `claims.py` and `ledger.py`
+implement them separately. Neither uses a local fallback when Redis is
+unreachable.
 """
 
 from __future__ import annotations

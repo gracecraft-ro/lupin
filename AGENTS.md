@@ -11,12 +11,13 @@
 3. It serves a dashboard for the loops, for both viewing and controlling
    them (start/stop/close a loop, add or remove a repo, trigger a run,
    adjust a machine's slots). Command: `serve`.
-4. It coordinates a fleet of machines: GitHub-issue claims, a machine
-   registry, and quests (a set of issues worked together on one machine).
-   Commands: `claim`, `renew-claim`, `release-claim`, `join`, `heartbeat`,
-   `drain`, `undrain`, `machines`, `place`, `quest`, `reconcile`, `roadmap`.
-   Loop lifecycle: `run`, `once`, `enable`, `disable`, `loops`, `stop`,
-   `peek`, `attach`, `schedule`, `pause`, `resume`.
+4. It coordinates a fleet of machines: issue claims, machine records, quests
+   (sets of issues worked together on one machine), and shared repository
+   events. Commands: `claim`, `renew-claim`, `release-claim`, `join`,
+   `heartbeat`, `drain`, `undrain`, `machines`, `place`, `quest`, `reconcile`,
+   `roadmap`, `ledger`.
+   Loop lifecycle: `run`, `once`, `enable`, `disable`, `loops`, `stop`, `peek`,
+   `attach`, `schedule`, `pause`, `resume`.
 
 One program, `lupin`, with subcommands. Run `lupin --help` for the full list.
 
@@ -34,6 +35,10 @@ lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
 lupin hold (--lease ID | <slot> --holder H --wait S) [--ttl SECONDS] -- <command>
 lupin release --lease ID
 lupin status [--json]
+lupin ledger append OWNER/REPO --event EVENT [--issue N] [--status S] \
+  [--branch B] [--summary TEXT] [--highlights TEXT] [--evidence TEXT] \
+  [--decisions TEXT] [--next TEXT] [--child N] [--json]
+lupin ledger read OWNER/REPO [--limit N] [--json]
 lupin serve [--bind 127.0.0.1] [--port 8788] [--roadmap REPO]
 lupin agent [--machine M] [--batch N] [--poll-interval S]
 lupin run <repo> [--machine M] [--platform claude|omp] [--note TEXT] [--resume]
@@ -54,6 +59,13 @@ lupin resume [--machine M | --all] [--json]
 
 `route` and `classify` print a plain result by default (`model effort`, or
 `category size`). Add `--json` for a JSON object instead.
+
+`ledger append` stores events in Redis. It records the time and host. Repeat
+digest options to add more than one item. Repeat `--child` for each split
+issue. `ledger read --json` returns the latest 10 events, oldest first.
+Use `--limit N` to choose another positive count. Both commands exit 3 if
+Redis is unavailable. The roadmap shows no ledger annotations and a warning.
+It ignores `.loop/loop-state.json`.
 
 `review-route --prefetch` fetches issue/PR text up front -- body, comments,
 and (for a PR) reviews and a diff stat (changed files, additions/deletions,
@@ -190,6 +202,7 @@ The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
   IDs and prices per subscription.
 - `src/lupin/claims.py` — `claim`/`renew-claim`/`release-claim`: one GitHub
   issue claimed by one host at a time.
+- `src/lupin/ledger.py` — appends and reads shared repository events in Redis.
 - `src/lupin/machines.py` — `join`/`heartbeat`/`drain`/`undrain`/`machines`:
   the fleet's machine registry.
 - `src/lupin/loops.py` — signed local-or-remote dispatch for loop controls.

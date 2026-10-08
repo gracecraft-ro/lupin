@@ -16,10 +16,10 @@ from urllib.parse import quote, urlsplit
 
 from . import classify
 from . import gh_cache
+from . import ledger as ledger_store
 
 CODE_DIR = "/code"
 GITHUB_CACHE_SECONDS = 60 * 60
-LEDGER_CACHE_SECONDS = 5 * 60
 GRAPHQL = """query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){issues(first:100,after:$cursor,states:OPEN,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number comments(last:20){nodes{body createdAt url author{login}}}} pageInfo{hasNextPage endCursor}}}}"""
 IMAGE = re.compile(r"!\[([^\]]*)\]\((https://[^)\s]+)\)")
 ATTACHMENT_ID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
@@ -107,7 +107,6 @@ BOTTLENECKS = {
     "roundsmith": {"index.html", "src/ui/shell.ts", "src/styles/components.css"},
 }
 _GITHUB_CACHE = {}
-_LEDGER_CACHE = {}
 _CACHE_LOCK = threading.Lock()
 CACHE_FILE = os.path.join(
     os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
@@ -134,13 +133,6 @@ def _load_cache():
                     now_monotonic - max(0, now_wall - timestamp),
                     tuple(data),
                 )
-        for row in saved.get("ledger", []):
-            if isinstance(row, list) and len(row) == 3:
-                repo, timestamp, data = row
-                _LEDGER_CACHE[repo] = (
-                    now_monotonic - max(0, now_wall - timestamp),
-                    tuple(data),
-                )
 
 
 def _persist_cache():
@@ -150,10 +142,6 @@ def _persist_cache():
         "github": [
             [repo, state, now_wall - max(0, now_monotonic - timestamp), data]
             for (repo, state), (timestamp, data) in _GITHUB_CACHE.items()
-        ],
-        "ledger": [
-            [repo, now_wall - max(0, now_monotonic - timestamp), data]
-            for repo, (timestamp, data) in _LEDGER_CACHE.items()
         ],
     }
     try:
@@ -201,25 +189,21 @@ def _run_json(argv: list[str], cwd: str, timeout: int = 60):
         return None, f"invalid JSON from {argv[0]}: {error}"
 
 
-def _read_ledger(repo_path: str):
-    path = os.path.join(repo_path, ".loop", "loop-state.json")
+def _read_ledger(repo_path: str, *, connection: dict | None = None):
+    owner, name, error = _repo_identity(repo_path)
+    if error:
+        return [], f"Could not identify repository for Redis ledger: {error}"
     try:
-        with open(path, encoding="utf-8") as handle:
-            ledger = json.load(handle)
-    except OSError as error:
-        return [], f"Could not read .loop/loop-state.json: {error.strerror or error}"
-    except json.JSONDecodeError as error:
-        return [], f"Could not parse .loop/loop-state.json: {error}"
-    if isinstance(ledger, list):
-        return ledger, None
-    if isinstance(ledger, dict) and isinstance(ledger.get("entries"), list):
-        return ledger["entries"], None
-    return [], ".loop/loop-state.json has an unsupported format"
+        # Roadmap status can depend on events older than the default limit.
+        events = ledger_store.read_events(
+            f"{owner}/{name}", limit=None, **(connection or {})
+        )
+        return events, None
+    except ledger_store.CoordinatorUnreachable as error:
+        return [], f"Repository ledger is unavailable: {error}"
 
 
 # A digest is the handoff summary split into four labelled bullet lists.
-# Old entries carry the same content as prose in `summary` and `followups`;
-# `_digest` reads those too, so a ledger written before the split still renders.
 DIGEST_FIELDS = (
     ("highlights", "Highlights"),
     ("evidence", "Evidence"),
@@ -252,8 +236,6 @@ def _digest(entry: dict) -> dict | None:
     fields = []
     for key, label in DIGEST_FIELDS:
         value = entry.get(key)
-        if key == "next" and value is None:
-            value = entry.get("followups")
         bullets = _bullets(value)
         if bullets:
             fields.append({"key": key, "label": label, "bullets": bullets})
@@ -441,6 +423,7 @@ def _comment_details(comment) -> dict:
         "author": comment.get("author") or "",
     }
 
+
 def build_model(
     issues: list[dict],
     comments: dict,
@@ -467,7 +450,7 @@ def build_model(
             entry
             for entry in reversed(ledger)
             if isinstance(entry, dict)
-            and (entry.get("event") == "handoff" or entry.get("action") == "handoff")
+            and entry.get("event") == "handoff"
         ),
         None,
     )
@@ -476,12 +459,7 @@ def build_model(
         handoff_status = re.sub(
             r"\s+",
             " ",
-            str(
-                handoff_entry.get("status")
-                or handoff_entry.get("note")
-                or handoff_entry.get("action")
-                or "handoff"
-            ),
+            str(handoff_entry.get("status") or handoff_entry.get("event") or "handoff"),
         ).strip()
         if len(handoff_status) > 64:
             handoff_status = handoff_status[:63].rstrip() + "…"
@@ -600,7 +578,7 @@ def build_model(
         number = int(issue["number"])
         labels = _label_names(issue)
         state = ledger_latest.get(number, {})
-        action = state.get("action") or state.get("event") or state.get("status")
+        action = state.get("event") or state.get("status")
         sprint_match = next(
             (re.fullmatch(r"sprint[-/](\d+)", label, re.IGNORECASE) for label in labels if re.fullmatch(r"sprint[-/](\d+)", label, re.IGNORECASE)),
             None,
@@ -729,11 +707,7 @@ def build_model(
 
 
 def _repo_identity(repo_path: str):
-    """Return (owner, name, warning) for the repo checked out at repo_path.
-
-    warning is None on success. On failure owner and name are None and
-    warning explains why.
-    """
+    """Return (owner, name, warning) for the repo checked out at repo_path."""
     identity, error = _run_json(["gh", "repo", "view", "--json", "owner,name"], repo_path)
     if error:
         return None, None, f"GitHub repository data is unavailable: {error}"
@@ -1039,9 +1013,9 @@ def cached_dependency_dag(repos: list[str], code_dir: str = CODE_DIR) -> dict:
     return dag
 
 
-def load_model(repo: str, repo_path: str):
+def load_model(repo: str, repo_path: str, *, connection: dict | None = None):
     issues, comments, warnings = load_github(repo_path)
-    ledger, ledger_error = _read_ledger(repo_path)
+    ledger, ledger_error = _read_ledger(repo_path, connection=connection)
     if ledger_error:
         warnings.append(ledger_error)
     model = build_model(issues, comments, ledger, warnings, repo)
@@ -1062,21 +1036,11 @@ def cached_github(repo: str, repo_path: str, state: str = "open"):
         return data
 
 
-def cached_ledger(repo: str, repo_path: str):
-    now = time.monotonic()
-    with _CACHE_LOCK:
-        cached = _LEDGER_CACHE.get(repo)
-        if cached and now - cached[0] < LEDGER_CACHE_SECONDS:
-            return cached[1]
-        data = _read_ledger(repo_path)
-        _LEDGER_CACHE[repo] = (time.monotonic(), data)
-        _persist_cache()
-        return data
-
-
-def cached_model(repo: str, repo_path: str):
+def cached_model(
+    repo: str, repo_path: str, *, connection: dict | None = None
+):
     issues, comments, warnings = cached_github(repo, repo_path)
-    ledger, ledger_error = cached_ledger(repo, repo_path)
+    ledger, ledger_error = _read_ledger(repo_path, connection=connection)
     warnings = list(warnings)
     if ledger_error:
         warnings.append(ledger_error)
@@ -1085,8 +1049,10 @@ def cached_model(repo: str, repo_path: str):
     return model
 
 
-def cached_combined_model(repo: str, repo_path: str):
-    model = cached_model(repo, repo_path)
+def cached_combined_model(
+    repo: str, repo_path: str, *, connection: dict | None = None
+):
+    model = cached_model(repo, repo_path, connection=connection)
     closed_issues, closed_comments, _warnings = cached_github(
         repo, repo_path, "closed"
     )
@@ -1096,11 +1062,8 @@ def cached_combined_model(repo: str, repo_path: str):
     return model
 
 
-
-
 def _escape_attr(value: str) -> str:
     return html.escape(str(value), quote=True)
-
 
 
 def _render_body(body: str) -> str:
@@ -1730,7 +1693,8 @@ def render_combined_page(repos: list[str], models: dict, page_fn) -> bytes:
         "<div class='browse-search'><label for='roadmap-search'>Search issues</label>"
         "<input id='roadmap-search' type='search' placeholder='Titles, labels, descriptions, comments'></div>"
         f"{queue_html}"
-        f"<p class='dim'>GitHub data refreshes hourly; ledger JSON and this page refresh every five minutes. "
+        f"<p class='dim'>GitHub data refreshes hourly; this page reloads about every five "
+        f"minutes and reads ledger events from Redis. "
         f"{open_count} open issues · {active_count} marked in flight · "
         f"{batch_count} suggested next-batch issues.</p>"
         f"{warning_cards}<h2>Latest updates</h2>"
@@ -1910,7 +1874,8 @@ def render_page(
         "<div class='browse-search'><label for='roadmap-search'>Search issues</label>"
         "<input id='roadmap-search' type='search' placeholder='Titles, labels, descriptions, comments'></div>"
         f"{queue_html}"
-        f"<p class='dim'>GitHub data refreshes hourly. Ledger JSON and this page refresh every five minutes.</p>"
+        f"<p class='dim'>GitHub data refreshes hourly; this page reloads about every five "
+        f"minutes and reads ledger events from Redis.</p>"
         f"<div class='queue-facts'><span class='pill'>{len(model['nodes'])} open issues</span>"
         f"<span class='pill'>{model['activeCount']} marked in flight</span>"
         f"<span class='pill'>{len(model['batch'])} next batch</span>{handoff_fact}</div>"

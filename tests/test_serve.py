@@ -19,7 +19,10 @@ from unittest import mock
 import pytest
 import redis as redis_lib
 
-from lupin import cli, claims, commands, machines, quest, quota_cache, roadmap, serve, slots, slots_redis
+from lupin import (
+    cli, claims, commands, ledger, machines, quest, quota_cache, roadmap, serve, slots,
+    slots_redis,
+)
 
 
 def _kw(redis_port):
@@ -1331,6 +1334,47 @@ def test_dashboard_shows_real_fleet_data_from_redis(redis_port, flush_redis):
     assert "<span class='pill on'>online</span>" in body
     assert "acme/widgets#7" in body
     assert "loop-widgets#1" in body
+
+
+def test_roadmap_route_reads_ledger_from_dashboard_connection(
+    redis_port, flush_redis
+):
+    connection = {
+        "redis_host": "127.0.0.1", "redis_port": redis_port,
+        "redis_username": None, "redis_password": None,
+    }
+    ledger.append_event(
+        "acme/widgets",
+        {
+            "event": "handoff", "issue": 7, "status": "ready",
+            "summary": "Shared handoff.", "highlights": ["Visible from dashboard."],
+        },
+        **connection,
+    )
+    issue = {"number": 7, "title": "Issue", "body": "", "labels": []}
+
+    with (
+        mock.patch.object(
+            serve, "code_repos", return_value=[{"repo": "widgets", "loopable": True}]
+        ),
+        mock.patch.object(
+            serve.roadmap, "cached_github", return_value=([issue], {}, [])
+        ),
+        mock.patch.object(
+            serve.roadmap, "_repo_identity", return_value=("acme", "widgets", None)
+        ),
+        _live_dashboard(connection) as port,
+    ):
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/roadmap?repo=widgets", timeout=15
+        ) as response:
+            status = response.status
+            body = response.read().decode()
+
+    assert status == 200
+    assert "Latest handoff: ready" in body
+    assert "Shared handoff." in body
+    assert "Visible from dashboard." in body
 
 
 def test_dashboard_degrades_when_redis_unreachable(closed_port):
