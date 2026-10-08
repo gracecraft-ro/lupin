@@ -972,10 +972,11 @@ def render_nav(active: str) -> str:
     )
 
 
-def render_topbar() -> str:
+def render_topbar(extra_html: str = "") -> str:
     return (
         "<div class=topbar>"
         "<label class=autolabel><input type=checkbox id=auto> auto-refresh</label>"
+        f"{extra_html}"
         "<span class=sp></span>"
         "<button type=button id=theme-toggle class=iconbtn aria-label='Toggle dark mode' "
         "title='Toggle dark mode'>"
@@ -986,7 +987,12 @@ def render_topbar() -> str:
 
 
 def page(
-    title: str, body: str, extra_css: str = "", extra_js: str = "", active: str = ""
+    title: str,
+    body: str,
+    extra_css: str = "",
+    extra_js: str = "",
+    active: str = "",
+    topbar_extra: str = "",
 ) -> bytes:
     return (
         "<!doctype html><html lang=en><head><meta charset=utf-8>"
@@ -995,7 +1001,7 @@ def page(
         "<link rel=icon href='/favicon.ico' type='image/svg+xml'>"
         f"<title>{esc(title)}</title><style>{CSS}{extra_css}</style></head>"
         f"<body><div class=shell>{render_nav(active)}<div class=content>"
-        f"{render_topbar()}<main>{body}</main></div></div>"
+        f"{render_topbar(topbar_extra)}<main>{body}</main></div></div>"
         f"<script>{JS}{extra_js}</script></body></html>"
     ).encode("utf-8")
 
@@ -2721,11 +2727,41 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/":
             self.reply(render_dashboard(gather(self.peek_lines, self.fleet_connection)))
         elif url.path == "/roadmap":
-            # roadmap.py owns this page's content; it only knows the shell's
-            # 4-argument page_fn contract, so pin the "Roadmap" nav entry
-            # here rather than changing that contract.
+            try:
+                machine_records = machines.machines(self.fleet_connection)
+                online = sum(record.get("state") == "online" for record in machine_records)
+                fleet_html = (
+                    "<a class='machine-count' href='/machines' style='display:flex;align-items:center;gap:6px'>"
+                    f"<span class='machine-dot {'online' if online == len(machine_records) else ''}'></span>"
+                    f"{online} of {len(machine_records)} machines</a>"
+                )
+            except machines.CoordinatorUnreachable:
+                fleet_html = "<span class='machine-count'>Machine status unavailable</span>"
+            recurring = next((row for row in timers() if row["unit"] == "delegation-loop.timer"), None)
+            next_run = recurring.get("next") if recurring else None
+            if next_run:
+                timer_html = (
+                    f"<span class=machine-timer>{icon('M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z', 14)}"
+                    f"Next run <b data-until='{next_run:.0f}'></b></span>"
+                )
+            elif not timer_active():
+                timer_html = "<span class=machine-timer>Timer paused</span>"
+            else:
+                timer_html = ""
+            roadmap_topbar = (
+                f"{fleet_html}{timer_html}<span class='updated-label'>Updated "
+                f"{time.strftime('%H:%M:%S', time.localtime())}</span>"
+            )
+
             def roadmap_page(title, body, extra_css="", extra_js=""):
-                return page(title, body, extra_css, extra_js, active="roadmap")
+                return page(
+                    title,
+                    body,
+                    extra_css,
+                    extra_js,
+                    active="roadmap",
+                    topbar_extra=roadmap_topbar,
+                )
 
             repos = roadmap.repository_names(code_repos())
             selected = query.get("repo", "").strip()
@@ -2740,7 +2776,10 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     for repo in repos
                 }
-                body = roadmap.render_list_page(repos, models, roadmap_page, query)
+                quest_state = self.quest_state(query.get("quest", "").strip()) if selected else None
+                body = roadmap.render_list_page(
+                    repos, models, roadmap_page, query, quest_state
+                )
             elif state == "closed":
                 issues_by_repo = {
                     name: roadmap.cached_github(
@@ -2752,7 +2791,7 @@ class Handler(BaseHTTPRequestHandler):
                 body = roadmap.render_completed_page(
                     selected, repos, issues_by_repo, roadmap_page
                 )
-            elif selected:
+            elif query.get("view") == "detail" and selected:
                 model = roadmap.cached_model(
                     selected, os.path.join(CODE_DIR, selected), connection=self.fleet_connection
                 )
@@ -2765,7 +2804,23 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     for repo in repos
                 }
-                body = roadmap.render_combined_page(repos, models, roadmap_page)
+                quest_state = self.quest_state(query.get("quest", "").strip()) if selected else None
+                issue_count = sum(
+                    len(model.get("nodes", []))
+                    for repo, model in models.items()
+                    if not selected or repo == selected
+                )
+                if (
+                    query.get("view") != "board"
+                    and issue_count > roadmap.BOARD_MAX_ISSUES
+                ):
+                    body = roadmap.render_list_page(
+                        repos, models, roadmap_page, query, quest_state
+                    )
+                else:
+                    body = roadmap.render_combined_page(
+                        repos, models, roadmap_page, query, quest_state
+                    )
             self.reply(body)
         elif url.path == "/usage":
             self.reply(render_usage(connection=self.fleet_connection))

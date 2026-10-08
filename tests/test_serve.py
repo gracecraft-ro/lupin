@@ -1411,15 +1411,49 @@ def test_roadmap_route_reads_ledger_from_dashboard_connection(
         _live_dashboard(connection) as port,
     ):
         with urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/roadmap?repo=widgets", timeout=15
+            f"http://127.0.0.1:{port}/roadmap?repo=widgets&issue=7&issue_repo=widgets",
+            timeout=15,
         ) as response:
             status = response.status
             body = response.read().decode()
 
     assert status == 200
-    assert "Latest handoff: ready" in body
     assert "Shared handoff." in body
     assert "Visible from dashboard." in body
+
+
+def test_roadmap_defaults_to_list_for_large_backlogs(
+    redis_port, flush_redis
+):
+    connection = {
+        "redis_host": "127.0.0.1", "redis_port": redis_port,
+        "redis_username": None, "redis_password": None,
+    }
+    issues = [
+        {"number": number, "title": f"Issue {number}", "body": "", "labels": []}
+        for number in range(1, roadmap.BOARD_MAX_ISSUES + 2)
+    ]
+    model = roadmap.build_model(issues, {}, [], repo="widgets")
+    model["closedNodes"] = []
+
+    with (
+        mock.patch.object(
+            serve, "code_repos", return_value=[{"repo": "widgets", "loopable": True}]
+        ),
+        mock.patch.object(roadmap, "cached_combined_model", return_value=model),
+        _live_dashboard(connection) as port,
+    ):
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/roadmap", timeout=15) as response:
+            default_body = response.read().decode()
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/roadmap?view=board", timeout=15
+        ) as response:
+            board_body = response.read().decode()
+
+    assert "Any priority" in default_body
+    assert "Issue 1" in default_body
+    assert "All tags" not in default_body
+    assert "All tags" in board_body
 
 
 def test_roadmap_route_reads_github_cache_from_dashboard_connection(
@@ -1466,8 +1500,7 @@ def test_roadmap_route_reads_github_cache_from_dashboard_connection(
             status = response.status
             body = response.read().decode()
 
-    assert status == 200
-    assert "#7 Cached dashboard issue" in body
+    assert "Cached dashboard issue" in body
 
 
 

@@ -5,7 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-from datetime import datetime, timedelta, timezone
 
 from lupin import ledger, roadmap
 
@@ -431,20 +430,7 @@ class RoadmapTests(unittest.TestCase):
             roadmap.github_attachment_id(base + attachment_id + "?redirect=evil")
         )
 
-    def test_activity_windows_and_los_angeles_time(self):
-        now = datetime(2026, 9, 26, 20, tzinfo=timezone.utc)
-        cases = [
-            (timedelta(minutes=30), "Past hour"),
-            (timedelta(hours=1), "Past hour"),
-            (timedelta(hours=6), "Past 6 hours"),
-            (timedelta(hours=24), "Past 24 hours"),
-            (timedelta(days=7), "Past 7 days"),
-            (timedelta(days=7, seconds=1), "Older than 7 days"),
-        ]
-        for age, expected in cases:
-            with self.subTest(age=age):
-                value = (now - age).isoformat()
-                self.assertEqual(roadmap._activity_group(value, now), expected)
+    def test_compact_time_uses_los_angeles_timezone(self):
         self.assertEqual(
             roadmap._compact_time("2026-09-26T20:00:00Z"),
             "Sep 26, 1:00 PM PDT",
@@ -537,180 +523,6 @@ class RoadmapTests(unittest.TestCase):
         self.assertNotIn("Latest <script>", page)
 
 
-    def test_combined_update_previews_newest_comment(self):
-        issue = {
-            "number": 19,
-            "title": "Commented issue",
-            "body": "Original description",
-            "labels": [],
-            "createdAt": "2026-09-20T10:00:00Z",
-            "updatedAt": "2026-09-25T10:00:00Z",
-            "url": "https://github.com/acme/repo/issues/19",
-        }
-        model = roadmap.build_model(
-            [issue],
-            {
-                19: [
-                    {
-                        "body": "Newest comment & <script>\nsecond line",
-                        "createdAt": "2026-09-26T10:00:00Z",
-                    }
-                ]
-            },
-            [],
-            repo="alpha",
-        )
-
-        page = roadmap.render_combined_page(
-            ["alpha"], {"alpha": model}, lambda title, body, css, js: body
-        )
-        updates = page.split("<h2>Latest updates</h2>", 1)[1].split(
-            "<h2>Work board</h2>", 1
-        )[0]
-
-        self.assertIn("<span class='pill'>Commented</span>", updates)
-        self.assertIn("Newest comment &amp; &lt;script&gt; second line", updates)
-        self.assertNotIn("Newest comment & <script>", updates)
-
-    def test_combined_update_previews_description_for_new_issue(self):
-        issue = {
-            "number": 20,
-            "title": "Fresh issue",
-            "body": "Description & details\nsecond line",
-            "labels": [],
-            "createdAt": "2026-09-26T10:00:00Z",
-            "updatedAt": "2026-09-26T10:00:00Z",
-            "url": "https://github.com/acme/repo/issues/20",
-        }
-        model = roadmap.build_model([issue], {}, [], repo="alpha")
-
-        page = roadmap.render_combined_page(
-            ["alpha"], {"alpha": model}, lambda title, body, css, js: body
-        )
-        updates = page.split("<h2>Latest updates</h2>", 1)[1].split(
-            "<h2>Work board</h2>", 1
-        )[0]
-
-        self.assertIn("<span class='pill'>Opened</span>", updates)
-        self.assertIn("Description &amp; details second line", updates)
-
-    def test_combined_updates_include_closed_issue(self):
-        issue = {
-            "number": 21,
-            "title": "Recently closed",
-            "body": "Closed issue description",
-            "labels": [],
-            "createdAt": "2026-09-20T10:00:00Z",
-            "updatedAt": "2026-09-26T10:00:00Z",
-            "closedAt": "2026-09-26T10:00:00Z",
-            "url": "https://github.com/acme/repo/issues/21",
-        }
-        model = roadmap.build_model([], {}, [], repo="alpha")
-        model["closedNodes"] = roadmap.build_model(
-            [issue], {}, [], repo="alpha"
-        )["nodes"]
-
-        page = roadmap.render_combined_page(
-            ["alpha"], {"alpha": model}, lambda title, body, css, js: body
-        )
-        updates = page.split("<h2>Latest updates</h2>", 1)[1].split(
-            "<h2>Work board</h2>", 1
-        )[0]
-
-        self.assertIn("#21 Recently closed", updates)
-        self.assertIn("<span class='pill'>Closed</span>", updates)
-
-
-    def test_combined_board_groups_recent_updates_and_keeps_issue_details(self):
-        now = datetime.now(timezone.utc)
-        older_time = now - timedelta(days=2)
-        newer_time = now - timedelta(hours=2)
-        older = roadmap.build_model(
-            [
-                {
-                    "number": 7,
-                    "title": "Older issue",
-                    "body": "",
-                    "labels": [],
-                    "url": "https://github.com/acme/old/issues/7",
-                    "updatedAt": older_time.isoformat(),
-                }
-            ],
-            {},
-            [],
-            repo="alpha",
-        )
-        newer = roadmap.build_model(
-            [
-                {
-                    "number": 7,
-                    "title": "Newer issue",
-                    "body": "New issue details ![image](https://github.com/user-attachments/assets/12345678-1234-5678-1234-123456789abc)",
-                    "labels": ["owner-decision"],
-                    "url": "https://github.com/acme/new/issues/7",
-                    "createdAt": (newer_time - timedelta(days=1)).isoformat(),
-                    "updatedAt": newer_time.isoformat(),
-                }
-            ],
-            {},
-            [],
-            repo="beta",
-        )
-        render = lambda title, body, css, js: body + css + js
-
-        page = roadmap.render_combined_page(
-            ["alpha", "beta"], {"alpha": older, "beta": newer}, render
-        )
-        updates = page.split("<h2>Latest updates</h2>", 1)[1].split(
-            "<h2>Work board</h2>", 1
-        )[0]
-
-        self.assertIn("alpha", page)
-        self.assertIn("beta", page)
-        self.assertIn("All repositories", page)
-        self.assertIn("Work board", page)
-        self.assertLess(page.index("Latest updates"), page.index("Work board"))
-        self.assertLess(updates.index("#7 Newer issue"), updates.index("#7 Older issue"))
-        self.assertIn("Past 6 hours", updates)
-        self.assertIn("Past 7 days", updates)
-        self.assertIn(roadmap._compact_time(newer_time.isoformat()), updates)
-        self.assertIn("Details and activity · 0 comments", updates)
-        self.assertIn(
-            "src='/image?id=12345678-1234-5678-1234-123456789abc'", updates
-        )
-        self.assertIn("Created " + roadmap._compact_time((newer_time - timedelta(days=1)).isoformat()), updates)
-        self.assertIn("Labels: owner-decision", updates)
-
-    def test_recent_update_item_carries_labels_for_client_side_filter(self):
-        # The label filter reads data-labels off the direct child of
-        # data-browse-group (updateBrowse's `:scope > [data-browse-item]`).
-        # render_issue_details() puts data-labels on a nested <details>, one
-        # level too deep for that query, so the wrapping <li> needs its own
-        # copy or the label filter treats every recent update as unlabeled.
-        now = datetime.now(timezone.utc)
-        model = roadmap.build_model(
-            [
-                {
-                    "number": 7,
-                    "title": "Labeled issue",
-                    "body": "",
-                    "labels": ["priority/P0"],
-                    "url": "https://github.com/acme/repo/issues/7",
-                    "updatedAt": now.isoformat(),
-                }
-            ],
-            {},
-            [],
-            repo="alpha",
-        )
-        render = lambda title, body, css, js: body + css + js
-        page = roadmap.render_combined_page(["alpha"], {"alpha": model}, render)
-        updates = page.split("<h2>Latest updates</h2>", 1)[1].split(
-            "<h2>Work board</h2>", 1
-        )[0]
-        self.assertIn(
-            "<li data-browse-item data-labels='[&quot;priority/P0&quot;]'>", updates
-        )
 
     def test_browse_filter_does_not_hide_matching_items(self):
         # updateBrowse() must show every item that matches an active label
@@ -720,81 +532,7 @@ class RoadmapTests(unittest.TestCase):
         self.assertIn("item.hidden=filtering?false:shown>=limit;", js)
         self.assertNotIn("item.hidden=Boolean(query||selected.size)||shown>=limit;", js)
 
-    def test_combined_board_lists_body_and_comment_images_by_recency(self):
-        body_image = "12345678-1234-5678-1234-123456789abc"
-        comment_image = "abcdefab-cdef-abcd-efab-cdefabcdefab"
-        image_url = "https://github.com/user-attachments/assets/"
-        model = roadmap.build_model(
-            [
-                {
-                    "number": 1,
-                    "title": "Body image",
-                    "body": f"Older body context ![body]({image_url}{body_image})",
-                    "labels": [],
-                    "url": "https://github.com/acme/repo/issues/1",
-                    "createdAt": "2026-09-20T00:00:00Z",
-                    "updatedAt": "2026-09-21T00:00:00Z",
-                },
-                {
-                    "number": 2,
-                    "title": "Comment image",
-                    "body": "No image in this issue",
-                    "labels": [],
-                    "url": "https://github.com/acme/repo/issues/2",
-                    "updatedAt": "2026-09-22T00:00:00Z",
-                },
-                {
-                    "number": 3,
-                    "title": "No image",
-                    "body": "This issue has no image",
-                    "labels": [],
-                    "url": "https://github.com/acme/repo/issues/3",
-                    "updatedAt": "2026-09-23T00:00:00Z",
-                },
-            ],
-            {
-                2: [
-                    {
-                        "body": f"Newer comment context ![comment]({image_url}{comment_image})",
-                        "createdAt": "2026-09-25T00:00:00Z",
-                        "url": "https://github.com/acme/repo/issues/2#issuecomment-2",
-                    }
-                ]
-            },
-            [],
-            repo="repo",
-        )
-
-        page = roadmap.render_combined_page(
-            ["repo"], {"repo": model}, lambda title, body, css, js: body
-        )
-        section = page.split("<details class='recent-image-details'>", 1)[1].split(
-            "</details>", 1
-        )[0]
-
-        self.assertIn("Recently added images", section)
-        self.assertIn(f"src='/image?id={body_image}'", section)
-        self.assertIn(f"src='/image?id={comment_image}'", section)
-        self.assertLess(
-            section.index("Newer comment context"),
-            section.index("Older body context"),
-        )
-        self.assertIn("issues/2#issuecomment-2", section)
-        self.assertNotIn("No image", section)
-
-        empty_model = roadmap.build_model(
-            [{"number": 4, "title": "No image", "body": "", "labels": []}],
-            {},
-            [],
-            repo="repo",
-        )
-        empty_page = roadmap.render_combined_page(
-            ["repo"], {"repo": empty_model}, lambda title, body, css, js: body
-        )
-        self.assertIn("<p class='dim'>No images found</p>", empty_page)
-
-    def test_queue_legend_and_stage_notes_render_on_both_pages(self):
-
+    def test_queue_notes_and_board_stage_names_render(self):
         model = roadmap.build_model(
             [{"number": 1, "title": "Issue", "body": "", "labels": []}],
             {},
@@ -804,21 +542,15 @@ class RoadmapTests(unittest.TestCase):
         render = lambda title, body, css, js: body
 
         repo_page = roadmap.render_page("alpha", ["alpha"], model, render)
-        combined_page = roadmap.render_combined_page(
+        board_page = roadmap.render_combined_page(
             ["alpha"], {"alpha": model}, render
         )
 
         self.assertIn("Line key: solid lines show dependencies", repo_page)
         self.assertIn("dashed lines show parent or split links", repo_page)
-        for page in (repo_page, combined_page):
-            self.assertIn("Next batch starts with the first eligible issue", page)
-            self.assertIn("Blocked or held means a decision", page)
-            self.assertIn(
-                "In-flight status comes from the last ledger action. "
-                "It does not confirm that a process is running.",
-                page,
-            )
-
+        self.assertIn("Next batch starts with the first eligible issue", board_page)
+        self.assertIn("In-flight status comes from the last ledger action.", board_page)
+        self.assertIn("<h2>Ready</h2>", board_page)
     def test_saved_filters_and_manual_queue_order_render_for_open_eligible_issues(self):
         issues = [
             {
@@ -856,37 +588,11 @@ class RoadmapTests(unittest.TestCase):
         self.assertNotIn("<li data-queue-item data-queue-key='32'", page)
         self.assertIn("data-computed-index='0' draggable='true'", page)
         self.assertEqual(model["batch"], [31])
-        combined_page = roadmap.render_combined_page(
-            ["alpha"], {"alpha": model}, render
+        filtered_board = roadmap.render_combined_page(
+            ["alpha"], {"alpha": model}, render, {"tag": "team-a"}
         )
-        self.assertIn("<ol data-next-batch='all'>", combined_page)
-        self.assertIn("data-queue-key='alpha#31'", combined_page)
-
-    def test_latest_update_title_appears_once(self):
-        model = roadmap.build_model(
-            [
-                {
-                    "number": 12,
-                    "title": "One visible title",
-                    "body": "",
-                    "labels": [],
-                    "url": "https://github.com/acme/repo/issues/12",
-                    "updatedAt": "2026-09-26T12:00:00Z",
-                }
-            ],
-            {},
-            [],
-            repo="alpha",
-        )
-        page = roadmap.render_combined_page(
-            ["alpha"], {"alpha": model}, lambda title, body, css, js: body
-        )
-        updates = page.split("<h2>Latest updates</h2>", 1)[1].split(
-            "<h2>Work board</h2>", 1
-        )[0]
-
-        self.assertEqual(updates.count("#12 One visible title"), 1)
-        self.assertIn("#12 One visible title", updates)
+        self.assertIn("Labelled eligible issue", filtered_board)
+        self.assertNotIn("Held issue", filtered_board)
 
     def test_needs_expert_decision_label_stays_eligible_and_batched(self):
         issues = [
@@ -936,16 +642,13 @@ class RoadmapTests(unittest.TestCase):
         model = roadmap.build_model(issues, {}, [], repo="alpha")
         render = lambda title, body, css, js: body
 
-        page = roadmap.render_page("alpha", ["alpha"], model, render)
         combined = roadmap.render_combined_page(["alpha"], {"alpha": model}, render)
 
-        for page_html in (page, combined):
-            self.assertIn("<h2>Owner blocked</h2>", page_html)
-            owner_blocked_html = page_html.split("<h2>Owner blocked</h2>", 1)[1]
-            self.assertIn("#42", owner_blocked_html)
-            self.assertIn("Blocked on human", owner_blocked_html)
+        self.assertIn("Blocked issues · need a person", combined)
+        self.assertIn("#42", combined)
+        self.assertIn("Blocked on human", combined)
 
-    def test_no_owner_blocked_issues_hides_owner_blocked_section(self):
+    def test_no_owner_blocked_issues_hides_attention_section(self):
         issues = [
             {
                 "number": 43,
@@ -955,14 +658,12 @@ class RoadmapTests(unittest.TestCase):
             },
         ]
         model = roadmap.build_model(issues, {}, [], repo="alpha")
-        render = lambda title, body, css, js: body
-
-        page = roadmap.render_page("alpha", ["alpha"], model, render)
-        combined = roadmap.render_combined_page(["alpha"], {"alpha": model}, render)
+        combined = roadmap.render_combined_page(
+            ["alpha"], {"alpha": model}, lambda title, body, css, js: body
+        )
 
         self.assertEqual(model["ownerBlocked"], [])
-        self.assertNotIn("Owner blocked", page)
-        self.assertNotIn("Owner blocked", combined)
+        self.assertNotIn("Blocked issues · need a person", combined)
 
     def test_legacy_owner_todo_and_needs_decision_labels_remain_held(self):
         issues = [
@@ -1004,41 +705,6 @@ class RoadmapTests(unittest.TestCase):
         )
 
         self.assertIn("needs expert decision", page)
-
-    def test_combined_page_shows_dependency_graph_for_repo_with_edges(self):
-        issues = [
-            {"number": 1, "title": "Parent", "body": "", "labels": ["epic"]},
-            {
-                "number": 2,
-                "title": "Child",
-                "body": "Part of #1. Depends on #3.",
-                "labels": [],
-            },
-            {"number": 3, "title": "Prerequisite", "body": "", "labels": []},
-        ]
-        model = roadmap.build_model(issues, {}, [], repo="alpha")
-
-        page = roadmap.render_combined_page(
-            ["alpha"], {"alpha": model}, lambda title, body, css, js: body
-        )
-
-        self.assertIn("<h2>Dependency graphs</h2>", page)
-        self.assertIn("queue-graph", page)
-        self.assertIn("dependency", page)
-
-    def test_combined_page_states_cross_repo_edges_are_out_of_scope(self):
-        model = roadmap.build_model(
-            [{"number": 1, "title": "Issue", "body": "", "labels": []}],
-            {},
-            [],
-            repo="alpha",
-        )
-
-        page = roadmap.render_combined_page(
-            ["alpha"], {"alpha": model}, lambda title, body, css, js: body
-        )
-
-        self.assertIn(roadmap.CROSS_REPO_EDGE_NOTE, page)
 
     def test_structured_digest_becomes_labelled_bullet_lists(self):
         issue = {"number": 31, "title": "Redis backend", "body": "", "labels": []}
@@ -1110,19 +776,21 @@ class RoadmapTests(unittest.TestCase):
         self.assertNotIn("<script>alert(1)</script>", page)
         self.assertIn("&lt;script&gt;", page)
 
-    def test_digest_ships_on_both_roadmap_pages(self):
+    def test_digest_shows_in_the_selected_issue_panel(self):
         issue = {"number": 35, "title": "Digest page", "body": "", "labels": []}
         ledger = [{"issue": 35, "highlights": ["One bullet."]}]
         model = roadmap.build_model([issue], {}, ledger, repo="alpha")
         render = lambda title, body, css, js: body
 
-        per_repo = roadmap.render_page("alpha", ["alpha"], model, render)
-        combined = roadmap.render_combined_page(["alpha"], {"alpha": model}, render)
+        combined = roadmap.render_combined_page(
+            ["alpha"],
+            {"alpha": model},
+            render,
+            {"issue": "35", "issue_repo": "alpha"},
+        )
 
-        for page in (per_repo, combined):
-            self.assertIn("data-digest-field='highlights'", page)
-            self.assertIn("One bullet.", page)
-
+        self.assertIn("data-digest-field='highlights'", combined)
+        self.assertIn("One bullet.", combined)
     def test_board_and_list_views_link_to_each_other(self):
         model = roadmap.build_model([], {}, [], repo="alpha")
         render = lambda title, body, css, js: body
@@ -1133,7 +801,7 @@ class RoadmapTests(unittest.TestCase):
         )
 
         self.assertIn("href='/roadmap?view=list'", board)
-        self.assertIn("href='/roadmap'", listing)
+        self.assertIn("href='/roadmap?view=board'", listing)
 
     def test_list_page_paginates_server_side_and_globally(self):
         issues = [
@@ -1230,6 +898,61 @@ class RoadmapTests(unittest.TestCase):
         self.assertNotIn("#1</a>", by_search)
         self.assertNotIn("#2</a>", by_search)
 
+
+    def test_list_stage_filter_and_owner_attention(self):
+        issues = [
+            {
+                "number": 1,
+                "title": "Ready task",
+                "body": "",
+                "labels": ["priority/P1"],
+            },
+            {
+                "number": 2,
+                "title": "Needs a person",
+                "body": "",
+                "labels": ["priority/P1", "completely-blocked-on-human"],
+            },
+        ]
+        model = roadmap.build_model(issues, {}, [], repo="alpha")
+        render = lambda title, body, css, js: body
+
+        ready = roadmap.render_list_page(
+            ["alpha"], {"alpha": model}, render, {"stage": "Ready"}
+        )
+        owner_blocked = roadmap.render_list_page(
+            ["alpha"], {"alpha": model}, render, {"stage": "Blocked", "owner": "1"}
+        )
+
+        self.assertIn("#1</a>", ready)
+        self.assertNotIn("#2</a>", ready)
+        self.assertIn("#2</a>", owner_blocked)
+        self.assertNotIn("#1</a>", owner_blocked)
+        self.assertIn("1 blocked need a person", owner_blocked)
+
+    def test_board_repo_filter_enables_quest_selection(self):
+        issue = {
+            "number": 7,
+            "title": "Quest candidate",
+            "body": "",
+            "labels": ["priority/P1"],
+        }
+        model = roadmap.build_model([issue], {}, [], repo="alpha")
+        render = lambda title, body, css, js: body
+
+        board = roadmap.render_combined_page(
+            ["alpha"], {"alpha": model}, render, {"repo": "alpha"}
+        )
+
+        self.assertIn("name='issue' value='7'", board)
+        self.assertIn("form='quest-start'", board)
+        self.assertIn("action='/quest/start'", board)
+
+        listing = roadmap.render_list_page(
+            ["alpha"], {"alpha": model}, render, {"repo": "alpha"}
+        )
+        self.assertIn("name='issue' value='7'", listing)
+        self.assertIn("action='/quest/start'", listing)
     def test_list_page_groups_by_epic_and_paginates_ten_at_a_time(self):
         epic = {
             "number": 10,
