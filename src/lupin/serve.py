@@ -233,6 +233,10 @@ def local_repo_inventory() -> list[dict]:
 
 
 
+# How long a page waits for a remote machine's answer, in seconds.
+REMOTE_WAIT_S = 15.0
+
+
 def loop_tail(repo: str, machine: str, lines: int, connection: dict, signing_key: str | None) -> str:
     local_host = machines.hostname()
     result = loops.dispatch_loop_action(
@@ -246,7 +250,13 @@ def loop_tail(repo: str, machine: str, lines: int, connection: dict, signing_key
         actor="lupin-dashboard",
         issuer=local_host,
         run_local=lambda argv: run(argv, timeout=20.0),
+        wait_s=REMOTE_WAIT_S,
     )
+    if result["mode"] == "queued":
+        finished = result.get("result")
+        if not finished or finished.get("state") not in ("ok", "failed"):
+            return f"(the request to {machine} has not finished; reload to try again)"
+        return finished.get("output", "")
     return result.get("output", "")
 
 

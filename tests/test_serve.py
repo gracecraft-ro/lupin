@@ -2040,6 +2040,25 @@ class LoopsRouteUnitTests(unittest.TestCase):
         handler.do_POST()
         self.assertEqual(handler.reply.call_args.args[1], 400)
 
+    def test_loop_tail_returns_the_output_of_a_remote_peek(self):
+        queued = {"mode": "queued", "id": "c1", "result": {"state": "ok", "output": "pane text\n"}}
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.loops, "dispatch_loop_action", return_value=queued) as dispatch,
+        ):
+            out = serve.loop_tail("a", "jesus", 60, {}, "key")
+        self.assertEqual(out, "pane text\n")
+        self.assertGreater(dispatch.call_args.kwargs["wait_s"], 0)
+
+    def test_loop_tail_says_so_when_a_remote_peek_has_not_finished(self):
+        queued = {"mode": "queued", "id": "c1", "result": None}
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.loops, "dispatch_loop_action", return_value=queued),
+        ):
+            out = serve.loop_tail("a", "jesus", 60, {}, "key")
+        self.assertIn("not finished", out)
+
     def test_send_route_rejects_bad_repo_name(self):
         handler = _loops_handler()
         _post_body(handler, "/loops/send", {"repo": "../etc", "machine": "h", "text": "hi"})
