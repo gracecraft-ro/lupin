@@ -61,6 +61,33 @@ def test_run_creates_herdr_worker_metadata_and_systemd_unit(monkeypatch, tmp_pat
     assert Path(metadata["prompt_file"]).is_file()
 
 
+@pytest.mark.parametrize("argv", [["run", "--all", "--json"], ["once", "now", "--json"]])
+def test_multi_repo_start_continues_after_quota_error(monkeypatch, capsys, argv):
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {
+        "widgets": "omp",
+        "gizmos": "claude",
+    })
+    attempted = []
+
+    def start(repo, **kwargs):
+        attempted.append(repo)
+        if repo == "widgets":
+            raise loop_runtime.LoopError("quota snapshot is stale")
+        return True, "started gizmos"
+
+    monkeypatch.setattr(loop_runtime, "start_loop", start)
+
+    assert cli.main(argv) == 1
+
+    assert attempted == ["widgets", "gizmos"]
+    results = json.loads(capsys.readouterr().out)
+    assert [(item["repo"], item["started"]) for item in results] == [
+        ("widgets", False),
+        ("gizmos", True),
+    ]
+    assert "quota snapshot is stale" in results[0]["message"]
+
+
 def test_fleet_run_uses_only_per_machine_signing_keys(monkeypatch, tmp_path, capsys):
     key_dir = tmp_path / "keys"
     key_dir.mkdir()
@@ -88,7 +115,7 @@ def test_fleet_run_uses_only_per_machine_signing_keys(monkeypatch, tmp_path, cap
 
     assert dispatched["signing_keys"] == {"jesus": "jesus-secret"}
     assert dispatched["local_host"] == "pihome"
-    assert dispatched["repos"] == {"widgets": None}
+    assert dispatched["repos"] == ["widgets"]
     assert json.loads(capsys.readouterr().out) == [
         {"repo": "widgets", "machine": "jesus", "queued": True, "id": "cmd-1"}
     ]

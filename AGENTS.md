@@ -135,8 +135,8 @@ enabled repo. A future `once` run uses the same default. It fails if no repo
 is enabled. `schedule first` sets the first timer run. Use `+2h` for a
 relative time or a calendar expression such as `tomorrow 09:00`. The
 interval controls later runs.
-`enable` and `disable` edit the local repo list.
-Use `--clear-orchestrators` with `enable` to remove a profile.
+`disable` also removes the repo's orchestrator profile. Use
+`--clear-orchestrators` with `enable` to clear a profile without disabling the repo.
 
 `fleet-run` sends each enabled repo to one online worker. It skips the local
 machine, workers with an active loop for that repo, and workers without that

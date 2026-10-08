@@ -161,10 +161,9 @@ def enabled_repos() -> list[str]:
 
 
 def write_enabled_repos(names: list[str]) -> None:
-    """Replace REPOS_FILE's contents -- the one write path for the
-    schedule `enabled_repos()` reads (issue #23; before this, nothing in
-    `serve.py` ever wrote this file). One name per line, same format
-    `enabled_repos()` already parses.
+    """Write enabled repo names in the legacy one-name-per-line format.
+
+    The loop runtime also writes `REPOS_FILE` with repo platforms.
     """
     os.makedirs(STATE_DIR, exist_ok=True)
     with open(REPOS_FILE, "w", encoding="utf-8") as fh:
@@ -3161,7 +3160,11 @@ class Handler(BaseHTTPRequestHandler):
         if confirm != repo:
             self.reply(render_error("type the repo name to confirm removal"), 400)
             return
-        write_enabled_repos([r for r in enabled if r != repo])
+        try:
+            loop_runtime.disable_repo(repo)
+        except loop_runtime.LoopError as exc:
+            self.reply(render_error(f"remove failed: {exc}"), 500)
+            return
         self.redirect(f"/repos?sent={quote(f'{repo} removed from the schedule', safe='')}")
 
     def do_repos_doc_save(self, form: dict) -> None:
@@ -3382,12 +3385,8 @@ class Handler(BaseHTTPRequestHandler):
         if machine != local_host and not signing_key:
             self.reply(render_error(f"no signing key is configured for {machine!r}"), 400)
             return
-        platform = _repo_platforms().get(repo)
         local_argv = ["lupin", "run", repo]
         queue_params = {"repo": repo}
-        if platform:
-            local_argv.extend(["--platform", platform])
-            queue_params["platform"] = platform
         try:
             result = loops.dispatch_loop_action(
                 machine=machine, local_host=local_host,

@@ -259,6 +259,34 @@ def test_schedule_once_keeps_omp_provider_and_model(monkeypatch, tmp_path: Path)
 
 
 
+def test_once_fire_continues_after_one_repo_quota_error(monkeypatch, tmp_path, capsys):
+    schedule_dir = tmp_path / "once"
+    schedule_dir.mkdir()
+    identifier = "a" * 16
+    schedule = schedule_dir / f"{identifier}.json"
+    schedule.write_text(json.dumps({"repos": ["widgets", "gizmos"]}), encoding="utf-8")
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    attempted = []
+
+    def start(repo, **kwargs):
+        attempted.append(repo)
+        if repo == "widgets":
+            raise loop_runtime.LoopError("quota snapshot is stale")
+        return True, "started gizmos"
+
+    monkeypatch.setattr(loop_runtime, "start_loop", start)
+
+    results = loop_runtime.once_fire(identifier)
+
+    assert attempted == ["widgets", "gizmos"]
+    assert results == [
+        "could not start loop for widgets: quota snapshot is stale",
+        "started gizmos",
+    ]
+    assert "quota snapshot is stale" in capsys.readouterr().err
+    assert not schedule.exists()
+
+
 def test_repo_catalog_includes_repo_without_delegation_doc(monkeypatch, tmp_path: Path):
     code_dir = tmp_path / "code"
     (code_dir / "widgets").mkdir(parents=True)
@@ -818,3 +846,19 @@ def test_start_loop_selects_profile_candidate_and_persists_it_for_recovery(
     assert metadata["platform"] == "omp"
     assert metadata["provider"] == "opencode-go"
     assert metadata["model"] == "opencode-go/step-5-preview-free:xhigh"
+
+
+def test_disable_repo_removes_its_orchestrator_profile(monkeypatch, tmp_path):
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(loop_runtime, "REPOS_FILE", state_dir / "repos")
+    monkeypatch.setattr(loop_runtime, "ORCHESTRATORS_FILE", state_dir / "orchestrators.json")
+    loop_runtime.write_repos([("widgets", "omp"), ("gizmos", "claude")])
+    loop_runtime._write_orchestrator_profiles({
+        "widgets": ["openai/gpt-5"],
+        "gizmos": ["claude"],
+    })
+
+    loop_runtime.disable_repo("widgets")
+
+    assert loop_runtime.enabled_repos() == {"gizmos": "claude"}
+    assert loop_runtime.orchestrator_profiles() == {"gizmos": ["claude"]}
