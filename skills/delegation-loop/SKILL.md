@@ -215,9 +215,19 @@ Read the final diff and run the repo's required gate and a smoke check. A
 worker's success report is not proof. Re-read issue and PR comments before
 closure.
 
-If the repo uses `.loop/loop-state.json`, update it through its documented
-handoff process. Lupin reads this file for roadmap status. It does not write
-dispatch or handoff entries.
+Append dispatch and handoff events to the shared Redis ledger:
+
+```sh
+lupin ledger append OWNER/REPO --event dispatch --issue N \
+  --status running --branch BRANCH
+lupin ledger append OWNER/REPO --event handoff --issue N --status STATUS \
+  --summary TEXT --highlights TEXT --evidence TEXT --decisions TEXT --next TEXT
+lupin ledger read OWNER/REPO --json
+```
+
+Add `--child N` for each split issue. If Redis is unavailable, ledger
+commands exit 3. The roadmap shows no ledger annotations and adds a warning.
+Do not use `.loop/loop-state.json`.
 
 Keep working while requested, unblocked work remains. Hand off when the
 backlog is done, work is dispatched up to capacity, or the rest is blocked.

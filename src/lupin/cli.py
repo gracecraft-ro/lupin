@@ -11,9 +11,10 @@ locally on a machine with credentials, published to a fleet-shared cache
 that any other machine then reads (issue #38; see `quota_cache.py`).
 `acquire`/`hold`/`release`/`status` are the
 slot-lease commands (issue #205 for the `local` backend, #210 for
-`redis`). `claim`/`renew-claim`/`release-claim` mark a GitHub issue as one
-loop's own, so two loops never work the same task (issue #6; Redis only, no
-`--backend` choice -- see `claims.py`). `review-route` picks which lock a
+`redis`). `ledger` appends and reads shared repository events in Redis
+(see `ledger.py`). `claim`/`renew-claim`/`release-claim` mark a GitHub issue
+as one loop's own, so two loops never work the same task (issue #6; Redis only,
+no `--backend` choice -- see `claims.py`). `review-route` picks which lock a
 routed model needs (issue #185), `roadmap` prints prioritized open tasks
 from `roadmap.py`'s data plus claims (issue #10), and `serve` runs the
 read-only dashboard (issue #204). `join`/`heartbeat`/`drain`/`undrain`/
@@ -93,6 +94,7 @@ from . import benchmark_fetch
 from . import claims
 from . import classify as classify_mod
 from . import commands
+from . import ledger
 from . import loops as loops_mod
 from . import machines
 from . import model_fetch
@@ -310,6 +312,32 @@ def _release_claim_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("target", help="OWNER/REPO#N, e.g. gracecraft/lupin#6")
     parser.add_argument("--holder", required=True)
     _redis_conn_args(parser)
+
+
+def _ledger_args(parser: argparse.ArgumentParser) -> None:
+    modes = parser.add_subparsers(dest="ledger_action", required=True)
+
+    append = modes.add_parser("append", help="append one event to a repository ledger")
+    append.add_argument("repo", help="OWNER/REPO")
+    append.add_argument("--event", required=True)
+    append.add_argument("--issue", type=int)
+    append.add_argument("--status")
+    append.add_argument("--branch")
+    append.add_argument("--summary")
+    for field in ("highlights", "evidence", "decisions", "next"):
+        append.add_argument(f"--{field}", action="append", default=[])
+    append.add_argument("--child", action="append", type=int, default=[])
+    append.add_argument("--json", action="store_true")
+    _fleet_connection_args(append)
+
+    read = modes.add_parser("read", help="read a repository ledger")
+    read.add_argument("repo", help="OWNER/REPO")
+    read.add_argument(
+        "--limit", type=int, default=10, metavar="N",
+        help="number of latest events to return (default: 10)",
+    )
+    read.add_argument("--json", action="store_true")
+    _fleet_connection_args(read)
 
 
 def _roadmap_args(parser: argparse.ArgumentParser) -> None:
@@ -575,6 +603,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _claim_args(sub.add_parser("claim", help="atomically take a GitHub issue, so no other loop works it"))
     _claim_args(sub.add_parser("renew-claim", help="push a claim's TTL back out"))
     _release_claim_args(sub.add_parser("release-claim", help="give up a claim (compare-and-delete)"))
+    _ledger_args(sub.add_parser("ledger", help="append or read shared repository events"))
     _review_route_args(
         sub.add_parser("review-route", help="route a pair and report which lock it needs")
     )
@@ -1249,6 +1278,41 @@ def _cmd_roadmap(args: argparse.Namespace) -> int:
     return code
 
 
+
+def _cmd_ledger(args: argparse.Namespace) -> int:
+    connection = _fleet_connection(args)
+    try:
+        if args.ledger_action == "append":
+            event = {"event": args.event}
+            for field in ("issue", "status", "branch", "summary"):
+                value = getattr(args, field)
+                if value is not None:
+                    event[field] = value
+            for field in ("highlights", "evidence", "decisions", "next"):
+                if getattr(args, field):
+                    event[field] = getattr(args, field)
+            if args.child:
+                event["children"] = args.child
+            result = ledger.append_event(args.repo, event, **connection)
+        else:
+            result = ledger.read_events(args.repo, limit=args.limit, **connection)
+    except ValueError as exc:
+        print(f"invalid ledger request: {exc}", file=sys.stderr)
+        return 1
+    except slots.CoordinatorUnreachable:
+        print(f"cannot reach the redis coordinator for ledger {args.repo!r}", file=sys.stderr)
+        return 3
+
+    if args.json:
+        print(json.dumps(result))
+    elif args.ledger_action == "append":
+        print(result["id"])
+    else:
+        for entry in result:
+            print(json.dumps(entry, ensure_ascii=False))
+    return 0
+
+
 def _redis_kwargs(args: argparse.Namespace) -> dict:
     return {
         "redis_host": args.redis_host,
@@ -1809,6 +1873,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_renew_claim(args)
     if args.cmd == "release-claim":
         return _cmd_release_claim(args)
+    if args.cmd == "ledger":
+        return _cmd_ledger(args)
     if args.cmd == "join":
         return _cmd_join(args)
     if args.cmd == "heartbeat":
