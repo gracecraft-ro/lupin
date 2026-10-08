@@ -64,6 +64,7 @@ online/offline.
   "quota": {
     "claude": {"pct_left": 42, "resets_at": "2026-10-05T18:00:00Z"}
   },
+  "repos": [{"repo": "field-trip", "enabled": true, "loopable": true}],
   "actions": ["loop.peek", "loop.run", "loop.stop", "schedule.pause", "schedule.resume", "schedule.set", "schedule.show"]
 }
 ```
@@ -79,6 +80,11 @@ still counts as new work, just deferred.
 `actions` is this machine's `agent.py` `ACTIONS` table (issue #27/#28),
 written by `_write_record` so it can never list an action the agent here
 doesn't actually run.
+
+`repos` lists directories under `/code` on this machine. Each item has a
+repo name, whether it is enabled, and whether it has a loop doc. The
+dashboard combines these lists. Each machine must run the Lupin version
+that sends this field before its repos appear.
 
 ### `focus:<quest>`
 

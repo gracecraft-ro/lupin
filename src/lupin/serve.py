@@ -266,6 +266,19 @@ def code_repos() -> list[dict]:
     return out
 
 
+def local_repo_inventory() -> list[dict]:
+    """Return repo names and loop readiness for this machine's heartbeat."""
+    enabled = set(enabled_repos())
+    return [
+        {
+            "repo": repo["repo"],
+            "enabled": repo["repo"] in enabled,
+            "loopable": repo["loopable"],
+        }
+        for repo in code_repos()
+    ]
+
+
 def tmux_sessions() -> list[dict]:
     fmt = "#{session_name}\t#{session_created}\t#{session_attached}\t#{session_windows}\t#{session_activity}"
     rc, out = run(["tmux", "ls", "-F", fmt])
@@ -464,6 +477,69 @@ def _valid_repo_name(repo: str) -> bool:
     return bool(REPO_NAME_RE.match(repo))
 
 
+def merge_repo_inventory(
+    local_repos: list[dict], machine_records: list[dict], local_host: str
+) -> list[dict]:
+    """Add repo inventories from other machines to this machine's repo list."""
+    repos = {repo["repo"]: {**repo, "local": True} for repo in local_repos}
+    remote = {}
+    for record in machine_records:
+        host = record.get("name")
+        if not isinstance(host, str) or host == local_host:
+            continue
+        reported = record.get("repos", [])
+        if not isinstance(reported, list):
+            continue
+        loops = record.get("loops", [])
+        running_repos = (
+            {
+                loop.get("repo")
+                for loop in loops
+                if isinstance(loop, dict) and isinstance(loop.get("repo"), str)
+            }
+            if isinstance(loops, list)
+            else set()
+        )
+        active = record.get("state") in ("online", "draining")
+        for item in reported:
+            if not isinstance(item, dict):
+                continue
+            repo = item.get("repo")
+            if not isinstance(repo, str) or not _valid_repo_name(repo):
+                continue
+            entry = remote.setdefault(
+                repo,
+                {"enabled": False, "loopable": False, "hosts": set(), "running_hosts": set()},
+            )
+            entry["enabled"] |= item.get("enabled") is True
+            entry["loopable"] |= item.get("loopable") is True
+            label = f"{host} (offline)" if record.get("state") == "offline" else host
+            entry["hosts"].add(label)
+            if active and repo in running_repos:
+                entry["running_hosts"].add(host)
+
+    for repo, entry in remote.items():
+        if repo in repos:
+            repos[repo]["fleet_enabled"] = entry["enabled"]
+            continue
+        state = (
+            "enabled" if entry["enabled"] and entry["loopable"]
+            else "disabled" if entry["loopable"]
+            else "no-doc"
+        )
+        repos[repo] = {
+            "repo": repo,
+            "state": state,
+            "enabled": entry["enabled"],
+            "loopable": entry["loopable"],
+            "local": False,
+            "running": bool(entry["running_hosts"]),
+            "running_machines": ", ".join(sorted(entry["running_hosts"])),
+            "machine": ", ".join(sorted(entry["hosts"])),
+        }
+    return sorted(repos.values(), key=lambda repo: repo["repo"])
+
+
 def _repo_full_names() -> dict[str, str]:
     """short repo name -> "owner/repo", for each enabled repo this host can
     resolve from its own local checkout. Same mapping `fleet_state()` builds
@@ -574,8 +650,8 @@ def gather_loops(connection: dict) -> dict:
 
 def gather(peek_lines: int, connection: dict | None = None) -> dict:
     sessions = tmux_sessions()
-    for s in sessions:
-        s["tail"] = session_tail(s["name"], peek_lines) if s["repo"] else ""
+    for session in sessions:
+        session["tail"] = session_tail(session["name"], peek_lines) if session["repo"] else ""
     state = {
         "now": time.time(),
         "enabled": enabled_repos(),
@@ -585,29 +661,43 @@ def gather(peek_lines: int, connection: dict | None = None) -> dict:
         "timer_active": timer_active(),
     }
     state.update(fleet_state(connection or {}))
+    state["repos"] = merge_repo_inventory(
+        state["repos"], state.get("machines", []), machines.hostname()
+    )
+    state["enabled"] = sorted(
+        set(state["enabled"])
+        | {
+            repo["repo"]
+            for repo in state["repos"]
+            if repo.get("enabled") is True or repo.get("fleet_enabled") is True
+        }
+    )
     return state
 
 
 def gather_repos(connection: dict) -> dict:
-    """Everything the Repos page (issue #23) reads: every /code directory
-    tagged enabled/disabled/no-doc (`code_repos()`), each one's live loop
-    status folded in from `gather_loops()` (one fleet read, not a second
-    one), and each loopable repo's concurrency cap from the generic slot
-    registry (see `_repo_slot_name`'s docstring for why that's a new slot
-    name, not a new schema).
-    """
+    """Return local repos and repos reported by other fleet machines."""
     loops = gather_loops(connection)
-    by_repo = {e["repo"]: e for e in loops["entries"]}
+    by_repo = {entry["repo"]: entry for entry in loops["entries"]}
     slot_status = slots_redis.status(**connection)
     repos = []
-    for r in code_repos():
-        entry = by_repo.get(r["repo"])
-        slot = slot_status.get(_repo_slot_name(r["repo"]), {})
+    inventory = merge_repo_inventory(
+        code_repos(), loops.get("machines", []), loops["local_host"]
+    )
+    for repo in inventory:
+        entry = by_repo.get(repo["repo"])
+        slot = slot_status.get(_repo_slot_name(repo["repo"]), {})
+        if repo["local"]:
+            running = entry is not None and entry["status"] in ("running", "remote")
+            machine = entry["machine"] if entry else loops["local_host"]
+        else:
+            running = repo["running"]
+            machine = repo["machine"]
         repos.append(
             {
-                **r,
-                "running": entry is not None and entry["status"] in ("running", "remote"),
-                "machine": entry["machine"] if entry else loops["local_host"],
+                **repo,
+                "running": running,
+                "machine": machine,
                 "max": slot.get("max"),
             }
         )
@@ -1187,22 +1277,30 @@ def render_dashboard(state: dict) -> bytes:
             "disabled": "<span class='pill off'>disabled</span>",
             "no-doc": "<span class=pill>no docs/delegation-loop.md</span>",
         }[r["state"]]
-        sess = "live" if r["repo"] in live else "<span class=dim>-</span>"
-        queue = (
-            f"<a href='/roadmap?repo={quote(r['repo'], safe='')}'>open</a>"
-            if r["loopable"]
-            else "<span class=dim>-</span>"
-        )
-        once = ""
-        if r["state"] == "enabled" and r["loopable"]:
-            command = f"loopctl once {r['repo']} now"
-            once = (
-                f"<span data-once-repo='{esc(r['repo'])}'>"
-                f"<code>{esc(command)}</code> "
-                "<label>when <input value=now aria-label='one-off loop time'></label> "
-                "<button type=button>copy</button> "
-                "<span class=dim data-copy-status aria-live=polite></span></span>"
+        if r.get("local", True):
+            sess = "live" if r["repo"] in live else "<span class=dim>-</span>"
+            queue = (
+                f"<a href='/roadmap?repo={quote(r['repo'], safe='')}'>open</a>"
+                if r["loopable"]
+                else "<span class=dim>-</span>"
             )
+            once = ""
+            if r["state"] == "enabled" and r["loopable"]:
+                command = f"loopctl once {r['repo']} now"
+                once = (
+                    f"<span data-once-repo='{esc(r['repo'])}'>"
+                    f"<code>{esc(command)}</code> "
+                    "<label>when <input value=now aria-label='one-off loop time'></label> "
+                    "<button type=button>copy</button> "
+                    "<span class=dim data-copy-status aria-live=polite></span></span>"
+                )
+        else:
+            sess = (
+                f"running on {esc(r['running_machines'])}"
+                if r["running"]
+                else f"available on {esc(r['machine'])}"
+            )
+            queue = once = "<span class=dim>-</span>"
         body.append(
             f"<tr><td>{esc(r['repo'])}</td><td>{pill}</td><td>{sess}</td>"
             f"<td>{queue}</td><td>{once}</td></tr>"
@@ -1912,7 +2010,8 @@ def _render_add_panel(tab: str, repos: list[dict]) -> str:
         "<p class=dim>Not implemented yet.</p>"
     )
     rows = []
-    for r in repos:
+    local_repos = [repo for repo in repos if repo.get("local", True)]
+    for r in local_repos:
         if r["state"] == "enabled":
             continue
         repo = r["repo"]
@@ -1934,8 +2033,10 @@ def _render_add_panel(tab: str, repos: list[dict]) -> str:
             )
     if rows:
         picker = "".join(rows)
-    elif repos:
+    elif local_repos:
         picker = "<p class=dim>Every repo under /code is already on the schedule.</p>"
+    elif repos:
+        picker = "<p class=dim>No local repos under /code. Fleet repos are listed below.</p>"
     else:
         picker = "<p class=dim>No repos found under /code.</p>"
     body = (
@@ -2021,6 +2122,18 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
     for r in repos:
         repo = r["repo"]
         pill = STATE_PILL[r["state"]]
+        if not r.get("local", True):
+            dot = "ok" if r["running"] else "idle"
+            loop_status = (
+                f"running on {r['running_machines']}" if r["running"] else "stopped"
+            )
+            rows.append(
+                f"<tr><td><b>{esc(repo)}</b></td><td>{pill}</td>"
+                f"<td><span class='dot {dot}'></span> {esc(loop_status)}</td>"
+                f"<td>{esc(r['machine'])}</td><td class=dim>-</td>"
+                "<td class=dim>Read-only fleet entry</td></tr>"
+            )
+            continue
         if not r["loopable"]:
             rows.append(
                 f"<tr><td><b>{esc(repo)}</b></td><td>{pill}</td>"
@@ -2075,19 +2188,10 @@ def render_repos(
     remove_repo: str | None = None,
     sent: str | None = None,
 ) -> bytes:
-    """The Repos page (issue #23): add/remove a repo from the local
-    schedule, view or edit its delegation doc, raise/lower its loop
-    concurrency cap, and run or one-off-schedule a loop.
+    """Show local repos and repos reported by other machines.
 
-    `data` is `gather_repos()`'s output. Query-string flags (`add`, `doc`,
-    `schedule`, `remove`) open the matching panel -- the same convention
-    `/roadmap`'s `state=closed` and `/loops`'s `group=`/`repo=` already use:
-    a plain link, no client-side state.
-
-    The mockup's filter pills ("All/Enabled/Disabled/No doc") are not
-    built here -- they only narrow which rows of an already-read table are
-    shown, no state to mutate, and this page's scope is already large
-    (add/remove/doc/run/schedule/slot-max). Left out, not silently cut.
+    Local rows support page actions. Fleet rows are read-only.
+    `data` comes from `gather_repos()`. Query flags open a panel.
     """
     repos = data["repos"]
     local_host = data["local_host"]

@@ -177,16 +177,13 @@ def _slot_summary(connection: dict) -> dict:
     return {name: {"used": info["holders"], "max": info["max"]} for name, info in raw.items()}
 
 
-def _write_record(client, name: str, *, state: str, connection: dict, loops: list[dict] | None = None) -> dict:
-    """Not every caller recomputes `providers`/`loops` on every write. When
-    `loops` isn't given, this carries over whatever the existing record
-    already has -- the same reason `heartbeat` carries over `state` --
-    so a plain `join`/`drain`/`undrain` can't wipe it out.
+def _write_record(
+    client, name: str, *, state: str, connection: dict,
+    loops: list[dict] | None = None, repos: list[dict] | None = None,
+) -> dict:
+    """Keep the last `providers`, `loops`, and `repos` values when a writer does not refresh them.
 
-    `quota` is the opposite: it is recomputed here every time. This
-    function is the only writer of `machine:<name>`, and a stale quota
-    reading is worse than the extra `quota.snapshot()` call costs.
-
+    `quota` is recalculated on every write.
     `actions` is read live from `agent.py`'s own `ACTIONS` table (imported
     here, not at module load, to avoid a top-level import cycle -- `agent.py`
     imports this module to check `draining` state). This way the list can
@@ -203,6 +200,7 @@ def _write_record(client, name: str, *, state: str, connection: dict, loops: lis
         "providers": existing.get("providers", []) if existing else [],
         "quota": quota.snapshot(),
         "loops": loops if loops is not None else (existing.get("loops", []) if existing else []),
+        "repos": repos if repos is not None else (existing.get("repos", []) if existing else []),
         "session_backend": SESSION_BACKEND,
         "actions": sorted(agent.ACTIONS),
     }
@@ -234,12 +232,14 @@ def join(
     redis_password: str | None = None,
     config_path: str | Path | None = None,
     loops: list[dict] | None = None,
+    repos: list[dict] | None = None,
 ) -> dict:
-    """Write the Redis location (+ user, if given) to the local fleet
-    config, then register this machine as online. The password is taken
-    only to make the registering call -- it is never written to the config
-    file; every later command re-supplies it (flag or `$LUPIN_REDIS_PASSWORD`).
+    """Write the Redis location to the local fleet config and register this machine.
+
+    The caller supplies this machine's live loops and local repo list. The
+    password is used for this write only; it is not saved in the config.
     """
+
     host, _, port_str = coordinator.partition(":")
     port = int(port_str) if port_str else 6379
     config = {"redis_host": host, "redis_port": port}
@@ -255,18 +255,21 @@ def join(
     }
     client = slots_redis._client(host, port, redis_username, redis_password)
     name = hostname()
-    record = _run(lambda: _write_record(client, name, state="online", connection=connection, loops=loops))
+    record = _run(
+        lambda: _write_record(
+            client, name, state="online", connection=connection, loops=loops, repos=repos
+        )
+    )
     return {"name": name, "config_path": str(path), **record}
 
 
-def heartbeat(connection: dict, *, loops: list[dict] | None = None) -> dict:
-    """Refresh this machine's record, keeping whatever `state` it already
-    had (so a draining machine stays draining through a heartbeat).
+def heartbeat(
+    connection: dict, *, loops: list[dict] | None = None, repos: list[dict] | None = None
+) -> dict:
+    """Refresh this machine's record and keep its state.
 
-    `loops` is this machine's current live-loop list (issue #2 phase A).
-    The caller (`cli.py`) reads that list itself and passes it in -- this
-    module has no way to read tmux or run `loopctl` (see module
-    docstring).
+    `loops` lists live loops. `repos` lists local repos. The caller reads
+    both lists and passes them in.
     """
     client = slots_redis._client(
         connection.get("redis_host"),
@@ -279,7 +282,9 @@ def heartbeat(connection: dict, *, loops: list[dict] | None = None) -> dict:
     def op():
         existing = _read_record(client, name)
         state = existing["state"] if existing else "online"
-        return _write_record(client, name, state=state, connection=connection, loops=loops)
+        return _write_record(
+            client, name, state=state, connection=connection, loops=loops, repos=repos
+        )
 
     return _run(op)
 
@@ -306,7 +311,7 @@ def undrain(connection: dict) -> dict:
 def machines(connection: dict) -> list[dict]:
     """Every registered machine, each as:
     `{"name", "state", "version", "heartbeat", "version_mismatch", "slots",
-    "providers", "quota", "loops", "session_backend", "actions"}`.
+    "providers", "quota", "loops", "repos", "session_backend", "actions"}`.
 
     `state` is the record's own `online`/`draining`, overridden to
     `offline` once `OFFLINE_AFTER` seconds have passed since `heartbeat`
@@ -319,11 +324,8 @@ def machines(connection: dict) -> list[dict]:
     name/state/version/heartbeat, so this is a pure addition, not a change
     to those fields.
 
-    `loops`/`session_backend`/`actions` (issue #2 phase A) are the same
-    kind of addition. Every read here uses `.get(..., default)`, so a
-    machine still running an older `lupin` -- one that never wrote these
-    fields -- shows up with an empty or unknown value instead of raising
-    `KeyError`.
+    `loops`/`repos`/`session_backend`/`actions` are optional additions. Old
+    records return empty lists or `None` for these fields.
     """
     client = slots_redis._client(
         connection.get("redis_host"),
@@ -357,6 +359,7 @@ def machines(connection: dict) -> list[dict]:
                     "providers": record.get("providers", []),
                     "quota": record.get("quota", {}),
                     "loops": record.get("loops", []),
+                    "repos": record.get("repos", []),
                     "session_backend": record.get("session_backend"),
                     "actions": record.get("actions", []),
                 }

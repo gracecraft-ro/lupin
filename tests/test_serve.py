@@ -2466,6 +2466,71 @@ class GatherReposTests(unittest.TestCase):
         self.assertTrue(row["running"])
         self.assertEqual(row["machine"], "jesus")
 
+    def test_remote_repo_inventory_renders_without_local_controls(self):
+        machine = {
+            "name": "jesus",
+            "state": "online",
+            "repos": [{"repo": "roundsmith", "enabled": True, "loopable": True}],
+            "loops": [{"repo": "roundsmith"}],
+        }
+        with (
+            mock.patch.object(serve, "code_repos", return_value=[]),
+            mock.patch.object(
+                serve, "gather_loops",
+                return_value={
+                    "entries": [],
+                    "machines": [machine],
+                    "fleet_error": None,
+                    "local_host": "pihome",
+                },
+            ),
+            mock.patch.object(serve.slots_redis, "status", return_value={}),
+        ):
+            data = serve.gather_repos({})
+
+        page = serve.render_repos(data, add="existing").decode()
+
+        assert [repo["repo"] for repo in data["repos"]] == ["roundsmith"]
+        assert data["repos"][0]["running"] is True
+        assert "running on jesus" in page
+        assert "Read-only fleet entry" in page
+        assert "No local repos under /code" in page
+        assert "action=/schedule/run" not in page
+        assert "action=/repos/add" not in page
+
+    def test_overview_shows_remote_repo_without_a_local_checkout(self):
+        machine = {
+            "name": "jesus",
+            "state": "online",
+            "repos": [{"repo": "roundsmith", "enabled": True, "loopable": True}],
+            "loops": [],
+        }
+        with (
+            mock.patch.object(serve, "tmux_sessions", return_value=[]),
+            mock.patch.object(serve, "enabled_repos", return_value=[]),
+            mock.patch.object(serve, "code_repos", return_value=[]),
+            mock.patch.object(serve, "timers", return_value=[]),
+            mock.patch.object(serve, "timer_active", return_value=False),
+            mock.patch.object(
+                serve, "fleet_state",
+                return_value={
+                    "machines": [machine],
+                    "claims": {},
+                    "fleet_error": None,
+                },
+            ),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            state = serve.gather(25, {})
+
+        page = serve.render_dashboard(state).decode()
+
+        assert state["enabled"] == ["roundsmith"]
+        assert "<td>roundsmith</td>" in page
+        assert "available on jesus" in page
+        assert "loopctl once roundsmith now" not in page
+
+
 
 class RepoRenderTests(unittest.TestCase):
     def _data(self, **overrides):
@@ -2527,9 +2592,7 @@ class RepoRenderTests(unittest.TestCase):
         self.assertIn("disabled", page)
 
     def test_add_panel_says_no_repos_found_when_code_repos_is_empty(self):
-        """`repos=[]` means `code_repos()` found nothing under /code (e.g.
-        pihome, with no local clones) -- a different case from every repo
-        being already enabled."""
+        """No local repos and no fleet report means there is nothing to add."""
         page = serve.render_repos(self._data(repos=[]), add="existing").decode()
         self.assertIn("No repos found under /code", page)
         self.assertNotIn("already on the schedule", page)

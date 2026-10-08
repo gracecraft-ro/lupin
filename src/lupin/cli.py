@@ -878,6 +878,7 @@ def _cmd_join(args: argparse.Namespace) -> int:
             redis_password=args.redis_password,
             config_path=args.config_path,
             loops=serve.local_loops(),
+            repos=serve.local_repo_inventory(),
         )
     except machines.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
@@ -888,7 +889,11 @@ def _cmd_join(args: argparse.Namespace) -> int:
 
 def _cmd_heartbeat(args: argparse.Namespace) -> int:
     try:
-        record = machines.heartbeat(_fleet_connection(args), loops=serve.local_loops())
+        record = machines.heartbeat(
+            _fleet_connection(args),
+            loops=serve.local_loops(),
+            repos=serve.local_repo_inventory(),
+        )
     except machines.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
         return 3
