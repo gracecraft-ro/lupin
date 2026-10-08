@@ -111,6 +111,12 @@ across a variation when possible; change one main factor at a time so failures
 are easy to explain. Combine factors when an interaction between them is a
 likely source of failure, such as touch plus a narrow screen.
 
+Mark the QA task `ui-pressure-test` when the repo's label map supports it.
+Use `frontend-ui` for its visual and interaction scope. For CAD apps, route
+geometry or spatial-tool evaluator lanes as `cad-spatial`. The classifier
+returns one category and checks CAD first. Split those lanes or route them
+separately when both benchmark categories matter.
+
 Give each evaluator a short brief with:
 
 - The exact journey, starting state, and assigned variations.
@@ -192,11 +198,18 @@ Do not call a finding `P0` only because it is a bug. Explain the user impact
 that supports the priority. If the repo has different labels, use its mapping
 and preserve the matching level of urgency.
 
+Do not put `ui-pressure-test` on every finding; it marks the QA task, not the
+bugs it finds. Use the repo's issue-type and capability labels for each
+finding. Use `frontend-ui` for visual UI findings and `cad-spatial` for CAD or
+geometry findings. Split or route separate work lanes when both categories
+need benchmark coverage.
+
 Each ticket must include:
 
 - A short title and type: bug, accessibility issue, feature request, or design
   request.
-- Priority and affected journey, device, browser, and input method.
+- Priority, Lupin capability (`frontend-ui` or `cad-spatial`), and affected
+  journey, device, browser, and input method.
 - User impact and the expected result.
 - Exact steps to repeat the issue and what happened instead.
 - Evidence links or attachments. Say if the problem happened once or more than

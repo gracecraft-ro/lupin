@@ -33,6 +33,25 @@ during repository setup if it does not exist. If you cannot add it, post the
 claim comment and report that the label is missing. Lupin does not change
 GitHub labels.
 
+## Label UI pressure-test work
+
+Use `ui-pressure-test` for an issue whose main goal is a human-like UI
+pressure test, when the repo's label map supports it. This is a work label,
+not a priority, size, issue type, or status. Do not apply it to every bug or
+design ticket found by a test. If the label is missing, report the gap; do not
+create a tracker label during triage.
+
+For Lupin's benchmark category, use `frontend-ui` for visual and interaction
+testing. Do not create a separate `visual` category. For CAD or 3D modeling
+work, use `cad-spatial` for the evaluator lane that tests geometry or spatial
+tools. These categories describe the work; they do not replace the
+`ui-pressure-test` work label.
+
+Lupin's classifier returns one category and checks CAD before UI. A mixed
+issue with CAD and UI terms routes as `cad-spatial`. Split visual and CAD work
+into evaluator lanes, or route each lane separately. Do not assume one
+benchmark category covers both.
+
 ## Decide what is ready
 
 - Check the dependency graph and the latest comments. Do not dispatch an issue
