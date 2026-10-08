@@ -740,22 +740,26 @@ class ModelSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(serve._format_price({"input": None, "output": None}), "no price data")
 
-    def test_format_score_variants(self):
-        self.assertEqual(serve._format_score(None), "no data")
-        self.assertEqual(serve._format_score({"score": None, "reason": "not found"}), "no data")
+    def test_format_benchmark_cell(self):
         self.assertEqual(
-            serve._format_score({"score": 73.1, "scale": "Artificial Analysis Intelligence Index (0-100)"}),
-            "<span title='Artificial Analysis Intelligence Index (0-100)'>73.1</span>",
+            serve._format_score([]),
+            "<span title='No source-verified score for this model'>—</span>",
         )
-        self.assertEqual(serve._format_score({"score": 73.1}), "73.1")
+        self.assertEqual(
+            serve._format_score([{
+                "score": 72,
+                "benchmark": "Example benchmark",
+                "metric": "Index",
+                "source": "https://example.test",
+            }]),
+            "<span title='Example benchmark · Index · https://example.test'>72</span>",
+        )
 
-    def test_format_value_variants(self):
-        self.assertEqual(serve._format_value(None, {"input": 3, "output": 15}), "no data")
-        self.assertEqual(serve._format_value({"score": None}, {"input": 3, "output": 15}), "no data")
-        self.assertEqual(serve._format_value({"score": 73.1}, None), "no data")
-        # Free price (nothing on file for either side) has no denominator.
-        self.assertEqual(serve._format_value({"score": 73.1}, {"input": None, "output": None}), "no data")
-        self.assertEqual(serve._format_value({"score": 18}, {"input": 3, "output": 15}), "2.0 pts/$")
+    def test_format_value_uses_normalized_performance_and_blended_price(self):
+        self.assertEqual(serve._format_value(None, {"input": 3, "output": 15}), "—")
+        self.assertEqual(serve._format_value(100, None), "—")
+        self.assertEqual(serve._format_value(100, {"input": None, "output": None}), "—")
+        self.assertEqual(serve._format_value(100, {"input": 3, "output": 15}), "11.1 pts/$")
 
 
 class AllModelsTableTests(unittest.TestCase):
@@ -850,37 +854,51 @@ class AllModelsTableTests(unittest.TestCase):
         self.assertIn("gpt-5.4", page)
         self.assertIn("no price data", page)
         self.assertIn("no ~/.codex credentials", page)
-        # Perf/Value are never invented -- no benchmark snapshot was cached.
-        self.assertEqual(page.count(">no data<"), 4)
+        self.assertIn("Empty cells mean no verified public score is available", page)
 
-    def test_perf_value_columns_read_the_shared_benchmark_snapshot(self):
-        # Perf/Value (issue #17's reopen) come from the fleet-shared Redis
-        # key, not a local file, so this mocks `benchmark_fetch.read_snapshot`
-        # directly rather than writing a fixture file like the other tests
-        # in this class do for `model_fetch.SNAPSHOT_FILE`.
+    def test_model_matrix_uses_category_sources_and_normalizes_perf(self):
         self.write_tiers({"coding": {"tiers": {}}})
         self.write_snapshot({
             "fetched_at": "2026-10-07T00:00:00+00:00",
             "subscriptions": {
                 "claude": {
                     "live": True,
-                    "models": [{"id": "claude-opus-4-5", "price": {"input": 5, "output": 25}, "promo": None}],
+                    "models": [{"id": "claude-sonnet-5-5", "display_name": "Sonnet 5.5", "price": {"input": 3, "output": 15}, "promo": None}],
+                },
+                "opencode-go": {
+                    "live": True,
+                    "models": [{"id": "glm-5.3", "display_name": "GLM-5.3", "price": {"input": 1, "output": 4}, "promo": None}],
                 },
             },
         })
         benchmark_snapshot = {
             "fetched_at": "2026-10-07T06:00:00+00:00",
-            "live": True,
             "scores": [
-                {"id": "claude-opus-4-5", "score": 75.0, "scale": "Artificial Analysis Intelligence Index (0-100)"},
+                {"id": "claude-sonnet-5-5", "score": 80, "scale": "Artificial Analysis Intelligence Index (0-100)", "source": "https://artificialanalysis.ai/leaderboards/models"},
+                {"id": "glm-5.3", "score": 40, "scale": "Artificial Analysis Intelligence Index (0-100)", "source": "https://artificialanalysis.ai/leaderboards/models", "note": {"text": "Useful & limited.", "source": "https://example.org/glm-note"}},
             ],
         }
         with mock.patch.object(serve.benchmark_fetch, "read_snapshot", return_value=benchmark_snapshot):
             page = self.render()
-        self.assertIn(">75", page)
-        self.assertIn("5.0 pts/$", page)
+        self.assertIn("Artificial Analysis Coding Agent Index v1.5", page)
+        self.assertIn("EQ-Bench Creative Writing v3", page)
+        self.assertIn("Alconost reports scores by provider family", page)
+        self.assertIn("68", page)
+        self.assertIn("54", page)
+        self.assertIn("80", page)
+        self.assertIn("100.0%", page)
+        self.assertIn("11.1 pts/$", page)
+        self.assertIn("Useful &amp; limited.", page)
+        self.assertIn("href='https://example.org/glm-note'", page)
+        self.assertIn("No private model tests were run", page)
 
-    def test_perf_value_columns_show_no_data_without_a_benchmark_snapshot(self):
+    def test_perf_uses_unavailable_benchmark_leader_as_denominator(self):
+        model = {"id": "glm-5.3"}
+        _categories, _scores, performance = serve.benchmark_catalog.matrix([model], None)
+        self.assertAlmostEqual(performance["glm-5.3"], 54 / 68 * 100)
+
+
+    def test_missing_benchmark_snapshot_keeps_matrix_blank(self):
         self.write_tiers({"coding": {"tiers": {}}})
         self.write_snapshot({
             "fetched_at": "2026-10-07T00:00:00+00:00",
@@ -893,7 +911,10 @@ class AllModelsTableTests(unittest.TestCase):
         })
         with mock.patch.object(serve.benchmark_fetch, "read_snapshot", return_value=None):
             page = self.render()
-        self.assertEqual(page.count(">no data<"), 2)
+        self.assertIn("No source-verified Intelligence Index scores are cached", page)
+        self.assertIn("No source-verified score for this model", page)
+        self.assertIn("<th>perf</th>", page)
+        self.assertIn("<td>—</td>", page)
 
     def test_benchmark_status_counts_only_numeric_scores(self):
         self.write_tiers({})
@@ -1974,18 +1995,29 @@ class LoopsRouteUnitTests(unittest.TestCase):
         with mock.patch.object(serve.machines, "hostname", return_value="h"):
             handler.do_POST()
         self.assertEqual(handler.reply.call_args.args[1], 400)
-        self.assertIn("signing-key", handler.reply.call_args.args[0].decode())
 
     def test_start_route_runs_lupin_on_the_local_machine(self):
         handler = _loops_handler()
         _post_body(handler, "/loops/start", {"repo": "a", "machine": "h"})
         with (
             mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve, "_repo_platforms", return_value={}),
             mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
         ):
             handler.do_POST()
         fake_run.assert_called_once_with(["lupin", "run", "a"], timeout=20.0)
         handler.redirect.assert_called_once_with("/loops?repo=a")
+
+    def test_coordinator_cannot_start_a_local_loop(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/start", {"repo": "a", "machine": "pihome"})
+        with (
+            mock.patch.dict("os.environ", {"LUPIN_LOOP_COORDINATOR_ONLY": "1"}),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+
     def test_peek_route_uses_the_local_lupin_action(self):
         handler = _loops_handler()
         handler.path = "/peek?repo=a&machine=h&lines=12"
@@ -2019,7 +2051,6 @@ class LoopsRouteUnitTests(unittest.TestCase):
         with mock.patch.object(serve.machines, "hostname", return_value="h"):
             handler.do_POST()
         self.assertEqual(handler.reply.call_args.args[1], 400)
-        self.assertIn("signing-key", handler.reply.call_args.args[0].decode())
 
     def test_nav_has_a_loops_link(self):
         self.assertIn("href='/loops'", serve.render_nav("loops"))
@@ -2077,7 +2108,10 @@ class TestLoopsPageIntegration:
         kw = _kw(redis_port)
         handler = _post_handler("/loops/start", b"repo=widgets&machine=jesus", kw)
         handler.cmd_signing_key = "secret"
-        with mock.patch.object(serve.machines, "hostname", return_value="pihome"):
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+            mock.patch.object(serve, "_repo_platforms", return_value={"widgets": "omp"}),
+        ):
             handler.do_POST()
 
         raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
@@ -2085,7 +2119,7 @@ class TestLoopsPageIntegration:
         assert len(queued) == 1
         stored = json.loads(raw.get(f"lupin:v1:cmd:{queued[0]}"))
         assert stored["action"] == "loop.run"
-        assert stored["params"] == {"repo": "widgets"}
+        assert stored["params"] == {"repo": "widgets", "platform": "omp"}
 
     def test_peek_enqueues_a_signed_remote_action(self, redis_port, flush_redis):
         kw = _kw(redis_port)
@@ -2197,6 +2231,17 @@ class ScheduleHelperTests(unittest.TestCase):
         unit = "delegation-loop-once-abcd.timer"
         self.assertEqual(serve._timer_loop_count(unit, unit, []), 1)
 
+    def test_coordinator_only_mode_excludes_local_machine(self):
+        records = [
+            {"name": "pihome", "state": "online", "slots": {}},
+            {"name": "jesus", "state": "online", "slots": {}},
+        ]
+        with mock.patch.dict("os.environ", {"LUPIN_LOOP_COORDINATOR_ONLY": "1"}):
+            ranked = serve._rank_candidates(records, "pihome")
+            available = serve._machine_available("pihome", records, "pihome")
+        self.assertEqual([record["name"] for record in ranked], ["jesus"])
+        self.assertFalse(available)
+
 
 class ScheduleRenderTests(unittest.TestCase):
     def _data(self, **overrides):
@@ -2236,6 +2281,17 @@ class ScheduleRenderTests(unittest.TestCase):
         data = self._data(machines=[{"name": "build-box", "state": "draining", "slots": {}}])
         page = serve.render_schedule(data).decode()
         self.assertIn("value='build-box' disabled", page)
+
+
+    def test_coordinator_only_schedule_hides_local_machine(self):
+        machines = [
+            {"name": "pihome", "state": "online", "slots": {}},
+            {"name": "jesus", "state": "online", "slots": {}},
+        ]
+        with mock.patch.dict("os.environ", {"LUPIN_LOOP_COORDINATOR_ONLY": "1"}):
+            page = serve.render_schedule(self._data(machines=machines)).decode()
+        self.assertNotIn("<option value='pihome'", page)
+        self.assertIn("<option value='jesus'", page)
 
     def test_success_banner_shown_when_sent(self):
         page = serve.render_schedule(self._data(), sent="Started 1 loop(s): widgets@pihome").decode()
@@ -2321,35 +2377,6 @@ class ScheduleRunRouteUnitTests(unittest.TestCase):
             handler.do_POST()
         self.assertEqual(handler.reply.call_args.args[1], 400)
 
-    def test_local_dispatch_starts_each_selected_repo_with_lupin(self):
-        handler = _schedule_handler()
-        _post_body(handler, "/schedule/run", {"repo": "all", "cnt": "2", "place": "any"})
-        with (
-            mock.patch.object(serve, "enabled_repos", return_value=["b-repo", "a-repo"]),
-            mock.patch.object(serve.machines, "hostname", return_value="h"),
-            mock.patch.object(serve.machines, "machines", return_value=[]),
-            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
-        ):
-            handler.do_POST()
-        self.assertEqual(
-            [call.args[0] for call in fake_run.call_args_list],
-            [["lupin", "run", "a-repo"], ["lupin", "run", "b-repo"]],
-        )
-        handler.redirect.assert_called_once()
-        self.assertTrue(handler.redirect.call_args.args[0].startswith("/schedule?sent="))
-
-    def test_single_repo_selection_ignores_the_loop_count_field(self):
-        handler = _schedule_handler()
-        _post_body(handler, "/schedule/run", {"repo": "a-repo", "cnt": "4", "place": "any"})
-        with (
-            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
-            mock.patch.object(serve.machines, "hostname", return_value="h"),
-            mock.patch.object(serve.machines, "machines", return_value=[]),
-            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
-        ):
-            handler.do_POST()
-        fake_run.assert_called_once_with(["lupin", "run", "a-repo"], timeout=20.0)
-
     def test_remote_machine_without_signing_key_is_rejected(self):
         handler = _schedule_handler()
         _post_body(handler, "/schedule/run", {"repo": "a-repo", "place": "jesus"})
@@ -2363,7 +2390,6 @@ class ScheduleRunRouteUnitTests(unittest.TestCase):
         ):
             handler.do_POST()
         self.assertEqual(handler.reply.call_args.args[1], 400)
-        self.assertIn("signing-key", handler.reply.call_args.args[0].decode())
 
     def test_draining_specific_machine_is_rejected(self):
         handler = _schedule_handler()
@@ -2379,29 +2405,6 @@ class ScheduleRunRouteUnitTests(unittest.TestCase):
             handler.do_POST()
         self.assertEqual(handler.reply.call_args.args[1], 400)
 
-    def test_spread_round_robins_across_ranked_machines_including_local(self):
-        handler = _schedule_handler()
-        handler.cmd_signing_key = "secret"
-        _post_body(handler, "/schedule/run", {"repo": "all", "cnt": "4", "place": "spread"})
-        records = [
-            {"name": "mini", "state": "online", "slots": {"bmo": {"used": 0, "max": 2}}},
-            {"name": "jesus", "state": "online", "slots": {"bmo": {"used": 0, "max": 1}}},
-        ]
-        with (
-            mock.patch.object(serve, "enabled_repos", return_value=["r1", "r2", "r3", "r4"]),
-            mock.patch.object(serve.machines, "hostname", return_value="h"),
-            mock.patch.object(serve.machines, "machines", return_value=records),
-            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
-            mock.patch.object(serve.commands, "enqueue") as fake_enqueue,
-        ):
-            handler.do_POST()
-        # Ranked by free slots desc then name: mini(2), jesus(1), h(0) --
-        # round-robin over 4 repos wraps back to mini for the 4th.
-        fake_run.assert_called_once_with(["lupin", "run", "r3"], timeout=20.0)
-        self.assertEqual(
-            [(call.args[0], call.args[2]) for call in fake_enqueue.call_args_list],
-            [("mini", {"repo": "r1"}), ("jesus", {"repo": "r2"}), ("mini", {"repo": "r4"})],
-        )
 
 
 class TestSchedulePageIntegration:
@@ -2428,10 +2431,11 @@ class TestSchedulePageIntegration:
     def test_run_now_enqueues_loop_run_for_a_remote_machine(self, redis_port, flush_redis):
         kw = _kw(redis_port)
         _write_machine_record(redis_port, "jesus", state="online")
-        handler = _post_handler("/schedule/run", b"repo=widgets&place=jesus", kw)
+        handler = _post_handler("/schedule/run", b"repo=widgets&cnt=4&place=jesus", kw)
         handler.cmd_signing_key = "secret"
         with (
             mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(serve, "_repo_platforms", return_value={"widgets": "omp"}),
             mock.patch.object(serve.machines, "hostname", return_value="pihome"),
         ):
             handler.do_POST()
@@ -2441,7 +2445,7 @@ class TestSchedulePageIntegration:
         assert len(queued) == 1
         stored = json.loads(raw.get(f"lupin:v1:cmd:{queued[0]}"))
         assert stored["action"] == "loop.run"
-        assert stored["params"] == {"repo": "widgets"}
+        assert stored["params"] == {"repo": "widgets", "platform": "omp"}
         assert stored["target"] == "jesus"
         assert stored["issuer"] == "pihome"
         assert commands.verify(stored, "secret") is True
@@ -2472,16 +2476,35 @@ class TestSchedulePageIntegration:
         )
         handler.cmd_signing_key = "secret"
         with (
-            mock.patch.object(serve, "enabled_repos", return_value=["a-repo", "b-repo"]),
+            mock.patch.object(
+                serve, "enabled_repos",
+                return_value=["a-repo", "b-repo", "c-repo"],
+            ),
+            mock.patch.object(
+                serve, "_repo_platforms",
+                return_value={"a-repo": "omp", "b-repo": "claude", "c-repo": "omp"},
+            ),
             mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+            mock.patch.dict("os.environ", {"LUPIN_LOOP_COORDINATOR_ONLY": "1"}),
         ):
             handler.do_POST()
 
         raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
-        total_queued = sum(
-            len(raw.zrange(f"lupin:v1:cmdq:{name}", 0, -1)) for name in ("jesus", "mini")
-        )
-        assert total_queued == 2
+        payloads = {}
+        for machine in ("jesus", "mini"):
+            queued = raw.zrange(f"lupin:v1:cmdq:{machine}", 0, -1)
+            assert len(queued) == 1
+            payloads[machine] = json.loads(raw.get(f"lupin:v1:cmd:{queued[0]}"))
+        assert [
+            (payload["target"], payload["params"])
+            for payload in (payloads["jesus"], payloads["mini"])
+        ] == [
+            ("jesus", {"repo": "a-repo", "platform": "omp"}),
+            ("mini", {"repo": "b-repo", "platform": "claude"}),
+        ]
+        assert all(commands.verify(payload, "secret") for payload in payloads.values())
+        assert raw.zrange("lupin:v1:cmdq:pihome", 0, -1) == []
+        handler.send_response.assert_called_once_with(303)
 
 
 # --------------------------------------------------------------------------

@@ -210,6 +210,12 @@ snapshot, so there is no `benchmark-snapshot:<machine>` variant.
 }
 ```
 
+Each score can also include an optional `note` object with `text` and a
+public `source` URL. The Models page shows these source-backed remarks in its
+Notes column. A note is omitted when the agent finds no useful evidence.
+Older snapshots may not have notes. The agent receives a zero-price model
+list only when both prices are zero in a live `fetch-models` snapshot.
+
 `live: false` carries a `stale_reason` instead of a `source`/`scores` list
 with real entries — the dispatched agent timed out, exited non-zero, or
 returned something that didn't match its schema. TTL is retention only

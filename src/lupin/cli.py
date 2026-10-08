@@ -608,7 +608,7 @@ def _build_parser() -> argparse.ArgumentParser:
         sub.add_parser("review-route", help="route a pair and report which lock it needs")
     )
     _roadmap_args(sub.add_parser("roadmap", help="prioritized open tasks, across repos"))
-    _serve_args(sub.add_parser("serve", help="run the read-only loopback dashboard"))
+    _serve_args(sub.add_parser("serve", help="run the loopback fleet dashboard"))
     _join_args(sub.add_parser("join", help="add this machine to the fleet"))
     _fleet_connection_args(sub.add_parser("heartbeat", help="refresh this machine's fleet record"))
     _fleet_connection_args(sub.add_parser("drain", help="mark this machine as draining"))
@@ -630,6 +630,9 @@ def _build_parser() -> argparse.ArgumentParser:
     _wait_arg(run_parser)
     _signing_key_arg(run_parser)
     _fleet_connection_args(run_parser)
+    fleet_run_parser = sub.add_parser("fleet-run", help="dispatch enabled loops to online fleet workers")
+    fleet_run_parser.add_argument("--json", action="store_true")
+    _fleet_connection_args(fleet_run_parser)
     once_parser = sub.add_parser("once", help="start now or schedule a one-off loop run")
     once_parser.add_argument("when")
     once_parser.add_argument("repos", nargs="*")
@@ -718,6 +721,10 @@ def _cmd_fetch_benchmarks(args: argparse.Namespace) -> int:
         if data.get("live"):
             tag += f"; fetched {_ago(data.get('fetched_at'))}"
         print(f"benchmarks: {scored}/{len(scores)} scored ({tag})")
+        for score in scores:
+            if isinstance(score, dict) and score.get("score") is None:
+                reason = score.get("reason") or "no reason provided"
+                print(f"  unscored: {score.get('id', '<unknown model>')} — {reason}")
     return 0
 
 
@@ -1468,6 +1475,48 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_fleet_run(args: argparse.Namespace) -> int:
+    """Dispatch the local enabled-repo list to eligible fleet workers."""
+    try:
+        repos = loop_runtime.enabled_repos()
+        if not repos:
+            print("no enabled repos to dispatch", file=sys.stderr)
+            return 1
+        connection = _fleet_connection(args)
+        records = machines.machines(connection)
+        signing_keys = {}
+        key_dir = os.environ.get("LUPIN_CMD_SIGNING_KEYS_DIR")
+        for record in records:
+            machine = record.get("name")
+            if not isinstance(machine, str):
+                continue
+            key = commands.signing_key_for(machine, directory=key_dir)
+            if key is not None:
+                signing_keys[machine] = key
+        results = loops_mod.dispatch_fleet_runs(
+            repos,
+            records,
+            local_host=machines.hostname(),
+            signing_keys=signing_keys,
+            connection=connection,
+        )
+    except slots.CoordinatorUnreachable as exc:
+        print(f"cannot reach the redis coordinator: {exc}", file=sys.stderr)
+        return 3
+    except loop_runtime.LoopError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(results))
+    else:
+        for result in results:
+            if result["queued"]:
+                print(f"queued {result['repo']}@{result['machine']} ({result['id']})")
+            else:
+                print(f"skip {result['repo']}: {result['message']}")
+    return 1 if any(not result["queued"] for result in results) else 0
+
+
 def _cmd_once(args: argparse.Namespace) -> int:
     try:
         if args.when == "now":
@@ -1899,6 +1948,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_agent(args)
     if args.cmd == "loop":
         return _cmd_loop_internal(args)
+    if args.cmd == "fleet-run":
+        return _cmd_fleet_run(args)
     if args.cmd == "run":
         return _cmd_run(args)
     if args.cmd == "once":

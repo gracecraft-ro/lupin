@@ -28,7 +28,7 @@ from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
-from . import benchmark_fetch, claims, commands, loop_runtime, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
+from . import benchmark_catalog, benchmark_fetch, claims, commands, loop_runtime, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
 from .slots import CoordinatorUnreachable
 from .quota import (
     QuotaDuration,
@@ -586,6 +586,10 @@ def gather_schedule(connection: dict) -> dict:
     }
 
 
+def _coordinator_only() -> bool:
+    return os.environ.get("LUPIN_LOOP_COORDINATOR_ONLY") == "1"
+
+
 def _rank_candidates(records: list[dict], local_host: str) -> list[dict]:
     """Online machines for "Run now" placement, most free loop capacity
     first (ties broken by name, for a deterministic "spread out" rotation).
@@ -598,17 +602,17 @@ def _rank_candidates(records: list[dict], local_host: str) -> list[dict]:
     capacity (`machines._slot_totals`, the same helper `place.py` itself
     uses for its own free-slots tiebreak), so that is all this uses.
 
-    Includes `local_host` only when the registry has no record for it at
-    all (or can't be reached, in which case `records` is already `[]`) --
-    same "the local machine is always a valid target" rule `do_loops_start`
-    applies. If the registry *does* have a record for `local_host`, that
-    record's own state wins instead: a `local_host` that has drained itself
-    is excluded here exactly like any other draining machine, not silently
-    treated as available just because it happens to be where this process
-    runs.
+    The local machine is a candidate only when this service also runs loops.
+    Coordinator-only mode excludes it, even if its registry record says
+    `online`.
     """
-    online = [r for r in records if r["state"] == "online"]
-    if local_host not in {r["name"] for r in records}:
+    local_worker = not _coordinator_only()
+    online = [
+        record
+        for record in records
+        if record["state"] == "online" and (local_worker or record["name"] != local_host)
+    ]
+    if local_worker and local_host not in {record["name"] for record in records}:
         online.append({"name": local_host, "state": "online", "slots": {}})
 
     def free_slots(record: dict) -> int:
@@ -619,17 +623,12 @@ def _rank_candidates(records: list[dict], local_host: str) -> list[dict]:
 
 
 def _machine_available(name: str, records: list[dict], local_host: str) -> bool:
-    """Whether `name` is a legal "Run now" placement target: a known
-    machine must report `state == "online"`; an unregistered name is only
-    accepted when it is `local_host` itself (same fallback `_rank_candidates`
-    uses). This is the single check both the placement <select> (via
-    `_rank_candidates`, for the generic "spread"/"any" choices) and a
-    user-pinned specific machine name go through -- a pinned name does not
-    get a looser rule than an automatic pick would.
-    """
+    """Whether `name` is a legal target for "Run now"."""
+    if _coordinator_only() and name == local_host:
+        return False
     record = next((r for r in records if r["name"] == name), None)
     if record is None:
-        return name == local_host
+        return name == local_host and not _coordinator_only()
     return record["state"] == "online"
 
 
@@ -1551,70 +1550,125 @@ def _snapshot_age(fetched_at: str | None) -> str:
     return f"<span data-since='{epoch:.0f}'></span> ago"
 
 
-def _format_score(entry: dict | None) -> str:
-    """"Perf" cell: `entry`'s score with its scale as a hover tooltip, or
-    "no data" if there's no entry or the dispatched agent couldn't find
-    one (`{"score": null, "reason": ...}`, never a guess -- see
-    `benchmark_fetch.py`)."""
-    if not entry or entry.get("score") is None:
-        return "no data"
-    scale = entry.get("scale") or ""
-    score = f"{entry['score']:g}"
-    return f"<span title='{esc(scale)}'>{score}</span>" if scale else score
+def _format_score(scores: list[dict]) -> str:
+    if not scores:
+        return "<span title='No source-verified score for this model'>—</span>"
+    cells = []
+    for score in scores:
+        title = f"{score['benchmark']} · {score['metric']} · {score['source']}"
+        cells.append(f"<span title='{esc(title)}'>{score['score']:g}</span>")
+    return "<br>".join(cells)
 
 
-def _format_value(entry: dict | None, price: dict | None) -> str:
-    """"Value" cell: score per dollar, i.e. `score / blended price`, where
-    blended price averages whatever of input/output price is on file.
-    This is this module's own ratio, computed from two real numbers (a
-    fetched score, a fetched price) -- never a guess, but also not
-    something the issue or the mockup ever specified a formula for; a
-    judgment call, flagged as such in this change's report. "no data"
-    whenever either input is missing, or price is free (nothing to divide
-    by that means anything).
-    """
-    if not entry or entry.get("score") is None or not price:
-        return "no data"
-    prices = [p for p in (price.get("input"), price.get("output")) if isinstance(p, (int, float))]
+def _format_research_note(note: dict | None) -> str:
+    if not isinstance(note, dict):
+        return "—"
+    text = note.get("text")
+    source = note.get("source")
+    if (
+        not isinstance(text, str)
+        or not text.strip()
+        or not isinstance(source, str)
+        or not source.startswith(("https://", "http://"))
+    ):
+        return "—"
+    return (
+        f"{esc(text)}<div class=dim>"
+        f"<a href='{esc(source)}' target='_blank' rel='noopener'>Source</a></div>"
+    )
+
+
+def _format_value(performance: float | None, price: dict | None) -> str:
+    if performance is None or not price:
+        return "—"
+    prices = [value for value in (price.get("input"), price.get("output")) if isinstance(value, (int, float))]
     blended = sum(prices) / len(prices) if prices else 0
-    if not blended:
-        return "no data"
-    return f"{entry['score'] / blended:.1f} pts/$"
+    return f"{performance / blended:.1f} pts/$" if blended else "—"
 
 
-def render_snapshot_models_table(models: list[dict], benchmark_scores: list[dict] | None = None) -> str:
-    """The "All models" table (issue #17): every model each subscription
-    actually returned that day, not a hardcoded list. "Perf"/"Value" read
-    from `benchmark_fetch`'s fleet-shared snapshot (issue #17's reopen),
-    matched by model id the same way price already matches by id --
-    "no data" for a model the dispatched agent couldn't find a credible
-    score for, never a guess.
-    """
+def render_benchmarks_by_category(categories: list[dict], models: list[dict]) -> str:
+    names = {model["id"]: model.get("display_name") or model["id"] for model in models}
+    rows = []
+    for category in categories:
+        benchmarks = category["benchmarks"]
+        if not benchmarks:
+            note = category.get("note") or "No source-verified model scores."
+            source = category.get("source")
+            source_link = (
+                f" <a href='{esc(source)}' target='_blank' rel='noopener'>Source</a>"
+                if source else ""
+            )
+            rows.append(
+                f"<tr><td>{esc(category['name'])}</td>"
+                f"<td colspan='2' class=dim>{esc(note)}{source_link}</td></tr>"
+            )
+            continue
+        for benchmark in benchmarks:
+            scores = sorted(benchmark["scores"], key=lambda item: item["score"], reverse=True)[:3]
+            leaders = ", ".join(
+                f"{esc(score.get('label') or names.get(score['model'], score['model']))}: {score['score']:g}"
+                for score in scores
+            ) or "No matching models in today's snapshot"
+            source = (
+                f"<a href='{esc(benchmark['source'])}' target='_blank' rel='noopener'>"
+                f"{esc(benchmark['name'])}</a>"
+            )
+            rows.append(
+                f"<tr><td>{esc(category['name'])}</td>"
+                f"<td>{source}<div class=dim>{esc(benchmark['metric'])}</div></td>"
+                f"<td>{leaders}<div class=dim>source checked {esc(str(benchmark.get('retrieved_on') or 'date unknown'))}</div></td></tr>"
+            )
+        if category.get("note"):
+            rows.append(
+                f"<tr><td></td><td colspan='2' class=dim>{esc(category['note'])}</td></tr>"
+            )
+    return (
+        "<div class='card scroll'><table><thead><tr>"
+        "<th>category</th><th>benchmark</th><th>top source scores</th>"
+        f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
+    )
+
+
+def render_snapshot_models_table(
+    models: list[dict],
+    categories: list[dict],
+    by_model: dict,
+    performance: dict,
+    notes_by_model: dict[str, dict] | None = None,
+) -> str:
     if not models:
         return (
             "<p class=dim>No model snapshot yet. Run <code>lupin fetch-models</code> "
             "or click \"Pull models\" above.</p>"
         )
+    category_heads = "".join(f"<th>{esc(category['name'])}</th>" for category in categories)
+    notes_by_model = notes_by_model or {}
     rows = []
-    for model in sorted(models, key=lambda m: (m["subscription"], m["id"])):
-        source = "live" if model["live"] else (esc(model["stale_reason"]) if model["stale_reason"] else "stale")
-        promo = esc(model["promo"]) if model.get("promo") else "-"
-        score_entry = benchmark_fetch.match_score(model["id"], benchmark_scores or [])
+    for model in sorted(models, key=lambda item: (item["subscription"], item["id"])):
+        model_id = model["id"]
+        cells = "".join(
+            f"<td>{_format_score(by_model.get(model_id, {}).get(category['id'], []))}</td>"
+            for category in categories
+        )
+        perf = performance.get(model_id)
+        perf_text = f"{perf:.1f}%" if perf is not None else "—"
+        model_meta = f"<div class=dim>{esc(model['subscription'])}</div>"
+        if model.get("stale_reason"):
+            model_meta += f"<div class=dim>{esc(model['stale_reason'])}</div>"
         rows.append(
             "<tr>"
-            f"<td>{esc(model['display_name'])}</td>"
-            f"<td>{esc(model['subscription'])}</td>"
-            f"<td>{esc(_format_price(model['price']))}</td>"
-            f"<td>{_format_score(score_entry)}</td>"
-            f"<td>{_format_value(score_entry, model['price'])}</td>"
-            f"<td>{promo}</td>"
-            f"<td class=dim>{source}</td>"
+            f"<td>{esc(model.get('display_name') or model_id)}{model_meta}</td>"
+            f"{cells}"
+            f"<td>{esc(_format_price(model.get('price')))}</td>"
+            f"<td>{perf_text}</td>"
+            f"<td>{esc(_format_value(perf, model.get('price')))}</td>"
+            f"<td>{_format_research_note(notes_by_model.get(model_id))}</td>"
             "</tr>"
         )
     return (
-        "<div class='card scroll'><table><tr><th>model</th><th>subscription</th>"
-        "<th>price</th><th>perf</th><th>value</th><th>promo</th><th>source</th></tr>"
-        f"{''.join(rows)}</table></div>"
+        "<div class='card scroll'><table><thead><tr><th>model</th>"
+        f"{category_heads}<th>$ input / output</th><th>perf</th><th>value</th><th>notes</th>"
+        f"</tr></thead><tbody>{''.join(rows)}</tbody></table></div>"
     )
 
 
@@ -1623,6 +1677,8 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
     snapshot = load_model_snapshot(connection)
     models = snapshot_models(snapshot)
     benchmark_snapshot = benchmark_fetch.read_snapshot(**(connection or {}))
+    benchmark_categories, scores_by_model, performance = benchmark_catalog.matrix(models, benchmark_snapshot)
+    notes_by_model = benchmark_catalog.notes_by_model(benchmark_snapshot)
     benchmark_scores = (benchmark_snapshot or {}).get("scores") or []
     scored_benchmarks = sum(
         1 for score in benchmark_scores
@@ -1636,7 +1692,7 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
     body.append(
         "<div class='card' style='display:flex;align-items:center;gap:1rem'>"
         f"<span class=dim>Last pulled: {_snapshot_age(snapshot.get('fetched_at') if snapshot else None)}</span>"
-        f"<span class=dim>Benchmarks: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)} ({scored_benchmarks}/{len(benchmark_scores)} scored)</span>"
+        f"<span class=dim>General scores: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)} ({scored_benchmarks}/{len(benchmark_scores)} scored)</span>"
         "<span style='flex:1'></span>"
         "<form method=post action='/model-tiers/refresh'>"
         "<button type=submit>Pull models</button></form>"
@@ -1676,14 +1732,20 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
         body.append("<div class='card dim'>No task categories.</div>")
     body.append("</div>")
     body.extend([
+        "<h2>Benchmarks by category</h2>",
+        "<p class=dim>Scores link to their sources. We show a score only for an exact model ID; "
+        "provider-family scores do not stand in for model scores. Empty cells mean no verified "
+        "public score is available. We may add our own tests later, one model at a time. "
+        "No private model tests were run for this page.</p>",
+        render_benchmarks_by_category(benchmark_categories, models),
         "<h2>All models</h2>",
-        "<p class=dim>Every model <code>lupin fetch-models</code> found reachable "
-        "today, across opencode-go, Claude, and Codex. \"Perf\" is "
-        "<code>lupin fetch-benchmarks</code>'s score for that model (a "
-        "dispatched agent's web research, cached fleet-wide); \"Value\" is "
-        "that score divided by price. Either reads \"no data\" when no "
-        "credible score was found, never a guess.</p>",
-        render_snapshot_models_table(models, benchmark_scores),
+        "<p class=dim>Perf is each model's average score as a percent of the best result in each "
+        "available benchmark, averaged equally across categories. Value is Perf divided by the "
+        "blended input/output price per million tokens. Rows with no matching score show —. "
+        "Notes show source-backed public observations. Older snapshots may not include them.</p>",
+        render_snapshot_models_table(
+            models, benchmark_categories, scores_by_model, performance, notes_by_model
+        ),
     ])
     return page("Model tiers", "".join(body), active="models")
 
@@ -1976,15 +2038,13 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
         )
         schedule_link = f"<a href='/repos?schedule={quote(repo, safe='')}'>Schedule&hellip;</a>"
         if r["state"] == "enabled":
-            # Posts straight to the existing, tested /schedule/run route --
-            # no new dispatch code. place=local_host is the only option
-            # here (unlike Schedule's own "Run now" card, a repo row has no
-            # machine picker in the mockup either).
+            place_choice = "spread" if _coordinator_only() else local_host
+            # Use online workers when this dashboard only coordinates runs.
             run_form = (
                 "<form method=post action=/schedule/run style='display:inline'>"
                 f"<input type=hidden name=repo value='{esc(repo)}'>"
                 "<input type=hidden name=cnt value=1>"
-                f"<input type=hidden name=place value='{esc(local_host)}'>"
+                f"<input type=hidden name=place value='{esc(place_choice)}'>"
                 "<button type=submit>Run now</button></form>"
             )
             remove_link = f"<a href='/repos?remove={quote(repo, safe='')}'>Remove</a>"
@@ -2156,12 +2216,13 @@ def render_schedule(data: dict, *, sent: str | None = None) -> bytes:
     repo_options = "".join(f"<option value='{esc(r)}'>{esc(r)}</option>" for r in sorted(enabled))
     cnt_options = "".join(f"<option value={n}>{n} loop{'s' if n != 1 else ''}</option>" for n in range(1, 5))
     place_options = ["<option value=spread>spread out</option>", "<option value=any>any machine</option>"]
-    # The registry's own record for `local_host` wins when there is one (a
-    # draining local machine must show as draining here too, not as a
-    # synthetic always-available entry) -- same rule `_machine_available`
-    # enforces on the POST side.
+    coordinator_only = _coordinator_only()
     by_name = {m["name"]: m for m in fleet_machines}
-    by_name.setdefault(local_host, {"name": local_host, "state": "online"})
+    if coordinator_only:
+        by_name.pop(local_host, None)
+    else:
+        # A registered local machine keeps its reported state.
+        by_name.setdefault(local_host, {"name": local_host, "state": "online"})
     for m in sorted(by_name.values(), key=lambda m: m["name"]):
         if m["state"] == "offline":
             continue
@@ -2170,9 +2231,13 @@ def render_schedule(data: dict, *, sent: str | None = None) -> bytes:
         place_options.append(f"<option value='{esc(m['name'])}'{disabled}>{esc(label)}</option>")
 
     fleet_error = data.get("fleet_error")
+    placement_note = (
+        "No worker choices are available until the registry responds."
+        if coordinator_only
+        else "Placement is limited to this machine."
+    )
     error_note = (
-        f"<p class=dim>Fleet registry unreachable: {esc(fleet_error)} "
-        "(placement choices below are limited to this machine).</p>"
+        f"<p class=dim>Fleet registry unreachable: {esc(fleet_error)} {placement_note}</p>"
         if fleet_error
         else ""
     )
@@ -2416,15 +2481,15 @@ class Handler(BaseHTTPRequestHandler):
     # #15's fleet data, issue #19's quest POST routes, and issue #20's
     # Machines page alike.
     fleet_connection: dict = {}
-    # Needed only to close/restart a loop on another fleet machine (issue
-    # #21) -- a local-machine close/restart never signs anything. See
-    # commands.py's docstring for what this key is and why it's per target.
-    # Known, flagged gap (issue #2's posted architecture-plan comment,
-    # "Signing-key scheme"): one shared key signs for every target today,
-    # so once any machine can command any other, a single compromised
-    # host could forge a command fleet-wide. Moving to per-machine keys is
-    # Grace's call to make, not a default to pick here.
     cmd_signing_key: str | None = None
+    cmd_signing_keys_dir: str | None = None
+
+    def _signing_key_for(self, machine: str) -> str | None:
+        return commands.signing_key_for(
+            machine,
+            default=self.cmd_signing_key,
+            directory=self.cmd_signing_keys_dir,
+        )
 
     def reply(self, body: bytes, status: int = 200) -> None:
         self.send_response(status)
@@ -2814,11 +2879,11 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("bad repo name"), 400)
             return
         local_host = machines.hostname()
-        if machine != local_host and not self.cmd_signing_key:
+        signing_key = self._signing_key_for(machine)
+        if machine != local_host and not signing_key:
             self.reply(
                 render_error(
-                    "closing a loop on another machine needs --cmd-signing-key "
-                    "or $LUPIN_CMD_SIGNING_KEY"
+                    f"no signing key is configured for {machine!r}"
                 ),
                 400,
             )
@@ -2830,7 +2895,7 @@ class Handler(BaseHTTPRequestHandler):
                     machine=machine, local_host=local_host,
                     local_argv=["lupin", "loop", "local-action", "stop", target],
                     queue_action="loop.stop", queue_params={"repo": target},
-                    connection=self.fleet_connection, signing_key=self.cmd_signing_key,
+                    connection=self.fleet_connection, signing_key=signing_key,
                     actor="lupin-dashboard", issuer=local_host,
                     run_local=lambda argv: run(argv, timeout=20.0),
                 )
@@ -2851,21 +2916,25 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("bad start request"), 400)
             return
         local_host = machines.hostname()
-        if machine != local_host and not self.cmd_signing_key:
-            self.reply(
-                render_error(
-                    "starting a loop on another machine needs --cmd-signing-key "
-                    "or $LUPIN_CMD_SIGNING_KEY"
-                ),
-                400,
-            )
+        if _coordinator_only() and machine == local_host:
+            self.reply(render_error("the coordinator cannot run loops"), 400)
             return
+        signing_key = self._signing_key_for(machine)
+        if machine != local_host and not signing_key:
+            self.reply(render_error(f"no signing key is configured for {machine!r}"), 400)
+            return
+        platform = _repo_platforms().get(repo)
+        local_argv = ["lupin", "run", repo]
+        queue_params = {"repo": repo}
+        if platform:
+            local_argv.extend(["--platform", platform])
+            queue_params["platform"] = platform
         try:
             result = loops.dispatch_loop_action(
                 machine=machine, local_host=local_host,
-                local_argv=["lupin", "run", repo],
-                queue_action="loop.run", queue_params={"repo": repo},
-                connection=self.fleet_connection, signing_key=self.cmd_signing_key,
+                local_argv=local_argv,
+                queue_action="loop.run", queue_params=queue_params,
+                connection=self.fleet_connection, signing_key=signing_key,
                 actor="lupin-dashboard", issuer=local_host,
                 run_local=lambda argv: run(argv, timeout=20.0),
             )
@@ -2904,6 +2973,7 @@ class Handler(BaseHTTPRequestHandler):
         capacity.
         """
         enabled = enabled_repos()
+        platforms = _repo_platforms()
         repo_choice = (form.get("repo") or [None])[0]
         if not repo_choice:
             self.reply(render_error("missing repo"), 400)
@@ -2959,24 +3029,28 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("bad placement"), 400)
             return
 
-        if any(m != local_host for m in assigned) and not self.cmd_signing_key:
-            self.reply(
-                render_error(
-                    "starting a loop on another machine needs --cmd-signing-key "
-                    "or $LUPIN_CMD_SIGNING_KEY"
-                ),
-                400,
-            )
+        missing_key = next(
+            (machine for machine in assigned if machine != local_host and not self._signing_key_for(machine)),
+            None,
+        )
+        if missing_key:
+            self.reply(render_error(f"no signing key is configured for {missing_key!r}"), 400)
             return
 
         errors = []
         for repo, machine in zip(targets_repos, assigned):
+            platform = platforms.get(repo)
+            local_argv = ["lupin", "run", repo]
+            queue_params = {"repo": repo}
+            if platform:
+                local_argv.extend(["--platform", platform])
+                queue_params["platform"] = platform
             try:
                 result = loops.dispatch_loop_action(
                     machine=machine, local_host=local_host,
-                    local_argv=["lupin", "run", repo],
-                    queue_action="loop.run", queue_params={"repo": repo},
-                    connection=self.fleet_connection, signing_key=self.cmd_signing_key,
+                    local_argv=local_argv, queue_action="loop.run",
+                    queue_params=queue_params,
+                    connection=self.fleet_connection, signing_key=self._signing_key_for(machine),
                     actor="lupin-dashboard", issuer=local_host,
                     run_local=lambda argv: run(argv, timeout=20.0),
                 )
@@ -3009,11 +3083,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(render_error("unknown loop"), 404)
                 return
             machine = entry["machine"]
-        if machine != machines.hostname() and not self.cmd_signing_key:
-            self.reply(render_error("reading output on another machine needs --cmd-signing-key or $LUPIN_CMD_SIGNING_KEY"), 400)
+        signing_key = self._signing_key_for(machine)
+        if machine != machines.hostname() and not signing_key:
+            self.reply(render_error(f"no signing key is configured for {machine!r}"), 400)
             return
         try:
-            out = loop_tail(repo, machine, int(lines), self.fleet_connection, self.cmd_signing_key)
+            out = loop_tail(repo, machine, int(lines), self.fleet_connection, signing_key)
         except CoordinatorUnreachable:
             self.reply(render_error("cannot reach the redis coordinator"), 502)
             return
@@ -3035,8 +3110,9 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("bad state request"), 400)
             return
         local_host = machines.hostname()
-        if machine != local_host and not self.cmd_signing_key:
-            self.reply(render_error("reading state on another machine needs --cmd-signing-key or $LUPIN_CMD_SIGNING_KEY"), 400)
+        signing_key = self._signing_key_for(machine)
+        if machine != local_host and not signing_key:
+            self.reply(render_error(f"no signing key is configured for {machine!r}"), 400)
             return
         try:
             result = loops.dispatch_loop_action(
@@ -3046,7 +3122,7 @@ class Handler(BaseHTTPRequestHandler):
                 queue_action="loop.state",
                 queue_params={"repo": repo},
                 connection=self.fleet_connection,
-                signing_key=self.cmd_signing_key,
+                signing_key=signing_key,
                 actor="lupin-dashboard",
                 issuer=local_host,
                 run_local=lambda argv: run(argv, timeout=20.0),
@@ -3308,12 +3384,13 @@ def main(argv: list[str] | None = None) -> int:
         "--config-path", default=os.environ.get("LUPIN_FLEET_CONFIG"),
         help="fleet config file (default: $LUPIN_FLEET_CONFIG or ~/.config/lupin/fleet.json)",
     )
-    # issue #21: the Loops page's close/restart needs this only to reach a
-    # loop on another fleet machine -- same env var cli.py's `lupin cmd
-    # send`/`lupin agent` already use (`_signing_key_arg`).
     ap.add_argument(
         "--cmd-signing-key", default=os.environ.get("LUPIN_CMD_SIGNING_KEY"),
-        help="default: $LUPIN_CMD_SIGNING_KEY -- needed only to close/restart a loop on another machine",
+        help="legacy shared signing key for remote loop actions",
+    )
+    ap.add_argument(
+        "--cmd-signing-key-dir", default=os.environ.get("LUPIN_CMD_SIGNING_KEYS_DIR"),
+        help="directory with one file per target machine",
     )
     args, _unknown = ap.parse_known_args(argv)
 
@@ -3369,6 +3446,7 @@ def main(argv: list[str] | None = None) -> int:
         config_path=args.config_path,
     )
     Handler.cmd_signing_key = args.cmd_signing_key
+    Handler.cmd_signing_keys_dir = args.cmd_signing_key_dir
 
     httpd = Server((args.bind, args.port), Handler)
     print(f"lupin on http://{args.bind}:{args.port}", file=sys.stderr)

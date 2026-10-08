@@ -11,7 +11,16 @@
           "scale": {"type": ["string", "null"]},
           "source": {"type": ["string", "null"]},
           "as_of": {"type": ["string", "null"]},
-          "reason": {"type": ["string", "null"]}
+          "reason": {"type": ["string", "null"]},
+          "note": {
+            "type": ["object", "null"],
+            "properties": {
+              "text": {"type": "string", "minLength": 1, "maxLength": 280},
+              "source": {"type": "string", "minLength": 1}
+            },
+            "required": ["text", "source"],
+            "additionalProperties": false
+          }
         },
         "required": ["id", "score"]
       }

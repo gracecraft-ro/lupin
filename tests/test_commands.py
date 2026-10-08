@@ -45,6 +45,17 @@ def test_verify_rejects_tampered_field():
     assert commands.verify(cmd, "secret") is False
 
 
+def test_signing_key_for_reads_target_file_without_shared_fallback(tmp_path):
+    key_dir = tmp_path / "keys"
+    key_dir.mkdir()
+    (key_dir / "jesus").write_text("jesus-secret\n", encoding="utf-8")
+
+    assert commands.signing_key_for("jesus", directory=key_dir) == "jesus-secret"
+    assert commands.signing_key_for("ralpha", default="shared", directory=key_dir) is None
+    assert commands.signing_key_for("../jesus", directory=key_dir) is None
+    assert commands.signing_key_for("jesus", default="shared") == "shared"
+
+
 def test_parse_params_basic():
     assert commands.parse_params(["repo=owner/name", "flag=1"]) == {"repo": "owner/name", "flag": "1"}
 

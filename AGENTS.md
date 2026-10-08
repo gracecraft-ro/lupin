@@ -12,10 +12,10 @@
    them (start/stop/close a loop, add or remove a repo, trigger a run,
    adjust a machine's slots). Command: `serve`.
 4. It coordinates a fleet of machines: issue claims, machine records, quests
-   (sets of issues worked together on one machine), and shared repository
-   events. Commands: `claim`, `renew-claim`, `release-claim`, `join`,
+   (sets of issues worked together on one machine), scheduled runs, and shared
+   repository events. Commands: `claim`, `renew-claim`, `release-claim`, `join`,
    `heartbeat`, `drain`, `undrain`, `machines`, `place`, `quest`, `reconcile`,
-   `roadmap`, `ledger`.
+   `roadmap`, `ledger`, `fleet-run`.
    Loop lifecycle: `run`, `once`, `enable`, `disable`, `loops`, `stop`, `peek`,
    `attach`, `schedule`, `pause`, `resume`.
 
@@ -42,7 +42,7 @@ lupin ledger read OWNER/REPO [--limit N] [--json]
 lupin serve [--bind 127.0.0.1] [--port 8788] [--roadmap REPO]
 lupin agent [--machine M] [--batch N] [--poll-interval S]
 lupin run <repo> [--machine M] [--platform claude|omp] [--note TEXT] [--resume]
-lupin run --all [--machine M] [--note TEXT]
+lupin fleet-run [--json]
 lupin once <when> [repo ...] [--platform claude|omp] [--note TEXT] [--resume]
 lupin enable <repo> [--platform claude|omp]
 lupin disable <repo>
@@ -105,6 +105,16 @@ relative time or a calendar expression such as `tomorrow 09:00`. The
 interval controls later runs.
 `enable` and `disable` edit the local repo list.
 
+`fleet-run` sends each enabled repo to one online worker. It skips the local
+machine, workers with an active loop for that repo, and workers without that
+repo's checkout. The coordinator needs one signing key file per worker in
+`LUPIN_CMD_SIGNING_KEYS_DIR`; each file name is the worker name. Each worker
+needs `lupin agent` and its matching key. The command queues runs but does not
+wait for them to start.
+
+On PiHome, the systemd timer runs `fleet-run` every 5h15m. The dashboard can
+start or stop that timer.
+
 `loops` reads state from the Herdr API. It reports the agent state, backend,
 session, workspace and pane IDs. It does not infer state from pane text.
 Each repo has one Herdr session. Each run has one workspace. A completed
@@ -137,16 +147,27 @@ This file is local config, not fleet state. Herdr must be installed on both
 machines. SSH must allow key-based access. A missing target makes `attach`
 fail instead of guessing a hostname.
 
-`fetch-benchmarks` gets a quality score for each model. It does not call a
-benchmark API. Instead it runs a sandboxed Claude agent once a day. That
-agent searches the web and reports back a score, a source, and a date —
-never a guess. The result goes into one shared Redis key, not a file on
-disk, so every machine sees the same score and only one machine does the
-work each day. Use `--force` to pull fresh data right now, skipping the
-daily cache (it still waits its turn if another machine is mid-pull).
-Plain output shows numeric score count and snapshot age. "Live" means the
-agent returned a valid snapshot. It does not mean every model has a score or
-that this command fetched the snapshot.
+`fetch-benchmarks` gets public benchmark scores. It does not run models. It
+uses a restricted Claude agent to search the web, then shares the result in
+Redis. Use `--force` to fetch now. Plain output lists each unscored model and
+the reason from the agent. Older cached results may only say `not found`
+until the next fetch. Model IDs come from the latest `fetch-models` snapshot.
+If that snapshot is missing or empty, Lupin uses the active picks in
+`model-tiers.json`.
+
+A fresh result may include a short, source-linked note about a model's
+publicly reported strengths or limits. The agent gets zero-price model IDs
+only when a live model snapshot reports zero input and output cost.
+
+The Models page shows scores from public sources by task category. It uses
+exact model IDs only. It does not copy a provider-family score to each model.
+Missing cells mean no verified score is available. The Notes column shows
+source-backed public observations. Older snapshots may not include notes.
+The page does not show private test results.
+"Perf" is each model's average score as a percent of the best score in each
+benchmark, averaged equally across scored categories. "Value" is Perf divided
+by the mean input and output price. Future Lupin tests may run one model at a
+time. The page does not run private model tests.
 
 `quota` shows how much of each provider's quota is left: percent left,
 which window (5 hours, 7 days, 30 days), and time to reset. Quota is one

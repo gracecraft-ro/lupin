@@ -8,6 +8,7 @@ call-was-made assertion.
 
 from __future__ import annotations
 
+import json
 from unittest import mock
 
 import pytest
@@ -162,6 +163,81 @@ def test_dispatch_remote_wait_times_out_with_unknown_result(redis_port, flush_re
     )
     assert result["result"]["state"] == "queued"
 
+
+
+def test_dispatch_fleet_runs_uses_each_targets_key_and_skips_unsafe_targets(redis_port, flush_redis):
+    connection = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    records = [
+        {
+            "name": "jesus",
+            "state": "online",
+            "actions": ["loop.run"],
+            "repos": [
+                {"repo": "widgets", "loopable": True},
+                {"repo": "roundsmith", "loopable": True},
+            ],
+            "loops": [{"repo": "widgets"}],
+            "slots": {"claude": {"used": 1, "max": 2}},
+        },
+        {
+            "name": "ralpha",
+            "state": "online",
+            "actions": ["loop.run"],
+            "repos": [
+                {"repo": "widgets", "loopable": True},
+                {"repo": "roundsmith", "loopable": True},
+            ],
+            "loops": [],
+            "slots": {"claude": {"used": 1, "max": 2}},
+        },
+        {
+            "name": "pihome",
+            "state": "online",
+            "actions": ["loop.run"],
+            "repos": [{"repo": "not-enabled", "loopable": True}],
+            "loops": [],
+            "slots": {},
+        },
+        {
+            "name": "mac",
+            "state": "online",
+            "actions": ["loop.run"],
+            "repos": [{"repo": "not-enabled", "loopable": True}],
+            "loops": [],
+            "slots": {},
+        },
+        {
+            "name": "offline",
+            "state": "offline",
+            "actions": ["loop.run"],
+            "repos": [{"repo": "not-enabled", "loopable": True}],
+            "loops": [],
+            "slots": {},
+        },
+    ]
+    keys = {"pihome": "local-key", "jesus": "jesus-key", "ralpha": "ralpha-key"}
+
+    results = loops.dispatch_fleet_runs(
+        {"widgets": "omp", "roundsmith": "claude", "not-enabled": "claude"},
+        records,
+        local_host="pihome",
+        signing_keys=keys,
+        connection=connection,
+    )
+
+    assert [(r["repo"], r.get("machine"), r["queued"]) for r in results] == [
+        ("not-enabled", None, False),
+        ("roundsmith", "jesus", True),
+        ("widgets", "ralpha", True),
+    ]
+    client = commands._client(**connection)
+    for result in results:
+        if not result["queued"]:
+            continue
+        payload = json.loads(client.get(commands.cmd_key(result["id"])))
+        expected_platform = "claude" if result["repo"] == "roundsmith" else "omp"
+        assert payload["params"] == {"repo": result["repo"], "platform": expected_platform}
+        assert commands.verify(payload, keys[result["machine"]])
 
 # --------------------------------------------------------------------------
 # ssh_target_for

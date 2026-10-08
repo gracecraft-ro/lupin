@@ -16,7 +16,7 @@ lupin = "lupin.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-lupin = ["model-tiers.json", "benchmark-schema.json"]
+lupin = ["model-tiers.json", "benchmark-schema.json", "benchmark-data.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -43,8 +43,11 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
+import re
 import time
 import uuid
+from pathlib import Path
 
 import redis
 
@@ -108,6 +111,28 @@ def verify(cmd: dict, key: str) -> bool:
     payload = {k: v for k, v in cmd.items() if k != "sig"}
     expected = sign(payload, key)
     return hmac.compare_digest(expected, cmd.get("sig", ""))
+
+
+_MACHINE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+
+
+def signing_key_for(
+    machine: str,
+    *,
+    default: str | None = None,
+    directory: str | Path | None = None,
+) -> str | None:
+    """Read one target's signing key, or use the legacy shared key."""
+    root = directory if directory is not None else os.environ.get("LUPIN_CMD_SIGNING_KEYS_DIR")
+    if root is None:
+        return default
+    if not _MACHINE_NAME_RE.fullmatch(machine):
+        return None
+    try:
+        key = (Path(root) / machine).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return key or None
 
 
 def parse_params(pairs: list[str]) -> dict:

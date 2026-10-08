@@ -13,8 +13,13 @@ import time
 from unittest import mock
 
 import redis as redis_lib
+import pytest
 
 from lupin import gh_cache, machines
+
+@pytest.fixture(autouse=True)
+def isolated_fleet_config(monkeypatch, tmp_path):
+    monkeypatch.setattr(machines, "DEFAULT_CONFIG_PATH", tmp_path / "fleet.json")
 
 
 def _kw(redis_port):

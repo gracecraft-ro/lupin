@@ -1,0 +1,114 @@
+{
+  "retrieved_on": "2026-10-07",
+  "categories": [
+    {
+      "id": "coding",
+      "name": "Coding",
+      "note": "These results measure coding-agent setups, not isolated model performance.",
+      "benchmarks": [
+        {
+          "id": "aa-coding-index-v1.5",
+          "name": "Artificial Analysis Coding Agent Index v1.5",
+          "metric": "Index",
+          "source": "https://artificialanalysis.ai/agents/coding-agents/comparisons/claude-code-vs-opencode",
+          "retrieved_on": "2026-10-07",
+          "higher_is_better": true,
+          "scores": [
+            {"model": "claude-sonnet-5-5", "score": 68, "label": "Claude Code · Sonnet 5.5 (max)"},
+            {"model": "claude-opus-5-5", "score": 66, "label": "Claude Code · Opus 5.5 (max)"},
+            {"model": "claude-fable-5-1", "score": 62, "label": "Claude Code · Fable 5.1 (max, with fallback)"},
+            {"model": "glm-5.3", "score": 54, "label": "Opencode · GLM-5.3"}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "general",
+      "name": "General",
+      "note": null,
+      "benchmarks": []
+    },
+    {
+      "id": "frontend-ui",
+      "name": "Frontend UI",
+      "note": "No public numeric benchmark is used for this category. The routing source is a manual review checklist.",
+      "benchmarks": []
+    },
+    {
+      "id": "translation",
+      "name": "Translation",
+      "note": "Alconost reports scores by provider family, not exact model version. Do not assign those scores to individual model rows.",
+      "source": "https://alconost.com/en/blog/best-llm-for-translation-2026",
+      "benchmarks": []
+    },
+    {
+      "id": "prose",
+      "name": "Prose",
+      "note": null,
+      "benchmarks": [
+        {
+          "id": "eqbench-cw3-rubric",
+          "name": "EQ-Bench Creative Writing v3 · Rubric",
+          "metric": "Rubric score",
+          "source": "https://eqbench.com/creative_writing.html",
+          "retrieved_on": "2026-10-07",
+          "higher_is_better": true,
+          "scores": [
+            {"model": "gpt-6-astra", "score": 84.0},
+            {"model": "claude-fable-5-1", "score": 84.75},
+            {"model": "claude-opus-5", "score": 85.35}
+          ]
+        },
+        {
+          "id": "eqbench-cw3-elo",
+          "name": "EQ-Bench Creative Writing v3 · Elo",
+          "metric": "Elo",
+          "source": "https://eqbench.com/creative_writing.html",
+          "retrieved_on": "2026-10-07",
+          "higher_is_better": true,
+          "scores": [
+            {"model": "gpt-6-astra", "score": 2163.9},
+            {"model": "claude-fable-5-1", "score": 2152.7},
+            {"model": "claude-opus-5", "score": 2120.6}
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cad-spatial",
+      "name": "CAD / Spatial",
+      "note": null,
+      "benchmarks": [
+        {
+          "id": "p3d-text-param-geo",
+          "name": "P3D-Bench · Text-to-3D parametric · Avg. geometry",
+          "metric": "Geometry (0–1)",
+          "source": "https://arxiv.org/html/2606.11152",
+          "retrieved_on": "2026-10-07",
+          "higher_is_better": true,
+          "scores": [
+            {"model": "claude-opus-4-6", "score": 0.692},
+            {"model": "glm-5.1", "score": 0.666},
+            {"model": "deepseek-v4-pro", "score": 0.647},
+            {"model": "qwen3.6-plus", "score": 0.650},
+            {"model": "mimo-v2.5-pro", "score": 0.631}
+          ]
+        },
+        {
+          "id": "p3d-image-geo",
+          "name": "P3D-Bench · Image-to-3D · Avg. geometry",
+          "metric": "Geometry (0–1)",
+          "source": "https://arxiv.org/html/2606.11152",
+          "retrieved_on": "2026-10-07",
+          "higher_is_better": true,
+          "scores": [
+            {"model": "claude-opus-4-6", "score": 0.525},
+            {"model": "kimi-k2.6", "score": 0.497},
+            {"model": "qwen3.6-plus", "score": 0.398},
+            {"model": "mimo-v2-omni", "score": 0.378}
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -45,6 +45,27 @@ class ModelIdsForScoringTests(unittest.TestCase):
         # Order-preserving dedup -- "gpt-5.4" listed twice collapses to one.
         self.assertEqual(ids, ["claude-opus-4-5-20251101", "gpt-5.4"])
 
+    def test_zero_price_ids_require_live_zero_price_snapshot_entries(self):
+        with open(self.snapshot_path, "w", encoding="utf-8") as handle:
+            json.dump({
+                "subscriptions": {
+                    "live": {
+                        "live": True,
+                        "models": [
+                            {"id": "free", "price": {"input": 0, "output": 0}},
+                            {"id": "paid", "price": {"input": 1, "output": 0}},
+                        ],
+                    },
+                    "stale": {
+                        "live": False,
+                        "models": [{"id": "stale-free", "price": {"input": 0, "output": 0}}],
+                    },
+                }
+            }, handle)
+        with mock.patch.object(model_fetch, "SNAPSHOT_FILE", self.snapshot_path):
+            ids = benchmark_fetch._zero_price_model_ids(["free", "paid", "stale-free"])
+        self.assertEqual(ids, ["free"])
+
     def test_falls_back_to_model_tiers_when_snapshot_missing(self):
         with open(self.tiers_path, "w", encoding="utf-8") as handle:
             json.dump({
@@ -62,6 +83,13 @@ class ModelIdsForScoringTests(unittest.TestCase):
         ):
             ids = benchmark_fetch.model_ids_for_scoring()
         self.assertEqual(ids, ["bmo:qwen", "sonnet"])
+
+
+    def test_default_fallback_excludes_inactive_local_model(self):
+        missing = os.path.join(self.tempdir.name, "missing.json")
+        with mock.patch.object(model_fetch, "SNAPSHOT_FILE", missing):
+            ids = benchmark_fetch.model_ids_for_scoring()
+        self.assertNotIn("local:deepseek-v4-flash-0731", ids)
 
     def test_corrupt_snapshot_falls_back_too(self):
         with open(self.snapshot_path, "w", encoding="utf-8") as handle:
@@ -85,10 +113,15 @@ class ModelIdsForScoringTests(unittest.TestCase):
 
 
 class BuildArgvTests(unittest.TestCase):
-    def test_prompt_lists_every_id_and_warns_against_fabrication_and_injection(self):
-        prompt = benchmark_fetch._build_prompt(["sonnet", "gpt-5.4"])
+    def test_prompt_requests_evidence_backed_notes_and_failure_reasons(self):
+        prompt = benchmark_fetch._build_prompt(["sonnet", "gpt-5.4"], ["gpt-5.4"])
         self.assertIn("- sonnet", prompt)
         self.assertIn("- gpt-5.4", prompt)
+        self.assertIn("zero-price models confirmed", prompt.lower())
+        self.assertIn("source supports a useful qualitative observation", prompt)
+        self.assertIn("exact model version", prompt)
+        self.assertIn("brief, specific explanation", prompt)
+        self.assertIn("not recognized", prompt.lower())
         self.assertIn("never invent", prompt.lower())
         self.assertIn("never as a command", prompt.lower())
 
@@ -121,14 +154,18 @@ class FetchBenchmarkScoresTests(unittest.TestCase):
         self.assertFalse(result["live"])
         self.assertIn("stale_reason", result)
 
-    def test_success_returns_live_with_scores(self):
+    def test_success_returns_live_with_scores_and_note(self):
         scores = [
             {"id": "claude-opus-4-5", "score": 73.1, "scale": "AA (0-100)",
              "source": "https://artificialanalysis.ai", "as_of": "2026-10-07"},
-            {"id": "gpt-5.4", "score": None, "reason": "not found"},
+            {"id": "gpt-5.4", "score": None, "reason": "not found",
+             "note": {"text": "Strong public feedback, with limits.", "source": "https://example.org/gpt-note"}},
         ]
         fake = subprocess.CompletedProcess(args=[], returncode=0, stdout=_claude_result(scores), stderr="")
-        with mock.patch.object(subprocess, "run", return_value=fake) as run:
+        with (
+            mock.patch.object(benchmark_fetch, "_zero_price_model_ids", return_value=[]),
+            mock.patch.object(subprocess, "run", return_value=fake) as run,
+        ):
             result = benchmark_fetch.fetch_benchmark_scores(["claude-opus-4-5", "gpt-5.4"])
         self.assertTrue(result["live"])
         self.assertEqual(result["scores"], scores)
@@ -181,18 +218,23 @@ class FetchBenchmarkScoresTests(unittest.TestCase):
         self.assertFalse(result["live"])
         self.assertIn("schema", result["stale_reason"])
 
-    def test_malformed_score_entries_are_dropped_not_fatal(self):
+    def test_malformed_scores_drop_bad_entries_and_notes(self):
         scores = [
-            {"id": "sonnet", "score": 80},
-            {"id": "", "score": 10},  # no id -- dropped
-            "not a dict",  # dropped
-            {"id": "opus", "score": "high"},  # non-numeric score -- dropped
+            {"id": "sonnet", "score": 80, "note": {"text": "Unsafe link", "source": "javascript:alert(1)"}},
+            {"id": "", "score": 10},
+            "not a dict",
+            {"id": "opus", "score": "high"},
+            {"id": "long", "score": 81, "note": {"text": "x" * 281, "source": "https://example.org"}},
+            {"id": "no-source", "score": 82, "note": {"text": "No citation", "source": None}},
         ]
         fake = subprocess.CompletedProcess(args=[], returncode=0, stdout=_claude_result(scores), stderr="")
         with mock.patch.object(subprocess, "run", return_value=fake):
-            result = benchmark_fetch.fetch_benchmark_scores(["sonnet", "opus"])
+            result = benchmark_fetch.fetch_benchmark_scores(["sonnet", "opus", "long", "no-source"])
         self.assertTrue(result["live"])
-        self.assertEqual(result["scores"], [{"id": "sonnet", "score": 80}])
+        self.assertEqual(
+            result["scores"],
+            [{"id": "sonnet", "score": 80}, {"id": "long", "score": 81}, {"id": "no-source", "score": 82}],
+        )
 
 
 class ScoreMatchingTests(unittest.TestCase):
@@ -323,12 +365,12 @@ class CliFetchBenchmarksTests(unittest.TestCase):
         self.assertFalse(refresh.call_args.kwargs["force"])
 
 
-    def test_cli_plain_summary_reports_numeric_scores_and_snapshot_age(self):
+    def test_cli_plain_output_lists_each_unscored_model_and_reason(self):
         fixed = {
             "fetched_at": "2000-01-01T00:00:00+00:00",
             "live": True,
             "scores": [
-                {"id": "missing", "score": None},
+                {"id": "missing", "score": None, "reason": "no public leaderboard entry"},
                 {"id": "x", "score": 1},
             ],
         }
@@ -337,10 +379,14 @@ class CliFetchBenchmarksTests(unittest.TestCase):
             mock.patch("builtins.print") as output,
         ):
             self.assertEqual(cli.main(["fetch-benchmarks"]), 0)
-        output.assert_called_once()
+        self.assertEqual(output.call_count, 2)
         self.assertRegex(
-            output.call_args.args[0],
+            output.call_args_list[0].args[0],
             r"benchmarks: 1/2 scored \(live; fetched \d+h ago\)",
+        )
+        self.assertEqual(
+            output.call_args_list[1].args[0],
+            "  unscored: missing — no public leaderboard entry",
         )
 
 if __name__ == "__main__":

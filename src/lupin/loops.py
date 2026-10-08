@@ -154,6 +154,75 @@ def dispatch_loop_action(
     return {"mode": "queued", "id": cmd_id, "result": result}
 
 
+def dispatch_fleet_runs(
+    repos: dict[str, str],
+    records: list[dict],
+    *,
+    local_host: str,
+    signing_keys: dict[str, str],
+    connection: dict,
+) -> list[dict]:
+    """Queue each enabled repo on an online worker that has its checkout."""
+    workers = [
+        record
+        for record in records
+        if record.get("name") != local_host
+        and record.get("state") == "online"
+        and "loop.run" in record.get("actions", [])
+        and record.get("name") in signing_keys
+    ]
+    queued = []
+    assigned: dict[str, int] = {}
+    for repo, platform in sorted(repos.items()):
+        candidates = [
+            worker
+            for worker in workers
+            if any(
+                entry.get("repo") == repo and entry.get("loopable") is True
+                for entry in worker.get("repos", [])
+            )
+            and not any(
+                entry.get("repo") == repo
+                for entry in worker.get("loops", [])
+            )
+        ]
+        if not candidates:
+            queued.append({
+                "repo": repo,
+                "queued": False,
+                "message": "no idle online worker has this repo",
+            })
+            continue
+        candidates.sort(
+            key=lambda worker: (
+                assigned.get(worker["name"], 0),
+                -sum(
+                    int(slot.get("max", 0)) - int(slot.get("used", 0))
+                    for slot in (worker.get("slots") or {}).values()
+                ),
+                worker["name"],
+            )
+        )
+        worker = candidates[0]
+        command_id = commands.enqueue(
+            worker["name"],
+            "loop.run",
+            {"repo": repo, "platform": platform},
+            key=signing_keys[worker["name"]],
+            actor="lupin-fleet-scheduler",
+            issuer=local_host,
+            **connection,
+        )
+        assigned[worker["name"]] = assigned.get(worker["name"], 0) + 1
+        queued.append({
+            "repo": repo,
+            "machine": worker["name"],
+            "queued": True,
+            "id": command_id,
+        })
+    return queued
+
+
 def ssh_target_for(machine: str, path: Path | str | None = None) -> str | None:
     """Look up `machine`'s ssh target -- a `user@host` string, or an
     ssh_config alias.

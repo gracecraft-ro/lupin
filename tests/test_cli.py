@@ -8,7 +8,7 @@ from unittest import mock
 
 import pytest
 
-from lupin import cli, loop_runtime, loops, machines, slots
+from lupin import cli, commands, loop_runtime, loops, machines, slots
 
 
 @pytest.fixture(autouse=True)
@@ -59,6 +59,69 @@ def test_run_creates_herdr_worker_metadata_and_systemd_unit(monkeypatch, tmp_pat
     assert metadata["state"] == "starting"
     assert metadata["platform"] == "claude"
     assert Path(metadata["prompt_file"]).is_file()
+
+
+def test_fleet_run_uses_only_per_machine_signing_keys(monkeypatch, tmp_path, capsys):
+    key_dir = tmp_path / "keys"
+    key_dir.mkdir()
+    (key_dir / "jesus").write_text("jesus-secret\n", encoding="utf-8")
+    monkeypatch.setenv("LUPIN_CMD_SIGNING_KEYS_DIR", str(key_dir))
+    monkeypatch.setenv("LUPIN_CMD_SIGNING_KEY", "shared-secret")
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
+    monkeypatch.setattr(machines, "hostname", lambda: "pihome")
+    monkeypatch.setattr(machines, "machines", lambda connection: [{"name": "jesus"}, {"name": "ralpha"}])
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: {"redis_host": "redis"})
+    dispatched = {}
+
+    def dispatch(repos, records, **kwargs):
+        dispatched.update(repos=repos, records=records, **kwargs)
+        return [{"repo": "widgets", "machine": "jesus", "queued": True, "id": "cmd-1"}]
+
+    monkeypatch.setattr(loops, "dispatch_fleet_runs", dispatch)
+
+    assert cli.main(["fleet-run", "--json"]) == 0
+
+    assert dispatched["signing_keys"] == {"jesus": "jesus-secret"}
+    assert dispatched["local_host"] == "pihome"
+    assert json.loads(capsys.readouterr().out) == [
+        {"repo": "widgets", "machine": "jesus", "queued": True, "id": "cmd-1"}
+    ]
+
+
+
+def test_fleet_run_queues_signed_run_to_worker(redis_port, flush_redis, monkeypatch, tmp_path, capsys):
+    connection = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    key_dir = tmp_path / "keys"
+    key_dir.mkdir()
+    (key_dir / "jesus").write_text("jesus-secret\n", encoding="utf-8")
+    records = [
+        {
+            "name": machine,
+            "state": "online",
+            "actions": ["loop.run"],
+            "repos": [{"repo": "widgets", "loopable": True}],
+            "loops": [],
+            "slots": {},
+        }
+        for machine in ("jesus", "ralpha")
+    ]
+    monkeypatch.setenv("LUPIN_CMD_SIGNING_KEYS_DIR", str(key_dir))
+    monkeypatch.setenv("LUPIN_CMD_SIGNING_KEY", "shared-secret")
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
+    monkeypatch.setattr(machines, "hostname", lambda: "pihome")
+    monkeypatch.setattr(machines, "machines", lambda connection: records)
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: connection)
+
+    assert cli.main(["fleet-run", "--json"]) == 0
+
+    queue = commands.get_queue("jesus", **connection)
+    assert len(queue) == 1
+    assert queue[0]["params"] == {"repo": "widgets", "platform": "omp"}
+    assert commands.get_queue("ralpha", **connection) == []
+    stored = commands._client(**connection).get(commands.cmd_key(queue[0]["id"]))
+    assert commands.verify(json.loads(stored), "jesus-secret")
+    assert json.loads(capsys.readouterr().out)[0]["machine"] == "jesus"
+
 
 def test_future_once_defaults_to_enabled_repos(monkeypatch, tmp_path: Path, capsys):
     monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)

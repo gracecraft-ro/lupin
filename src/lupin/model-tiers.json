@@ -8,10 +8,6 @@
         {
           "model": "bmo:qwen3.8-flash-next",
           "effort": "low"
-        },
-        {
-          "model": "local:deepseek-v4-flash-0731",
-          "effort": "low"
         }
       ],
       "tier1": [
@@ -44,10 +40,6 @@
       "tier0": [
         {
           "model": "bmo:qwen3.8-flash-next",
-          "effort": "low"
-        },
-        {
-          "model": "local:deepseek-v4-flash-0731",
           "effort": "low"
         }
       ],
@@ -101,12 +93,6 @@
     "source": "Alconost Translation Quality Index + Linguist Evaluation (2025-2026 sample, alconost.com/en/blog/best-llm-for-translation-2026)",
     "last_verified": "2026-10-03",
     "tiers": {
-      "tier0": [
-        {
-          "model": "local:deepseek-v4-flash-0731",
-          "effort": "medium"
-        }
-      ],
       "tier1": [
         {
           "model": "sonnet",
@@ -120,7 +106,7 @@
         }
       ]
     },
-    "note": "Alconost's full ranking: Gemini (AQI 77.7, LE 67.8) > Claude (75.6, 58.9) > GPT (73.1, 57.6) > DeepSeek (71.5, 51.4) > DeepL. Gemini and GPT score higher than Claude but have no provider config in this repo (confirmed in #179 research), so Claude is the best model this repo can actually route to for tier1/2. DeepSeek is tier0 only because it is the one free/local model family Alconost's table actually measured -- it is 4th of 5, not a strong score, and Qwen/bmo was not tested at all. A single disagreeing data point: Alconost's separate subtitle-specific benchmark (same source, April 2026) found TranslateGemma and Gemini Flash Lite beating full Claude Sonnet on subtitle text specifically -- this tier is based on the general-purpose table, not the subtitle one. Still worth the periodic manual spot-check before trusting any of this on a real task."
+    "note": "No tier0 route. Alconost reports provider-family scores, not exact model-version scores. Gemini and GPT score higher than Claude but have no provider config here, so Claude is the best routed option for tier1/2. DeepSeek ranks fourth of five in the sample; this does not verify any exact DeepSeek model. The sample is general-purpose; its separate subtitle benchmark found different leaders."
   },
   "prose": {
     "source": "LMArena Creative Writing leaderboard (BenchLeader snapshot, 2026-09-29) and EQ-Bench Creative Writing (Sept 2026) -- the two agree on a leader, unlike the translation sources",
@@ -143,17 +129,13 @@
         }
       ]
     },
-    "note": "Claude Opus leads both leaderboards by different methodology: LMArena puts Opus 5.5 at 1521 Elo (#1) with Fable 5 close second at 1501; EQ-Bench puts Opus 5 at 2121 Elo (#1) with Kimi K3 second at 2071, GPT-5.6 Sol third. No tier0: neither leaderboard has ever scored bmo's actual local models (qwen3.8-flash-next, deepseek-v4-flash-0731) on creative writing, so the free tier's prose quality is a genuine unknown, not a guess being hidden here -- leave this row without a tier0 entry until someone runs a real check rather than picking one on no evidence."
+    "note": "No tier0: these public creative-writing leaderboards do not score a model currently routed by this repo, so tier0 quality is unknown."
   },
   "cad-spatial": {
     "source": "P3D-Bench (arxiv 2606.11152)",
     "last_verified": "2026-10-03",
     "tiers": {
       "tier0": [
-        {
-          "model": "local:deepseek-v4-flash-0731",
-          "effort": "medium"
-        },
         {
           "model": "bmo:qwen3.8-flash-next",
           "effort": "medium"
@@ -176,6 +158,6 @@
         }
       ]
     },
-    "note": "P3D-Bench tests Claude Opus 4.6, DeepSeek V4 Pro, and Qwen3.6-Plus head-to-head on parametric 3D generation -- the closest published proxies for bmo's local deepseek-v4-flash-0731/qwen3.8-flash-next. GPT-5.5 and Gemini 3.1 Pro score highest overall but have no provider config in this repo, so they are not a usable pick; Opus 4.6 is the best model this repo can actually route to, even though the paper places it in a second tier behind those two, not at the top. DeepSeek V4 Pro and Qwen3.6-Plus both land in the lowest general-purpose tier on this benchmark, clearly behind every hosted frontier model -- tier0 here means 'least-bad free option', not 'validated for CAD work'. DeepSeek is listed first only because the paper singles out Qwen3.6-Plus for markedly lower geometry scores on one image-to-3D table and does not call out DeepSeek the same way; that is a weak signal, not a confident ranking between the two. Still needs the periodic manual spot-check (#179 research) before trusting either on a real CAD task. CORRECTION (2026-10-03): the AA score above is for \"qwen3.8-flash-next\" by name, but bmo's live /v1/models endpoint actually serves \"swift-1.5-iq3_xxs\" -- a heavily-quantized (iq3_xxs) fine-tune of Qwen, a different artifact AA never scored. The AA number does not verify the real served model's quality. Treat bmo's tier0 placement here as unverified until something benchmarks swift-1.5-iq3_xxs directly on a real task, not qwen3.8-flash-next's published score."
+    "note": "P3D-Bench compares Claude Opus 4.6, DeepSeek V4 Pro, and Qwen3.6-Plus on parametric 3D generation. These are different model versions from the routed models, so their scores do not verify this tier. GPT-5.5 and Gemini 3.1 Pro score highest but have no provider config here. The remaining tier0 route is bmo; its actual served model is not identified by this benchmark. Tier0 means the lowest-cost routed option, not a model validated for CAD work."
   }
 }
