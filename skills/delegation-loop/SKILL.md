@@ -22,16 +22,18 @@ dispatch and the repository's handoff record.
 ## Install skills on loop hosts
 
 The `skills/` tree is the source. Installing the Lupin command does not
-install these files. A Nix host flake maps the four directories from its
-pinned Lupin input into each runner's skill set. A rebuild creates or updates
-the links; do not copy the files by hand.
+install these files. A Nix host flake maps the four required directories from
+its pinned Lupin input into each runner's skill set. A rebuild creates or
+updates the links; do not copy the files by hand. The `ui-pressure-test`
+skill is optional. Add it to a selected runner when a task needs visual QA.
 
 - Claude Code: `~/.claude/skills/`
 - Pi: `~/.pi/agent/skills/`
 - OMP: `~/.omp/agent/skills/`
 
-Add all four names to each host's skill set, including any curated subset.
-After a rebuild, check that every `SKILL.md` is readable:
+Add all four required names to each host's skill set, including any curated
+subset. Add `ui-pressure-test` to hosts that run UI pressure tests. After a
+rebuild, check that every required `SKILL.md` is readable:
 
 ```sh
 for root in "$HOME/.claude/skills" "$HOME/.pi/agent/skills" "$HOME/.omp/agent/skills"; do
@@ -45,8 +47,9 @@ done
 ```
 
 Start a new agent session and confirm it loads `/delegation-loop`, `/triage`,
-`/ship`, and `/code-review`. Do not start a worker if a required skill is
-missing.
+`/ship`, and `/code-review`. If the task needs UI pressure testing, also
+confirm it loads `/ui-pressure-test`. Do not start a worker if a skill it
+needs is missing.
 
 ## Read the backlog
 
@@ -132,7 +135,15 @@ Give each worker a short brief with:
 - Machine, absolute worktree path, and branch.
 - Required tests and smoke checks.
 
-Tell the worker to use `/ship`. Do not repeat its implementation checklist.
+Tell implementation workers to use `/ship`. Do not repeat its implementation
+checklist.
+
+When an issue makes a major change to a web app's user interface or key user
+journey, and a preview is ready, dispatch a separate QA task with
+`ui-pressure-test`. Keep the test agent read-only with respect to source code,
+and keep its browser data separate from implementation work. Ask for evidence,
+prioritized tickets, and a list of untested items. Do not ask the test agent to
+fix findings.
 Use the runner's worktree isolation feature when it has one. Otherwise, create
 a separate worktree and verify the worker's working directory.
 
