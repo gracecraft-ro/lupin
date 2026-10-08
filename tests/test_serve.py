@@ -1398,6 +1398,56 @@ def test_roadmap_route_reads_ledger_from_dashboard_connection(
     assert "Visible from dashboard." in body
 
 
+def test_roadmap_route_reads_github_cache_from_dashboard_connection(
+    redis_port, flush_redis, auth_redis_port, monkeypatch, tmp_path
+):
+    connection = {
+        "redis_host": "127.0.0.1", "redis_port": redis_port,
+        "redis_username": None, "redis_password": None,
+    }
+    resolve_connection = machines.resolve_connection
+
+    def resolve_default_connection(**kwargs):
+        if not any(kwargs.values()):
+            return {
+                "redis_host": "127.0.0.1", "redis_port": auth_redis_port,
+                "redis_username": None, "redis_password": "test-pass",
+            }
+        return resolve_connection(**kwargs)
+
+    monkeypatch.setattr(machines, "DEFAULT_CONFIG_PATH", tmp_path / "fleet.json")
+    monkeypatch.setattr(machines, "resolve_connection", resolve_default_connection)
+    monkeypatch.setattr(roadmap, "_GITHUB_CACHE", {})
+    monkeypatch.setattr(roadmap, "_persist_cache", lambda: None)
+
+    issue = {"number": 7, "title": "Cached dashboard issue", "body": "", "labels": []}
+    redis_lib.Redis(
+        host="127.0.0.1", port=redis_port, decode_responses=True
+    ).set(
+        f"{roadmap.gh_cache.PREFIX}gh-cache:acme/widgets:issues:open",
+        json.dumps({"data": [issue]}),
+        ex=roadmap.gh_cache.CACHE_TTL,
+    )
+
+    with (
+        mock.patch.object(
+            serve, "code_repos", return_value=[{"repo": "widgets", "loopable": True}]
+        ),
+        mock.patch.object(
+            roadmap, "_repo_identity", return_value=("acme", "widgets", None)
+        ),
+        _live_dashboard(connection) as port,
+    ):
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/roadmap", timeout=15) as response:
+            status = response.status
+            body = response.read().decode()
+
+    assert status == 200
+    assert "#7 Cached dashboard issue" in body
+
+
+
+
 def test_dashboard_degrades_when_redis_unreachable(closed_port):
     """No Redis listening on the other end -- the page must still render
     200 with a plain "unreachable" message, not 500.

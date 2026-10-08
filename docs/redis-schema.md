@@ -242,6 +242,7 @@ issue state, issue body/labels, quest-labeled issues, dependency links.
 Written only by `pihome` (the fixed value of `gh_cache.CANONICAL_GH_FETCHER`
 — a hard pin to one named machine, not a race any machine could win). Read
 by every machine, `pihome` included.
+The roadmap uses the dashboard's Redis connection for this cache.
 
 ```json
 {"data": {"number": 42, "state": "OPEN"}}

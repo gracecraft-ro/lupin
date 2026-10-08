@@ -1014,7 +1014,7 @@ def cached_dependency_dag(repos: list[str], code_dir: str = CODE_DIR) -> dict:
 
 
 def load_model(repo: str, repo_path: str, *, connection: dict | None = None):
-    issues, comments, warnings = load_github(repo_path)
+    issues, comments, warnings = load_github(repo_path, connection=connection)
     ledger, ledger_error = _read_ledger(repo_path, connection=connection)
     if ledger_error:
         warnings.append(ledger_error)
@@ -1023,14 +1023,20 @@ def load_model(repo: str, repo_path: str, *, connection: dict | None = None):
     return model
 
 
-def cached_github(repo: str, repo_path: str, state: str = "open"):
+def cached_github(
+    repo: str,
+    repo_path: str,
+    state: str = "open",
+    *,
+    connection: dict | None = None,
+):
     now = time.monotonic()
     key = (repo, state)
     with _CACHE_LOCK:
         cached = _GITHUB_CACHE.get(key)
         if cached and now - cached[0] < GITHUB_CACHE_SECONDS:
             return cached[1]
-        data = load_github(repo_path, state)
+        data = load_github(repo_path, state, connection=connection)
         _GITHUB_CACHE[key] = (time.monotonic(), data)
         _persist_cache()
         return data
@@ -1039,7 +1045,9 @@ def cached_github(repo: str, repo_path: str, state: str = "open"):
 def cached_model(
     repo: str, repo_path: str, *, connection: dict | None = None
 ):
-    issues, comments, warnings = cached_github(repo, repo_path)
+    issues, comments, warnings = cached_github(
+        repo, repo_path, connection=connection
+    )
     ledger, ledger_error = _read_ledger(repo_path, connection=connection)
     warnings = list(warnings)
     if ledger_error:
@@ -1054,7 +1062,7 @@ def cached_combined_model(
 ):
     model = cached_model(repo, repo_path, connection=connection)
     closed_issues, closed_comments, _warnings = cached_github(
-        repo, repo_path, "closed"
+        repo, repo_path, "closed", connection=connection
     )
     model["closedNodes"] = build_model(
         closed_issues, closed_comments, [], repo=repo

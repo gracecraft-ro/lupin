@@ -2707,7 +2707,8 @@ class Handler(BaseHTTPRequestHandler):
             elif state == "closed":
                 issues_by_repo = {
                     name: roadmap.cached_github(
-                        name, os.path.join(CODE_DIR, name), "closed"
+                        name, os.path.join(CODE_DIR, name), "closed",
+                        connection=self.fleet_connection,
                     )
                     for name in ([selected] if selected else repos)
                 }
