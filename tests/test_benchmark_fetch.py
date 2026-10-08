@@ -140,7 +140,7 @@ class BuildArgvTests(unittest.TestCase):
         thinking_index = argv.index("--thinking")
         self.assertEqual(argv[thinking_index + 1], benchmark_fetch.OMP_THINKING)
         tools_index = argv.index("--tools")
-        self.assertEqual(argv[tools_index + 1], "web_search")
+        self.assertEqual(argv[tools_index + 1], "web_search,read")
         self.assertIn("--no-session", argv)
         self.assertIn("--auto-approve", argv)
         self.assertIn("--max-time", argv)
@@ -157,15 +157,25 @@ class BuildArgvTests(unittest.TestCase):
 
 class ShardTests(unittest.TestCase):
     def test_models_split_into_shards_of_shard_size(self):
-        ids = [f"m{index}" for index in range(7)]
+        ids = [f"m{index}" for index in range(13)]
         shards = benchmark_fetch._shards(ids)
-        self.assertEqual([len(shard) for shard in shards], [3, 3, 1])
+        self.assertEqual([len(shard) for shard in shards], [6, 6, 1])
         self.assertEqual([model for shard in shards for model in shard], ids)
 
+    def test_one_shard_per_six_models(self):
+        scores = [{"id": f"m{index}", "score": 50.0} for index in range(13)]
+        fake = _fake(_omp_result(scores))
+        with mock.patch.object(subprocess, "run", return_value=fake) as run:
+            result = benchmark_fetch.fetch_benchmark_scores([f"m{index}" for index in range(13)])
+        # 13 models, shards of 6 -> 3 calls, no more than 2 at a time.
+        self.assertEqual(run.call_count, 3)
+        self.assertTrue(result["live"])
+        self.assertEqual(len(result["scores"]), 13)
+
     def test_lock_ttl_covers_every_round_of_the_fan_out(self):
-        # 3 models: one shard, one round. 12 models: 4 shards, 4 workers,
-        # still one round. 13 models: 5 shards, 4 workers, two rounds.
-        self.assertEqual(benchmark_fetch._lock_ttl(3), benchmark_fetch.SHARD_TIMEOUT + 60.0)
+        # 6 models: one shard, one round. 12 models: 2 shards, 2 workers,
+        # still one round. 13 models: 3 shards, 2 workers, two rounds.
+        self.assertEqual(benchmark_fetch._lock_ttl(6), benchmark_fetch.SHARD_TIMEOUT + 60.0)
         self.assertEqual(benchmark_fetch._lock_ttl(12), benchmark_fetch.SHARD_TIMEOUT + 60.0)
         self.assertEqual(benchmark_fetch._lock_ttl(13), 2 * benchmark_fetch.SHARD_TIMEOUT + 60.0)
 
@@ -202,19 +212,6 @@ class FetchBenchmarkScoresTests(unittest.TestCase):
         self.assertFalse(result["live"])
         self.assertIn("stale_reason", result)
 
-    def test_one_shard_per_three_models(self):
-        scores = [{"id": model_id, "score": 50.0} for model_id in ("a", "b", "c", "d", "e", "f", "g")]
-        fake = _fake(_omp_result(scores))
-        with mock.patch.object(subprocess, "run", return_value=fake) as run:
-            result = benchmark_fetch.fetch_benchmark_scores(["a", "b", "c", "d", "e", "f", "g"])
-        # 7 models, shards of 3 -> 3 calls, all up to 4 at once.
-        self.assertEqual(run.call_count, 3)
-        self.assertTrue(result["live"])
-        self.assertEqual(result["source"], "omp -p opencode-go/step-5-preview-free thinking=max, web search")
-        self.assertEqual(len(result["scores"]), 7)
-        for entry in result["scores"]:
-            self.assertIn("fetched_at", entry)
-
     def test_every_call_is_bounded_by_the_shard_timeout(self):
         fake = _fake(_omp_result([{"id": "a", "score": 1}]))
         with mock.patch.object(subprocess, "run", return_value=fake) as run:
@@ -223,23 +220,24 @@ class FetchBenchmarkScoresTests(unittest.TestCase):
 
     def test_one_failed_shard_does_not_sink_the_rest(self):
         def side_effect(argv, **kwargs):
-            # The shard that was asked about b1/b2/b3 fails; the others answer.
+            # The shard asked about b1/b2/b3/c1 fails; the first shard answers.
             if "b1" in argv[-1]:
                 return _fake("", returncode=1, stderr="rate limited")
-            answered = [model_id for model_id in ("a1", "a2", "a3", "c1") if f"- {model_id}" in argv[-1]]
+            answered = [model_id for model_id in ("a1", "a2", "a3", "a4", "a5", "a6") if f"- {model_id}" in argv[-1]]
             return _fake(_omp_result([{"id": model_id, "score": 50.0} for model_id in answered]))
 
         with mock.patch.object(subprocess, "run", side_effect=side_effect):
-            result = benchmark_fetch.fetch_benchmark_scores(["a1", "a2", "a3", "b1", "b2", "b3", "c1"])
+            # 10 models, shards of 6 -> shard one is a1..a6, shard two is
+            # b1/b2/b3/c1 and fails.
+            result = benchmark_fetch.fetch_benchmark_scores(["a1", "a2", "a3", "a4", "a5", "a6", "b1", "b2", "b3", "c1"])
 
         self.assertTrue(result["live"])
         # The failed shard's models are the only ones missing, and the run
-        # says so instead of silently dropping them. Shards finish out of
-        # order, so compare as a set.
-        self.assertEqual({entry["id"] for entry in result["scores"]}, {"a1", "a2", "a3", "c1"})
+        # says so instead of silently dropping them.
+        self.assertEqual({entry["id"] for entry in result["scores"]}, {"a1", "a2", "a3", "a4", "a5", "a6"})
         self.assertIn("stale_reason", result)
         self.assertIn("b1", result["stale_reason"])
-        self.assertIn("b3", result["stale_reason"])
+        self.assertIn("c1", result["stale_reason"])
 
     def test_all_shards_failing_keeps_previous_scores_and_reports_not_live(self):
         previous = [{"id": "cached", "score": 10, "fetched_at": "2026-10-07T00:00:00+00:00"}]

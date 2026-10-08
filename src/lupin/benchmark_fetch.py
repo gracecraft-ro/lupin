@@ -51,7 +51,7 @@ The exact command this module runs per shard, confirmed by hand first
 (see `_build_argv`'s docstring for each flag):
 
     omp -p --model opencode-go/step-5-preview-free --thinking max \\
-      --tools web_search --no-session --auto-approve \\
+      --tools web_search,read --no-session --auto-approve \\
       --max-time 420 '<prompt>'
 
 The agent prints a status line ("Working...") before its reply, so the
@@ -104,16 +104,26 @@ OMP_BINARY = "omp"
 OMP_MODEL = "opencode-go/step-5-preview-free"
 OMP_THINKING = "max"
 
-# One tool: web search. No bash, no file reads, no edits.
-OMP_TOOLS = "web_search"
+# One tool for the page fetch, plus web search as the fallback. `read`
+# fetches a URL as text: no search-provider quota, ~2s per page. The free
+# web-search providers are the scarce resource here -- measured
+# 2026-10-08, a wide fan-out exhausted them (Firecrawl keyless credits
+# "exhausted, retry_after ~86400s", Parallel/Exa MCP 429s), and every
+# shard then returned score: null with a search-failure reason. One
+# `read` of the model's own Artificial Analysis page carries the score in
+# plain text ("Qwen3.7 Max scores 29 on the Artificial Analysis
+# Intelligence Index"), so the agent needs the search engine only for a
+# model Artificial Analysis does not list.
+OMP_TOOLS = "web_search,read"
 
 # Models per agent call, and how many calls run at once. A 54-model call
-# ran out of search budget (24/54 scored); a 3-model call at max thinking
-# took ~140s wall clock and scored 3/3. 18 shards over 4 workers is about
-# 12 minutes for a full day's list, and one failing shard costs 3 models,
-# not the whole fetch.
-SHARD_SIZE = 3
-MAX_PARALLEL_SHARDS = 4
+# ran out of search budget (24/54 scored); a 6-model call reading one AA
+# page per model stays well inside one agent turn. 10 shards over 2
+# workers is about 20 minutes for a 56-model day, and one failing shard
+# costs 6 models, not the whole fetch. Two workers, not four: four
+# concurrent shards measurably tripped the search providers' rate limits.
+SHARD_SIZE = 6
+MAX_PARALLEL_SHARDS = 2
 
 # One shard's wall-clock cap, for both `omp --max-time` and this module's
 # own subprocess timeout. ~2.5x the measured 140s shard, because a shard
@@ -189,7 +199,13 @@ _PROMPT_TEMPLATE = """You are looking up today's best publicly available benchma
 Zero-price models confirmed by a live model snapshot:
 {zero_price_model_list}
 
-Use web search. Try the Artificial Analysis leaderboard first (artificialanalysis.ai): its Intelligence Index covers most frontier models on one 0-100 scale. If a model is not there, any other credible public leaderboard or provider benchmark page is acceptable. For each model, return one entry with `id`, `score`, `scale`, `source`, and `as_of`; when the number is the Artificial Analysis Intelligence Index, name it in `scale` ("Artificial Analysis Intelligence Index, 0-100"). If no credible score exists, set `score` to null and give a brief, specific explanation in `reason` of what you checked. State whether the ID was not recognized, no public leaderboard entry exists, only an unverified proxy exists, or recent searches found no relevant result. Never invent a score or describe a guess as fact.
+Use web search only as a fallback. The primary source is a direct page read: Artificial Analysis publishes the Intelligence Index on each model's own page, and one read is ~2 seconds with no search quota. For each model, read
+
+    https://artificialanalysis.ai/models/<slug>
+
+where <slug> is the model ID with every "." replaced by "-" and any trailing date (like -20251101) removed. Example: glm-5.1 -> artificialanalysis.ai/models/glm-5-1; qwen3.6-plus -> artificialanalysis.ai/models/qwen3-6-plus; claude-opus-4-5-20251101 -> artificialanalysis.ai/models/claude-opus-4-5. The page states the score in plain text, e.g. "Qwen3.7 Max scores 29 on the Artificial Analysis Intelligence Index". Read only artificialanalysis.ai pages. If a read fails, or the page is not about this model, or it has no Intelligence Index number, then use web search for that one model. Do not read any other site or any local file.
+
+For each model, return one entry with `id`, `score`, `scale`, `source`, and `as_of`; when the number is the Artificial Analysis Intelligence Index, name it in `scale` ("Artificial Analysis Intelligence Index, 0-100") and set `source` to the page you read. If no credible score exists, set `score` to null and give a brief, specific explanation in `reason` of what you checked. State whether the ID was not recognized, no public leaderboard entry exists, only an unverified proxy exists, or the lookup itself failed (say which: page not found, or search unavailable). Never invent a score or describe a guess as fact. A search failure is not evidence that a model has no score -- say so in `reason`.
 
 Optionally add `note: {{"text": "...", "source": "https://..."}}` when a credible public source supports a useful qualitative observation about strengths or limitations. Keep the note to one short sentence of at most 280 characters. Notes are most useful when a model has no public score and for zero-price models listed above. Prefer evidence for the exact model version. If evidence is about a model family or a different version, say so. Do not infer quality or safety from price, model name, or another model's score. Do not describe private tests. Omit the note when there is no useful, supported observation.
 
@@ -256,8 +272,12 @@ def _build_argv(prompt: str) -> list[str]:
       subscription model (see `OMP_MODEL`'s comment).
     - `--thinking max` spends the most reasoning the provider offers.
       A web lookup that gives up early is the failure mode here, not cost.
-    - `--tools web_search` exposes one built-in tool: web search. No
-      bash, no reads, no edits -- nothing in this prompt needs them.
+    - `--tools web_search,read` exposes two built-in tools. `read` fetches
+      the model's own Artificial Analysis page as text -- the page states
+      the score in plain text, and a fetch costs no search-provider quota,
+      which is the scarce resource (see `OMP_TOOLS`' comment). `web_search`
+      stays as the fallback for a model the site does not list. No bash,
+      no edits, no writes.
     - `--no-session` keeps this run out of the session store: it is a
       cron job's by-product, not a conversation to resume.
     - `--auto-approve` lets the agent use its one tool without a person
@@ -401,7 +421,7 @@ def fetch_benchmark_scores(model_ids: list[str], *, previous: list[dict] | None 
     snapshot = {
         "fetched_at": _newest_entry_time(merged),
         "live": True,
-        "source": f"{OMP_BINARY} -p {OMP_MODEL} thinking={OMP_THINKING}, web search",
+        "source": f"{OMP_BINARY} -p {OMP_MODEL} thinking={OMP_THINKING}, web search + page reads",
         "scores": merged,
     }
     if failures:
