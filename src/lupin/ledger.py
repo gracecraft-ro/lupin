@@ -116,7 +116,7 @@ def append_event(
     record["host"] = machines.hostname()
     client = _client(redis_host, redis_port, redis_username, redis_password)
     try:
-        stream_id = _call_with_retry(lambda: client.xadd(key, _encode(record)))
+        stream_id = client.xadd(key, _encode(record))
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(repo) from exc
     return {"id": stream_id, **record}
