@@ -1914,6 +1914,28 @@ class GatherLoopsTests(unittest.TestCase):
         self.assertEqual([row["repo"] for row in data["entries"]], ["x"])
         self.assertEqual(data["entries"][0]["status"], "stopped")
 
+    def test_gather_loops_lists_remote_loops_when_server_has_no_code_dir(self):
+        machine_records = [
+            {"name": "jesus", "state": "online",
+             "loops": [{"repo": "roundsmith", "state": "working", "backend": "herdr"}]},
+            {"name": "ralpha", "state": "online",
+             "loops": [{"repo": "ghostbook.nix", "state": "idle", "backend": "herdr"}]},
+        ]
+        with (
+            mock.patch.object(serve, "code_repos", return_value=[]),
+            mock.patch.object(serve.loop_runtime, "local_loops", return_value=[]),
+            mock.patch.object(serve, "enabled_repos", return_value=[]),
+            mock.patch.object(serve, "fleet_state", return_value={
+                "claims": {}, "machines": machine_records, "fleet_error": None,
+            }),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            entries = serve.gather_loops({})["entries"]
+        self.assertEqual(
+            [(e["repo"], e["machine"], e["status"]) for e in entries],
+            [("ghostbook.nix", "ralpha", "idle"), ("roundsmith", "jesus", "working")],
+        )
+
 class LoopsRouteUnitTests(unittest.TestCase):
     """Routing logic for controls that use Lupin and Herdr."""
 

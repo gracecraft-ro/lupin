@@ -489,8 +489,9 @@ def gather_loops(connection: dict) -> dict:
     state = fleet_state(connection)
     remote_states = _loop_hosts_from_heartbeat(state.get("machines", []), local_host)
     entries = []
-    for repo_info in code_repos():
-        repo = repo_info["repo"]
+    # The server may have no /code. Loops that other machines report still count.
+    repo_names = {repo_info["repo"] for repo_info in code_repos()} | set(remote_states)
+    for repo in sorted(repo_names):
         entry = local_states.get(repo)
         machine = local_host
         if entry is None:
