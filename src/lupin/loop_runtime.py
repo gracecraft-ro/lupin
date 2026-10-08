@@ -639,7 +639,8 @@ def _launch_agent(
     workspace_id = _workspace_id(workspace)
     if not pane or not workspace_id:
         raise HerdrError("Herdr workspace has no pane or workspace ID")
-    prompt = Path(prompt_file).read_text(encoding="utf-8")
+    # Herdr rejects newlines in agent arguments, so send the prompt as one line.
+    prompt = " ".join(Path(prompt_file).read_text(encoding="utf-8").split())
     argv = [
         HERDR, "--session", session, "agent", "start", AGENT_NAME, "--kind", platform,
         "--pane", pane, "--timeout", "300000", "--",

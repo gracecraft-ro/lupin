@@ -367,6 +367,20 @@ def test_launch_agent_finds_the_pane_when_workspace_list_has_no_root_pane(monkey
     assert calls[0][calls[0].index("--pane") + 1] == "w1:p1"
 
 
+def test_launch_agent_sends_the_prompt_without_newlines(monkeypatch, tmp_path: Path):
+    # Herdr 0.9.3 rejects any newline in an agent argument.
+    prompt_file = tmp_path / "prompt"
+    prompt_file.write_text("first line\n\nsecond  line\n", encoding="utf-8")
+    workspace = {"id": "w1", "root_pane": {"pane_id": "w1:p1", "workspace_id": "w1"}}
+    calls = []
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: calls.append(argv) or (0, ""))
+    monkeypatch.setattr(loop_runtime, "_wait_agent", lambda got_session, workspace_id: 0)
+
+    loop_runtime._launch_agent("lupin-widgets-abc123", "claude", workspace, str(prompt_file), resume=False)
+
+    assert calls[0][-1] == "first line second line"
+
+
 def test_launch_agent_uses_herdr_start_api(monkeypatch, tmp_path: Path):
     prompt_file = tmp_path / "prompt"
     prompt_file.write_text("finish the handoff\n", encoding="utf-8")
@@ -409,7 +423,7 @@ def test_launch_agent_uses_herdr_start_api(monkeypatch, tmp_path: Path):
         "300000",
         "--",
         "--continue",
-        "finish the handoff\n",
+        "finish the handoff",
     ]
     assert options["timeout"] == 310.0
     assert options["env"]["HERDR_ENV"] == "1"
