@@ -45,7 +45,9 @@ def test_verify_rejects_tampered_field():
     assert commands.verify(cmd, "secret") is False
 
 
-def test_signing_key_for_reads_target_file_without_shared_fallback(tmp_path):
+def test_signing_key_for_reads_target_file_without_shared_fallback(monkeypatch, tmp_path):
+    monkeypatch.delenv("LUPIN_CMD_SIGNING_KEYS_DIR", raising=False)
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
     key_dir = tmp_path / "keys"
     key_dir.mkdir()
     (key_dir / "jesus").write_text("jesus-secret\n", encoding="utf-8")
@@ -54,6 +56,28 @@ def test_signing_key_for_reads_target_file_without_shared_fallback(tmp_path):
     assert commands.signing_key_for("ralpha", default="shared", directory=key_dir) is None
     assert commands.signing_key_for("../jesus", directory=key_dir) is None
     assert commands.signing_key_for("jesus", default="shared") == "shared"
+
+
+def test_signing_key_for_reads_systemd_credential_directory(monkeypatch, tmp_path):
+    key_dir = tmp_path / "credentials"
+    key_dir.mkdir()
+    (key_dir / "ralpha").write_text("ralpha-secret\n", encoding="utf-8")
+    monkeypatch.delenv("LUPIN_CMD_SIGNING_KEYS_DIR", raising=False)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(key_dir))
+
+    assert commands.signing_key_for("ralpha") == "ralpha-secret"
+
+
+def test_signing_key_for_keeps_shared_fallback_without_target_credential(
+    monkeypatch, tmp_path
+):
+    key_dir = tmp_path / "credentials"
+    key_dir.mkdir()
+    (key_dir / "redis-password").write_text("redis-secret\n", encoding="utf-8")
+    monkeypatch.delenv("LUPIN_CMD_SIGNING_KEYS_DIR", raising=False)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(key_dir))
+
+    assert commands.signing_key_for("ralpha", default="shared-secret") == "shared-secret"
 
 
 def test_parse_params_basic():

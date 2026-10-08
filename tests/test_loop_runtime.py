@@ -8,6 +8,31 @@ import pytest
 from lupin import loop_runtime
 
 
+def test_systemd_run_uses_nixos_sudo_wrapper_when_not_on_path(monkeypatch, tmp_path):
+    wrapper = tmp_path / "sudo"
+    wrapper.touch()
+    wrapper.chmod(0o755)
+    monkeypatch.setattr(loop_runtime, "NIXOS_SUDO_WRAPPER", wrapper)
+    monkeypatch.setenv("PATH", "")
+    launched = []
+    monkeypatch.setattr(
+        loop_runtime,
+        "_run",
+        lambda argv, **kwargs: launched.append(argv) or (0, ""),
+    )
+
+    result = loop_runtime._systemd_run("widgets", "loop", ["lupin", "loop", "worker"])
+    assert result == (0, "")
+
+    assert launched[0][:3] == [str(wrapper), "-n", "systemd-run"]
+
+
+def test_sudo_argv_uses_path_when_nixos_wrapper_is_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(loop_runtime, "NIXOS_SUDO_WRAPPER", tmp_path / "sudo")
+
+    assert loop_runtime._sudo_argv("systemd-run") == ["sudo", "-n", "systemd-run"]
+
+
 def test_loop_state_uses_herdr_agent_state_and_ids(monkeypatch):
     metadata = {
         "repo": "widgets",
@@ -101,8 +126,13 @@ def test_stop_closes_only_loop_workspace_and_stops_empty_session(
     def run(argv, **kwargs):
         if argv[:3] == ["systemctl", "is-active", loop_runtime.unit_name("widgets") + ".service"]:
             return 0, "active"
-        if argv[:4] == ["sudo", "-n", "systemctl", "stop"]:
-            actions.append(("systemd", tuple(argv[3:])))
+        if argv[-4:] == [
+            "-n",
+            "systemctl",
+            "stop",
+            f"{loop_runtime.unit_name('widgets')}.service",
+        ]:
+            actions.append(("systemd", tuple(argv[-3:])))
             return 0, ""
         raise AssertionError(argv)
 

@@ -421,7 +421,7 @@ Each host gets its own Redis user (`lupin-jesus`, `lupin-ralpha`,
 
 ```
 PING GET SET DEL PEXPIRE ZADD ZREM ZCARD ZRANGE ZREMRANGEBYSCORE
-XADD XRANGE SCAN EVAL EVALSHA SCRIPT|LOAD
+XADD XRANGE XREVRANGE SCAN EVAL EVALSHA SCRIPT|LOAD
 ```
 
 ## Fallback when Redis is unreachable

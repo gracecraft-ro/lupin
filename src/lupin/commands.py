@@ -122,8 +122,18 @@ def signing_key_for(
     default: str | None = None,
     directory: str | Path | None = None,
 ) -> str | None:
-    """Read one target's signing key, or use the legacy shared key."""
-    root = directory if directory is not None else os.environ.get("LUPIN_CMD_SIGNING_KEYS_DIR")
+    """Read a target key from configured or systemd credentials; else default."""
+    root = directory
+    if root is None:
+        root = os.environ.get("LUPIN_CMD_SIGNING_KEYS_DIR")
+    if root is None:
+        credentials_dir = os.environ.get("CREDENTIALS_DIRECTORY")
+        if (
+            credentials_dir is not None
+            and _MACHINE_NAME_RE.fullmatch(machine)
+            and (Path(credentials_dir) / machine).is_file()
+        ):
+            root = credentials_dir
     if root is None:
         return default
     if not _MACHINE_NAME_RE.fullmatch(machine):

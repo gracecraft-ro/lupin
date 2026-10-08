@@ -26,6 +26,7 @@ REPOS_FILE = STATE_DIR / "repos"
 LOOPS_DIR = STATE_DIR / "herdr-loops"
 REPORTS_DIR = STATE_DIR / "reports"
 HERDR = os.environ.get("LUPIN_HERDR_BIN", "herdr")
+NIXOS_SUDO_WRAPPER = Path("/run/wrappers/bin/sudo")
 DEFAULT_PROMPT = (
     "You are the delegation-loop orchestrator for this repository. Read "
     "AGENTS.md and /delegation-loop. If docs/delegation-loop.md exists, read "
@@ -96,6 +97,16 @@ def _run(argv: list[str], *, timeout: float = HERDR_TIMEOUT, env: dict | None = 
     if proc.stderr:
         output += proc.stderr
     return proc.returncode, output.strip()
+
+
+def _sudo_argv(*args: str) -> list[str]:
+    """Use NixOS's sudo wrapper when the service PATH omits it."""
+    executable = (
+        str(NIXOS_SUDO_WRAPPER)
+        if NIXOS_SUDO_WRAPPER.is_file() and os.access(NIXOS_SUDO_WRAPPER, os.X_OK)
+        else "sudo"
+    )
+    return [executable, "-n", *args]
 
 
 def _herdr_env() -> dict[str, str]:
@@ -377,11 +388,11 @@ def _systemd_run(
     user = os.environ.get("LUPIN_LOOP_USER", os.environ.get("USER", "ghosta"))
     group = os.environ.get("LUPIN_LOOP_GROUP", "users")
     unit = unit_name(repo, kind)
-    argv = [
-        "sudo", "-n", "systemd-run", f"--unit={unit}", "--collect",
+    argv = _sudo_argv(
+        "systemd-run", f"--unit={unit}", "--collect",
         f"--uid={user}", f"--gid={group}", "--property=KillMode=control-group",
         "--property=TimeoutStopSec=20s",
-    ]
+    )
     if kind == "loop":
         argv.extend([
             "--property=Restart=on-failure",
@@ -826,7 +837,8 @@ def stop_loop(repo: str) -> str:
         _, state = _run(["systemctl", "is-active", f"{unit_name(repo)}.service"], timeout=3.0)
         if state in {"active", "activating", "deactivating"}:
             rc, output = _run(
-                ["sudo", "-n", "systemctl", "stop", f"{unit_name(repo)}.service"], timeout=30.0
+                _sudo_argv("systemctl", "stop", f"{unit_name(repo)}.service"),
+                timeout=30.0,
             )
             if rc:
                 raise LoopError(output or f"could not stop Lupin worker for {repo}")
@@ -1054,10 +1066,10 @@ def schedule_once(
     command = _lupin_command("once-fire", "--id", identifier)
     user = os.environ.get("LUPIN_LOOP_USER", os.environ.get("USER", "ghosta"))
     group = os.environ.get("LUPIN_LOOP_GROUP", "users")
-    argv = [
-        "sudo", "-n", "systemd-run", f"--unit={unit}", "--collect",
+    argv = _sudo_argv(
+        "systemd-run", f"--unit={unit}", "--collect",
         f"--uid={user}", f"--gid={group}", "--timer-property=AccuracySec=1s",
-    ]
+    )
     if relative:
         argv.append(f"--on-active={when_value}")
     else:
@@ -1108,7 +1120,7 @@ def schedule_local(args: list[str]) -> str:
         return output
     if args == ["pause"] or args == ["resume"]:
         action = "stop" if args[0] == "pause" else "start"
-        rc, output = _run(["sudo", "-n", "systemctl", action, "delegation-loop.timer"], timeout=20.0)
+        rc, output = _run(_sudo_argv("systemctl", action, "delegation-loop.timer"), timeout=20.0)
         if rc:
             raise LoopError(output or f"could not {args[0]} delegation-loop.timer")
         return f"{args[0]}d delegation-loop.timer"
@@ -1138,10 +1150,12 @@ def schedule_local(args: list[str]) -> str:
         raise LoopError("usage: lupin schedule [show|first <when> every <interval>|cal <expression>]")
     dropin.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
     dropin.write_text(content, encoding="utf-8")
-    rc, output = _run(["sudo", "-n", "systemctl", "daemon-reload"], timeout=20.0)
+    rc, output = _run(_sudo_argv("systemctl", "daemon-reload"), timeout=20.0)
     if rc:
         raise LoopError(output or "systemd daemon-reload failed")
-    rc, output = _run(["sudo", "-n", "systemctl", "restart", "delegation-loop.timer"], timeout=20.0)
+    rc, output = _run(
+        _sudo_argv("systemctl", "restart", "delegation-loop.timer"), timeout=20.0
+    )
     if rc:
         raise LoopError(output or "could not restart delegation-loop.timer")
     return "updated delegation-loop.timer"

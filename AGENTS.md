@@ -107,10 +107,13 @@ interval controls later runs.
 
 `fleet-run` sends each enabled repo to one online worker. It skips the local
 machine, workers with an active loop for that repo, and workers without that
-repo's checkout. The coordinator needs one signing key file per worker in
-`LUPIN_CMD_SIGNING_KEYS_DIR`; each file name is the worker name. Each worker
-needs `lupin agent` and its matching key. The command queues runs but does not
-wait for them to start.
+repo's checkout.
+
+The coordinator needs one signing key file per worker. Lupin reads these
+files from `LUPIN_CMD_SIGNING_KEYS_DIR`, or from systemd's
+`CREDENTIALS_DIRECTORY` when the first variable is unset. Each file name is
+the worker name. Each worker needs `lupin agent` and its matching key. The
+command queues runs but does not wait for them to start.
 
 On PiHome, the systemd timer runs `fleet-run` every 5h15m. The dashboard can
 start or stop that timer.
