@@ -1333,6 +1333,7 @@ def _live_dashboard(connection: dict):
     serve.Handler.fleet_connection = connection
     serve.Handler.allowed_hosts = {f"127.0.0.1:{port}"}
     serve.Handler.peek_lines = 5
+    serve._FRAGMENT_CACHE.clear()
 
     class Server(ThreadingHTTPServer):
         daemon_threads = True
@@ -1411,7 +1412,7 @@ def test_roadmap_route_reads_ledger_from_dashboard_connection(
         _live_dashboard(connection) as port,
     ):
         with urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/roadmap?repo=widgets&issue=7&issue_repo=widgets",
+            f"http://127.0.0.1:{port}/roadmap/board?repo=widgets&issue=7&issue_repo=widgets",
             timeout=15,
         ) as response:
             status = response.status
@@ -1444,12 +1445,17 @@ def test_roadmap_defaults_to_list_for_large_backlogs(
         _live_dashboard(connection) as port,
     ):
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/roadmap", timeout=15) as response:
+            shell = response.read().decode()
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/roadmap/board", timeout=15) as response:
             default_body = response.read().decode()
         with urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/roadmap?view=board", timeout=15
+            f"http://127.0.0.1:{port}/roadmap/board?view=board", timeout=15
         ) as response:
             board_body = response.read().decode()
 
+    assert "roadmap-fragment" in shell
+    assert "data-src='/roadmap/board'" in shell
+    assert "Issue 1" not in shell
     assert "Any priority" in default_body
     assert "Issue 1" in default_body
     assert "All tags" not in default_body
@@ -1496,11 +1502,81 @@ def test_roadmap_route_reads_github_cache_from_dashboard_connection(
         ),
         _live_dashboard(connection) as port,
     ):
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/roadmap", timeout=15) as response:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/roadmap/board", timeout=15
+        ) as response:
             status = response.status
             body = response.read().decode()
 
     assert "Cached dashboard issue" in body
+
+
+def test_roadmap_fragment_is_served_from_cache_without_a_rebuild(
+    redis_port, flush_redis
+):
+    """The rendered fragment is cached: a reload inside the window must not
+    build the models again, because a build can wait on Redis and `gh`."""
+    connection = {
+        "redis_host": "127.0.0.1", "redis_port": redis_port,
+        "redis_username": None, "redis_password": None,
+    }
+    model = roadmap.build_model(
+        [{"number": 3, "title": "Cached card", "body": "", "labels": []}],
+        {}, [], repo="widgets",
+    )
+    model["closedNodes"] = []
+    builds = []
+
+    def build(repo, path, *, connection=None):
+        builds.append(repo)
+        return model
+
+    with (
+        mock.patch.object(
+            serve, "code_repos", return_value=[{"repo": "widgets", "loopable": True}]
+        ),
+        mock.patch.object(roadmap, "cached_combined_model", side_effect=build),
+        _live_dashboard(connection) as port,
+    ):
+        for _ in range(2):
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/roadmap/board", timeout=15
+            ) as response:
+                body = response.read().decode()
+
+    assert builds == ["widgets"]
+    assert "Cached card" in body
+
+
+def test_roadmap_full_query_renders_the_whole_page_without_javascript(
+    redis_port, flush_redis
+):
+    """`full=1` is the no-JavaScript path: one response, board included."""
+    connection = {
+        "redis_host": "127.0.0.1", "redis_port": redis_port,
+        "redis_username": None, "redis_password": None,
+    }
+    model = roadmap.build_model(
+        [{"number": 4, "title": "Whole page card", "body": "", "labels": []}],
+        {}, [], repo="widgets",
+    )
+    model["closedNodes"] = []
+
+    with (
+        mock.patch.object(
+            serve, "code_repos", return_value=[{"repo": "widgets", "loopable": True}]
+        ),
+        mock.patch.object(roadmap, "cached_combined_model", return_value=model),
+        _live_dashboard(connection) as port,
+    ):
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/roadmap?full=1", timeout=15
+        ) as response:
+            body = response.read().decode()
+
+    assert body.startswith("<!doctype html>")
+    assert "Whole page card" in body
+    assert "roadmap-fragment" not in body
 
 
 
