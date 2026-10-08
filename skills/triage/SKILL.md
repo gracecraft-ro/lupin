@@ -95,6 +95,16 @@ Give the worker a short brief:
 - Claim or quest ID, machine, worktree path, and branch.
 - Repository instructions and required verification.
 
-Tell the worker to use `/ship`. Use the repository's handoff ledger if it has
-one. Lupin reads `.loop/loop-state.json` for roadmap status, but does not write
-dispatch or handoff entries.
+Tell the worker to use `/ship`. Record dispatches, handoffs, and split links
+in the shared Redis ledger:
+
+```sh
+lupin ledger append OWNER/REPO --event dispatch --issue N \
+  --status running --branch BRANCH
+lupin ledger append OWNER/REPO --event handoff --issue N --status STATUS \
+  --summary TEXT --highlights TEXT --evidence TEXT --decisions TEXT --next TEXT
+lupin ledger read OWNER/REPO --json
+```
+
+Add `--child N` for each split issue. If Redis is unavailable, ledger commands
+exit 3. Do not write `.loop/loop-state.json`.

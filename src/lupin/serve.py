@@ -2653,7 +2653,9 @@ class Handler(BaseHTTPRequestHandler):
             state = "closed" if query.get("state") == "closed" else "open"
             if query.get("view") == "list" and state == "open":
                 models = {
-                    repo: roadmap.cached_model(repo, os.path.join(CODE_DIR, repo))
+                    repo: roadmap.cached_model(
+                        repo, os.path.join(CODE_DIR, repo), connection=self.fleet_connection
+                    )
                     for repo in repos
                 }
                 body = roadmap.render_list_page(repos, models, roadmap_page, query)
@@ -2668,12 +2670,16 @@ class Handler(BaseHTTPRequestHandler):
                     selected, repos, issues_by_repo, roadmap_page
                 )
             elif selected:
-                model = roadmap.cached_model(selected, os.path.join(CODE_DIR, selected))
+                model = roadmap.cached_model(
+                    selected, os.path.join(CODE_DIR, selected), connection=self.fleet_connection
+                )
                 quest_state = self.quest_state(query.get("quest", "").strip())
                 body = roadmap.render_page(selected, repos, model, roadmap_page, quest_state)
             else:
                 models = {
-                    repo: roadmap.cached_combined_model(repo, os.path.join(CODE_DIR, repo))
+                    repo: roadmap.cached_combined_model(
+                        repo, os.path.join(CODE_DIR, repo), connection=self.fleet_connection
+                    )
                     for repo in repos
                 }
                 body = roadmap.render_combined_page(repos, models, roadmap_page)
@@ -3421,7 +3427,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.roadmap not in repos:
             print(f"lupin: unknown repository {args.roadmap!r}", file=sys.stderr)
             return 2
-        model = roadmap.cached_model(args.roadmap, os.path.join(CODE_DIR, args.roadmap))
+        connection = machines.resolve_connection(
+            redis_host=args.redis_host,
+            redis_port=args.redis_port,
+            redis_username=args.redis_username,
+            redis_password=args.redis_password,
+            config_path=args.config_path,
+        )
+        model = roadmap.cached_model(
+            args.roadmap, os.path.join(CODE_DIR, args.roadmap), connection=connection
+        )
         _print_roadmap(args.roadmap, model, args.verbose, args.json)
         return 0
 

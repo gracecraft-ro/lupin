@@ -9,7 +9,7 @@ This is the data model `lupin` uses once the `redis` backend exists
 | --- | --- | --- | --- |
 | `slot:<name>` | sorted set (member = holder, score = expiry in ms) | fleet slots: `bmo` (max 1 holder), and `repo:<repo>` per loopable repo (a declared loop-concurrency cap, not yet enforced by loopctl — issue #23). | `omp.lock` |
 | `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since), with a TTL | one claim per GitHub issue | nothing today |
-| `ledger:<owner>/<repo>` | stream (`XADD`) | `ts host issue branch status body` | `.loop/loop-state.json`, once more than one host writes it |
+| `ledger:<owner>/<repo>` | stream (`XADD`/`XRANGE`) | `ts host event issue status branch summary highlights evidence decisions next children` | `.loop/loop-state.json` is ignored; no local fallback |
 | `machine:<name>` | string (JSON), with a TTL | one fleet machine's status — see Fleet keys below | nothing today |
 | `focus:<quest>` | string (JSON), no TTL | which machine a quest is pinned to — see Fleet keys below | nothing today |
 | `quest:<id>` | string (JSON), no TTL | one quest's issues, order, machine, state — see Fleet keys below | nothing today |
@@ -37,6 +37,34 @@ doesn't change the shape of any key that already exists.
 
 **Release** is a compare-and-delete script. Only the current holder can
 release its own entry.
+
+## Repository ledger
+
+`lupin ledger append OWNER/REPO` adds one event to the shared stream.
+`lupin ledger read OWNER/REPO` returns events from oldest to newest. Add
+`--json` for a JSON array. An empty stream returns `[]`.
+
+Each event has a UTC `ts`, a `host`, and an event name. Optional fields are
+an issue number, status, branch, summary, and digest lists: highlights,
+evidence, decisions, and next steps. `children` is a list of issue numbers
+split from the event's issue. List fields are JSON arrays in Redis.
+
+Use these commands to write and read events:
+
+```sh
+lupin ledger append OWNER/REPO --event handoff --issue 42 \
+  --status done --branch BRANCH --summary TEXT \
+  --highlights TEXT --evidence TEXT --decisions TEXT --next TEXT \
+  --child 43
+lupin ledger read OWNER/REPO --json
+```
+
+Ledger commands exit 3 when Redis is unavailable. The roadmap then shows no
+ledger annotations and adds a warning. Lupin does not read or copy the old
+`.loop/loop-state.json` file.
+
+The roadmap reads the stream on each page load. It reloads about every five
+minutes while open, so new events appear without a manual refresh.
 
 ## Fleet keys
 

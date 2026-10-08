@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 from datetime import datetime, timedelta, timezone
 
-from lupin import roadmap
+from lupin import ledger, roadmap
 
 
 class RoadmapTests(unittest.TestCase):
@@ -19,7 +19,6 @@ class RoadmapTests(unittest.TestCase):
         cache_patch.start()
         self.addCleanup(cache_patch.stop)
         roadmap._GITHUB_CACHE.clear()
-        roadmap._LEDGER_CACHE.clear()
 
     def test_normalizes_priority_and_size_labels(self):
         issues = [
@@ -89,39 +88,6 @@ class RoadmapTests(unittest.TestCase):
 
         self.assertFalse(
             any(edge["from"] == 158 or edge["to"] == 158 for edge in edges)
-        )
-    def test_malformed_ledger_does_not_hide_github_issues(self):
-        issue = {
-            "number": 4,
-            "title": "Visible issue",
-            "body": "",
-            "labels": [],
-            "url": "https://github.com/gracecraft-software/bodysmith/issues/4",
-        }
-        responses = [
-            ({"owner": {"login": "gracecraft-software"}, "name": "bodysmith"}, None),
-            ([issue], None),
-        ]
-        with tempfile.TemporaryDirectory() as directory:
-            ledger_path = Path(directory) / ".loop" / "loop-state.json"
-            ledger_path.parent.mkdir()
-            ledger_path.write_text("{bad json", encoding="utf-8")
-            with (
-                mock.patch.object(roadmap, "_run_json", side_effect=responses),
-                mock.patch.object(roadmap, "_read_comments", return_value=({}, None)),
-                # Bypass the issue #35 cache/gate -- test_gh_cache.py covers it.
-                mock.patch.object(
-                    roadmap.gh_cache, "cached_gh_json", side_effect=lambda *a, **kw: a[3]()
-                ),
-            ):
-                model = roadmap.load_model("bodysmith", directory)
-
-        self.assertEqual([node["number"] for node in model["nodes"]], [4])
-        self.assertTrue(
-            any(
-                "Could not parse .loop/loop-state.json" in warning
-                for warning in model["warnings"]
-            )
         )
 
     def test_dispatch_ledger_event_marks_issue_active(self):
@@ -263,74 +229,56 @@ class RoadmapTests(unittest.TestCase):
         )
         self.assertIn("priority/P1", page)
 
-    def test_github_and_ledger_caches_refresh_independently(self):
+    def test_github_cache_expires_after_one_hour(self):
         roadmap._GITHUB_CACHE.clear()
-        roadmap._LEDGER_CACHE.clear()
         clock = [0.0]
-        issue = {"number": 1, "title": "Issue", "body": "", "labels": []}
-        updated_issue = {"number": 1, "title": "Updated issue", "body": "", "labels": []}
-        dispatch = [{"issue": 1, "event": "dispatch"}]
+        old_issue = {"number": 1, "title": "Old", "body": "", "labels": []}
+        fresh_issue = {"number": 1, "title": "Fresh", "body": "", "labels": []}
         with (
             mock.patch.object(roadmap.time, "monotonic", side_effect=lambda: clock[0]),
             mock.patch.object(
-                roadmap,
-                "load_github",
-                side_effect=[([issue], {}, []), ([updated_issue], {}, [])],
-            ) as github,
-            mock.patch.object(
-                roadmap, "_read_ledger", side_effect=[([], None), (dispatch, None), ([], None)]
-            ) as ledger,
+                roadmap, "load_github",
+                side_effect=[([old_issue], {}, []), ([fresh_issue], {}, [])],
+            ) as load,
         ):
-            first = roadmap.cached_model("repo", "/repo")
-            clock[0] = roadmap.LEDGER_CACHE_SECONDS - 1
-            cached = roadmap.cached_model("repo", "/repo")
-            clock[0] = roadmap.LEDGER_CACHE_SECONDS
-            fresh_ledger = roadmap.cached_model("repo", "/repo")
-            self.assertEqual(github.call_count, 1)
-            self.assertEqual(ledger.call_count, 2)
+            first = roadmap.cached_github("repo", "/repo")
+            clock[0] = roadmap.GITHUB_CACHE_SECONDS - 1
+            cached = roadmap.cached_github("repo", "/repo")
             clock[0] = roadmap.GITHUB_CACHE_SECONDS
-            fresh_github = roadmap.cached_model("repo", "/repo")
+            fresh = roadmap.cached_github("repo", "/repo")
 
-        self.assertFalse(first["nodes"][0]["dispatched"])
-        self.assertIs(cached["nodes"][0]["dispatched"], False)
-        self.assertTrue(fresh_ledger["nodes"][0]["dispatched"])
-        self.assertEqual(github.call_count, 2)
-        self.assertEqual(ledger.call_count, 3)
-        self.assertFalse(fresh_github["nodes"][0]["dispatched"])
-        self.assertEqual(fresh_github["nodes"][0]["title"], "Updated issue")
+        self.assertEqual(first[0][0]["title"], "Old")
+        self.assertEqual(cached[0][0]["title"], "Old")
+        self.assertEqual(fresh[0][0]["title"], "Fresh")
+        self.assertEqual(load.call_count, 2)
 
-    def test_caches_reload_from_disk_after_restart(self):
+    def test_github_cache_reloads_from_disk_after_restart(self):
         issue = {"number": 7, "title": "Saved", "body": "", "labels": []}
         github_data = ([issue], {}, [])
-        ledger_data = ([{"issue": 7, "event": "dispatch"}], None)
         with tempfile.TemporaryDirectory() as directory:
             with (
                 mock.patch.object(roadmap, "CACHE_FILE", str(Path(directory) / "cache.json")),
                 mock.patch.object(roadmap.time, "monotonic", return_value=100.0),
                 mock.patch.object(roadmap.time, "time", return_value=1_000_000.0),
-                mock.patch.object(roadmap, "load_github", return_value=github_data) as github,
-                mock.patch.object(roadmap, "_read_ledger", return_value=ledger_data) as ledger,
+                mock.patch.object(roadmap, "load_github", return_value=github_data) as load,
             ):
                 roadmap._GITHUB_CACHE.clear()
-                roadmap._LEDGER_CACHE.clear()
                 self.assertEqual(roadmap.cached_github("repo", "/repo"), github_data)
-                self.assertEqual(roadmap.cached_ledger("repo", "/repo"), ledger_data)
 
                 roadmap._GITHUB_CACHE.clear()
-                roadmap._LEDGER_CACHE.clear()
                 roadmap._load_cache()
                 self.assertEqual(roadmap.cached_github("repo", "/repo"), github_data)
-                self.assertEqual(roadmap.cached_ledger("repo", "/repo"), ledger_data)
-                self.assertEqual(github.call_count, 1)
-                self.assertEqual(ledger.call_count, 1)
+                self.assertEqual(load.call_count, 1)
 
-    def test_expired_disk_caches_are_refreshed(self):
+    def test_expired_github_disk_cache_is_refreshed(self):
         old_issue = {"number": 7, "title": "Old", "body": "", "labels": []}
         fresh_issue = {"number": 7, "title": "Fresh", "body": "", "labels": []}
         now = 1_000_000.0
         saved = {
-            "github": [["repo", "open", now - roadmap.GITHUB_CACHE_SECONDS - 1, ([old_issue], {}, [])]],
-            "ledger": [["repo", now - roadmap.LEDGER_CACHE_SECONDS - 1, ([{"issue": 7}], None)]],
+            "github": [[
+                "repo", "open", now - roadmap.GITHUB_CACHE_SECONDS - 1,
+                ([old_issue], {}, []),
+            ]],
         }
         with tempfile.TemporaryDirectory() as directory:
             cache_file = Path(directory) / "cache.json"
@@ -341,22 +289,14 @@ class RoadmapTests(unittest.TestCase):
                 mock.patch.object(roadmap.time, "time", return_value=now),
                 mock.patch.object(
                     roadmap, "load_github", return_value=([fresh_issue], {}, [])
-                ) as github,
-                mock.patch.object(
-                    roadmap, "_read_ledger", return_value=([{"issue": 8}], None)
-                ) as ledger,
+                ) as load,
             ):
                 roadmap._GITHUB_CACHE.clear()
-                roadmap._LEDGER_CACHE.clear()
                 roadmap._load_cache()
-                self.assertEqual(
-                    roadmap.cached_github("repo", "/repo")[0][0]["title"], "Fresh"
-                )
-                self.assertEqual(roadmap.cached_ledger("repo", "/repo")[0], [{"issue": 8}])
+                result = roadmap.cached_github("repo", "/repo")
 
-        self.assertEqual(github.call_count, 1)
-        self.assertEqual(ledger.call_count, 1)
-
+        self.assertEqual(result[0][0]["title"], "Fresh")
+        self.assertEqual(load.call_count, 1)
     def test_cache_file_is_derived_from_home_not_hardcoded(self):
         # roadmap.py used to hardcode /home/ghosta here. CACHE_FILE must be
         # computed from HOME at import time, so it works for any user.
@@ -372,7 +312,7 @@ class RoadmapTests(unittest.TestCase):
         model = roadmap.build_model(
             [],
             {},
-            [{"event": "handoff", "note": "HANDOFF, not a finish."}],
+            [{"event": "handoff", "status": "HANDOFF, not a finish."}],
             repo="nix",
         )
         render = lambda title, body, css, js: json.dumps([title, body, css, js])
@@ -729,9 +669,6 @@ class RoadmapTests(unittest.TestCase):
         self.assertIn("beta", page)
         self.assertIn("All repositories", page)
         self.assertIn("Work board", page)
-        self.assertIn("GitHub data refreshes hourly", page)
-        self.assertIn("ledger JSON and this page refresh every five minutes", page)
-        self.assertIn("setTimeout(function(){location.reload()},305000)", page)
         self.assertLess(page.index("Latest updates"), page.index("Work board"))
         self.assertLess(updates.index("#7 Newer issue"), updates.index("#7 Older issue"))
         self.assertIn("Past 6 hours", updates)
@@ -1128,9 +1065,9 @@ class RoadmapTests(unittest.TestCase):
             digest["headline"], "Redis slot leases, staged in the prep repo."
         )
 
-    def test_prose_entry_without_lists_still_renders_a_headline(self):
+    def test_next_steps_render_with_a_headline(self):
         issue = {"number": 32, "title": "Tunnel", "body": "", "labels": []}
-        ledger = [{"issue": 32, "summary": "Mac launchd tunnel added.", "followups": "Owner: set the tailnet IP."}]
+        ledger = [{"issue": 32, "summary": "Mac launchd tunnel added.", "next": "Owner: set the tailnet IP."}]
 
         node = roadmap.build_model([issue], {}, ledger, repo="nix")["nodes"][0]
 
@@ -1144,7 +1081,7 @@ class RoadmapTests(unittest.TestCase):
         issue = {"number": 33, "title": "Untouched", "body": "", "labels": []}
 
         node = roadmap.build_model(
-            [issue], {}, [{"issue": 33, "action": "dispatch"}], repo="nix"
+            [issue], {}, [{"issue": 33, "event": "dispatch"}], repo="nix"
         )["nodes"][0]
 
         self.assertIsNone(node["digest"])
@@ -1460,6 +1397,107 @@ class DependencyDagTests(unittest.TestCase):
             dag["warnings"], {"core": ["GitHub dependency links are unavailable: boom"]}
         )
         self.assertEqual(load.call_count, 2)
+
+
+
+def test_roadmap_reads_latest_shared_events(redis_port, flush_redis, monkeypatch):
+    connection = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    issues = [
+        {"number": 21, "title": "Parent", "body": "", "labels": []},
+        {"number": 22, "title": "Split task", "body": "", "labels": []},
+    ]
+    monkeypatch.setattr(
+        roadmap, "cached_github", lambda *args, **kwargs: (issues, {}, [])
+    )
+    monkeypatch.setattr(roadmap, "_repo_identity", lambda _path: ("acme", "repo", None))
+
+    before = roadmap.cached_model("repo", "/repo", connection=connection)
+    ledger.append_event(
+        "acme/repo",
+        {
+            "event": "dispatch", "issue": 21, "status": "running",
+            "children": [22],
+        },
+        **connection,
+    )
+    ledger.append_event(
+        "acme/repo",
+        {
+            "event": "handoff", "issue": 22, "status": "ready",
+            "summary": "Shared handoff.", "highlights": ["Event visible on both hosts."],
+        },
+        **connection,
+    )
+    after = roadmap.cached_model("repo", "/repo", connection=connection)
+
+    assert not before["nodes"][0]["dispatched"]
+    nodes = {node["number"]: node for node in after["nodes"]}
+    assert nodes[21]["dispatched"]
+    assert nodes[22]["digest"]["headline"] == "Shared handoff."
+    assert after["handoffStatus"] == "ready"
+    assert {"from": 21, "to": 22, "kind": "split"} in after["edges"]
+    page = roadmap.render_page(
+        "repo", ["repo"], after, lambda _title, body, _css, _js: body
+    )
+    assert "Latest handoff: ready" in page
+    assert "Event visible on both hosts." in page
+    assert "class='parent-link'" in page
+
+
+def test_roadmap_ignores_local_ledger_history_and_empty_stream(
+    redis_port, flush_redis, monkeypatch, tmp_path
+):
+    connection = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    issue = {"number": 21, "title": "Old event", "body": "", "labels": []}
+    loop_dir = tmp_path / ".loop"
+    loop_dir.mkdir()
+    (loop_dir / "loop-state.json").write_text(
+        json.dumps([{"issue": 21, "event": "dispatch", "summary": "Old"}]),
+        encoding="utf-8",
+    )
+    cache_file = tmp_path / "cache.json"
+    cache_file.write_text(
+        json.dumps({
+            "ledger": [["repo", 0, ([{"issue": 21, "event": "dispatch"}], None)]],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(roadmap, "CACHE_FILE", str(cache_file))
+    roadmap._GITHUB_CACHE.clear()
+    roadmap._load_cache()
+    monkeypatch.setattr(
+        roadmap, "cached_github", lambda *args, **kwargs: ([issue], {}, [])
+    )
+    monkeypatch.setattr(roadmap, "_repo_identity", lambda _path: ("acme", "repo", None))
+
+    model = roadmap.cached_model("repo", str(tmp_path), connection=connection)
+
+    assert not model["nodes"][0]["dispatched"]
+    assert model["nodes"][0]["digest"] is None
+    assert model["handoffStatus"] is None
+    assert model["warnings"] == []
+
+
+def test_roadmap_shows_empty_ledger_on_unavailable_coordinator(
+    closed_port, monkeypatch
+):
+    issue = {"number": 21, "title": "Issue", "body": "", "labels": []}
+    monkeypatch.setattr(
+        roadmap, "cached_github", lambda *args, **kwargs: ([issue], {}, [])
+    )
+    monkeypatch.setattr(roadmap, "_repo_identity", lambda _path: ("acme", "repo", None))
+
+    model = roadmap.cached_model(
+        "repo", "/repo",
+        connection={"redis_host": "127.0.0.1", "redis_port": closed_port},
+    )
+
+    assert not model["nodes"][0]["dispatched"]
+    assert model["handoffStatus"] is None
+    assert any(
+        "Repository ledger is unavailable" in warning
+        for warning in model["warnings"]
+    )
 
 
 if __name__ == "__main__":
