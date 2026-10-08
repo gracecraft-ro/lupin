@@ -27,9 +27,11 @@ enabled repositories. `review-route --prefetch` fetches issue or pull request
 text and comments; it does not choose a model. Omit `--repo` when Lupin's
 enabled-repository list is the intended scope.
 
-Use the repository's label map if it has one. Otherwise, keep its existing
-label names. Do not create or rename labels as part of triage. Lupin does not
-apply labels for you.
+Use the repository's label map if it has one. Keep its priority, size, type,
+and blocker labels. Use a separate `claimed` label for active work. Add it
+during repository setup if it does not exist. If you cannot add it, post the
+claim comment and report that the label is missing. Lupin does not change
+GitHub labels.
 
 ## Decide what is ready
 
@@ -54,16 +56,16 @@ apply labels for you.
 
 From the issue's repository checkout, `lupin place 123 --json` classifies the
 issue, recommends a model and effort, and ranks available machines. It does
-not claim the issue or start an agent. `lupin quota` shows the latest shared
-quota readings. Routing uses the quota data available to the local process;
-do not assume that the shared quota display is also the router's input.
+not claim the issue or start an agent. `lupin quota` displays the shared Redis
+snapshot and refreshes it with local provider data when this machine has
+credentials. `route()` reads quota from the local machine, so the two results
+may differ.
 
 If Lupin cannot place the task, use `lupin review-route` with the issue's
-category and size to get a model and effort recommendation. Do not ignore a
-reported quota wait by selecting the blocked model yourself.
+category and size. Do not ignore a reported quota wait by selecting the
+blocked model yourself.
 
-When Redis fleet claims are configured, reserve an issue before dispatch. Use
-the same target and holder to renew or release it:
+When Redis fleet claims are configured, reserve the issue before dispatch:
 
 ```sh
 lupin claim OWNER/REPO#123 --holder SESSION
@@ -71,24 +73,28 @@ lupin renew-claim OWNER/REPO#123 --holder SESSION
 lupin release-claim OWNER/REPO#123 --holder SESSION
 ```
 
-A claim needs Redis; Lupin has no local claim fallback. If the claim fails, do
-not report the issue as reserved. Follow the repository's local coordination
-rules instead.
+A claim is stored in Redis. It does not add a GitHub label or comment, and it
+does not store the worktree path. After the claim succeeds, the claim owner
+adds the `claimed` label and comments with the machine, worktree, branch, and
+holder. When the claim ends, remove the label and comment with the result.
+Do not mark an issue as claimed if the Redis claim fails. Lupin has no local
+claim fallback.
 
 For a related set of issues, `lupin quest start --issue 123 --issue 124`
 claims the issues and registers a quest on a selected machine. It does not
-start an agent or disable quota pacing.
+start an agent or disable quota pacing. Do not claim those issues again.
 
 ## Handoff
 
-Give the worker only the context it needs:
+Give the worker a short brief:
 
 - Issue number, goal, and acceptance checks.
 - Current comments and open dependencies.
-- Files or components likely to change; known parallel work.
+- Likely files and known parallel work.
 - Lupin's model, effort, and machine recommendation.
-- Claim or quest ID, repository instructions, and required verification.
+- Claim or quest ID, machine, worktree path, and branch.
+- Repository instructions and required verification.
 
-Use the repository's handoff ledger if it has one. Lupin reads
-`.loop/loop-state.json` for roadmap status, but it does not write dispatch or
-handoff entries.
+Tell the worker to use `/ship`. Use the repository's handoff ledger if it has
+one. Lupin reads `.loop/loop-state.json` for roadmap status, but does not write
+dispatch or handoff entries.
