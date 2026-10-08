@@ -3294,7 +3294,6 @@ class Handler(BaseHTTPRequestHandler):
         capacity.
         """
         enabled = enabled_repos()
-        platforms = _repo_platforms()
         repo_choice = (form.get("repo") or [None])[0]
         if not repo_choice:
             self.reply(render_error("missing repo"), 400)
@@ -3360,12 +3359,8 @@ class Handler(BaseHTTPRequestHandler):
 
         errors = []
         for repo, machine in zip(targets_repos, assigned):
-            platform = platforms.get(repo)
             local_argv = ["lupin", "run", repo]
             queue_params = {"repo": repo}
-            if platform:
-                local_argv.extend(["--platform", platform])
-                queue_params["platform"] = platform
             try:
                 result = loops.dispatch_loop_action(
                     machine=machine, local_host=local_host,

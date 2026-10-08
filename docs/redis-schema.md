@@ -203,36 +203,52 @@ snapshot, so there is no `benchmark-snapshot:<machine>` variant.
 
 ```json
 {
-  "fetched_at": "2026-10-07T12:00:00+00:00",
+  "fetched_at": "2026-10-08T04:20:00+00:00",
   "live": true,
-  "source": "claude -p sonnet, web search/fetch",
+  "source": "omp -p opencode-go/step-5-preview-free thinking=max, web search",
   "scores": [
-    {"id": "claude-opus-4-5", "score": 73.1, "scale": "Artificial Analysis Intelligence Index (0-100)",
-     "source": "https://artificialanalysis.ai/models/claude-opus-4-5", "as_of": "2026-10-07"},
-    {"id": "gpt-5.4", "score": null, "reason": "not found"}
+    {"id": "qwen3.7-max", "score": 29, "scale": "Artificial Analysis Intelligence Index, 0-100",
+     "source": "https://artificialanalysis.ai/models/qwen3-7-max", "as_of": "2026-10-08",
+     "fetched_at": "2026-10-08T04:20:00+00:00"},
+    {"id": "omen-alpha", "score": null, "reason": "not found",
+     "fetched_at": "2026-10-08T04:20:00+00:00"}
   ]
 }
 ```
 
-Each score can also include an optional `note` object with `text` and a
-public `source` URL. The Models page shows these source-backed remarks in its
-Notes column. A note is omitted when the agent finds no useful evidence.
-Older snapshots may not have notes. The agent receives a zero-price model
-list only when both prices are zero in a live `fetch-models` snapshot.
+Each score carries its own `fetched_at`. One refresh asks the agent only
+about the models whose entry is missing, unscored, or older than 20 hours,
+and merges the answer over the cached entries, so a model's score keeps
+yesterday's stamp while today's run refreshes the rest. A fetch that fails
+entirely leaves the cached scores in place — `live: false` describes this
+run, it does not replace the cache. `stale_reason` also appears on an
+otherwise-live snapshot when some shards failed; the merged `scores` list
+is then the answer for the models that did refresh.
 
-`live: false` carries a `stale_reason` instead of a `source`/`scores` list
-with real entries — the dispatched agent timed out, exited non-zero, or
-returned something that didn't match its schema. TTL is retention only
-(7 days, `benchmark_fetch.REDIS_KEY_TTL`) — freshness is decided by
-comparing `fetched_at` to a 20-hour window
-(`benchmark_fetch.CACHE_FRESH_SECONDS`), not by the key expiring; the
-same "stored timestamp, not Redis TTL" convention as `machine:<name>`'s
+Each score can also include an optional `note` object with `text` and a
+public `source` URL. The Models page shows these source-backed remarks in
+its Notes column. A note is omitted when the agent finds no useful
+evidence. Older snapshots may not have notes. The agent receives a
+zero-price model list only when both prices are zero in a live
+`fetch-models` snapshot.
+
+TTL is retention only (7 days, `benchmark_fetch.REDIS_KEY_TTL`) —
+freshness is decided per entry by comparing its `fetched_at` to a 20-hour
+window (`benchmark_fetch.CACHE_FRESH_SECONDS`), not by the key expiring;
+the same "stored timestamp, not Redis TTL" convention as `machine:<name>`'s
 offline detection above.
 
+The lookup worker is a free opencode-go model (`step-5-preview-free`) run
+through `omp -p` with `--thinking max` and one tool, `web_search`; the
+model list is sharded 3 models per call, up to 4 calls at a time
+(`benchmark_fetch.SHARD_SIZE`, `MAX_PARALLEL_SHARDS`). See
+`benchmark_fetch.py`'s docstring for the measurement that led there.
+
 Only one machine fetches at a time: `lupin fetch-benchmarks` wraps the
-actual dispatch in `slot:benchmark-fetch` (max 1 holder, no renewal —
-see `benchmark_fetch.py`'s docstring for why a lease TTL alone, not a
-renew timer, is what recovers this slot if its holder crashes mid-fetch).
+actual dispatch in `slot:benchmark-fetch` (max 1 holder, no renewal — the
+lease TTL is computed from the work this run will do,
+`benchmark_fetch._lock_ttl`, so it already covers every round of the
+fan-out; a crashed holder's lease expires on its own).
 A machine that finds the slot already held just reads whatever is in
 `benchmark-snapshot` right now instead of waiting.
 
@@ -411,7 +427,7 @@ numbers.
 | Machine heartbeat | 30s | 120s |
 | Command record (`cmd:<id>`) | n/a — not renewed | 1 hour (retention only, see below) |
 | Command result (`cmdres:<id>`) | n/a — not renewed | 1 hour |
-| `slot:benchmark-fetch` lease | n/a — not renewed | ~7 min (`benchmark_fetch.CLAUDE_TIMEOUT` + 60s headroom) |
+| `slot:benchmark-fetch` lease | n/a — not renewed | `benchmark_fetch._lock_ttl()`: shard rounds × `SHARD_TIMEOUT` + 60s headroom (~8 min for a 54-model day) |
 | `benchmark-snapshot` | n/a — not renewed | 7 days (retention only, see below) |
 | `model-snapshot` | n/a — not renewed | 7 days (retention only) |
 | GitHub data cache (`gh-cache:...`) | n/a — not renewed | 5 min |
@@ -446,7 +462,7 @@ Connect timeout 2s, 1 retry, then:
 | Ledger | `lupin` always writes the local file too. The Redis copy misses the entry — v1 has no replay. |
 | Host-scope slot | No change — these never use Redis. |
 | Command queue | `lupin cmd send`/`lupin agent` exit 3. No local fallback, same as claims — a command only means anything if the target machine can see it. |
-| Benchmark snapshot | `lupin fetch-benchmarks` reports `live: false` with a `stale_reason` (exit 0, same convention as `model_fetch.py`'s own failure cases — see `cli.py`'s exit-code table, "any other error" doesn't fit this, it's a data-availability fact, not a usage error). No local fallback — a fleet-shared cache has nothing meaningful to fall back to on one machine. |
+| Benchmark snapshot | `lupin fetch-benchmarks` reports `live: false` with a `stale_reason` (exit 0, same convention as `model_fetch.py`'s own failure cases — see `cli.py`'s exit-code table, "any other error" doesn't fit this, it's a data-availability fact, not a usage error). No local fallback — a fleet-shared cache has nothing meaningful to fall back to on one machine, and a failed run leaves the last cached scores on the key untouched rather than erasing them. |
 | GitHub data cache | `pihome` calls `gh` directly anyway (it just can't publish for other machines). Every other machine reports "no data yet" instead of calling `gh` itself — no direct-call fallback here, unlike the resources above. |
 | Quota snapshot | A machine with real provider credentials still returns its own live reading (it just can't publish for other machines). A machine with no credentials for a provider has nothing to fall back to and reports "no data cached yet" for it. |
 

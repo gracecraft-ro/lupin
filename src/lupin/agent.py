@@ -143,6 +143,29 @@ def _validate_platform(value) -> str:
         raise RejectedCommand("platform must be claude or omp")
     return value
 
+def _validate_omp_options(params: dict, platform: str | None) -> list[str]:
+    provider = params.get("provider")
+    model = params.get("model")
+    if provider is not None and (
+        not isinstance(provider, str) or provider not in {"openai", "opencode-go"}
+    ):
+        raise RejectedCommand("provider must be openai or opencode-go")
+    if model is not None and (
+        not isinstance(model, str)
+        or not model
+        or len(model) > 256
+        or any(ord(character) < 32 or ord(character) == 127 for character in model)
+    ):
+        raise RejectedCommand("invalid OMP model")
+    if (provider is not None or model is not None) and platform != "omp":
+        raise RejectedCommand("provider and model require platform omp")
+    flags = []
+    if provider is not None:
+        flags.extend(["--provider", provider])
+    if model is not None:
+        flags.extend(["--model", model])
+    return flags
+
 
 def _validate_note(value) -> str | None:
     if value is None:
@@ -157,7 +180,9 @@ def _handle_loop_run(params: dict, cmd_id: str) -> list[str]:
     argv = ["lupin", "run", repo]
     platform = params.get("platform")
     if platform is not None:
-        argv.extend(["--platform", _validate_platform(platform)])
+        platform = _validate_platform(platform)
+        argv.extend(["--platform", platform])
+    argv.extend(_validate_omp_options(params, platform))
     note = _validate_note(params.get("note"))
     if note is not None:
         argv.extend(["--note", note])
@@ -171,6 +196,11 @@ def _handle_loop_run(params: dict, cmd_id: str) -> list[str]:
 
 def _handle_loop_run_all(params: dict, cmd_id: str) -> list[str]:
     argv = ["lupin", "run", "--all"]
+    platform = params.get("platform")
+    if platform is not None:
+        platform = _validate_platform(platform)
+        argv.extend(["--platform", platform])
+    argv.extend(_validate_omp_options(params, platform))
     note = _validate_note(params.get("note"))
     if note is not None:
         argv.extend(["--note", note])

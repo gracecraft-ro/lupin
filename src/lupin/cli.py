@@ -4,10 +4,10 @@
 ghostbook.nix in issue #203. `fetch-models` fetches a daily snapshot of
 which model IDs each subscription can call today and what they cost
 (issue #16; see `model_fetch.py`). `fetch-benchmarks` fetches (or reads the
-fleet-shared cache of) a daily benchmark/quality score per model, via a
-restricted dispatched agent, not a local file (issue #17's reopen; see
-`benchmark_fetch.py`). `quota` publishes provider quota and this machine's
-`7-day usage totals to shared Redis for the dashboard.
+fleet-shared cache of) a daily benchmark/quality score per model, via
+sharded free-model `omp` agent calls, not a local file (issue #17's
+reopen; see `benchmark_fetch.py`). `quota` publishes provider quota and
+this machine's `7-day usage totals to shared Redis for the dashboard.
 `acquire`/`hold`/`release`/`status` are the
 slot-lease commands (issue #205 for the `local` backend, #210 for
 `redis`). `ledger` appends and reads shared repository events in Redis
@@ -623,6 +623,8 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("repo", nargs="?")
     run_parser.add_argument("--all", action="store_true")
     run_parser.add_argument("--platform", choices=("claude", "omp"))
+    run_parser.add_argument("--provider", choices=("openai", "opencode-go"))
+    run_parser.add_argument("--model")
     run_parser.add_argument("--note")
     run_parser.add_argument("--resume", action="store_true")
     run_parser.add_argument("--machine", help="run on a fleet machine")
@@ -637,12 +639,24 @@ def _build_parser() -> argparse.ArgumentParser:
     once_parser.add_argument("when")
     once_parser.add_argument("repos", nargs="*")
     once_parser.add_argument("--platform", choices=("claude", "omp"))
+    once_parser.add_argument("--provider", choices=("openai", "opencode-go"))
+    once_parser.add_argument("--model")
     once_parser.add_argument("--note")
     once_parser.add_argument("--resume", action="store_true")
     once_parser.add_argument("--json", action="store_true")
     enable_parser = sub.add_parser("enable", help="add a repo to the loop schedule")
     enable_parser.add_argument("repo")
     enable_parser.add_argument("--platform", choices=("claude", "omp"), default="claude")
+    enable_parser.add_argument(
+        "--orchestrator",
+        action="append",
+        help="eligible model: claude, openai/MODEL, or opencode-go/MODEL; repeat to add choices",
+    )
+    enable_parser.add_argument(
+        "--clear-orchestrators",
+        action="store_true",
+        help="remove this repo's orchestrator profile",
+    )
     disable_parser = sub.add_parser("disable", help="remove a repo from the loop schedule")
     disable_parser.add_argument("repo")
     loops_parser = sub.add_parser("loops", help="show Herdr loop state")
@@ -1400,8 +1414,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if args.all == bool(args.repo):
         print("run needs one repo or --all", file=sys.stderr)
         return 1
-    if args.all and (args.platform or args.resume):
-        print("run --all uses each repo's configured platform and cannot resume", file=sys.stderr)
+    if args.all and args.resume:
+        print("run --all cannot resume", file=sys.stderr)
+        return 1
+    if (args.provider or args.model) and args.platform != "omp":
+        print("--provider and --model require --platform omp", file=sys.stderr)
         return 1
     local_host = machines.hostname()
     machine = args.machine or local_host
@@ -1413,11 +1430,21 @@ def _cmd_run(args: argparse.Namespace) -> int:
             "note": args.note,
             "resume": args.resume,
         }
+        if args.platform is not None:
+            queue_params["platform"] = args.platform
+        if args.provider is not None:
+            queue_params["provider"] = args.provider
+        if args.model is not None:
+            queue_params["model"] = args.model
         local_argv = ["lupin", "run", "--all"] if args.all else ["lupin", "run", args.repo]
         if args.note is not None:
             local_argv.extend(["--note", args.note])
         if args.platform:
             local_argv.extend(["--platform", args.platform])
+        if args.provider:
+            local_argv.extend(["--provider", args.provider])
+        if args.model:
+            local_argv.extend(["--model", args.model])
         if args.resume:
             local_argv.append("--resume")
         try:
@@ -1453,7 +1480,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         failed = False
         for repo in targets:
             ok, message = loop_runtime.start_loop(
-                repo, platform=args.platform, note=args.note, resume=args.resume
+                repo,
+                platform=args.platform,
+                provider=args.provider,
+                model=args.model,
+                note=args.note,
+                resume=args.resume,
             )
             results.append({"repo": repo, "started": ok, "message": message})
             failed |= not ok and not message.startswith("skip ")
@@ -1476,6 +1508,7 @@ def _cmd_fleet_run(args: argparse.Namespace) -> int:
     """Dispatch the local enabled-repo list to eligible fleet workers."""
     try:
         repos = loop_runtime.enabled_repos()
+        repos = {repo: None for repo in repos}
         if not repos:
             print("no enabled repos to dispatch", file=sys.stderr)
             return 1
@@ -1522,7 +1555,12 @@ def _cmd_once(args: argparse.Namespace) -> int:
             failed = False
             for repo in targets:
                 ok, message = loop_runtime.start_loop(
-                    repo, platform=args.platform, note=args.note, resume=args.resume
+                    repo,
+                    platform=args.platform,
+                    provider=args.provider,
+                    model=args.model,
+                    note=args.note,
+                    resume=args.resume,
                 )
                 results.append({"repo": repo, "started": ok, "message": message})
                 failed |= not ok and not message.startswith("skip ")
@@ -1534,7 +1572,8 @@ def _cmd_once(args: argparse.Namespace) -> int:
             return 1 if failed else 0
         targets = args.repos or list(loop_runtime.enabled_repos())
         message = loop_runtime.schedule_once(
-            args.when, targets, platform=args.platform, note=args.note, resume=args.resume
+            args.when, targets, platform=args.platform, provider=args.provider,
+            model=args.model, note=args.note, resume=args.resume
         )
     except loop_runtime.LoopError as exc:
         print(str(exc), file=sys.stderr)
@@ -1548,7 +1587,12 @@ def _cmd_once(args: argparse.Namespace) -> int:
 
 def _cmd_enable(args: argparse.Namespace) -> int:
     try:
-        loop_runtime.enable_repo(args.repo, args.platform)
+        loop_runtime.enable_repo(
+            args.repo,
+            args.platform,
+            args.orchestrator,
+            clear_orchestrators=args.clear_orchestrators,
+        )
     except loop_runtime.LoopError as exc:
         print(str(exc), file=sys.stderr)
         return 1

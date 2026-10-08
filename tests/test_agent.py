@@ -81,9 +81,34 @@ def test_loop_run_returns_after_starting_lupin_worker(redis_port, flush_redis, m
             ["lupin", "run", "lupin", "--platform", "omp", "--note", "review\nhandoff", "--resume"],
         ),
         (
+            "loop.run",
+            {
+                "repo": "lupin",
+                "platform": "omp",
+                "provider": "openai",
+                "model": "openai/gpt-5.2",
+            },
+            [
+                "lupin", "run", "lupin", "--platform", "omp",
+                "--provider", "openai", "--model", "openai/gpt-5.2",
+            ],
+        ),
+        (
             "loop.run-all",
             {"note": "review"},
             ["lupin", "run", "--all", "--note", "review"],
+        ),
+        (
+            "loop.run-all",
+            {
+                "platform": "omp",
+                "provider": "opencode-go",
+                "model": "opencode-go/step-5-preview-free:xhigh",
+            },
+            [
+                "lupin", "run", "--all", "--platform", "omp", "--provider", "opencode-go",
+                "--model", "opencode-go/step-5-preview-free:xhigh",
+            ],
         ),
         (
             "repo.enable",

@@ -2656,7 +2656,7 @@ class TestSchedulePageIntegration:
         assert len(queued) == 1
         stored = json.loads(raw.get(f"lupin:v1:cmd:{queued[0]}"))
         assert stored["action"] == "loop.run"
-        assert stored["params"] == {"repo": "widgets", "platform": "omp"}
+        assert stored["params"] == {"repo": "widgets"}
         assert stored["target"] == "jesus"
         assert stored["issuer"] == "pihome"
         assert commands.verify(stored, "secret") is True
@@ -2691,10 +2691,6 @@ class TestSchedulePageIntegration:
                 serve, "enabled_repos",
                 return_value=["a-repo", "b-repo", "c-repo"],
             ),
-            mock.patch.object(
-                serve, "_repo_platforms",
-                return_value={"a-repo": "omp", "b-repo": "claude", "c-repo": "omp"},
-            ),
             mock.patch.object(serve.machines, "hostname", return_value="pihome"),
             mock.patch.dict("os.environ", {"LUPIN_LOOP_COORDINATOR_ONLY": "1"}),
         ):
@@ -2710,8 +2706,8 @@ class TestSchedulePageIntegration:
             (payload["target"], payload["params"])
             for payload in (payloads["jesus"], payloads["mini"])
         ] == [
-            ("jesus", {"repo": "a-repo", "platform": "omp"}),
-            ("mini", {"repo": "b-repo", "platform": "claude"}),
+            ("jesus", {"repo": "a-repo"}),
+            ("mini", {"repo": "b-repo"}),
         ]
         assert all(commands.verify(payload, "secret") for payload in payloads.values())
         assert raw.zrange("lupin:v1:cmdq:pihome", 0, -1) == []
