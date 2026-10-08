@@ -172,13 +172,12 @@ benchmark, averaged equally across scored categories. "Value" is Perf divided
 by the mean input and output price. Future Lupin tests may run one model at a
 time. The page does not run private model tests.
 
-`quota` shows how much of each provider's quota is left: percent left,
-which window (5 hours, 7 days, 30 days), and time to reset. Quota is one
-account per provider, shared by the whole fleet, not a per-machine fact —
-a machine with real provider logins reads it live and publishes it to one
-shared Redis key; every other machine reads that key instead of calling
-the provider itself. A provider with no reading yet (no machine with its
-logins has run `quota` recently) shows "no quota data cached yet".
+`quota` reads provider quota on machines with provider access and publishes
+it to shared Redis. The `/usage` page reads these shared rows. It also reads
+each machine's local 7-day token and cost totals, stored in separate
+per-machine Redis snapshots. The page adds totals by provider and marks a
+snapshot stale after five minutes. Each snapshot expires after 24 hours.
+Systemd runs `lupin quota` every five minutes on Jesus and Ralpha.
 
 ## How a slot's limit (`max`) works
 
@@ -231,6 +230,8 @@ per-machine limit or add controls that the current code cannot support.
 - `src/lupin/quota_cache.py` — `lupin quota`'s shared Redis cache: one
   machine's real quota reading, published for the whole fleet to read
   (issue #38).
+- `src/lupin/usage_cache.py` — publishes each machine's 7-day usage totals
+  for the `/usage` page to add across the fleet.
 - `src/lupin/model_fetch.py` — `fetch-models`: a daily snapshot of model
   IDs and prices per subscription.
 - `src/lupin/claims.py` — `claim`/`renew-claim`/`release-claim`: one GitHub
