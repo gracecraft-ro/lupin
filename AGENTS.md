@@ -107,6 +107,9 @@ never a guess. The result goes into one shared Redis key, not a file on
 disk, so every machine sees the same score and only one machine does the
 work each day. Use `--force` to pull fresh data right now, skipping the
 daily cache (it still waits its turn if another machine is mid-pull).
+Plain output shows numeric score count and snapshot age. "Live" means the
+agent returned a valid snapshot. It does not mean every model has a score or
+that this command fetched the snapshot.
 
 `quota` shows how much of each provider's quota is left: percent left,
 which window (5 hours, 7 days, 30 days), and time to reset. Quota is one

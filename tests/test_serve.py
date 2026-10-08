@@ -919,6 +919,22 @@ class AllModelsTableTests(unittest.TestCase):
             page = self.render()
         self.assertEqual(page.count(">no data<"), 2)
 
+    def test_benchmark_status_counts_only_numeric_scores(self):
+        self.write_tiers({})
+        benchmark_snapshot = {
+            "fetched_at": "2026-10-07T06:00:00+00:00",
+            "live": True,
+            "scores": [
+                {"id": "one", "score": None, "reason": "unable to verify"},
+                {"id": "two", "score": None, "reason": "unable to verify"},
+            ],
+        }
+        with mock.patch.object(
+            serve.benchmark_fetch, "read_snapshot", return_value=benchmark_snapshot
+        ):
+            page = self.render()
+        self.assertIn("(0/2 scored)", page)
+
     def test_sent_message_is_shown_and_escaped(self):
         self.write_tiers({})
         page = self.render(sent="pull failed: <boom>")

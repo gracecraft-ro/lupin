@@ -1793,6 +1793,10 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
     models = snapshot_models(snapshot)
     benchmark_snapshot = benchmark_fetch.read_snapshot(**(connection or {}))
     benchmark_scores = (benchmark_snapshot or {}).get("scores") or []
+    scored_benchmarks = sum(
+        1 for score in benchmark_scores
+        if isinstance(score, dict) and score.get("score") is not None
+    )
     body = [
         f'<header><h1>{icon("M7 7h10v10H7zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3")}Models</h1></header>',
     ]
@@ -1801,7 +1805,7 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
     body.append(
         "<div class='card' style='display:flex;align-items:center;gap:1rem'>"
         f"<span class=dim>Last pulled: {_snapshot_age(snapshot.get('fetched_at') if snapshot else None)}</span>"
-        f"<span class=dim>Benchmarks: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)}</span>"
+        f"<span class=dim>Benchmarks: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)} ({scored_benchmarks}/{len(benchmark_scores)} scored)</span>"
         "<span style='flex:1'></span>"
         "<form method=post action='/model-tiers/refresh'>"
         "<button type=submit>Pull models</button></form>"

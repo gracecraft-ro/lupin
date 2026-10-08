@@ -655,8 +655,15 @@ def _cmd_fetch_benchmarks(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(data))
     else:
+        scores = data.get("scores", [])
+        scored = sum(
+            1 for score in scores
+            if isinstance(score, dict) and score.get("score") is not None
+        )
         tag = "live" if data.get("live") else f"stale/unavailable ({data.get('stale_reason')})"
-        print(f"benchmarks: {len(data.get('scores', []))} scored ({tag})")
+        if data.get("live"):
+            tag += f"; fetched {_ago(data.get('fetched_at'))}"
+        print(f"benchmarks: {scored}/{len(scores)} scored ({tag})")
     return 0
 
 
