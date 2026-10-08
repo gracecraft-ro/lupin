@@ -21,19 +21,32 @@ dispatch and the repository's handoff record.
 
 ## Install skills on loop hosts
 
-The `skills/` folders are source files. Installing Lupin does not install
-them. Each host that runs a loop must make all four skills available to its
-agent runner:
+The `skills/` tree is the source. Installing the Lupin command does not
+install these files. A Nix host flake maps the four directories from its
+pinned Lupin input into each runner's skill set. A rebuild creates or updates
+the links; do not copy the files by hand.
 
 - Claude Code: `~/.claude/skills/`
 - Pi: `~/.pi/agent/skills/`
 - OMP: `~/.omp/agent/skills/`
 
-Manage these paths in the host's config. For another runner, use its native
-skill path. After deployment, check that each required `SKILL.md` is readable
-on every target host. Start a new agent session and confirm it loads
-`/triage`, `/ship`, and `/code-review` before dispatch. Do not start a worker
-if one of these skills is missing.
+Add all four names to each host's skill set, including any curated subset.
+After a rebuild, check that every `SKILL.md` is readable:
+
+```sh
+for root in "$HOME/.claude/skills" "$HOME/.pi/agent/skills" "$HOME/.omp/agent/skills"; do
+  for name in delegation-loop triage ship code-review; do
+    test -r "$root/$name/SKILL.md" || {
+      echo "Missing $root/$name/SKILL.md" >&2
+      exit 1
+    }
+  done
+done
+```
+
+Start a new agent session and confirm it loads `/delegation-loop`, `/triage`,
+`/ship`, and `/code-review`. Do not start a worker if a required skill is
+missing.
 
 ## Read the backlog
 
@@ -68,13 +81,18 @@ lupin renew-claim OWNER/REPO#123 --holder SESSION
 lupin release-claim OWNER/REPO#123 --holder SESSION
 ```
 
-Lupin stores claims in Redis. A claim does not add a GitHub label, comment,
-or assignment. It also does not store the worktree path.
+By default, Lupin expires a claim after 10 minutes. Use `--ttl SECONDS` to
+change this limit. Renew every 2 minutes while work continues. Each renewal
+starts the timer again. If the claim is not renewed, Redis removes it when the
+timer ends. `lupin reconcile` runs once per call. It releases claims with no
+renewal for 10 minutes, even when `--ttl` is longer. Its schedule sets the
+cleanup delay.
 
-After a claim succeeds, the claim owner must mark the issue in GitHub. Use the
-repo's `claimed` label. Add it during repo setup if it does not exist. If you
-cannot add it, post the comment and report that the label is missing. Include
-the machine, worktree, branch, and holder:
+Lupin does not yet sync claims to GitHub. Issue #43 tracks automatic
+`claimed` label updates. Until it ships, the claim owner must update the issue
+manually. Use the repo's `claimed` label. Add it during repo setup if it does
+not exist. If you cannot add it, post the comment and report that the label is
+missing. Include the machine, worktree, branch, and holder:
 
 ```sh
 gh issue edit 123 --repo OWNER/REPO --add-label claimed
