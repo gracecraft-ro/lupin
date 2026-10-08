@@ -6,10 +6,11 @@ Replace `loopctl` with Lupin for delegation-loop lifecycle. Use one Herdr sessio
 ## Worktrees
 - Lupin: `/home/ghosta/jobs/lupin-issue-40`, branch `issue-40-herdr-lifecycle`.
 - Ghostbook: `/home/ghosta/jobs/ghostbook.nix-issue-40`, branch `issue-40-herdr-runtime`.
-- Merged Lupin `origin/main` at `41d05a4` and Ghostbook `origin/main` at `bc03da8`. Both merges are still uncommitted.
-- Separate machine-log commit in mounted Ghostbook `main`: `ac45f20`. No issue-branch commit or push.
-- No push, host activation, or deployment.
-- Each worktree still has its `issue-40 local work before main sync` stash.
+- Local `/code/lupin` `main` includes issue commit `2cb0863` and sync merge `561ca89`.
+- Local `/code/ghostbook.nix` `main` includes issue commit `b4bded1` and sync merge `5c22694`.
+- These commits are local only. No push, host activation, or deployment.
+- Uncommitted work is not part of these commits. Lupin: `AGENTS.md`, `src/lupin/benchmark_fetch.py`, `src/lupin/cli.py`, `tests/test_benchmark_fetch.py`, and `tests/test_gh_cache.py`. Ghostbook: `docs/sandbox-todo.md`, `flake.nix`, `hosts/ralpha/README.md`, and `.serena/logs/`.
+- Each issue worktree still has its `issue-40 local work before main sync` stash.
 
 ## Changes
 - Lupin stores Herdr loop state and repo inventory in the machine heartbeat.
@@ -24,12 +25,11 @@ Replace `loopctl` with Lupin for delegation-loop lifecycle. Use one Herdr sessio
 - `bash -n` passed for the four changed Ghostbook scripts.
 - Herdr 0.9.3 local smoke created and closed a workspace. It also read a pane and checked agent state. No real coding agent or remote SSH ran.
 
-## Host build limit
-- Jesus and Ralpha system builds both stopped in `contour` because `/bin/sh` was missing from the Nix build sandbox.
-- A Jesus retry added the pinned Bash path to that build's sandbox. It then failed to compile `contour`: `simd::rebind_simd_t` and `simd::static_simd_cast` were missing with GCC 16.2.0.
-- No Nix config changed. The host system builds are not verified.
+## Host builds
+- The Jesus NixOS build passed with the local Lupin issue worktree as an input override. No host was activated.
+- The Ralpha build stopped in U-Boot: `./scripts/gcc-version.sh -p gcc` returned “No such file or directory.” The system build is not complete.
 
 ## Release gate
-- Ghostbook `flake.lock` pins Lupin main `41d05a49db2b5a299d0a68721b26360a4e95545d`. It does not include the issue #40 runtime code. The host build used the local Lupin worktree.
-- The host files do not configure a `lupin agent` service or `LUPIN_CMD_SIGNING_KEY` (`grep` for `systemd.services.lupin-agent|LUPIN_CMD_SIGNING_KEY|lupin agent` in both configuration files returned no matches).
-- Remote signed commands and remote SSH remain untested. Do not deploy this pin as issue #40 support.
+- Ghostbook `flake.lock` pins Lupin `20f96406a224510b47a150ff45e71f894be806b1`. The host build used the local Lupin issue worktree, not this pin.
+- Search for `systemd.services.lupin-agent`, `LUPIN_CMD_SIGNING_KEY`, and `lupin agent` in both host configs found no matches.
+- Remote signed commands and remote SSH remain untested. Do not treat the pinned input as verified for issue #40.
