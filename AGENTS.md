@@ -268,6 +268,13 @@ orchestrator profiles in `orchestrators.json`, loop metadata in
 one-off schedules in `once/`. `locks/` serializes local start and stop
 actions. Herdr keeps its own session and workspace state.
 The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
+The same file also holds each checkout's repo identity, so a restart does
+not pay for `gh` again.
+
+`/roadmap` returns the page shell at once and fills in the board or list
+from `/roadmap/board`, which renders one HTML fragment per query and keeps
+the last results for `LUPIN_ROADMAP_FRAGMENT_TTL` seconds (default 30).
+`?full=1` renders the whole page in one response, with no JavaScript.
 
 The Repos and Roadmap pages read the checkouts in `LUPIN_LOOP_CODE_DIR`
 (default `/code`) on the machine that runs `lupin serve`. A repo with no

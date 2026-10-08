@@ -100,6 +100,20 @@ CACHE_FILE = os.path.join(
     "cache.json",
 )
 
+# `gh repo view` answers, remembered per (checkout, origin URL) -- see
+# `_repo_identity`: the URL is the cache key, `gh` stays the authority.
+# A good answer is believed for hours. A failed one is re-checked soon:
+# tokens expire, access gets granted, and a repo with no access should not
+# look broken for half a day on the strength of one denial.
+_IDENTITY_TTL = 6 * 60 * 60.0
+_IDENTITY_RETRY = 5 * 60.0
+_IDENTITY_CACHE: dict[tuple, tuple[float, tuple]] = {}
+_IDENTITY_LOCK = threading.Lock()
+
+
+def _identity_ttl(result: tuple) -> float:
+    return _IDENTITY_TTL if result[0] else _IDENTITY_RETRY
+
 
 def _load_cache():
     try:
@@ -119,17 +133,32 @@ def _load_cache():
                     now_monotonic - max(0, now_wall - timestamp),
                     tuple(data),
                 )
+        for row in saved.get("identity", []):
+            if isinstance(row, list) and len(row) == 6:
+                path, url, timestamp, owner, name, warning = row
+                _IDENTITY_CACHE[(path, url)] = (
+                    now_monotonic - max(0, now_wall - timestamp),
+                    (owner, name, warning),
+                )
 
 
 def _persist_cache():
     now_monotonic = time.monotonic()
     now_wall = time.time()
-    saved = {
-        "github": [
+    # Snapshot both tables under their locks: page builds write them from
+    # several threads at once, and a dict that changes size during the
+    # snapshot raises.
+    with _CACHE_LOCK:
+        github = [
             [repo, state, now_wall - max(0, now_monotonic - timestamp), data]
             for (repo, state), (timestamp, data) in _GITHUB_CACHE.items()
-        ],
-    }
+        ]
+    with _IDENTITY_LOCK:
+        identity = [
+            [path, url, now_wall - max(0, now_monotonic - timestamp), *result]
+            for (path, url), (timestamp, result) in _IDENTITY_CACHE.items()
+        ]
+    saved = {"github": github, "identity": identity}
     try:
         directory = os.path.dirname(CACHE_FILE)
         os.makedirs(directory, exist_ok=True)
@@ -693,44 +722,48 @@ def build_model(
 
 
 def _repo_identity(repo_path: str):
-    """Return (owner, name, warning) for the repo checked out at repo_path."""
-    parsed = _parse_remote_url(_git_remote_url(repo_path) or "")
-    if parsed:
-        return parsed[0], parsed[1], None
-    return _gh_identity(repo_path)
+    """Return (owner, name, warning) for the repo checked out at repo_path.
 
-
-# `gh repo view` costs one network subprocess (~0.6 s) per call, and the
-# fallback path runs it once per repo per page load. Memoize for a short
-# while so a repo with no usable remote (or no GitHub access) is asked once
-# a minute, not once per request.
-_IDENTITY_TTL = 60.0
-_IDENTITY_CACHE: dict[str, tuple[float, tuple]] = {}
-_IDENTITY_LOCK = threading.Lock()
+    `gh repo view` is the authority -- it follows a repo that moved owners
+    -- but it is one network subprocess (~0.6 s), and a Roadmap page load
+    resolves an identity per repo. The checkout's `origin` URL only changes
+    when someone edits the remote, so it keys the cache: read it from git
+    (~5 ms), and ask `gh` only when that URL is new or its answer is stale.
+    """
+    url = _git_remote_url(repo_path)
+    # A checkout with no `origin` (or one that is not a repository at all)
+    # cannot be identified from git alone, and `gh` answers the same denial
+    # on every page load. Remember that answer too, keyed by the path, so it
+    # is re-checked on the retry clock instead of once per render. Paths
+    # that are not real directories are not cached.
+    key = (repo_path, url or "") if os.path.isdir(repo_path) else None
+    if key is None:
+        return _gh_identity(repo_path)
+    now = time.monotonic()
+    with _IDENTITY_LOCK:
+        cached = _IDENTITY_CACHE.get(key)
+        if cached and now - cached[0] < _identity_ttl(cached[1]):
+            return cached[1]
+    result = _gh_identity(repo_path)
+    with _IDENTITY_LOCK:
+        _IDENTITY_CACHE[key] = (time.monotonic(), result)
+    if result[0]:
+        _persist_cache()
+    return result
 
 
 def _gh_identity(repo_path: str):
-    now = time.monotonic()
-    with _IDENTITY_LOCK:
-        cached = _IDENTITY_CACHE.get(repo_path)
-        if cached and now - cached[0] < _IDENTITY_TTL:
-            return cached[1]
     identity, error = _run_json(["gh", "repo", "view", "--json", "owner,name"], repo_path)
     if error:
-        result = (None, None, f"GitHub repository data is unavailable: {error}")
-    elif not isinstance(identity, dict):
-        result = (None, None, "GitHub returned invalid repository data")
-    else:
-        owner_data = identity.get("owner")
-        owner = owner_data.get("login") if isinstance(owner_data, dict) else None
-        name = identity.get("name")
-        if not owner or not name:
-            result = (None, None, "GitHub returned no repository owner or name")
-        else:
-            result = (owner, name, None)
-    with _IDENTITY_LOCK:
-        _IDENTITY_CACHE[repo_path] = (time.monotonic(), result)
-    return result
+        return None, None, f"GitHub repository data is unavailable: {error}"
+    if not isinstance(identity, dict):
+        return None, None, "GitHub returned invalid repository data"
+    owner_data = identity.get("owner")
+    owner = owner_data.get("login") if isinstance(owner_data, dict) else None
+    name = identity.get("name")
+    if not owner or not name:
+        return None, None, "GitHub returned no repository owner or name"
+    return owner, name, None
 
 
 def _git_remote_url(repo_path: str) -> str | None:
@@ -747,38 +780,6 @@ def _git_remote_url(repo_path: str) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
-
-
-def _parse_remote_url(url: str):
-    """Return (owner, name) from a GitHub remote URL, or None.
-
-    Handles the three shapes git writes: https, ssh, and scp
-    (`git@host:owner/repo`). Returns None for anything that is not a
-    github.com URL, so those checkouts fall back to `gh`.
-    """
-    text = (url or "").strip()
-    if text.endswith("/"):
-        text = text[:-1]
-    if text.endswith(".git"):
-        text = text[:-4]
-    if "://" in text:
-        text = text.split("://", 1)[1]
-        authority, slash, rest = text.partition("/")
-        if "@" in authority:
-            authority = authority.split("@", 1)[1]
-        text = f"{authority}/{rest}" if slash else authority
-    elif "@" in text.split("/", 1)[0] and ":" in text:
-        text = text.partition("@")[2].replace(":", "/", 1)
-    parts = [part for part in text.split("/") if part]
-    if len(parts) < 3 or parts[0].casefold() not in {
-        "github.com",
-        "www.github.com",
-    }:
-        return None
-    owner, name = parts[1], parts[2]
-    if not owner or not name:
-        return None
-    return owner, name
 
 
 def load_github(repo_path: str, state: str = "open", *, connection: dict | None = None):
@@ -1123,7 +1124,7 @@ def cached_github(
         data = load_github(repo_path, state, connection=connection)
         with _CACHE_LOCK:
             _GITHUB_CACHE[key] = (time.monotonic(), data)
-            _persist_cache()
+        _persist_cache()
         return data
 
 
@@ -2114,8 +2115,37 @@ def _sort_list_rows(rows: list[dict], sort: str) -> list[dict]:
     return sorted(rows, key=lambda row: (priority_rank(row), row["repo"], row["number"]))
 
 
-def render_list_page(repos: list[str], models: dict, page_fn, query: dict, quest_state=None) -> bytes:
-    """Render the Roadmap List view.
+LIST_CSS = """
+.roadmap-view{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.roadmap-view a{padding:.4rem .8rem;color:var(--ink2);text-decoration:none}
+.roadmap-view a.active{background:var(--surface);font-weight:600;color:var(--ink)}
+.list-stage-row{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--line)}
+.list-stage-tabs{display:flex;gap:.4rem;overflow-x:auto}
+.list-stage-tabs a{white-space:nowrap;padding:.45rem .7rem;border-radius:9px;color:var(--ink2);text-decoration:none;font-size:13px}
+.list-stage-tabs a.active{background:var(--surface);color:var(--ink);font-weight:600}
+.list-stage-tabs b{font:12px var(--mono);margin-left:.2rem}
+.list-owner-blocked{white-space:nowrap;border:1px solid var(--warnline);background:var(--warnbg);color:var(--warnink);border-radius:10px;padding:.4rem .7rem;font-size:13px}
+.queue-filter{display:flex;gap:.55rem;align-items:center;flex-wrap:wrap;margin:.75rem 0;padding-bottom:.75rem;border-bottom:1px solid var(--line)}
+.queue-filter label{font-size:12px;color:var(--ink3)}
+.queue-filter select,.queue-filter input{font:inherit;padding:.4rem .55rem;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink)}
+.list-table{display:grid;gap:0;background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:0 1rem;overflow:auto}
+.list-row{display:grid;grid-template-columns:70px minmax(180px,1fr) 124px 120px 100px 118px 64px 90px;gap:10px;padding:.55rem 0;border-top:1px solid var(--line2);align-items:center;font-size:.85rem;min-width:900px}
+.list-issue{display:flex;align-items:center;gap:.45rem}
+.list-issue input{width:16px;height:16px;margin:0}
+.list-head{position:sticky;top:0;background:var(--surface);font:12px var(--mono);letter-spacing:.04em;text-transform:uppercase;color:var(--ink3);border-top:0}
+.list-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.list-group{margin:.3rem 0}
+.list-group-header{display:block;padding:.55rem 0;font-weight:600;text-decoration:none;color:var(--ink)}
+.list-group-header:hover{text-decoration:underline}
+.list-more{display:block;padding:.3rem 0 .3rem 1.4rem}
+.list-pager{display:flex;align-items:center;gap:.8rem;margin:.8rem 0;padding:.7rem 1rem;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
+.list-pager .sp{flex:1}
+@media(max-width:760px){.list-stage-row{align-items:flex-start;flex-direction:column}.queue-filter{align-items:stretch}.queue-filter input,.queue-filter select{max-width:100%}}
+"""
+
+
+def list_fragment(repos: list[str], models: dict, query: dict, quest_state=None) -> tuple[str, str]:
+    """Render the Roadmap List view as body plus CSS, with no page wrapper.
 
     The Board groups a few dozen issues by queue stage. List filters and sorts
     server-side and returns 50 rows per page. This keeps large roadmaps small
@@ -2345,33 +2375,12 @@ def render_list_page(repos: list[str], models: dict, page_fn, query: dict, quest
         f"<div class='list-table'>{table_html}</div>"
         f"{quest_panel}{footer}"
     )
-    css = """
-.roadmap-view{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden}
-.roadmap-view a{padding:.4rem .8rem;color:var(--ink2);text-decoration:none}
-.roadmap-view a.active{background:var(--surface);font-weight:600;color:var(--ink)}
-.list-stage-row{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.5rem 0;border-bottom:1px solid var(--line)}
-.list-stage-tabs{display:flex;gap:.4rem;overflow-x:auto}
-.list-stage-tabs a{white-space:nowrap;padding:.45rem .7rem;border-radius:9px;color:var(--ink2);text-decoration:none;font-size:13px}
-.list-stage-tabs a.active{background:var(--surface);color:var(--ink);font-weight:600}
-.list-stage-tabs b{font:12px var(--mono);margin-left:.2rem}
-.list-owner-blocked{white-space:nowrap;border:1px solid var(--warnline);background:var(--warnbg);color:var(--warnink);border-radius:10px;padding:.4rem .7rem;font-size:13px}
-.queue-filter{display:flex;gap:.55rem;align-items:center;flex-wrap:wrap;margin:.75rem 0;padding-bottom:.75rem;border-bottom:1px solid var(--line)}
-.queue-filter label{font-size:12px;color:var(--ink3)}
-.queue-filter select,.queue-filter input{font:inherit;padding:.4rem .55rem;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink)}
-.list-table{display:grid;gap:0;background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:0 1rem;overflow:auto}
-.list-row{display:grid;grid-template-columns:70px minmax(180px,1fr) 124px 120px 100px 118px 64px 90px;gap:10px;padding:.55rem 0;border-top:1px solid var(--line2);align-items:center;font-size:.85rem;min-width:900px}
-.list-issue{display:flex;align-items:center;gap:.45rem}
-.list-issue input{width:16px;height:16px;margin:0}
-.list-head{position:sticky;top:0;background:var(--surface);font:12px var(--mono);letter-spacing:.04em;text-transform:uppercase;color:var(--ink3);border-top:0}
-.list-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.list-group{margin:.3rem 0}
-.list-group-header{display:block;padding:.55rem 0;font-weight:600;text-decoration:none;color:var(--ink)}
-.list-group-header:hover{text-decoration:underline}
-.list-more{display:block;padding:.3rem 0 .3rem 1.4rem}
-.list-pager{display:flex;align-items:center;gap:.8rem;margin:.8rem 0;padding:.7rem 1rem;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
-.list-pager .sp{flex:1}
-@media(max-width:760px){.list-stage-row{align-items:flex-start;flex-direction:column}.queue-filter{align-items:stretch}.queue-filter input,.queue-filter select{max-width:100%}}
-"""
+    return body, LIST_CSS
+
+
+def render_list_page(repos: list[str], models: dict, page_fn, query: dict, quest_state=None) -> bytes:
+    """Render the Roadmap List view as a full page."""
+    body, css = list_fragment(repos, models, query, quest_state)
     return page_fn("Work across repositories · list", body, css, "")
 
 
