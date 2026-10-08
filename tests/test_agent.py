@@ -85,9 +85,14 @@ def test_loop_run_returns_after_starting_lupin_worker(redis_port, flush_redis, m
             {"note": "review"},
             ["lupin", "run", "--all", "--note", "review"],
         ),
+        (
+            "repo.enable",
+            {"repo": "lupin"},
+            ["lupin", "enable", "lupin"],
+        ),
     ],
 )
-def test_loop_run_forwards_validated_remote_options(
+def test_supported_remote_actions_build_validated_argv(
     redis_port, flush_redis, monkeypatch, action, params, expected
 ):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}

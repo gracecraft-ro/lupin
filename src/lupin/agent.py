@@ -128,6 +128,11 @@ def _check_cal_expr_with_systemd_analyze(expr: str) -> None:
         raise RejectedCommand(f"not a valid calendar expression: {expr!r}")
 
 
+def _handle_repo_enable(params: dict, cmd_id: str) -> list[str]:
+    repo = _validate_repo(params.get("repo"))
+    return ["lupin", "enable", repo]
+
+
 def _handle_loop_stop(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
     return ["lupin", "loop", "local-action", "stop", repo]
@@ -212,6 +217,7 @@ def _handle_schedule_resume(params: dict, cmd_id: str) -> list[str]:
 # An action not in this table is rejected, not attempted.
 ACTIONS = {
     "loop.stop": _handle_loop_stop,
+    "repo.enable": _handle_repo_enable,
     "loop.run": _handle_loop_run,
     "loop.run-all": _handle_loop_run_all,
     "loop.peek": _handle_loop_peek,

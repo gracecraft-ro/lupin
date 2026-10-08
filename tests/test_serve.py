@@ -1654,21 +1654,27 @@ class TestMachinesPageIntegration:
     would be caught here, not just a call-was-made assertion.
     """
 
-    def test_page_renders_real_machine_and_slot_data(self, redis_port, flush_redis, tmp_path):
+    def test_page_renders_machine_records_and_fleet_wide_slot_data_once(
+        self, redis_port, flush_redis, tmp_path, monkeypatch
+    ):
         # join() before acquire() on purpose -- join's own written `slots`
         # snapshot would be empty at this point. The page still has to show
         # the lease below, so it must be reading slots_redis.status() live,
         # not that stale per-record field.
         kw = _kw(redis_port)
-        machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
-        slots_redis.acquire("bmo", "worker-a", max_holders=2, **kw)
-
+        names = ["jesus", "pihome", "ralpha"]
+        for name in names:
+            monkeypatch.setattr(machines, "hostname", lambda name=name: name)
+            machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
+        slots_redis.acquire("bmo", "worker-a", max_holders=1, **kw)
         handler = _get_handler("/machines", kw)
         handler.do_GET()
 
         body = handler.reply.call_args.args[0].decode()
-        assert machines.hostname() in body
-        assert "<td>bmo</td><td>1</td><td>2</td>" in body
+        for name in names:
+            assert name in body
+        assert body.count("<h2>Fleet-wide slots</h2>") == 1
+        assert body.count("<td>bmo</td><td>1</td><td>1</td>") == 1
 
     def test_unreachable_coordinator_is_502(self, closed_port):
         handler = _get_handler("/machines", {"redis_host": "127.0.0.1", "redis_port": closed_port})
@@ -2668,12 +2674,13 @@ class GatherReposTests(unittest.TestCase):
         self.assertTrue(row["running"])
         self.assertEqual(row["machine"], "jesus")
 
-    def test_remote_repo_inventory_renders_without_local_controls(self):
+    def test_remote_repo_inventory_renders_enable_and_start_controls(self):
         machine = {
             "name": "jesus",
             "state": "online",
-            "repos": [{"repo": "roundsmith", "enabled": True, "loopable": True}],
-            "loops": [{"repo": "roundsmith"}],
+            "actions": ["loop.run", "repo.enable"],
+            "repos": [{"repo": "roundsmith", "enabled": False, "loopable": True}],
+            "loops": [],
         }
         with (
             mock.patch.object(serve, "code_repos", return_value=[]),
@@ -2693,12 +2700,71 @@ class GatherReposTests(unittest.TestCase):
         page = serve.render_repos(data, add="existing").decode()
 
         assert [repo["repo"] for repo in data["repos"]] == ["roundsmith"]
-        assert data["repos"][0]["running"] is True
-        assert "running on jesus" in page
-        assert "Read-only fleet entry" in page
+        assert "Enable on jesus" in page
+        assert "action=/repos/enable" in page
+        assert "action=/loops/start" not in page
         assert "No local repos under /code" in page
-        assert "action=/schedule/run" not in page
-        assert "action=/repos/add" not in page
+
+    def test_enabled_remote_repo_has_start_control(self):
+        machine = {
+            "name": "jesus",
+            "state": "online",
+            "actions": ["loop.run", "repo.enable"],
+            "repos": [{"repo": "roundsmith", "enabled": True, "loopable": True}],
+            "loops": [],
+        }
+        with (
+            mock.patch.object(serve, "code_repos", return_value=[]),
+            mock.patch.object(
+                serve, "gather_loops",
+                return_value={
+                    "entries": [],
+                    "machines": [machine],
+                    "fleet_error": None,
+                    "local_host": "pihome",
+                },
+            ),
+            mock.patch.object(serve.slots_redis, "status", return_value={}),
+        ):
+            data = serve.gather_repos({})
+
+        page = serve.render_repos(data).decode()
+        assert "Start on jesus" in page
+        assert "action=/loops/start" in page
+        assert "action=/repos/enable" not in page
+
+    def test_remote_controls_remain_available_for_a_local_repo_row(self):
+        machine = {
+            "name": "jesus",
+            "state": "online",
+            "actions": ["loop.run"],
+            "repos": [{"repo": "roundsmith", "enabled": True, "loopable": True}],
+            "loops": [],
+        }
+        with (
+            mock.patch.object(
+                serve, "code_repos",
+                return_value=[{
+                    "repo": "roundsmith", "state": "disabled",
+                    "loopable": True, "has_doc": True,
+                }],
+            ),
+            mock.patch.object(
+                serve, "gather_loops",
+                return_value={
+                    "entries": [],
+                    "machines": [machine],
+                    "fleet_error": None,
+                    "local_host": "pihome",
+                },
+            ),
+            mock.patch.object(serve.slots_redis, "status", return_value={}),
+        ):
+            data = serve.gather_repos({})
+
+        page = serve.render_repos(data).decode()
+        assert "Add to schedule" in page
+        assert "Start on jesus" in page
 
     def test_overview_shows_remote_repo_without_a_local_checkout(self):
         machine = {
@@ -2878,6 +2944,36 @@ class TestReposPageRoutes:
         handler.path = "/repos?doc=widgets"
         handler.do_GET()
         assert handler.reply.call_args.args[1] == 404
+
+    def test_remote_enable_route_dispatches_to_reported_worker(self, monkeypatch):
+        machine = {
+            "name": "jesus",
+            "state": "online",
+            "actions": ["repo.enable"],
+            "repos": [{"repo": "widgets", "enabled": False, "loopable": True}],
+        }
+        monkeypatch.setattr(serve.machines, "hostname", lambda: "pihome")
+        monkeypatch.setattr(serve.machines, "machines", lambda connection: [machine])
+        dispatch = mock.Mock(return_value={"mode": "queued", "id": "cmd", "result": None})
+        monkeypatch.setattr(serve.loops, "dispatch_loop_action", dispatch)
+        handler = _repos_handler()
+        handler._signing_key_for = lambda target: "jesus-key"
+
+        _post_body(handler, "/repos/enable", {"repo": "widgets", "machine": "jesus"})
+        handler.do_POST()
+
+        dispatch.assert_called_once_with(
+            machine="jesus",
+            local_host="pihome",
+            local_argv=["lupin", "enable", "widgets"],
+            queue_action="repo.enable",
+            queue_params={"repo": "widgets"},
+            connection={},
+            signing_key="jesus-key",
+            actor="lupin-dashboard",
+            issuer="pihome",
+        )
+        handler.redirect.assert_called_once()
 
     def test_add_route_rejects_a_missing_repository(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))

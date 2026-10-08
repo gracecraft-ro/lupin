@@ -406,18 +406,34 @@ def merge_repo_inventory(
                 continue
             entry = remote.setdefault(
                 repo,
-                {"enabled": False, "loopable": False, "hosts": set(), "running_hosts": set()},
+                {
+                    "enabled": False,
+                    "loopable": False,
+                    "hosts": set(),
+                    "running_hosts": set(),
+                    "enabled_hosts": set(),
+                    "enable_hosts": set(),
+                },
             )
-            entry["enabled"] |= item.get("enabled") is True
+            is_enabled = item.get("enabled") is True
+            entry["enabled"] |= is_enabled
             entry["loopable"] |= item.get("loopable") is True
             label = f"{host} (offline)" if record.get("state") == "offline" else host
             entry["hosts"].add(label)
+            if record.get("state") == "online":
+                actions = record.get("actions", [])
+                if is_enabled and "loop.run" in actions:
+                    entry["enabled_hosts"].add(host)
+                if not is_enabled and "repo.enable" in actions:
+                    entry["enable_hosts"].add(host)
             if active and repo in running_repos:
                 entry["running_hosts"].add(host)
 
     for repo, entry in remote.items():
         if repo in repos:
             repos[repo]["fleet_enabled"] = entry["enabled"]
+            repos[repo]["enabled_hosts"] = sorted(entry["enabled_hosts"])
+            repos[repo]["enable_hosts"] = sorted(entry["enable_hosts"])
             continue
         state = "enabled" if entry["enabled"] else "disabled"
         repos[repo] = {
@@ -429,6 +445,8 @@ def merge_repo_inventory(
             "running": bool(entry["running_hosts"]),
             "running_machines": ", ".join(sorted(entry["running_hosts"])),
             "machine": ", ".join(sorted(entry["hosts"])),
+            "enabled_hosts": sorted(entry["enabled_hosts"]),
+            "enable_hosts": sorted(entry["enable_hosts"]),
         }
     return sorted(repos.values(), key=lambda repo: repo["repo"])
 
@@ -1782,23 +1800,25 @@ def _slot_controls(slot: str, current_max: int) -> str:
 
 
 def render_machines(records: list[dict], slot_status: dict) -> bytes:
-    """The fleet machine list (issue #20).
+    """Render fleet-wide slot controls once, then one status card per machine.
 
-    `slot_status` is a live `slots_redis.status()` read, not each record's
-    own `slots` field -- that field is a snapshot taken at the machine's
-    last `join`/`heartbeat` call (`machines.py`'s `_write_record`), so it
-    would hide a slot-max change made through this page's own controls
-    until the next heartbeat (up to 30s, longer if the heartbeat loop isn't
-    running). `slots_redis.status()` has no such lag.
-
-    v1 has exactly one fleet slot (`bmo`), shared by the whole fleet, not
-    partitioned per machine -- so the same live numbers are shown, and the
-    same controls apply, on every machine's card. Changing a slot's max
-    from any one card changes it everywhere.
+    Slot leases and limits live in shared Redis keys. Repeating them inside
+    each machine card suggests that each machine has a separate limit.
     """
     body = [f'<header><h1>{icon("M4 4h16v6H4zM4 14h16v6H4zM8 7h.01M8 17h.01")}Machines</h1></header>']
-    if not records:
-        body.append("<div class='card dim'>No machine has joined the fleet yet.</div>")
+    if slot_status:
+        body.append("<div class=card><h2>Fleet-wide slots</h2>")
+        body.append("<table><tr><th>slot</th><th>holders</th><th>max</th><th></th></tr>")
+        for slot_name, info in sorted(slot_status.items()):
+            used = info.get("holders", 0)
+            slot_max = info.get("max")
+            controls = _slot_controls(slot_name, slot_max if slot_max is not None else 1)
+            body.append(
+                f"<tr><td>{esc(slot_name)}</td><td>{esc(used)}</td>"
+                f"<td>{esc(slot_max) if slot_max is not None else '-'}</td>"
+                f"<td>{controls}</td></tr>"
+            )
+        body.append("</table></div>")
     for record in sorted(records, key=lambda r: r["name"]):
         state = record["state"]
         pill_class = {"online": "on", "offline": "off"}.get(state, "")
@@ -1815,22 +1835,9 @@ def render_machines(records: list[dict], slot_status: dict) -> bytes:
             body.append(f"<span class=dim>heartbeat <span data-since='{hb:.0f}'></span></span>")
         else:
             body.append("<span class=dim>no heartbeat</span>")
-        body.append("</div>")
-        if slot_status:
-            body.append("<table><tr><th>slot</th><th>holders</th><th>max</th><th></th></tr>")
-            for slot_name, info in sorted(slot_status.items()):
-                used = info.get("holders", 0)
-                slot_max = info.get("max")
-                controls = _slot_controls(slot_name, slot_max if slot_max is not None else 1)
-                body.append(
-                    f"<tr><td>{esc(slot_name)}</td><td>{esc(used)}</td>"
-                    f"<td>{esc(slot_max) if slot_max is not None else '-'}</td>"
-                    f"<td>{controls}</td></tr>"
-                )
-            body.append("</table>")
-        else:
-            body.append("<p class=dim>No slot data reported.</p>")
-        body.append("</div>")
+        body.append("</div></div>")
+    if not records:
+        body.append("<div class='card dim'>No machine has joined the fleet yet.</div>")
     return page("Machines", "".join(body), active="machines")
 
 
@@ -2006,6 +2013,25 @@ def _render_remove_panel(repo: str) -> str:
     )
 
 
+def _remote_repo_controls(repo: str, entry: dict) -> str:
+    controls = []
+    for machine in entry.get("enabled_hosts", []):
+        controls.append(
+            "<form method=post action=/loops/start style='display:inline'>"
+            f"<input type=hidden name=repo value='{esc(repo)}'>"
+            f"<input type=hidden name=machine value='{esc(machine)}'>"
+            f"<button type=submit>Start on {esc(machine)}</button></form>"
+        )
+    for machine in entry.get("enable_hosts", []):
+        controls.append(
+            "<form method=post action=/repos/enable style='display:inline'>"
+            f"<input type=hidden name=repo value='{esc(repo)}'>"
+            f"<input type=hidden name=machine value='{esc(machine)}'>"
+            f"<button type=submit>Enable on {esc(machine)}</button></form>"
+        )
+    return " ".join(controls)
+
+
 def _render_repo_table(repos: list[dict], local_host: str) -> str:
     rows = [
         "<tr><th>repo</th><th>state</th><th>loops &middot; max</th>"
@@ -2019,11 +2045,14 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
             loop_status = (
                 f"running on {r['running_machines']}" if r["running"] else "stopped"
             )
+            actions = _remote_repo_controls(repo, r) or (
+                "<span class=dim>Remote actions unavailable</span>"
+            )
             rows.append(
                 f"<tr><td><b>{esc(repo)}</b></td><td>{pill}</td>"
                 f"<td><span class='dot {dot}'></span> {esc(loop_status)}</td>"
                 f"<td>{esc(r['machine'])}</td><td class=dim>-</td>"
-                "<td class=dim>Read-only fleet entry</td></tr>"
+                f"<td>{actions}</td></tr>"
             )
             continue
         dot = "ok" if r["running"] else "idle"
@@ -2039,7 +2068,6 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
         schedule_link = f"<a href='/repos?schedule={quote(repo, safe='')}'>Schedule&hellip;</a>"
         if r["state"] == "enabled":
             place_choice = "spread" if _coordinator_only() else local_host
-            # Use online workers when this dashboard only coordinates runs.
             run_form = (
                 "<form method=post action=/schedule/run style='display:inline'>"
                 f"<input type=hidden name=repo value='{esc(repo)}'>"
@@ -2056,6 +2084,9 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
                 "<button type=submit>Add to schedule</button></form>"
             )
             actions = f"{add_btn} {schedule_link} &middot; {doc_action}"
+        remote_controls = _remote_repo_controls(repo, r)
+        if remote_controls:
+            actions += f" &middot; {remote_controls}"
         rows.append(
             f"<tr><td><b>{esc(repo)}</b></td><td>{pill}</td>"
             f"<td><span class='dot {dot}'></span> {esc(sess_label)} {stepper}</td>"
@@ -2077,7 +2108,8 @@ def render_repos(
 ) -> bytes:
     """Show local repos and repos reported by other machines.
 
-    Local rows support page actions. Fleet rows are read-only.
+    Local rows support local actions. Remote rows support signed enable and
+    start actions when the machine reports those capabilities.
     `data` comes from `gather_repos()`. Query flags open a panel.
     """
     repos = data["repos"]
@@ -2692,6 +2724,59 @@ class Handler(BaseHTTPRequestHandler):
             )
         )
 
+    def do_repos_enable(self, form: dict) -> None:
+        repo = form.get("repo", [""])[0].strip()
+        machine = form.get("machine", [""])[0].strip()
+        if not _valid_repo_name(repo) or not machine or machine == machines.hostname():
+            self.reply(render_error("bad remote repo enable request"), 400)
+            return
+        try:
+            records = machines.machines(self.fleet_connection)
+        except CoordinatorUnreachable:
+            self.reply(render_error("cannot reach the redis coordinator"), 502)
+            return
+        record = next((row for row in records if row.get("name") == machine), None)
+        known_repo = next(
+            (
+                item for item in (record or {}).get("repos", [])
+                if isinstance(item, dict) and item.get("repo") == repo
+            ),
+            None,
+        )
+        if (
+            not record
+            or record.get("state") != "online"
+            or not known_repo
+            or known_repo.get("enabled") is True
+            or known_repo.get("loopable") is not True
+            or "repo.enable" not in record.get("actions", [])
+        ):
+            self.reply(render_error("remote repository cannot be enabled on that machine"), 400)
+            return
+        signing_key = self._signing_key_for(machine)
+        if not signing_key:
+            self.reply(render_error(f"no signing key is configured for {machine!r}"), 400)
+            return
+        try:
+            result = loops.dispatch_loop_action(
+                machine=machine,
+                local_host=machines.hostname(),
+                local_argv=["lupin", "enable", repo],
+                queue_action="repo.enable",
+                queue_params={"repo": repo},
+                connection=self.fleet_connection,
+                signing_key=signing_key,
+                actor="lupin-dashboard",
+                issuer=machines.hostname(),
+            )
+        except CoordinatorUnreachable:
+            self.reply(render_error("cannot reach the redis coordinator"), 502)
+            return
+        if result.get("mode") == "local" or result.get("state") == "failed":
+            self.reply(render_error(f"enable failed: {result.get('output', 'remote command failed')}"), 502)
+            return
+        self.redirect(f"/repos?sent={quote(f'enable request sent for {repo} to {machine}', safe='')}")
+
     def do_repos_add(self, form: dict) -> None:
         repo = form.get("repo", [""])[0].strip()
         if not self._repo_exists(repo):
@@ -3207,6 +3292,8 @@ class Handler(BaseHTTPRequestHandler):
             self.do_schedule_timer(form)
         elif url.path == "/schedule/run":
             self.do_schedule_run(form)
+        elif url.path == "/repos/enable":
+            self.do_repos_enable(form)
         elif url.path == "/repos/add":
             self.do_repos_add(form)
         elif url.path == "/repos/generate-docs":
