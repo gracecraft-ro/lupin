@@ -4,7 +4,7 @@ Use Redis as the shared source for roadmap annotations and handoff status.
 When open, the roadmap reloads about every five minutes and reads new events.
 
 ## Current Step
-PR #44 is open. The follow-up is ready; the full Nix check is running.
+PR #44 is open. Tests and the Nix check passed; all follow-up commits are pushed.
 
 ## Files Changed
 `src/lupin/ledger.py`, `cli.py`, and `roadmap.py`; ledger and roadmap tests;
@@ -26,7 +26,7 @@ PR #44. A final handoff event was written to fleet Redis (ID
 `1791430490296-0`).
 
 ## Next Action
-Commit and push the follow-up to PR #44; post the test report.
+Review and merge PR #44 after approval.
 
 ## Known Blockers
 The active OAuth account cannot upload to the upstream repo. A PAT with
