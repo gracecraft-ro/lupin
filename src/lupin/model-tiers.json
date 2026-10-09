@@ -1,8 +1,8 @@
 {
-  "_comment": "Model-tier matrix for delegation-loop review calls. Row = task category, each tier is an ordered list of {model, effort} fallbacks. See issue #179 for the research behind these picks and #182 for the schema.",
+  "_comment": "Model-tier matrix for review and dispatch calls. One row per task category. Each tier is an ordered list of {model, effort}. The first entry of a tier is the default. Later entries are used only when an earlier entry has no quota left, or when a provider's surplus lets a call lean one rung up on that same provider. Model names: 'bmo:...' and 'local:...' run on local GPUs and never use a paid account; 'opencode-go/...' and 'openai/...' run on those subscriptions; a bare name (sonnet, opus, fable) runs on the Claude subscription. Prices and benchmark scores come from the dated sources in each row's 'source' field.",
   "coding": {
-    "source": "Artificial Analysis Coding Agent Index",
-    "last_verified": "2026-10-03",
+    "source": "Artificial Analysis Coding Agent Index v1.5 (retrieved 2026-10-07); prices from the 2026-10-08 fetch-models snapshot (models.dev)",
+    "last_verified": "2026-10-08",
     "tiers": {
       "tier0": [
         {
@@ -12,30 +12,46 @@
       ],
       "tier1": [
         {
-          "model": "sonnet",
-          "effort": "medium"
+          "model": "opencode-go/glm-5.3",
+          "effort": "high"
         },
         {
-          "model": "sonnet",
+          "model": "opencode-go/kimi-k2.7-code",
+          "effort": "high"
+        },
+        {
+          "model": "opencode-go/deepseek-v4-pro",
           "effort": "high"
         }
       ],
       "tier2": [
         {
-          "model": "opus",
+          "model": "sonnet",
+          "effort": "high"
+        },
+        {
+          "model": "opencode-go/qwen3.8-max",
+          "effort": "high"
+        },
+        {
+          "model": "opencode-go/kimi-k3",
           "effort": "high"
         },
         {
           "model": "opus",
+          "effort": "high"
+        },
+        {
+          "model": "fable",
           "effort": "xhigh"
         }
       ]
     },
-    "note": "AA's Coding Agent Index number for \"qwen3.8-flash-next\" (73.1) was cited to justify bmo's tier0 placement here. CORRECTION (2026-10-03): the AA score above is for \"qwen3.8-flash-next\" by name, but bmo's live /v1/models endpoint actually serves \"swift-1.5-iq3_xxs\" -- a heavily-quantized (iq3_xxs) fine-tune of Qwen, a different artifact AA never scored. The AA number does not verify the real served model's quality. Treat bmo's tier0 placement here as unverified until something benchmarks swift-1.5-iq3_xxs directly on a real task, not qwen3.8-flash-next's published score."
+    "note": "Index scores: sonnet 5.5 = 68 (the leader), opus 5.5 = 66 (97%), fable 5.1 = 62 (91%), glm-5.3 = 54 (79%). Value (score percent divided by blended input/output price, models.dev, 2026-10-08): glm-5.3 27.4 pts/$ at $1.40/$4.40; deepseek-v4-pro $0.66/$1.98 (70.8 pts/$, scored for CAD, not coding); kimi-k2.7-code $0.95/$4 with no exact score; sonnet 16.7 pts/$ at $2/$10; opus 5.5 8.1 pts/$ at $4/$20; fable 3.2 pts/$ at $10/$50. So the default rung is a high-value opencode-go model at high effort, and the expensive Claude models are the last entries, not the first. bmo stays tier0: the AA score used for it belongs to a different artifact, and bmo's real served model is unverified, so treat this placement as unverified until something benchmarks the served model directly. kimi-k2.7-code, deepseek-v4-pro, qwen3.8-max and kimi-k3 have no exact coding score; they are picked for price and provider spread, not for a measured coding result."
   },
   "general": {
-    "source": "Artificial Analysis Intelligence Index",
-    "last_verified": "2026-10-03",
+    "source": "Artificial Analysis Intelligence Index (no cached scores on 2026-10-08); prices from the 2026-10-08 fetch-models snapshot (models.dev)",
+    "last_verified": "2026-10-08",
     "tiers": {
       "tier0": [
         {
@@ -45,72 +61,100 @@
       ],
       "tier1": [
         {
-          "model": "sonnet",
-          "effort": "medium"
+          "model": "opencode-go/glm-5.3",
+          "effort": "high"
         },
         {
-          "model": "sonnet",
+          "model": "opencode-go/kimi-k2.7-code",
+          "effort": "high"
+        },
+        {
+          "model": "opencode-go/deepseek-v4-pro",
           "effort": "high"
         }
       ],
       "tier2": [
         {
-          "model": "opus",
+          "model": "sonnet",
+          "effort": "high"
+        },
+        {
+          "model": "opencode-go/qwen3.8-max",
           "effort": "high"
         },
         {
           "model": "opus",
+          "effort": "high"
+        },
+        {
+          "model": "fable",
           "effort": "xhigh"
         }
       ]
     },
-    "note": "AA's Intelligence Index number for \"qwen3.8-flash-next\" (39.8) was cited to justify bmo's tier0 placement here. CORRECTION (2026-10-03): the AA score above is for \"qwen3.8-flash-next\" by name, but bmo's live /v1/models endpoint actually serves \"swift-1.5-iq3_xxs\" -- a heavily-quantized (iq3_xxs) fine-tune of Qwen, a different artifact AA never scored. The AA number does not verify the real served model's quality. Treat bmo's tier0 placement here as unverified until something benchmarks swift-1.5-iq3_xxs directly on a real task, not qwen3.8-flash-next's published score."
+    "note": "No exact-model Intelligence Index score is cached for any model here (the last fetch found none), so this row copies coding's order: the default rung is the highest-value paid option at high effort, and the expensive Claude models come last. bmo stays tier0. The AA number used earlier for bmo belongs to a different artifact, and bmo's real served model is unverified, so treat this placement as unverified until something benchmarks the served model directly."
   },
   "frontend-ui": {
-    "source": "manual (mirrors ship/SKILL.md step 8 screenshot rule and delegation-loop/SKILL.md's visible-change effort floor)",
-    "last_verified": "2026-10-03",
+    "source": "manual (mirrors ship/SKILL.md step 8 screenshot rule and delegation-loop/SKILL.md's visible-change effort floor); prices from the 2026-10-08 fetch-models snapshot (models.dev)",
+    "last_verified": "2026-10-08",
     "tiers": {
       "tier1": [
+        {
+          "model": "opencode-go/glm-5.3",
+          "effort": "high"
+        },
         {
           "model": "sonnet",
           "effort": "high"
         }
       ],
       "tier2": [
+        {
+          "model": "sonnet",
+          "effort": "high"
+        },
         {
           "model": "opus",
           "effort": "high"
         },
         {
-          "model": "opus",
+          "model": "fable",
           "effort": "xhigh"
         }
       ]
     },
-    "note": "no tier0: UI review always escalates to tier2 on any user-visible change; there is no free-tier lane for this category"
+    "note": "No numeric benchmark scores any model for UI work, so every entry here is a price judgment, not a measured result. No tier0: UI review escalates to tier2 on any user-visible change, so anything large or visible still runs on sonnet first. glm-5.3 leads tier1 at $1.40/$4.40 against sonnet at $2/$10; it has no UI score, so treat a small-UI dispatches to it as a cost saving of unproven quality, not a measured win."
   },
   "translation": {
-    "source": "Alconost Translation Quality Index + Linguist Evaluation (2025-2026 sample, alconost.com/en/blog/best-llm-for-translation-2026)",
-    "last_verified": "2026-10-03",
+    "source": "Alconost Translation Quality Index + Linguist Evaluation (2025-2026 sample, alconost.com/en/blog/best-llm-for-translation-2026); prices from the 2026-10-08 fetch-models snapshot (models.dev)",
+    "last_verified": "2026-10-08",
     "tiers": {
       "tier1": [
         {
+          "model": "opencode-go/deepseek-v4-pro",
+          "effort": "high"
+        },
+        {
           "model": "sonnet",
-          "effort": "medium"
+          "effort": "high"
         }
       ],
       "tier2": [
+        {
+          "model": "sonnet",
+          "effort": "high"
+        },
         {
           "model": "opus",
           "effort": "high"
         }
       ]
     },
-    "note": "No tier0 route. Alconost reports provider-family scores, not exact model-version scores. Gemini and GPT score higher than Claude but have no provider config here, so Claude is the best routed option for tier1/2. DeepSeek ranks fourth of five in the sample; this does not verify any exact DeepSeek model. The sample is general-purpose; its separate subtitle benchmark found different leaders."
+    "note": "No exact-model translation score exists for any model here. Alconost reports provider-family scores, not model-version scores, so those numbers are not assigned to any model row. deepseek-v4-pro leads tier1 for price ($0.66/$1.98) with no exact translation score; Claude stays the fallback inside tier1 and the top rung. No tier0: the old local: route had no score either and a text model on a local GPU is not the cheapest lane once paid prices are this low."
   },
   "prose": {
-    "source": "LMArena Creative Writing leaderboard (BenchLeader snapshot, 2026-09-29) and EQ-Bench Creative Writing (Sept 2026) -- the two agree on a leader, unlike the translation sources",
-    "last_verified": "2026-10-03",
+    "source": "LMArena Creative Writing leaderboard (BenchLeader snapshot, 2026-09-29) and EQ-Bench Creative Writing (Sept 2026) -- the two agree on a leader, unlike the translation sources; prices from the 2026-10-08 fetch-models snapshot (models.dev)",
+    "last_verified": "2026-10-08",
     "tiers": {
       "tier1": [
         {
@@ -129,11 +173,11 @@
         }
       ]
     },
-    "note": "No tier0: these public creative-writing leaderboards do not score a model currently routed by this repo, so tier0 quality is unknown."
+    "note": "EQ-Bench Creative Writing v3: fable 5.1 = 99.4% of the best score, opus 5 = 99.0%, gpt-6-astra = 99.2%. Every scored model here is expensive (opus $4/$20, fable $10/$50, astra $10/$50), so no cheap option is promoted on evidence: the scored rungs stay as they are, ordered by value (opus 6.6 pts/$ before fable 3.2 pts/$). sonnet has no creative-writing score and stays tier1, the cheapest Claude rung. No tier0: these leaderboards do not score a model currently routed for free, so tier0 quality is unknown."
   },
   "cad-spatial": {
-    "source": "P3D-Bench (arxiv 2606.11152)",
-    "last_verified": "2026-10-03",
+    "source": "P3D-Bench (arxiv 2606.11152); prices from the 2026-10-08 fetch-models snapshot (models.dev)",
+    "last_verified": "2026-10-08",
     "tiers": {
       "tier0": [
         {
@@ -142,6 +186,22 @@
         }
       ],
       "tier1": [
+        {
+          "model": "opencode-go/mimo-v2.5-pro",
+          "effort": "high"
+        },
+        {
+          "model": "opencode-go/deepseek-v4-pro",
+          "effort": "high"
+        },
+        {
+          "model": "opencode-go/qwen3.6-plus",
+          "effort": "high"
+        },
+        {
+          "model": "opencode-go/kimi-k2.6",
+          "effort": "high"
+        },
         {
           "model": "sonnet",
           "effort": "high"
@@ -158,6 +218,6 @@
         }
       ]
     },
-    "note": "P3D-Bench compares Claude Opus 4.6, DeepSeek V4 Pro, and Qwen3.6-Plus on parametric 3D generation. These are different model versions from the routed models, so their scores do not verify this tier. GPT-5.5 and Gemini 3.1 Pro score highest but have no provider config here. The remaining tier0 route is bmo; its actual served model is not identified by this benchmark. Tier0 means the lowest-cost routed option, not a model validated for CAD work."
+    "note": "P3D-Bench geometry scores (opus 4.6 = 100%): kimi-k2.6 94.7%, deepseek-v4-pro 93.5%, mimo-v2.5-pro 91.2%, qwen3.6-plus 84.9%. Value (score percent / blended price): mimo-v2.5-pro 139.7 pts/$ at $0.435/$0.87, deepseek-v4-pro 70.8 at $0.66/$1.98, qwen3.6-plus 48.5 at $0.50/$3, kimi-k2.6 38.2 at $0.95/$4. The benchmark names Opus 4.6, DeepSeek V4 Pro and Qwen3.6-Plus, which are close to but not the same versions as the routed IDs, so treat the scores as a family signal rather than an exact match. tier1 is ordered by value and every entry scores at least 84.9% of the leader at a fraction of opus's $4/$20. opus keeps tier2 as the only 100% model. bmo stays tier0: the benchmark does not identify bmo's real served model, and tier0 means the lowest-cost routed option, not a model validated for CAD work."
   }
 }

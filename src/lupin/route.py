@@ -20,7 +20,9 @@ and applies three adjustments:
 - Quota is fleet-wide, not per-machine (every provider is one account shared
   by the whole fleet, confirmed in issue #36) -- so this is also where quota
   pacing happens, via `pace.py`. See `_apply_pacing` below for the three
-  rules (reserve, lean-in, exhaustion fallback).
+  rules (reserve, lean-in, exhaustion fallback). A lean-in moves up one rung
+  on the *same* provider, so a surplus is spent on that account before its
+  window resets, never on another account's quota.
 
 This module only decides; it never touches a lock, a scheduler, or a machine
 itself.
@@ -57,12 +59,22 @@ _TIER_ORDER = ("tier0", "tier1", "tier2")
 _PROVIDER_BY_MODEL = {
     "sonnet": "claude",
     "opus": "claude",
-    "fable": "opencode-go",
+    # fable runs in Claude Code: today's fetch-models snapshot lists
+    # claude-fable-5-1 under the claude subscription (api.anthropic.com), and
+    # the coding index labels it "Claude Code | Fable 5.1". It used to map to
+    # opencode-go, which gated the fleet's most expensive model ($10/$50) on
+    # the wrong account's quota.
+    "fable": "claude",
 }
 
 
 def provider_for_model(model: str) -> str:
     """Map a routed model to the provider `quota.py` tracks it under.
+
+    The prefix is the same one `lupin run`/`lupin enable --orchestrator` use
+    for a model selector, so `opencode-go/glm-5.3` is the opencode-go
+    subscription's glm-5.3. A bare name (sonnet/opus/fable) is a Claude
+    subscription alias.
 
     "bmo:"/"local:" models run on local/shared-GPU inference, not a cloud
     account with a quota reading -- `pace.py` never has rows for them, so
@@ -73,6 +85,10 @@ def provider_for_model(model: str) -> str:
         return "bmo"
     if model.startswith("local:"):
         return "local"
+    if model.startswith("opencode-go/"):
+        return "opencode-go"
+    if model.startswith("openai/"):
+        return "openai"
     return _PROVIDER_BY_MODEL.get(model, model)
 
 
@@ -94,12 +110,23 @@ def _resolve_tier(tiers: dict, tier: str) -> str:
     raise KeyError(f"no tier at or above {tier!r} in this row")
 
 
-def _bump_tier(row: dict, tier: str) -> str:
-    """One tier up from `tier`, never past the top (never a no-op loop)."""
-    next_index = _TIER_ORDER.index(tier) + 1
-    if next_index < len(_TIER_ORDER):
-        return _resolve_tier(row, _TIER_ORDER[next_index])
-    return tier
+def _lean_in_entry(row: dict, tier: str, provider: str) -> dict | None:
+    """The strongest entry above `tier` that runs on `provider`, or None.
+
+    Lean-in (decision 2, issue #36) spends one provider's surplus before
+    that provider's window resets, so the rung it moves to must be on the
+    same provider. Bumping the tier and taking whichever model sits at its
+    top would spend the surplus quota on a different account -- the
+    opposite of the rule -- which is what the matrix-with-many-providers
+    case needs prevented (coding's tier1 is opencode-go, its tier2 starts
+    with sonnet on claude). No same-provider entry above `tier` means there
+    is nothing to lean in to, and the pick stays where it is.
+    """
+    for candidate in _TIER_ORDER[_TIER_ORDER.index(tier) + 1 :]:
+        for entry in row.get(candidate, []):
+            if provider_for_model(entry["model"]) == provider:
+                return entry
+    return None
 
 
 def _fallback_entries(row: dict, tier: str) -> list[dict]:
@@ -133,9 +160,10 @@ def _apply_pacing(row: dict, tier: str, quota_rows: list[dict]) -> dict:
     """Quota pacing (issue #36's three rules, implemented in `pace.py`).
 
     A no-op when `quota_rows` is empty -- the caller already decided
-    whether to pass live data. Otherwise: lean up one tier on a provider's
-    surplus (decision 2, skipped if blocked), then, if the resulting pick
-    is blocked (decision 1), search for another viable entry (decision 3).
+    whether to pass live data. Otherwise: lean one rung up on a provider's
+    surplus (decision 2, skipped if blocked, and always staying on that
+    same provider -- see `_lean_in_entry`), then, if the resulting pick is
+    blocked (decision 1), search for another viable entry (decision 3).
 
     Returns `{"model", "effort"}` on an ordinary pick, plus
     `"downgraded_from"` when decision 3 had to move off a blocked pick, or
@@ -153,10 +181,12 @@ def _apply_pacing(row: dict, tier: str, quota_rows: list[dict]) -> dict:
     is_blocked = pace.blocked(quota_rows, provider, now_ms)
 
     if not is_blocked and pace.lean_in(quota_rows, provider, now_ms):
-        tier = _bump_tier(row, tier)
-        choice = row[tier][0]
-        provider = provider_for_model(choice["model"])
-        is_blocked = pace.blocked(quota_rows, provider, now_ms)
+        # `_lean_in_entry` only ever returns an entry on `provider` itself, so
+        # the block check above already covers the rung it moves to; nothing
+        # to re-check here.
+        lean_choice = _lean_in_entry(row, tier, provider)
+        if lean_choice is not None:
+            choice = lean_choice
 
     if not is_blocked:
         return {"model": choice["model"], "effort": choice["effort"]}

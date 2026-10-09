@@ -47,11 +47,14 @@ def dispatch_plan(model: str, *, mode: str = "same-unit") -> str:
     `mode` only matters for a claude model: "same-unit" (the default) means
     the caller is itself inside the primary loop's loop-claude-* unit and
     can run the review in-process; "separate" means it cannot, so the result
-    picks the lock path instead.
+    picks the lock path instead. A model on any other provider (for example
+    `opencode-go/glm-5.3`) takes no fleet lock -- the claude lock exists to
+    keep concurrent Claude calls apart, and holding it for a call that never
+    touches Claude only blocks real Claude work.
     """
     if model.startswith("bmo:") or model.startswith("local:"):
         return "omp_lock"
-    if mode == "separate":
+    if mode == "separate" and route.provider_for_model(model) == "claude":
         return "claude_lock"
     return "same_unit"
 

@@ -56,13 +56,13 @@ _TIERS = {
     },
     "prose": {
         "tiers": {
-            # Mirrors prose's real shape: tier2 lists two different
-            # providers (claude, opencode-go) -- the case a quota-pacing
-            # fallback needs to find "another provider, same tier".
+            # Mirrors the two-provider shape the real matrix needs: a
+            # quota-pacing fallback must be able to find "another provider,
+            # same tier" (claude, then opencode-go).
             "tier1": [{"model": "sonnet", "effort": "high"}],
             "tier2": [
                 {"model": "opus", "effort": "high"},
-                {"model": "fable", "effort": "high"},
+                {"model": "opencode-go/glm-5.3", "effort": "high"},
             ],
         }
     },
@@ -174,7 +174,16 @@ class RouteTests(unittest.TestCase):
         # resolves to the packaged model-tiers.json.
         result = route.route("coding", "size-m", quota_rows=[])
 
-        self.assertEqual(result, {"model": "sonnet", "effort": "medium"})
+        self.assertEqual(result, {"model": "opencode-go/glm-5.3", "effort": "high"})
+
+    def test_real_matrix_leads_its_top_tier_with_the_index_leader(self):
+        # coding's tier2 is the "hardest work" rung: sonnet 5.5 scores 68 on
+        # the coding index (the leader) at half opus's price, so it leads --
+        # the expensive models are last, not first.
+        self.assertEqual(
+            route.route("coding", "size-l", quota_rows=[]),
+            {"model": "sonnet", "effort": "high"},
+        )
 
 
 class RoutePacingTests(unittest.TestCase):
@@ -194,14 +203,15 @@ class RoutePacingTests(unittest.TestCase):
         }
 
     def test_blocked_provider_falls_back_to_next_tiers_other_provider(self):
-        # prose's tier2 lists opus (claude) then fable (opencode-go). Claude
-        # blocked -> falls to fable, not a wait and not a local/bmo model
-        # (prose's tier1 has no local/bmo entry anyway, but this exercises
-        # the "other entry in the same tier" branch either way).
+        # prose's tier2 lists opus (claude) then opencode-go/glm-5.3. Claude
+        # blocked -> falls to the opencode-go model, not a wait and not a
+        # local/bmo model (prose's tier1 has no local/bmo entry anyway, but
+        # this exercises the "other entry in the same tier" branch either
+        # way).
         rows = [self._row("claude", 100, 10 * HOUR_MS)]
         result = route.route("prose", "size-l", tiers=_TIERS, quota_rows=rows)
 
-        self.assertEqual(result["model"], "fable")
+        self.assertEqual(result["model"], "opencode-go/glm-5.3")
         self.assertEqual(result["downgraded_from"], {"model": "opus", "effort": "high"})
 
     def test_blocked_tier1_does_not_fall_back_to_a_tier2_on_the_same_blocked_account(self):
@@ -227,7 +237,7 @@ class RoutePacingTests(unittest.TestCase):
         ]
         result = route.route("prose", "size-l", tiers=_TIERS, quota_rows=rows)
 
-        # opus (claude) is blocked, falls to fable (opencode-go) -- also
+        # opus (claude) is blocked, falls to opencode-go/glm-5.3 -- also
         # blocked, resetting sooner than claude. The wait must reflect that
         # sooner reset, not claude's (seen first).
         self.assertAlmostEqual(result["wait_seconds"], 20 * 60, delta=2)
@@ -253,6 +263,70 @@ class RoutePacingTests(unittest.TestCase):
         result = route.route("coding", "size-l", tiers=_TIERS, quota_rows=rows)
 
         self.assertEqual(result, {"model": "opus", "effort": "high"})
+
+    def test_lean_in_uses_the_next_rung_on_the_same_provider(self):
+        # glm-5.3 (opencode-go) has a surplus and qwen3.8-max (opencode-go)
+        # sits one tier above it -- lean-in must land there.
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [{"model": "opencode-go/glm-5.3", "effort": "high"}],
+                    "tier2": [
+                        {"model": "sonnet", "effort": "high"},
+                        {"model": "opencode-go/qwen3.8-max", "effort": "high"},
+                    ],
+                }
+            }
+        }
+        rows = [self._row("opencode-go", 10, 1 * HOUR_MS)]
+        result = route.route("coding", "size-m", tiers=tiers, quota_rows=rows)
+
+        self.assertEqual(result, {"model": "opencode-go/qwen3.8-max", "effort": "high"})
+
+    def test_lean_in_never_spends_a_surplus_on_another_provider(self):
+        # The rule is "spend this account's quota before its window resets".
+        # tier2 opens with sonnet (claude), so a tier bump would spend an
+        # opencode-go surplus on Claude quota -- the opposite of the rule.
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [{"model": "opencode-go/glm-5.3", "effort": "high"}],
+                    "tier2": [
+                        {"model": "sonnet", "effort": "high"},
+                        {"model": "opus", "effort": "high"},
+                    ],
+                }
+            }
+        }
+        rows = [self._row("opencode-go", 10, 1 * HOUR_MS)]
+        result = route.route("coding", "size-m", tiers=tiers, quota_rows=rows)
+
+        self.assertEqual(result, {"model": "opencode-go/glm-5.3", "effort": "high"})
+
+    def test_lean_in_on_the_real_matrix_spends_an_opencode_go_surplus(self):
+        # The real coding row: tier1 is opencode-go, tier2 opens with sonnet.
+        # A surplus on opencode-go must lean to qwen3.8-max, never to Claude.
+        result = route.route(
+            "coding",
+            "size-m",
+            quota_rows=[self._row("opencode-go", 10, 1 * HOUR_MS)],
+        )
+
+        self.assertEqual(result, {"model": "opencode-go/qwen3.8-max", "effort": "high"})
+
+    def test_opencode_go_exhausted_falls_back_to_the_default_claude_rung(self):
+        # Every opencode-go entry in coding is blocked, so the search moves
+        # to the first unblocked entry in tier2 -- sonnet, not opus or fable.
+        result = route.route(
+            "coding",
+            "size-m",
+            quota_rows=[self._row("opencode-go", 100, 10 * HOUR_MS)],
+        )
+
+        self.assertEqual(result["model"], "sonnet")
+        self.assertEqual(
+            result["downgraded_from"], {"model": "opencode-go/glm-5.3", "effort": "high"}
+        )
 
     def test_empty_quota_rows_is_a_no_op(self):
         result = route.route("coding", "size-m", tiers=_TIERS, quota_rows=[])

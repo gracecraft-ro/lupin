@@ -87,10 +87,16 @@ _CLAUDE_QUOTA = {"claude": {"pct_left": 62.0, "resets_at": 1_800_000_000_000, "s
 def test_provider_for_model_maps_claude_models():
     assert place.provider_for_model("sonnet") == "claude"
     assert place.provider_for_model("opus") == "claude"
+    # fable runs in Claude Code: the 2026-10-08 fetch-models snapshot lists
+    # claude-fable-5-1 under the claude subscription, and the coding index
+    # labels it "Claude Code | Fable 5.1". Mapping it to opencode-go gated
+    # the fleet's most expensive model on the wrong account's quota.
+    assert place.provider_for_model("fable") == "claude"
 
 
-def test_provider_for_model_maps_fable_to_opencode_go():
-    assert place.provider_for_model("fable") == "opencode-go"
+def test_provider_for_model_maps_subscription_prefixed_models():
+    assert place.provider_for_model("opencode-go/glm-5.3") == "opencode-go"
+    assert place.provider_for_model("openai/gpt-6-luna") == "openai"
 
 
 def test_provider_for_model_maps_bmo_and_local_prefixes():
@@ -172,8 +178,9 @@ def test_place_picks_the_machine_with_more_free_slots(redis_port, flush_redis):
     result = place.place("retry backoff", _kw(redis_port))
 
     # No labels on this synthetic issue -> classify() falls back to
-    # size-? -> tier2 -> "opus" (model-tiers.json's "coding" row).
-    assert result["model"] == "opus"
+    # size-? -> tier2 -> "sonnet" (model-tiers.json's "coding" row leads
+    # its top tier with the index leader, not the most expensive model).
+    assert result["model"] == "sonnet"
     assert result["provider"] == "claude"
     assert result["pick"] == "mac-studio"
     by_name = {c["name"]: c for c in result["candidates"]}
@@ -294,7 +301,7 @@ def test_place_reports_a_wait_without_filtering_machines(redis_port, flush_redis
     assert result["downgraded_from"] is None
     assert result["wait_seconds"] == 295.0
     assert result["candidates"] == []
-    assert result["skipped"] == {"offline": 0, "other_provider": 0}
+    assert result["skipped"] == {"offline": 0, "other_provider": 0, "quota_unreadable": 0}
 
 
 def test_place_reports_routes_downgrade_and_ranks_the_new_provider(redis_port, flush_redis, monkeypatch):
@@ -330,7 +337,57 @@ def test_place_normal_pick_has_no_wait_or_downgrade_fields(redis_port, flush_red
     assert result["pick"] == "mac-studio"
     assert result["wait_seconds"] is None
     assert result["downgraded_from"] is None
-    assert result["skipped"] == {"offline": 0, "other_provider": 0}
+    assert result["skipped"] == {"offline": 0, "other_provider": 0, "quota_unreadable": 0}
+
+
+def test_place_skips_a_machine_that_cannot_read_the_providers_quota(
+    redis_port, flush_redis, monkeypatch
+):
+    """`quota.snapshot()` writes an entry for every provider on every
+    heartbeat, so "has an entry" proves nothing -- every machine has all
+    four. A reading with a real percentage is what proves the machine has
+    that provider's credentials, so an entry with none is skipped: sending
+    an opencode-go model to a machine without the key cannot work.
+    """
+    monkeypatch.setattr(
+        place.route_mod, "route",
+        lambda *a, **kw: {"model": "opencode-go/glm-5.3", "effort": "high"},
+    )
+    _write_machine(
+        redis_port, "no-opencode-key",
+        quota={"opencode-go": {"pct_left": None, "resets_at": None, "source": "test"}},
+    )
+    _write_machine(
+        redis_port, "opencode-box",
+        quota={"opencode-go": {"pct_left": 100.0, "resets_at": None, "source": "test"}},
+    )
+
+    result = place.place("fix the retry backoff", _kw(redis_port))
+
+    assert result["model"] == "opencode-go/glm-5.3"
+    assert result["provider"] == "opencode-go"
+    assert result["pick"] == "opencode-box"
+    assert [c["name"] for c in result["candidates"]] == ["opencode-box"]
+    assert result["skipped"]["quota_unreadable"] == 1
+
+
+def test_place_reports_no_pick_when_no_machine_can_read_the_providers_quota(
+    redis_port, flush_redis, monkeypatch
+):
+    monkeypatch.setattr(
+        place.route_mod, "route",
+        lambda *a, **kw: {"model": "opencode-go/glm-5.3", "effort": "high"},
+    )
+    _write_machine(
+        redis_port, "keyless",
+        quota={"opencode-go": {"pct_left": None, "resets_at": None, "source": "test"}},
+    )
+
+    result = place.place("fix the retry backoff", _kw(redis_port))
+
+    assert result["provider"] == "opencode-go"
+    assert result["pick"] is None
+    assert result["skipped"]["quota_unreadable"] == 1
 
 
 def test_place_raises_coordinator_unreachable(closed_port):
