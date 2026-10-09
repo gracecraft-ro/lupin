@@ -754,6 +754,16 @@ class ModelSnapshotTests(unittest.TestCase):
         self.assertIsNone(serve.match_live_model("bmo:qwen3.8-flash-next", models))
         self.assertIsNone(serve.match_live_model("local:deepseek-v4-flash-0731", models))
 
+    def test_match_live_model_strips_the_subscription_prefix(self):
+        # A tier entry like "opencode-go/glm-5.3" names the service the
+        # snapshot already records in its own `subscription` field, so the
+        # prefix is dropped before matching -- otherwise every prefixed
+        # pick on the Models page would read "no live data".
+        models = [{"id": "glm-5.3", "display_name": None}]
+        self.assertEqual(serve.match_live_model("opencode-go/glm-5.3", models)["id"], "glm-5.3")
+        self.assertEqual(serve.match_live_model("openai/gpt-6-luna", models), None)
+        self.assertIsNone(serve.match_live_model("opencode-go/", models))
+
     def test_match_live_model_no_match_is_none(self):
         self.assertIsNone(serve.match_live_model("fable", [{"id": "claude-opus-4-5"}]))
 

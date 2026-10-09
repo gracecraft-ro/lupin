@@ -1,11 +1,34 @@
+import copy
+import itertools
+import json
 import time
 import unittest
+from importlib import resources
 
 from lupin import route
 from lupin.quota import QuotaDuration
 
 HOUR_MS = 60 * 60 * 1000
 MIN_MS = 60 * 1000
+
+_PROVIDERS = ("claude", "opencode-go", "openai")
+_SIZES = ("size-xs", "size-s", "size-m", "size-l", "size-xl", "size-?")
+_STATES = ("normal", "blocked", "surplus")
+
+
+def _grid_rows(states):
+    """quota_rows for one grid point: `states` gives each provider's state."""
+    now_ms = time.time() * 1000
+    rows = []
+    for provider, state in zip(_PROVIDERS, states):
+        if state == "blocked":
+            rows.append({"provider": provider, "duration": QuotaDuration.FIVE_HOURS,
+                         "used_pct": 100, "resets_at": now_ms + 10 * HOUR_MS})
+        elif state == "surplus":
+            rows.append({"provider": provider, "duration": QuotaDuration.FIVE_HOURS,
+                         "used_pct": 10, "resets_at": now_ms + HOUR_MS})
+    return rows
+
 
 _TIERS = {
     "coding": {
@@ -56,13 +79,13 @@ _TIERS = {
     },
     "prose": {
         "tiers": {
-            # Mirrors prose's real shape: tier2 lists two different
-            # providers (claude, opencode-go) -- the case a quota-pacing
-            # fallback needs to find "another provider, same tier".
+            # Mirrors the two-provider shape the real matrix needs: a
+            # quota-pacing fallback must be able to find "another provider,
+            # same tier" (claude, then opencode-go).
             "tier1": [{"model": "sonnet", "effort": "high"}],
             "tier2": [
                 {"model": "opus", "effort": "high"},
-                {"model": "fable", "effort": "high"},
+                {"model": "opencode-go/glm-5.3", "effort": "high"},
             ],
         }
     },
@@ -169,13 +192,6 @@ class RouteTests(unittest.TestCase):
 
         self.assertEqual(result, {"model": "opus", "effort": "high"})
 
-    def test_loads_the_real_model_tiers_json(self):
-        # No injected tiers dict -- confirms the default path actually
-        # resolves to the packaged model-tiers.json.
-        result = route.route("coding", "size-m", quota_rows=[])
-
-        self.assertEqual(result, {"model": "sonnet", "effort": "medium"})
-
 
 class RoutePacingTests(unittest.TestCase):
     """Issue #36: quota is fleet-wide, so route() paces on it directly.
@@ -194,14 +210,15 @@ class RoutePacingTests(unittest.TestCase):
         }
 
     def test_blocked_provider_falls_back_to_next_tiers_other_provider(self):
-        # prose's tier2 lists opus (claude) then fable (opencode-go). Claude
-        # blocked -> falls to fable, not a wait and not a local/bmo model
-        # (prose's tier1 has no local/bmo entry anyway, but this exercises
-        # the "other entry in the same tier" branch either way).
+        # prose's tier2 lists opus (claude) then opencode-go/glm-5.3. Claude
+        # blocked -> falls to the opencode-go model, not a wait and not a
+        # local/bmo model (prose's tier1 has no local/bmo entry anyway, but
+        # this exercises the "other entry in the same tier" branch either
+        # way).
         rows = [self._row("claude", 100, 10 * HOUR_MS)]
         result = route.route("prose", "size-l", tiers=_TIERS, quota_rows=rows)
 
-        self.assertEqual(result["model"], "fable")
+        self.assertEqual(result["model"], "opencode-go/glm-5.3")
         self.assertEqual(result["downgraded_from"], {"model": "opus", "effort": "high"})
 
     def test_blocked_tier1_does_not_fall_back_to_a_tier2_on_the_same_blocked_account(self):
@@ -227,7 +244,7 @@ class RoutePacingTests(unittest.TestCase):
         ]
         result = route.route("prose", "size-l", tiers=_TIERS, quota_rows=rows)
 
-        # opus (claude) is blocked, falls to fable (opencode-go) -- also
+        # opus (claude) is blocked, falls to opencode-go/glm-5.3 -- also
         # blocked, resetting sooner than claude. The wait must reflect that
         # sooner reset, not claude's (seen first).
         self.assertAlmostEqual(result["wait_seconds"], 20 * 60, delta=2)
@@ -254,10 +271,86 @@ class RoutePacingTests(unittest.TestCase):
 
         self.assertEqual(result, {"model": "opus", "effort": "high"})
 
+    def test_lean_in_and_fallback_stay_on_the_account_with_quota(self):
+        # Quota is per account. A surplus leans only to a higher rung on the
+        # same provider. A blocked provider falls to an entry on another one.
+        glm = {"model": "opencode-go/glm-5.3", "effort": "high"}
+        cases = {
+            "surplus leans to the next rung on the same provider": (
+                self._row("opencode-go", 10, 1 * HOUR_MS),
+                [glm],
+                [
+                    {"model": "sonnet", "effort": "high"},
+                    {"model": "opencode-go/qwen3.8-max", "effort": "high"},
+                ],
+                {"model": "opencode-go/qwen3.8-max", "effort": "high"},
+            ),
+            "surplus never leans onto another provider": (
+                self._row("opencode-go", 10, 1 * HOUR_MS),
+                [glm],
+                [
+                    {"model": "sonnet", "effort": "high"},
+                    {"model": "opus", "effort": "high"},
+                ],
+                glm,
+            ),
+            "blocked provider falls to the first unblocked entry": (
+                self._row("opencode-go", 100, 10 * HOUR_MS),
+                [glm],
+                [
+                    {"model": "sonnet", "effort": "high"},
+                    {"model": "opus", "effort": "high"},
+                ],
+                {"model": "sonnet", "effort": "high", "downgraded_from": glm},
+            ),
+        }
+        for name, (row, tier1, tier2, expected) in cases.items():
+            with self.subTest(case=name):
+                tiers = {"coding": {"tiers": {"tier1": tier1, "tier2": tier2}}}
+                result = route.route("coding", "size-m", tiers=tiers, quota_rows=[row])
+
+                self.assertEqual({key: result.get(key) for key in expected}, expected)
+
     def test_empty_quota_rows_is_a_no_op(self):
         result = route.route("coding", "size-m", tiers=_TIERS, quota_rows=[])
 
         self.assertEqual(result, {"model": "sonnet", "effort": "medium"})
+
+
+class PackagedTiersTests(unittest.TestCase):
+    def test_every_packaged_tier_entry_can_be_picked(self):
+        # An entry route() never returns is dead config. Give each entry a
+        # unique effort tag, run the whole quota grid, and require every tag
+        # to show up as a pick or as a downgraded_from.
+        packaged = json.loads(
+            resources.files("lupin").joinpath("model-tiers.json").read_text(encoding="utf-8")
+        )
+        states = itertools.product(_STATES, repeat=len(_PROVIDERS))
+        grid = list(itertools.product(_SIZES, (True, False), states))
+        for category, row in packaged.items():
+            if category.startswith("_"):
+                continue
+            with self.subTest(category=category):
+                probed = copy.deepcopy(row)
+                probes = set()
+                for tier_name, entries in probed["tiers"].items():
+                    for index, entry in enumerate(entries):
+                        entry["effort"] = f"__probe_{tier_name}_{index}__"
+                        probes.add(entry["effort"])
+                seen = set()
+                for size, bmo, states in grid:
+                    result = route.route(
+                        category,
+                        size,
+                        bmo_available=bmo,
+                        tiers={category: probed},
+                        quota_rows=_grid_rows(states),
+                    )
+                    seen.add(result.get("effort"))
+                    if "downgraded_from" in result:
+                        seen.add(result["downgraded_from"]["effort"])
+
+                self.assertEqual(probes - seen, set())
 
 
 if __name__ == "__main__":

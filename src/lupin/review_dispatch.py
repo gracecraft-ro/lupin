@@ -1,23 +1,17 @@
 """Decide how to run a review call, and print the decision as JSON.
 
-This is the wiring for issue #185: `route.route()` (issue #184) already picks
-a {model, effort} pair; this module picks which lock that pair needs, so the
-shell dispatch code in `hosts/jesus/configuration.nix` can reuse the
-existing claude-dispatch.lock/omp.lock machinery instead of a hardcoded
-model. It decides; it never touches a lock or a process itself -- same
-division of work as route.py.
+`route.route()` picks a {model, effort} pair. This module picks the lock that
+pair needs. It decides only. It never takes a lock or starts a process.
 
-Three plans, matching the three cases in #185:
+Plans:
 
-- "same_unit": a claude model, run sequentially inside the caller's own
-  already-counted loop-claude-* unit. No lock -- this costs nothing extra
-  against claude_max_concurrent because it starts no new systemd unit.
-- "claude_lock": a claude model, but a separate process is unavoidable. Take
-  claude-dispatch.lock and recheck capacity before launching.
-- "omp_lock": the routed model runs through omp's shared LM Studio server
-  (a "bmo:" or "local:" model -- see the omp case's own comment in
-  configuration.nix for why both share one lock). Take the blocking
-  omp.lock, same as the omp dispatch path.
+- "same_unit": no fleet lock. Used for a Claude model in same-unit mode, and
+  for any model on another provider (for example `opencode-go/glm-5.3`) in
+  either mode.
+- "claude_lock": a Claude model in separate mode. Take claude-dispatch.lock
+  and recheck capacity before launching.
+- "omp_lock": a `bmo:` or `local:` model. It runs on the shared LM Studio
+  server, so take the blocking omp.lock.
 
 `--prefetch` (issue #1) is a second, unrelated mode in the same command: it
 fetches issue/PR text up front so a delegation-loop orchestrator, and the
@@ -44,14 +38,19 @@ _TOKEN_RE = re.compile(r"(?:gh[oprsu]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)")
 def dispatch_plan(model: str, *, mode: str = "same-unit") -> str:
     """Return "same_unit", "claude_lock", or "omp_lock" for a routed model.
 
-    `mode` only matters for a claude model: "same-unit" (the default) means
-    the caller is itself inside the primary loop's loop-claude-* unit and
-    can run the review in-process; "separate" means it cannot, so the result
-    picks the lock path instead.
+    `mode` changes the result only for a Claude model. "same-unit" (the
+    default) means the caller already runs inside the primary loop's
+    loop-claude-* unit, so it runs the review in-process. "separate" means it
+    cannot, so a Claude model returns "claude_lock".
+
+    A model on any other provider (for example `opencode-go/glm-5.3`) returns
+    "same_unit" in both modes. "same_unit" means no fleet lock. The claude
+    lock serializes Claude calls only, so holding it for a call that never
+    touches Claude would block real Claude work.
     """
     if model.startswith("bmo:") or model.startswith("local:"):
         return "omp_lock"
-    if mode == "separate":
+    if mode == "separate" and route.provider_for_model(model) == "claude":
         return "claude_lock"
     return "same_unit"
 

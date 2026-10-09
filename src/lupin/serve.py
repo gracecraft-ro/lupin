@@ -1572,7 +1572,7 @@ def model_tiers() -> list[dict]:
     return rows
 
 
-_ALIAS_PREFIX = re.compile(r"^(bmo|local):")
+_ALIAS_PREFIX = re.compile(r"^(?:bmo|local):|^(?:opencode-go|openai)/")
 
 
 def load_model_snapshot(connection: dict | None = None) -> dict | None:
@@ -1613,7 +1613,7 @@ def snapshot_models(snapshot: dict | None) -> list[dict]:
 
 def match_live_model(alias: str, models: list[dict]) -> dict | None:
     """Match a model-tiers.json alias (short hand names like "sonnet" or
-    "bmo:qwen3.8-flash-next") to a snapshot model (full API IDs like
+    "opencode-go/glm-5.3") to a snapshot model (full API IDs like
     "claude-sonnet-4-5-..."). It is not a 1:1 lookup, so this is a
     heuristic, not a resolver:
 
@@ -1621,6 +1621,10 @@ def match_live_model(alias: str, models: list[dict]) -> dict | None:
       two are never found -- `model_fetch` only covers the claude,
       opencode-go, and codex subscriptions, not bmo's or a local model
       server's own catalog. Those aliases always report "no live data".
+    - An "opencode-go/" or "openai/" prefix is stripped too, because the
+      snapshot's own `subscription` field already says which service a
+      model id belongs to -- the tier file repeats it in the alias, and
+      the badge would otherwise never match.
     - What remains is looked up as a case-insensitive substring of a
       snapshot model's id or display name, first match wins. Good enough
       to flag "known reachable today" without pretending to be a precise

@@ -330,6 +330,25 @@ class ClaudeOauthQuotaTests(unittest.TestCase):
             fetch.call_args.args[0].get_header("Authorization"), "Bearer test-token"
         )
 
+    def test_missing_file_or_token_is_a_no_key_note(self):
+        cases = [
+            ("missing file", mock.patch("builtins.open", side_effect=FileNotFoundError())),
+            ("no token field", mock.patch(
+                "builtins.open",
+                mock.mock_open(read_data=json.dumps({"claudeAiOauth": {}})),
+            )),
+            ("empty token", mock.patch(
+                "builtins.open",
+                mock.mock_open(read_data=json.dumps({"claudeAiOauth": {"accessToken": ""}})),
+            )),
+        ]
+        for label, patch in cases:
+            with self.subTest(label), patch:
+                rows = quota.claude_oauth_quota()
+                self.assertEqual(
+                    rows, [{"provider": "claude", "note": quota.NO_CLAUDE_CREDENTIALS}]
+                )
+
 
 class SnapshotTests(unittest.TestCase):
     """`snapshot()` -- the one normalized entry point `machines.py`'s
@@ -369,4 +388,5 @@ class SnapshotTests(unittest.TestCase):
             result = quota.snapshot()
         self.assertEqual(result["claude"]["pct_left"], None)
         self.assertEqual(result["claude"]["resets_at"], None)
+        self.assertEqual(result["claude"]["note"], "quota unavailable")
         self.assertEqual(result["claude"]["source"], quota.quota_source_label("claude"))
