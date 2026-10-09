@@ -62,12 +62,17 @@ def test_cached_none_is_a_hit_not_a_miss(redis_port, flush_redis):
     fetch.assert_not_called()
 
 
+def _record(name: str, state: str = "online") -> dict:
+    return {"name": name, "state": state, "version": "1", "heartbeat": "1970-01-01T00:00:00Z"}
+
+
 def test_non_canonical_machine_never_fetches_on_a_miss(redis_port, flush_redis):
     fetch = mock.Mock()
     with mock.patch.object(machines, "hostname", return_value="jesus"):
-        data, error = gh_cache.cached_gh_json(
-            "acme", "repo", "issues:open", fetch, connection=_kw(redis_port)
-        )
+        with mock.patch.object(machines, "machines", return_value=[_record(gh_cache.CANONICAL_GH_FETCHER)]):
+            data, error = gh_cache.cached_gh_json(
+                "acme", "repo", "issues:open", fetch, connection=_kw(redis_port)
+            )
 
     assert data is None
     assert "pihome" in error
@@ -84,6 +89,84 @@ def test_non_canonical_machine_never_fetches_when_redis_is_down(closed_port):
     assert data is None
     assert "jesus" in error
     fetch.assert_not_called()
+
+
+@pytest.mark.parametrize("state", ["draining", "offline"])
+def test_non_canonical_machine_fetches_when_the_pinned_fetcher_is_gone(
+    redis_port, flush_redis, state
+):
+    """The pin has no holder: pihome is draining or offline, so nobody is
+    maintaining the shared cache. jesus fetches and publishes instead of
+    showing the whole fleet an empty roadmap -- the case that left jesus's
+    own dashboard blank.
+    """
+    fetch = mock.Mock(return_value=([{"number": 1}], None))
+    with mock.patch.object(machines, "hostname", return_value="jesus"):
+        with mock.patch.object(machines, "machines", return_value=[_record(gh_cache.CANONICAL_GH_FETCHER, state)]):
+            data, error = gh_cache.cached_gh_json(
+                "acme", "repo", "issues:open", fetch, connection=_kw(redis_port)
+            )
+
+    assert data == [{"number": 1}]
+    assert error is None
+    fetch.assert_called_once()
+    raw = _raw_client(redis_port).get(f"{gh_cache.PREFIX}gh-cache:acme/repo:issues:open")
+    assert json.loads(raw) == {"data": [{"number": 1}]}
+
+
+def test_non_canonical_machine_fetches_when_the_pinned_fetcher_never_joined(
+    redis_port, flush_redis
+):
+    fetch = mock.Mock(return_value=([{"number": 1}], None))
+    with mock.patch.object(machines, "hostname", return_value="jesus"):
+        with mock.patch.object(machines, "machines", return_value=[_record("ralpha")]):
+            data, error = gh_cache.cached_gh_json(
+                "acme", "repo", "issues:open", fetch, connection=_kw(redis_port)
+            )
+
+    assert data == [{"number": 1}]
+    assert error is None
+    fetch.assert_called_once()
+
+
+def test_unreadable_registry_keeps_the_conservative_answer(redis_port, flush_redis):
+    """A registry that cannot be read is not evidence the pinned fetcher is
+    gone, so the miss stays a miss rather than turning into a fetch we
+    cannot justify."""
+    fetch = mock.Mock()
+    with mock.patch.object(machines, "hostname", return_value="jesus"):
+        with mock.patch.object(machines, "machines", side_effect=machines.CoordinatorUnreachable("x")):
+            data, error = gh_cache.cached_gh_json(
+                "acme", "repo", "issues:open", fetch, connection=_kw(redis_port)
+            )
+
+    assert data is None
+    assert "pihome" in error
+    fetch.assert_not_called()
+
+
+def test_fallback_fetcher_serializes_on_the_shared_lock(redis_port, flush_redis):
+    """Two machines that both fall back still fetch once: the second finds
+    the first's published result after waiting on the lock."""
+    from lupin import slots_redis
+
+    held = slots_redis.acquire("gh-fetch/acme/repo", holder="other-machine", **_kw(redis_port))
+    try:
+        _raw_client(redis_port).set(
+            f"{gh_cache.PREFIX}gh-cache:acme/repo:issues:open",
+            json.dumps({"data": [{"number": 1}]}),
+        )
+        fetch = mock.Mock()
+        with mock.patch.object(machines, "hostname", return_value="jesus"):
+            with mock.patch.object(machines, "machines", return_value=[_record(gh_cache.CANONICAL_GH_FETCHER, "draining")]):
+                data, error = gh_cache.cached_gh_json(
+                    "acme", "repo", "issues:open", fetch, connection=_kw(redis_port)
+                )
+        assert data == [{"number": 1}]
+        assert error is None
+        fetch.assert_not_called()
+    finally:
+        slots_redis.release(held, **_kw(redis_port))
 
 
 def test_canonical_machine_fetches_and_publishes_on_a_miss(redis_port, flush_redis):

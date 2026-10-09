@@ -1291,10 +1291,19 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
 
 
 def _cmd_roadmap(args: argparse.Namespace) -> int:
-    claims_lookup = functools.partial(claims.claims_for, **_claim_kwargs(args))
+    # One resolved connection for both the claim marks and the shared
+    # `gh` cache behind `roadmap_cli.build_roadmap` -- the roadmap's own
+    # GitHub reads used to resolve nothing at all, so on a fleet whose
+    # Redis needs auth every repo came back unreadable. `--config-path` is
+    # deliberately absent here: `_roadmap_args` uses `_redis_conn_args`,
+    # which has no such flag, and `resolve_connection` falls back to the
+    # same default fleet config every other reader uses.
+    connection = machines.resolve_connection(**_claim_kwargs(args))
+    claims_lookup = functools.partial(claims.claims_for, **connection)
     text, code = roadmap_cli.run(
         args.repo, args.limit, args.stage, args.dag, args.json, args.refresh,
         claims_lookup=claims_lookup,
+        connection=connection,
     )
     print(text)
     return code

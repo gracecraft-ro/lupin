@@ -261,9 +261,14 @@ A machine that finds the slot already held just reads whatever is in
 
 Backs `place`/`quest`/`roadmap`'s read-only `gh` lookups (issue #35):
 issue state, issue body/labels, quest-labeled issues, dependency links.
-Written only by `pihome` (the fixed value of `gh_cache.CANONICAL_GH_FETCHER`
-— a hard pin to one named machine, not a race any machine could win). Read
-by every machine, `pihome` included.
+Written by `pihome` (the fixed value of `gh_cache.CANONICAL_GH_FETCHER`
+— a hard pin to one named machine, not a race any machine could win).
+Every other machine reads it while that fetcher is alive. When the pinned
+machine is not maintaining the cache — draining, offline, or never joined
+— a machine that needs the data fetches it and publishes through the same
+`gh-fetch/<owner>/<repo>` slot, so the first machine to win still answers
+for the fleet and no two machines fetch the same repo at once.
+Read by every machine, `pihome` included.
 The roadmap uses the dashboard's Redis connection for this cache.
 
 ```json

@@ -338,6 +338,37 @@ class RoadmapTests(unittest.TestCase):
         )
         self.assertIn("priority/P1", page)
 
+    def test_failed_fetch_is_not_cached(self):
+        """A read that came back empty *and* said why is an outage, not a
+        snapshot. Caching it kept a repo blank for the whole hour after its
+        cause (auth, a drained fetcher) was already fixed, which is how the
+        Roadmap stayed empty on jesus.
+        """
+        outage = ([], {}, ["GitHub issue data is unavailable: auth failed"])
+        recovered = ([{"number": 1, "title": "Real", "body": "", "labels": []}], {}, [])
+        with mock.patch.object(
+            roadmap, "load_github", side_effect=[outage, recovered]
+        ) as load:
+            first = roadmap.cached_github("repo", "/repo")
+            second = roadmap.cached_github("repo", "/repo")
+
+        self.assertEqual(first, outage)
+        self.assertEqual(second, recovered)
+        self.assertEqual(load.call_count, 2)
+
+    def test_repo_with_genuinely_no_issues_still_caches(self):
+        """The other half of the rule: no issues and no warning is a real
+        (empty) snapshot and must still be cached, or a quiet repo re-fetches
+        on every page load.
+        """
+        empty = ([], {}, [])
+        with mock.patch.object(roadmap, "load_github", return_value=empty) as load:
+            roadmap.cached_github("repo", "/repo")
+            again = roadmap.cached_github("repo", "/repo")
+
+        self.assertEqual(again, empty)
+        self.assertEqual(load.call_count, 1)
+
     def test_github_cache_expires_after_one_hour(self):
         roadmap._GITHUB_CACHE.clear()
         clock = [0.0]

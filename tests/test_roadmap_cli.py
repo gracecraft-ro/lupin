@@ -217,7 +217,7 @@ class EmptyStateTests(unittest.TestCase):
         with mock.patch.object(roadmap, "_repo_identity", side_effect=_identity()), \
              mock.patch.object(
                  roadmap, "cached_github",
-                 side_effect=lambda repo, path, state="open": (
+                 side_effect=lambda repo, path, state="open", **kw: (
                      [_issue(422, "split store", "P2"), _issue(440, "docs", "P3")], {}, []
                  ) if state == "open" else ([], {}, []),
              ), \
@@ -248,7 +248,7 @@ class EmptyStateTests(unittest.TestCase):
         with mock.patch.object(roadmap, "_repo_identity", side_effect=_identity()), \
              mock.patch.object(
                  roadmap, "cached_github",
-                 side_effect=lambda repo, path, state="open": ([], {}, []),
+                 side_effect=lambda repo, path, state="open", **kw: ([], {}, []),
              ), \
              mock.patch.object(
                  roadmap, "cached_dependency_dag",
@@ -312,7 +312,7 @@ class DagViewTests(unittest.TestCase):
         with mock.patch.object(roadmap, "_repo_identity", side_effect=_identity()), \
              mock.patch.object(
                  roadmap, "cached_github",
-                 side_effect=lambda repo, path, state="open": (
+                 side_effect=lambda repo, path, state="open", **kw: (
                      (open_issues.get(repo, []), {}, []) if state == "open" else ([], {}, [])
                  ),
              ), \
@@ -349,7 +349,7 @@ class DagViewTests(unittest.TestCase):
         with mock.patch.object(roadmap, "_repo_identity", side_effect=_identity()), \
              mock.patch.object(
                  roadmap, "cached_github",
-                 side_effect=lambda repo, path, state="open": (
+                 side_effect=lambda repo, path, state="open", **kw: (
                      (open_issues.get(repo, []), {}, []) if state == "open" else ([], {}, [])
                  ),
              ), \
@@ -387,7 +387,7 @@ class DagViewTests(unittest.TestCase):
         with mock.patch.object(roadmap, "_repo_identity", side_effect=_identity()), \
              mock.patch.object(
                  roadmap, "cached_github",
-                 side_effect=lambda repo, path, state="open": (
+                 side_effect=lambda repo, path, state="open", **kw: (
                      (open_issues.get(repo, []), {}, []) if state == "open" else ([], {}, [])
                  ),
              ), \
@@ -413,7 +413,7 @@ class JsonOutputTests(unittest.TestCase):
         with mock.patch.object(roadmap, "_repo_identity", side_effect=_identity()), \
              mock.patch.object(
                  roadmap, "cached_github",
-                 side_effect=lambda repo, path, state="open": (
+                 side_effect=lambda repo, path, state="open", **kw: (
                      (open_issues.get(repo, []), {}, []) if state == "open" else ([], {}, [])
                  ),
              ), \

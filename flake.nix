@@ -74,6 +74,10 @@
                 pythonPackages.redis
               ]))
               pkgs.redis
+              # `roadmap._git_remote_url` shells out to `git`, and the
+              # wrapper's PATH does not reach this builder -- the sandbox
+              # only sees nativeBuildInputs.
+              pkgs.git
             ];
           } ''
             test -x "$package/bin/lupin"

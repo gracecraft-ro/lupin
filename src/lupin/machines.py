@@ -41,6 +41,7 @@ what the agent actually runs.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import time
 from datetime import datetime, timezone
@@ -136,6 +137,40 @@ def _write_config(config: dict, config_path: str | Path | None = None) -> Path:
     return path
 
 
+def _load_credential(name: str) -> str | None:
+    """A systemd credential, from `$CREDENTIALS_DIRECTORY/<name>`.
+
+    Same convention `loop_runtime.worker()` already uses for the fleet's
+    Redis password: the secret is loaded into the service by systemd, not
+    passed in the environment or stored in the fleet config, so a process
+    that wants it has to read it from here.
+    """
+    directory = os.environ.get("CREDENTIALS_DIRECTORY")
+    if not directory:
+        return None
+    try:
+        value = (Path(directory) / name).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return value or None
+
+
+def _redis_password() -> str | None:
+    """The fleet Redis password, for a caller that passes none.
+
+    A caller that does pass one (`cli.py`'s `--redis-password`, which
+    defaults to `$LUPIN_REDIS_PASSWORD`) always wins. Without this
+    fallback, every path that resolves the fleet connection without a
+    password -- `lupin serve` under systemd, which loads the secret as
+    `LoadCredential` and sets no `LUPIN_REDIS_PASSWORD`, and
+    `gh_cache`'s own `_resolve` -- connects unauthenticated and Redis
+    answers `AuthenticationError`. That error subclasses `ConnectionError`,
+    so it is indistinguishable from "Redis is down" and every fleet read
+    reports the cache as unreachable.
+    """
+    return _load_credential("redis-password") or os.environ.get("LUPIN_REDIS_PASSWORD")
+
+
 def resolve_connection(
     *,
     redis_host: str | None = None,
@@ -148,14 +183,15 @@ def resolve_connection(
     didn't pass from the config `lupin join` wrote, then a hardcoded
     default. `redis_password` is never read from the config file (`join`
     never writes it there -- see `join`'s docstring), only from the caller
-    (in practice, `cli.py`'s `--redis-password`/`$LUPIN_REDIS_PASSWORD`).
+    (in practice, `cli.py`'s `--redis-password`/`$LUPIN_REDIS_PASSWORD`) or,
+    when the caller passes none, from `_redis_password()`.
     """
     config = load_config(config_path)
     return {
         "redis_host": redis_host or config.get("redis_host") or "localhost",
         "redis_port": redis_port or config.get("redis_port") or 6379,
         "redis_username": redis_username or config.get("redis_username"),
-        "redis_password": redis_password,
+        "redis_password": redis_password or _redis_password(),
     }
 
 

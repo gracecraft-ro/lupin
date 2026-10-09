@@ -1579,6 +1579,98 @@ def test_roadmap_full_query_renders_the_whole_page_without_javascript(
     assert "roadmap-fragment" not in body
 
 
+def test_roadmap_shows_why_a_repo_has_no_issues(redis_port, flush_redis):
+    """A repo whose GitHub read failed renders no cards, which used to be
+    indistinguishable from a repo with no issues. The board now names the
+    repo and the reason, so a blank lane is not read as "nothing to do".
+    """
+    connection = {
+        "redis_host": "127.0.0.1", "redis_port": redis_port,
+        "redis_username": None, "redis_password": None,
+    }
+    models = {
+        "widgets": roadmap.build_model(
+            [{"number": 4, "title": "Whole page card", "body": "", "labels": []}],
+            {}, [], repo="widgets",
+        ),
+        "broken": roadmap.build_model(
+            [], {}, [],
+            warnings=["GitHub issue data is unavailable: no git remotes found"],
+            repo="broken",
+        ),
+    }
+    for model in models.values():
+        model["closedNodes"] = []
+
+    with (
+        mock.patch.object(
+            serve, "code_repos",
+            return_value=[
+                {"repo": "widgets", "loopable": True},
+                {"repo": "broken", "loopable": True},
+            ],
+        ),
+        mock.patch.object(
+            roadmap, "cached_combined_model", side_effect=lambda repo, path, **kw: models[repo]
+        ),
+        _live_dashboard(connection) as port,
+    ):
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/roadmap/board", timeout=15
+        ) as response:
+            body = response.read().decode()
+
+    assert "Whole page card" in body
+    assert "class='repo-warnings'" in body
+    assert "broken" in body
+    assert "no git remotes found" in body
+
+
+def test_roadmap_list_view_repo_filter_hides_other_repos_warnings(
+    redis_port, flush_redis
+):
+    """`?repo=` narrows the list to one repo; its warnings must narrow too,
+    or a filtered view still reports failures for repos it is not showing.
+    """
+    connection = {
+        "redis_host": "127.0.0.1", "redis_port": redis_port,
+        "redis_username": None, "redis_password": None,
+    }
+    models = {
+        "widgets": roadmap.build_model(
+            [{"number": 4, "title": "Widget card", "body": "", "labels": []}],
+            {}, [], repo="widgets",
+        ),
+        "broken": roadmap.build_model(
+            [], {}, [],
+            warnings=["GitHub issue data is unavailable: no git remotes found"],
+            repo="broken",
+        ),
+    }
+
+    with (
+        mock.patch.object(
+            serve, "code_repos",
+            return_value=[
+                {"repo": "widgets", "loopable": True},
+                {"repo": "broken", "loopable": True},
+            ],
+        ),
+        mock.patch.object(
+            roadmap, "cached_model", side_effect=lambda repo, path, **kw: models[repo]
+        ),
+        _live_dashboard(connection) as port,
+    ):
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/roadmap/board?view=list&repo=widgets", timeout=15
+        ) as response:
+            body = response.read().decode()
+
+    assert "Widget card" in body
+    assert "class='repo-warnings'" not in body
+    assert "no git remotes found" not in body
+
+
 
 
 def test_dashboard_degrades_when_redis_unreachable(closed_port):

@@ -6,20 +6,28 @@ machines seeing different snapshots of the same repo at the same moment.
 
 Grace's correction on the first design: the fetcher is not "whichever
 machine wins a lock race" -- it is one named machine, pinned by hostname.
-`CANONICAL_GH_FETCHER` is that name. Every other machine only ever reads
-the cache; on a miss it returns an honest "no data yet" error instead of
-calling `gh` itself, even if Redis is down. The `slots_redis` lock below
-still matters, but only to stop the canonical fetcher from running the same
-fetch twice if two `lupin` invocations on that one machine race each other.
+`CANONICAL_GH_FETCHER` is that name. Every other machine reads the cache
+while that fetcher is alive; on a miss it returns an honest "no data yet"
+error instead of calling `gh` itself. When the pinned fetcher is not
+maintaining the cache (draining, offline, or never joined), the pin has no
+holder, so the next machine reads the fleet registry, sees that, and fetches
+live itself -- publishing through the same shared lock, so the first
+machine to get there still answers for the whole fleet. A machine never
+calls `gh` on its own when Redis is down and it is not the canonical
+fetcher. The `slots_redis` lock below serializes fetchers; with more than
+one machine able to fetch, that lock is what keeps the "one snapshot" part
+of the design true.
 
 Risk, stated rather than papered over: `CANONICAL_GH_FETCHER` is compared
 against `machines.hostname()` (`socket.gethostname()`) with a plain `==`.
 If that machine's hostname is ever reported differently -- a FQDN
 (`pihome.local`) instead of the short name, or changed by whoever reimages
-it -- this check silently stops matching and the fetch path goes cold
-fleet-wide (every machine, including the one meant to fetch, falls back to
-"no data yet"). Nothing here detects that; it would show up as every
-caller's cache staying empty.
+it -- this check silently stops matching and pihome's own reads stop
+fetching. The registry check in `_canonical_fetcher_live` no longer lets
+that take the rest of the fleet down with it: the registry is keyed by the
+name `join` wrote, so a hostname mismatch leaves pihome looking absent,
+which is the same signal as "not maintaining the cache", and the other
+machines fetch live instead of showing nothing.
 """
 
 from __future__ import annotations
@@ -79,52 +87,43 @@ def _client(connection: dict):
     )
 
 
-def cached_gh_json(
+def _canonical_fetcher_live(connection: dict) -> bool:
+    """Is `CANONICAL_GH_FETCHER` maintaining the shared cache right now?
+
+    Read from the fleet registry, not assumed. A pinned host that is
+    draining, offline, or never joined leaves the cache cold forever --
+    which is exactly what happened here: pihome was drained and jesus,
+    the machine running `lupin serve`, refused every `gh` read. This is
+    the cold-cache case the module docstring names as a risk ("the fetch
+    path goes cold fleet-wide ... it would show up as every caller's cache
+    staying empty"); this check is what detects it.
+
+    Returns True when the registry cannot be read: an unreadable registry
+    is not evidence the fetcher is gone, and the conservative answer keeps
+    the original behaviour rather than starting a fetch it cannot justify.
+    """
+    try:
+        records = {record["name"]: record for record in machines.machines(connection)}
+    except Exception:
+        return True
+    record = records.get(CANONICAL_GH_FETCHER)
+    return bool(record) and record.get("state") == "online"
+
+
+def _fetch_and_publish(
     owner: str,
     name: str,
     cache_key: str,
     fetch_fn: Callable[[], tuple[Any, str | None]],
-    *,
-    connection: dict | None = None,
+    client,
+    connection: dict,
 ) -> tuple[Any, str | None]:
-    """Return `fetch_fn()`'s result, either from the shared cache or from a
-    live `gh` call -- but only on `CANONICAL_GH_FETCHER` does a cache miss
-    ever run `fetch_fn`. Every other machine gets `(None, "<explanation>")`
-    on a miss, never calling `gh` itself, Redis up or down.
-
-    `fetch_fn` takes no arguments and returns `(data, error)`, the same
-    shape every `gh`-calling function in this codebase already uses --
-    callers wrap their real call in a closure. A result is cached only when
-    `error` is falsy; a failed fetch is never cached, so the next caller
-    (which might be able to reach `gh` where this one couldn't) gets a real
-    retry instead of a cached failure.
+    """Run `fetch_fn` under the shared `gh-fetch` lock and publish the
+    result. Only one machine fetches a given repo's key at a time, so the
+    first one to win answers for the whole fleet and everyone else reads
+    its answer from the cache instead of paying for a second `gh` call.
     """
-    connection = _resolve(connection)
-    client = _client(connection)
     key = f"{PREFIX}gh-cache:{owner}/{name}:{cache_key}"
-
-    hit, cached, redis_ok = _read_cache(client, key)
-    if hit:
-        return cached, None
-
-    hostname = machines.hostname()
-    if hostname != CANONICAL_GH_FETCHER:
-        if redis_ok:
-            return None, (
-                f"no cached GitHub data yet for {cache_key} ({owner}/{name}); "
-                f"only {CANONICAL_GH_FETCHER} fetches live data"
-            )
-        return None, (
-            f"the GitHub data cache is unreachable and this machine ({hostname}) "
-            f"is not {CANONICAL_GH_FETCHER}, so it cannot fetch directly"
-        )
-
-    if not redis_ok:
-        # CANONICAL_GH_FETCHER is still the authority even when it can't
-        # publish for anyone else -- answer its own caller with a live
-        # fetch rather than failing a command over a cache-layer outage.
-        return fetch_fn()
-
     # A unique holder per call, not just `cache_key`: `slots_redis.acquire`
     # treats a second acquire from the *same* holder as a renew, not
     # contention (see `_ACQUIRE_SCRIPT` -- same holder means no wait at
@@ -153,9 +152,11 @@ def cached_gh_json(
             redis_password=connection.get("redis_password"),
         )
     except slots_redis.SlotFull:
-        # Another fetch for this repo is already in flight on this same
-        # machine -- check once more in case it just finished, otherwise
-        # fetch anyway. A duplicate read is wasted work, not a bug.
+        # Another fetch for this repo is already in flight -- on the
+        # canonical fetcher this is another `lupin` process on the same
+        # machine, in the fallback case it is another machine. Check once
+        # more in case it just finished, otherwise fetch anyway. A
+        # duplicate read is wasted work, not a bug.
         hit, cached, _redis_ok = _read_cache(client, key)
         if hit:
             return cached, None
@@ -181,6 +182,62 @@ def cached_gh_json(
     finally:
         if lease:
             _release(lease, connection)
+
+
+def cached_gh_json(
+    owner: str,
+    name: str,
+    cache_key: str,
+    fetch_fn: Callable[[], tuple[Any, str | None]],
+    *,
+    connection: dict | None = None,
+) -> tuple[Any, str | None]:
+    """Return `fetch_fn()`'s result, either from the shared cache or from a
+    live `gh` call. `CANONICAL_GH_FETCHER` always fetches on a miss. Every
+    other machine reads the cache while that fetcher is alive; when it is
+    not (draining, offline, or never joined -- see `_canonical_fetcher_live`),
+    this machine fetches too, and publishes, so the fleet still gets one
+    shared snapshot. A machine never fetches when Redis is down and it is
+    not the canonical fetcher.
+
+    `fetch_fn` takes no arguments and returns `(data, error)`, the same
+    shape every `gh`-calling function in this codebase already uses --
+    callers wrap their real call in a closure. A result is cached only when
+    `error` is falsy; a failed fetch is never cached, so the next caller
+    (which might be able to reach `gh` where this one couldn't) gets a real
+    retry instead of a cached failure.
+    """
+    connection = _resolve(connection)
+    client = _client(connection)
+    key = f"{PREFIX}gh-cache:{owner}/{name}:{cache_key}"
+
+    hit, cached, redis_ok = _read_cache(client, key)
+    if hit:
+        return cached, None
+
+    hostname = machines.hostname()
+    canonical = hostname == CANONICAL_GH_FETCHER
+    if not canonical:
+        if not redis_ok:
+            return None, (
+                f"the GitHub data cache is unreachable and this machine ({hostname}) "
+                f"is not {CANONICAL_GH_FETCHER}, so it cannot fetch directly"
+            )
+        if _canonical_fetcher_live(connection):
+            return None, (
+                f"no cached GitHub data yet for {cache_key} ({owner}/{name}); "
+                f"only {CANONICAL_GH_FETCHER} fetches live data"
+            )
+        # Nobody is maintaining the cache, so fall through and fetch here.
+
+    if not redis_ok:
+        # Only the canonical fetcher reaches this with Redis down: it is
+        # still the authority even when it cannot publish for anyone else
+        # -- answer its own caller with a live fetch rather than failing a
+        # command over a cache-layer outage.
+        return fetch_fn()
+
+    return _fetch_and_publish(owner, name, cache_key, fetch_fn, client, connection)
 
 
 def _release(lease, connection: dict) -> None:

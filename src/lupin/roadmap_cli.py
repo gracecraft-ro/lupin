@@ -98,6 +98,7 @@ def build_roadmap(
     code_dir: str = roadmap.CODE_DIR,
     refresh: bool = False,
     claims_lookup=claims.claims_for,
+    connection: dict | None = None,
 ) -> dict:
     """Fetch open issues and the dependency DAG for `repos`, mark claimed
     issues, and compute each issue's status.
@@ -105,6 +106,9 @@ def build_roadmap(
     Returns {"repos": {repo: [node, ...]}, "cycles": [...], "warnings": [...]}.
     Each node: number, title, priority, status (ready/blocked/claimed),
     claimedBy (session string or None), blockedBy (resolved open blockers).
+
+    `connection` reaches the shared `gh` cache, which owns the fleet Redis
+    location itself when it is None (see `gh_cache._resolve`).
     """
     warnings: list[str] = []
     issues_by_repo: dict[str, dict[int, dict]] = {}
@@ -120,9 +124,13 @@ def build_roadmap(
         if identity_error:
             warnings.append(f"{repo}: {identity_error}")
         if refresh:
-            issues, _comments, issue_warnings = roadmap.load_github(path, "open")
+            issues, _comments, issue_warnings = roadmap.load_github(
+                path, "open", connection=connection
+            )
         else:
-            issues, _comments, issue_warnings = roadmap.cached_github(repo, path, "open")
+            issues, _comments, issue_warnings = roadmap.cached_github(
+                repo, path, "open", connection=connection
+            )
         warnings.extend(f"{repo}: {w}" for w in issue_warnings)
         by_number = {
             issue["number"]: issue
@@ -473,8 +481,14 @@ def run(
     code_dir: str = roadmap.CODE_DIR,
     enabled_repos=None,
     claims_lookup=claims.claims_for,
+    connection: dict | None = None,
 ) -> tuple[str, int]:
-    """Build and render `lupin roadmap`. Returns (output text, exit code)."""
+    """Build and render `lupin roadmap`. Returns (output text, exit code).
+
+    `connection` is the fleet Redis location, threaded from `cli.py`'s
+    `--redis-*` flags. `build_roadmap` falls back to `gh_cache`'s own
+    resolution when it is None, which reads the same fleet config.
+    """
     if repo:
         repos = [repo]
         explicit_repo = True
@@ -489,7 +503,13 @@ def run(
     if not repos:
         return "No ready tasks in any repo. Nothing to run.", 0
 
-    model = build_roadmap(repos, code_dir=code_dir, refresh=refresh, claims_lookup=claims_lookup)
+    model = build_roadmap(
+        repos,
+        code_dir=code_dir,
+        refresh=refresh,
+        claims_lookup=claims_lookup,
+        connection=connection,
+    )
     multi_repo = len(repos) > 1
 
     if dag:

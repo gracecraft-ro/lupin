@@ -1099,6 +1099,19 @@ def _fetch_lock(key: tuple) -> threading.Lock:
         return lock
 
 
+def _fetch_failed(data: tuple) -> bool:
+    """Did this `load_github` result fail to read anything, and say why?
+
+    `load_github` returns `(issues, comments, warnings)`. An empty issue
+    list with a warning is an outage (bad auth, unreachable cache, no
+    remote); an empty issue list with no warnings is a repo that really
+    has none open. Shared by `cached_github`, which must not persist the
+    first kind for an hour.
+    """
+    issues, _comments, warnings = data
+    return not issues and bool(warnings)
+
+
 def cached_github(
     repo: str,
     repo_path: str,
@@ -1122,6 +1135,15 @@ def cached_github(
         if data is not None:
             return data
         data = load_github(repo_path, state, connection=connection)
+        if _fetch_failed(data):
+            # A fetch that returned nothing *and* said why is not a
+            # snapshot -- it is the outage. Caching it means one bad
+            # minute (auth, a drained fetcher, a rate limit) keeps a repo
+            # blank for the whole hour, which is exactly how an already
+            # broken Roadmap stayed broken after its cause was fixed. A
+            # repo with genuinely no issues has no warnings, so it still
+            # caches normally.
+            return data
         with _CACHE_LOCK:
             _GITHUB_CACHE[key] = (time.monotonic(), data)
         _persist_cache()
@@ -1568,10 +1590,35 @@ BOARD_CSS = """
 .roadmap-board>.card{grid-column:1/-1;margin:0}
 .roadmap-note{padding:0 1rem}
 .updated-label{white-space:nowrap;color:var(--ink3);font:12px var(--mono)}
+.repo-warnings{grid-column:1/-1;padding:.7rem 1rem;border:1px solid var(--warnline);background:var(--warnbg);color:var(--warnink);border-radius:12px;font-size:12px}
+.repo-warnings summary{cursor:pointer;font:600 12px var(--mono)}
+.repo-warnings ul{margin:.5rem 0 0;padding-left:1.1rem;display:grid;gap:.25rem}
 @media(max-width:900px){.updated-label{display:none}}
 @media(max-width:1000px){.roadmap-layout{grid-template-columns:1fr}.roadmap-detail{border-left:0;border-top:1px solid var(--line)}}
 @media(max-width:760px){.roadmap-board{grid-template-columns:1fr}.roadmap-card-grid,.roadmap-human .roadmap-card-grid{grid-template-columns:1fr}.roadmap-facts{display:none}}
 """
+
+
+def _repo_warnings(models: dict, repos: list[str]) -> str:
+    """Per-repo fetch failures, shown instead of an empty board.
+
+    A repo whose issues could not be read renders no cards, which is
+    indistinguishable from a repo with no issues -- a silent zero that
+    says nothing about whether the GitHub data ever arrived. The model
+    already carries the reason; this puts it on screen.
+    """
+    parts = []
+    for repo in repos:
+        messages = (models.get(repo) or {}).get("warnings") or []
+        if not messages:
+            continue
+        items = "".join(f"<li>{html.escape(message)}</li>" for message in messages)
+        parts.append(
+            f"<details class='repo-warnings'><summary>{html.escape(repo)}: "
+            f"{len(messages)} warning{'s' if len(messages) != 1 else ''}</summary>"
+            f"<ul>{items}</ul></details>"
+        )
+    return "".join(parts)
 
 
 def board_fragment(repos: list[str], models: dict, query=None, quest_state=None) -> tuple[str, str]:
@@ -1799,7 +1846,7 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
         f"<div class='roadmap-board-toolbar'>{status_html}{view_html}</div>"
         f"<nav class='roadmap-filter-row' aria-label='Tags'><strong>Tags</strong>{tag_html}</nav>"
         f"<nav class='roadmap-filter-row' aria-label='Capabilities'><strong>Capability</strong>{cap_html}</nav>"
-        f"<div class='roadmap-layout'><main class='roadmap-board'>{''.join(board_lanes) or '<p class=dim>No issues match these filters.</p>'}{quest_panel}</main>{issue_panel}</div>"
+        f"<div class='roadmap-layout'><main class='roadmap-board'>{_repo_warnings(models, active_repos)}{''.join(board_lanes) or '<p class=dim>No issues match these filters.</p>'}{quest_panel}</main>{issue_panel}</div>"
         f"<p class='dim roadmap-note'>{QUEUE_STAGE_NOTE} {LEDGER_STATUS_NOTE} Issue links open GitHub.</p>"
     )
     return body, BOARD_CSS
@@ -2140,6 +2187,9 @@ LIST_CSS = """
 .list-more{display:block;padding:.3rem 0 .3rem 1.4rem}
 .list-pager{display:flex;align-items:center;gap:.8rem;margin:.8rem 0;padding:.7rem 1rem;border:1px solid var(--line);border-radius:12px;background:var(--surface)}
 .list-pager .sp{flex:1}
+.repo-warnings{margin:.75rem 0;padding:.7rem 1rem;border:1px solid var(--warnline);background:var(--warnbg);color:var(--warnink);border-radius:12px;font-size:12px}
+.repo-warnings summary{cursor:pointer;font:600 12px var(--mono)}
+.repo-warnings ul{margin:.5rem 0 0;padding-left:1.1rem;display:grid;gap:.25rem}
 @media(max-width:760px){.list-stage-row{align-items:flex-start;flex-direction:column}.queue-filter{align-items:stretch}.queue-filter input,.queue-filter select{max-width:100%}}
 """
 
@@ -2372,6 +2422,7 @@ def list_fragment(repos: list[str], models: dict, query: dict, quest_state=None)
         f"<span class='roadmap-view'><a href='{board_link}'>Board</a><a class='active' href='{list_link_current}'>List</a></span></header>"
         f"<div class='list-stage-row'>{stage_tabs}</div>"
         f"{filters_form}"
+        f"{_repo_warnings(models, [repo for repo in repos if not repo_filter or repo == repo_filter])}"
         f"<div class='list-table'>{table_html}</div>"
         f"{quest_panel}{footer}"
     )
