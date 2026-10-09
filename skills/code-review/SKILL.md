@@ -30,6 +30,7 @@ Do not replace a PR review with a review of an unsubmitted branch.
 - Look for wrong behavior, missing boundaries, unsafe access, error cases,
   broken callers, weak tests, and unnecessary complexity.
 - Read relevant tests and code outside the diff when needed.
+- Identify when docs should be revised to reflect updated functionality or architecture.
 - Check CI status. Do not treat a green build as proof that the design is sound.
 - For UI changes, inspect the real surface and attached screenshots.
 - For 3D changes, inspect the contact sheet and compare useful views.
@@ -73,3 +74,5 @@ Use `APPROVED` only when no blocking finding remains. List optional nits as
 non-blocking. The orchestrator posts the verdict and findings on the PR,
 dispatches fixes, and runs this review again on the updated PR head. It merges
 only after approval and required checks pass.
+
+It is CRITICAL to check that excessive code isn't being added. There is a tendency for agents to reinvent the wheel, so to speak, create things that already exists, write tests that test nothing meaningful, or write too many tests. Whenever possible, we need to update existing tests instead of adding new tests when fixing behavior and not adding new features. If you see that a PR is bloated, you need to propose the changes to streamline it, or else you risk being buried in an avalanche of tech debt one PR at a time.
