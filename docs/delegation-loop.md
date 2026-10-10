@@ -5,7 +5,7 @@ can run without it. Read the root `AGENTS.md` first.
 
 ## Where this repo lives
 
-This repo is `gracecraft-software/lupin`. The owner clones it to
+This repo is `gracecraft-software/lupin`. The owner keeps a checkout at
 `~/Code/Projects/lupin` and OrbStack mounts it into the `jesus` sandbox at
 `/code/lupin`, the same way `ghostbook.nix` is mounted at
 `/code/ghostbook.nix`.
@@ -22,31 +22,23 @@ The sandbox `gh` account is `gracecraft-ro`. It cannot push to
 the PR on the fork, against `release/next`. Closing or labeling an issue can
 fail without triage access. Check before you write it into a report.
 
-To work on an issue:
-
-1. Clone it to a task directory, and work on a branch there, not in the
-   mount itself:
+1. Fetch the fork. From the repo checkout, run:
 
    ```bash
-   test ! -e ~/jobs/lupin-<task> || { echo "job dir exists"; exit 1; }
-   git clone --shared /code/lupin ~/jobs/lupin-<task>
-   git -C ~/jobs/lupin-<task> remote add fork https://github.com/gracecraft-ro/lupin.git
+   git fetch fork
    ```
 
-   `origin` in the clone points back at the mount. Do not push to it for a
-   PR.
-
-2. Branch from the current `release/next` on the fork. Fetch the fork first:
+2. Create a worktree for your branch. Keep its path under `.claude/worktrees/`.
+   Run:
 
    ```bash
-   git -C ~/jobs/lupin-<task> fetch fork
-   git -C ~/jobs/lupin-<task> switch -c <branch> fork/release/next
+   git worktree add <path> -b <branch> fork/release/next
    ```
 
 3. Use `/ship`. It runs `git push -u fork <branch>` and opens the PR. The PR
    base is `release/next` on the fork.
 
-On a Herdr worker you can use a Herdr worktree instead of a clone:
+On a Herdr worker, use the Herdr worktree commands:
 
 ```bash
 herdr worktree list --cwd /code/lupin
@@ -54,11 +46,12 @@ git -C /code/lupin fetch fork
 herdr worktree create --branch <branch> --base fork/release/next --cwd /code/lupin
 ```
 
-If the `fork` remote is missing, stop and report. Do not add a remote.
+A linked worktree shares its remotes with the checkout it came from. If that
+checkout has no `fork` remote, stop and report. Do not add a remote.
 
-The worktree is a linked Git worktree, not a clone. A linked worktree shares its
-remotes with the checkout it came from. If that checkout has no `fork` remote,
-stop and report.
+`lupin run` still starts each loop from `origin/HEAD`, which is upstream `main`.
+It does not start from `fork/release/next`. Until the owner changes it, start
+feature work with the Herdr worktree commands above.
 
 ## Pull request and review
 
@@ -68,9 +61,8 @@ repo:
 
 1. The base branch is the integration branch, `release/next`, on the fork
    (`gracecraft-ro/lupin`). A feature PR never targets upstream `main`.
-2. A worker uses `/ship` (see rule 1). If the push to the fork fails, it
-   reports the branch name and commit range. The reviewer reviews that
-   branch. Do not merge it until a PR exists on the fork.
+2. A worker uses `/ship` (see rule 1). If the push fails, the item stops.
+   Report the branch name and commit range. Do not review or merge it.
 3. The orchestrator dispatches `/code-review` for every PR or branch,
    including docs-only changes. The reviewer is not the worker. The
    reviewer's model tier is not lower than the worker's.
@@ -83,11 +75,12 @@ repo:
    approves and the gate passes. The gate is `nix flake check` (see "Build
    and test" in `AGENTS.md`). Merge with
    `gh pr merge --repo gracecraft-ro/lupin --merge`. Do not rebase. Do not
-   force-push. A worker or reviewer never merges. Close the issue in the same
-   pass as the merge.
+   force-push. Before merge, the branch must contain the current `release/next`.
+   See the merge check in the `delegation-loop` skill. A worker or reviewer
+   never merges. Close the issue in the same pass as the merge.
 
-Changes to this policy go to upstream `main` for the owner to merge. Feature
-work goes to fork `release/next`. PR #130 stays on upstream `main`.
+Changes to this policy go to upstream `main` for the owner to merge. The owner
+opens that PR. Feature work goes to fork `release/next`.
 
 At the end of a session, run `/handoff`.
 
@@ -96,13 +89,14 @@ At the end of a session, run `/handoff`.
 This repo follows "Preview server" in the `delegation-loop` skill. For this
 repo:
 
-- The start command, port, and machine are in "Preview server" in `AGENTS.md`.
-- The dashboard command is `lupin serve --bind 127.0.0.1 --port PORT`.
+- The start command and port are in "Preview server" in `AGENTS.md`. The
+  machine is not named yet.
 - Set `LUPIN_LOOP_STATE_DIR` to a preview-only path. The default is
   `/var/lib/delegation-loop`, which is the real fleet state.
 - Do not set `LUPIN_REDIS_HOST` to the fleet Redis unless the test needs it.
-- The state directory does not change the Herdr session. Herdr always uses the
-  `lupin-loops` session (`SESSION_NAME` in `src/lupin/loop_runtime.py`).
+- The state directory does not change the Herdr session. New runs use the
+  `lupin-loops` session (`SESSION_NAME` in `src/lupin/loop_runtime.py`). Older
+  loops may use a legacy session until they stop.
 - Do not use the start, stop, or run controls on the preview dashboard.
 
 ## Other rules
