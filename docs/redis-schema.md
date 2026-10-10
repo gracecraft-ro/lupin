@@ -387,8 +387,8 @@ cases. No single timer enforces it. It has three parts:
   - Remove the command from the queue.
   - Write the audit line.
 
-  A nil reply means the key already exists. The key may hold this attempt's
-  claim, after a lost reply. It may also hold another poller's claim. The entry
+  A nil reply means the key already exists. The key can hold this attempt's
+  claim, after a lost reply. It can also hold another poller's claim. The entry
   counts as this attempt's only when `state` is `running` and `claim` matches
   this attempt's token. The budget counts five calls. It covers the claim read
   even when that read does not run.
@@ -485,7 +485,7 @@ If a wait runs to that limit, the stop ends and the debrief is not written.
 
 - The budget does not cover the prune read, the pending-list read, or earlier
   commands in the same poll. These run before the command read.
-- The stop claim uses `debrief_client`. A reply that takes more than 1 second
+- The stop claim uses `debrief_client`. A read that waits more than 1 second
   makes an attempt fail. `_call_with_retry` then makes one more attempt. Three
   cases follow:
   - The first try writes the claim, and its reply is lost. The retry returns
@@ -496,7 +496,7 @@ If a wait runs to that limit, the stop ends and the debrief is not written.
     record `failed` and removes the command from the queue (`startup_scan`).
   - Another poller claims the id first. This poller returns `lost-race`. It does
     not touch the queue or run the command.
-- Non-stop actions use `_client`, which allows 2 seconds per reply. They are not
+- Non-stop actions use `_client`, which allows 2 seconds per read. They are not
   affected by this limit.
   `test_non_stop_command_survives_a_reply_slower_than_the_stop_bound` checks this.
 - If the stop runs, but the result write fails, the record stays `running`
@@ -552,7 +552,7 @@ allowance.
   "id": "a1b2c3d4e5f6...",
   "target": "jesus",
   "action": "loop.stop",
-  "params": {"repo": "gracecraft/lupin"},
+  "params": {"repo": "lupin"},
   "actor": "grace",
   "issuer": "pihome",
   "issued_at": 1759708800.123,
@@ -586,16 +586,16 @@ claim belongs to this attempt when `claim` matches its token and `state` is
 
 A `running` entry that is still queued when `lupin agent` restarts is marked
 `failed`, with reason `orphaned: still running when the agent restarted`. The
-startup scan does this. It never runs the command again. Three cases can leave
-such an entry:
+startup scan does this. It never runs the command again.
+Three cases can leave such an entry for any action:
 
-- The agent process stopped while the stop subprocess ran. A crash or a kill
-  can cause this. The stop may have run in full or in part. The startup scan
-  does not check.
+- The agent process stopped while its command subprocess ran. A crash or a
+  kill can cause this. The command can have run in full or in part. The
+  startup scan does not check.
 - The claim was written, but its reply was lost. The retry or the claim read
-  then failed. The stop did not run. The agent exited with code 3.
-- The stop ran, but the result write failed. The agent exited with code 3. The
-  stop did run.
+  then failed. The command did not run. The agent exited with code 3.
+- The command ran, but the result write failed. The agent exited with code 3.
+  The command did run.
 
 `output` is the last 8 KiB of combined stdout+stderr;
 `rejected`/`failed`-without-a-run carry a `reason` string instead.
@@ -606,10 +606,10 @@ One stream entry per enqueue and one per terminal outcome
 (`ok`/`failed`/`rejected`/`expired`), capped with `MAXLEN ~ 2000`. This is the
 audit trail. Some outcomes have no line:
 
-- A write is best effort. A Redis connection or timeout error drops the line.
-- A run whose `ZREM` fails has no line. If a later poll expires the entry, that
-  poll writes an `expired` line. `cmdres` still says `ok`. If the entry is
-  pruned first, no line is written.
+- A Redis connection or timeout error on the write drops the line.
+- A run whose `ZREM` fails has no line. If a later poll expires the entry, and its ZREM succeeds, that
+  poll writes an `expired` line. `cmdres` still says `ok`. If the prune removes the entry
+  first, no line is written.
 
 ## TTLs
 
