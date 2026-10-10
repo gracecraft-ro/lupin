@@ -467,8 +467,8 @@ Its waits:
     reply. It is not `MGET`. `MGET` returns nothing for a key of the wrong type,
     so that claim would vanish. A `GET` batch raises the error.
 
-The debrief client is made with no connection arguments. It connects to
-`localhost:6379` without auth.
+The debrief client gets no host, port, or password from its caller. It connects
+to `localhost:6379` without auth. Issue #118 tracks this.
 
 ## Lock waits
 
@@ -514,9 +514,10 @@ If a wait runs to that limit, the stop ends and the debrief is not written.
 - The claims scan counts as one request and reply. `SCAN` returns keys in pages.
   Each extra page is one more request and reply. The budget does not count the
   extra pages.
-- A server that sends data slowly can keep one reply going. Each read waits up
-  to 1 second. The reply as a whole has no time limit, so the budget does not
-  bound this case.
+- A server that sends data slowly can keep one reply going. Each read on the
+  stop path waits up to 1 second. Each read on `_client`, which the command
+  read uses, waits up to 2 seconds. The reply as a whole has no time limit.
+  The budget does not bound this case.
 - Name lookup (`getaddrinfo`) is not covered by the timeouts.
 
 ## Budget result
@@ -589,9 +590,9 @@ A `running` entry that is still queued when `lupin agent` restarts is marked
 startup scan does this. It never runs the command again.
 Three cases can leave such an entry for any action:
 
-- The agent process stopped while its command subprocess ran. A crash or a
-  kill can cause this. The command can have run in full or in part. The
-  startup scan does not check.
+- The agent process stopped after it wrote the claim, and before the command
+  finished. A crash or a kill can cause this. The command can have run in
+  full, in part, or not at all. The startup scan does not check.
 - The claim was written, but its reply was lost. The retry or the claim read
   then failed. The command did not run. The agent exited with code 3.
 - The command ran, but the result write failed. The agent exited with code 3.
