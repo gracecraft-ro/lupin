@@ -142,3 +142,81 @@ def test_acquire_with_the_right_password_uses_redis_not_the_fallback(auth_redis_
     raw = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass", decode_responses=True)
     assert raw.zcard("lupin:v1:slot:bmo") == 1
     slots_redis.release(lease, **kw)
+
+
+# A refused login is not an unreachable server. `auth_redis_port` is a real
+# server with a password. The tests below connect without one.
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda kw: slots_redis.acquire("not-bmo", "a", **kw),
+        lambda kw: slots_redis.release("not-bmo:a", **kw),
+        lambda kw: slots_redis.set_max("not-bmo", 3, **kw),
+    ],
+    ids=["acquire", "release", "set_max"],
+)
+def test_refused_login_names_the_password_source_not_unreachable(call, auth_redis_port):
+    with pytest.raises(slots.CoordinatorUnreachable) as caught:
+        call({"redis_host": "127.0.0.1", "redis_port": auth_redis_port})
+
+    message = str(caught.value)
+    assert "unreachable" not in message
+    assert "LUPIN_REDIS_PASSWORD" in message
+    assert "redis-password" in message
+    assert "test-pass" not in message
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda kw: slots_redis.acquire("bmo", "a", **kw),
+        lambda kw: slots_redis.renew("bmo:a", **kw),
+        lambda kw: slots_redis.release("bmo:a", **kw),
+        lambda kw: slots_redis.status(**kw),
+    ],
+    ids=["acquire", "renew", "release", "status"],
+)
+def test_refused_login_warning_names_the_password_source_before_the_local_fallback(
+    call, auth_redis_port, tmp_path, capsys
+):
+    call({"redis_host": "127.0.0.1", "redis_port": auth_redis_port, "state_root": str(tmp_path)})
+
+    err = capsys.readouterr().err
+    assert "unreachable" not in err
+    assert "LUPIN_REDIS_PASSWORD" in err
+    assert "local backend" in err
+
+
+def test_command_the_acl_denies_names_the_acl_not_unreachable(auth_redis_port):
+    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
+    admin.execute_command("ACL", "SETUSER", "no-eval", "on", ">no-eval-pw", "~lupin:*", "+get", "+set", "+ping")
+    try:
+        with pytest.raises(slots.CoordinatorUnreachable) as caught:
+            slots_redis.acquire(
+                "not-bmo", "a", redis_username="no-eval", redis_password="no-eval-pw",
+                redis_host="127.0.0.1", redis_port=auth_redis_port,
+            )
+    finally:
+        admin.execute_command("ACL", "DELUSER", "no-eval")
+
+    message = str(caught.value)
+    assert "unreachable" not in message
+    assert "ACL" in message
+    assert "no-eval-pw" not in message
+
+
+def test_cli_acquire_with_a_refused_login_names_the_password_source(auth_redis_port, monkeypatch, capsys):
+    monkeypatch.delenv("LUPIN_REDIS_USERNAME", raising=False)
+    monkeypatch.delenv("LUPIN_REDIS_PASSWORD", raising=False)
+    code = cli.main([
+        "acquire", "not-bmo", "--holder", "a", "--backend", "redis",
+        "--redis-host", "127.0.0.1", "--redis-port", str(auth_redis_port),
+    ])
+
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "cannot reach" not in err
+    assert "unreachable" not in err
+    assert "LUPIN_REDIS_PASSWORD" in err

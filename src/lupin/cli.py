@@ -54,7 +54,9 @@ Exit codes, by design (see #198's architecture plan):
      unreachable -- `bmo` falls back to the `local` backend instead (see
      `slots_redis.py`), so it does not reach this exit code. Claims have no
      local fallback at all, so `claim`/`renew-claim`/`release-claim` return
-     3 for every unreachable-Redis case.
+     3 for every unreachable-Redis case. A slot call that Redis refuses (bad
+     login, or a command the user's ACL denies) also returns 3. The message
+     names the cause, not "cannot reach".
   1  any other error (malformed lease id, bad JSON input, hold with neither
      --lease nor <slot>/--holder, etc.) -- also `renew-claim`/`release-claim`
      when the caller isn't the claim's current holder.
@@ -825,6 +827,9 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
     except slots.SlotFull:
         print(f"slot {args.slot!r} is full", file=sys.stderr)
         return 2
+    except slots_redis.CoordinatorAuthFailed as exc:
+        print(f"lupin: {exc}", file=sys.stderr)
+        return 3
     except slots.CoordinatorUnreachable:
         print(f"cannot reach the {args.backend} coordinator for slot {args.slot!r}", file=sys.stderr)
         return 3
@@ -858,6 +863,9 @@ def _cmd_hold(args: argparse.Namespace, command: list[str]) -> int:
     except slots.SlotFull:
         print(f"slot {args.slot!r} is full", file=sys.stderr)
         return 2
+    except slots_redis.CoordinatorAuthFailed as exc:
+        print(f"lupin: {exc}", file=sys.stderr)
+        return 3
     except slots.CoordinatorUnreachable:
         print(f"cannot reach the {args.backend} coordinator for slot {args.slot!r}", file=sys.stderr)
         return 3
@@ -870,6 +878,9 @@ def _cmd_release(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 1
+    except slots_redis.CoordinatorAuthFailed as exc:
+        print(f"lupin: {exc}", file=sys.stderr)
+        return 3
     except slots.CoordinatorUnreachable:
         print(f"cannot reach the {args.backend} coordinator for lease {args.lease!r}", file=sys.stderr)
         return 3
@@ -1262,6 +1273,9 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
     except slots.SlotFull:
         print("reconcile is already running on another machine", file=sys.stderr)
         return 2
+    except slots_redis.CoordinatorAuthFailed as exc:
+        print(f"lupin: {exc}", file=sys.stderr)
+        return 3
     except slots.CoordinatorUnreachable:
         print("cannot reach the redis coordinator for the reconcile slot", file=sys.stderr)
         return 3

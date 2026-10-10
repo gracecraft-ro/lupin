@@ -77,6 +77,9 @@ instead of failing the whole batch.
 `acquire` prints a lease ID on success. Exit code 2 means the slot is full
 — the caller should skip and try again later. Exit code 3 means the `redis`
 backend cannot reach the coordinator and the slot has no local fallback.
+Exit code 3 also means Redis refused the login. The message then says so. It
+names `LUPIN_REDIS_PASSWORD` and the `redis-password` credential, which
+supply the password.
 The `local` backend's coordinator is the filesystem, so it never returns 3.
 
 `hold` acquires a lease (or reuses one from `--lease`), runs `<command>`,

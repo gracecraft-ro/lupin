@@ -37,6 +37,14 @@ counts as unreachable too). Every other slot name raises
 for a hypothetical second fleet slot, v1 only has `bmo`, so this module does
 not invent a rule for a slot that does not exist yet.
 
+Redis can refuse the login (`AuthenticationError`) or refuse one command
+(`NoPermissionError`). `AuthenticationError` is a subclass of
+`ConnectionError`. This module tells both apart from an unreachable server.
+The fallback rule above is the same for them. The message is different: it
+names the real reason and the setting to check. Where this module raises,
+it raises `CoordinatorAuthFailed`. That is a subclass of
+`CoordinatorUnreachable`, so older handlers and exit code 3 do not change.
+
 Claims and ledger streams are fleet keys. `claims.py` and `ledger.py`
 implement them separately. Neither uses a local fallback when Redis is
 unreachable.
@@ -55,6 +63,17 @@ from ._lease_runtime import run_with_lease, split_lease
 
 SlotFull = local_slots.SlotFull
 CoordinatorUnreachable = local_slots.CoordinatorUnreachable
+
+
+class CoordinatorAuthFailed(CoordinatorUnreachable):
+    """Redis answered, but refused the login or the command.
+
+    The message says why and which setting to check. It never holds the
+    password.
+    """
+
+
+_AUTH_ERRORS = (redis.exceptions.AuthenticationError, redis.exceptions.NoPermissionError)
 
 PREFIX = "lupin:v1:"
 FALLBACK_SLOTS = {"bmo"}
@@ -127,12 +146,32 @@ def _call_with_retry(func):
         return func()
 
 
-def _warn_fallback(slot: str, exc: Exception) -> None:
-    print(
-        f"lupin: redis unreachable ({exc}); falling back to the local backend "
-        f"for slot {slot!r}",
-        file=sys.stderr,
+def _auth_reason(exc: Exception) -> str:
+    """Say why Redis refused, and which setting to check. Redis does not
+    put the password in its reply, so this message does not hold it.
+    """
+    reply = str(exc).rstrip(".")
+    if isinstance(exc, redis.exceptions.NoPermissionError):
+        return (
+            "redis user is not allowed to run this command. "
+            f"Check the user's ACL in docs/redis-schema.md. Redis said: {reply}"
+        )
+    return (
+        "redis refused the login. "
+        "Check the password in LUPIN_REDIS_PASSWORD or the redis-password credential. "
+        f"Redis said: {reply}"
     )
+
+
+def _warn_fallback(slot: str, exc: Exception) -> None:
+    if isinstance(exc, _AUTH_ERRORS):
+        message = f"lupin: {_auth_reason(exc)}. Falling back to the local backend for slot {slot!r}"
+    else:
+        message = (
+            f"lupin: redis unreachable ({exc}); falling back to the local backend "
+            f"for slot {slot!r}"
+        )
+    print(message, file=sys.stderr)
 
 
 def _now_ms() -> int:
@@ -173,6 +212,8 @@ def set_max(
     key = f"{PREFIX}slot:{slot}:max"
     try:
         _call_with_retry(lambda: client.set(key, max_holders))
+    except _AUTH_ERRORS as exc:
+        raise CoordinatorAuthFailed(_auth_reason(exc)) from exc
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(slot) from exc
     return max_holders
@@ -207,6 +248,13 @@ def acquire(
             max_n = _call_with_retry(lambda: _get_or_set_max(client, slot, max_holders))
             result = _call_with_retry(
                 lambda: client.eval(_ACQUIRE_SCRIPT, 1, key, holder, _now_ms(), ttl_ms, max_n)
+            )
+        except _AUTH_ERRORS as exc:
+            if slot not in FALLBACK_SLOTS:
+                raise CoordinatorAuthFailed(_auth_reason(exc)) from exc
+            _warn_fallback(slot, exc)
+            return local_slots.acquire(
+                slot, holder, wait=wait, ttl=ttl, max_holders=max_holders, state_root=state_root
             )
         except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
             if slot not in FALLBACK_SLOTS:
@@ -245,7 +293,7 @@ def renew(
             lambda: client.eval(_RENEW_SCRIPT, 1, key, holder, _now_ms(), int(ttl * 1000))
         )
         return bool(result)
-    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
+    except (*_AUTH_ERRORS, redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         if slot not in FALLBACK_SLOTS:
             return False
         _warn_fallback(slot, exc)
@@ -271,6 +319,11 @@ def release(
     try:
         result = _call_with_retry(lambda: client.eval(_RELEASE_SCRIPT, 1, key, holder))
         return bool(result)
+    except _AUTH_ERRORS as exc:
+        if slot not in FALLBACK_SLOTS:
+            raise CoordinatorAuthFailed(_auth_reason(exc)) from exc
+        _warn_fallback(slot, exc)
+        return local_slots.release(lease, state_root=state_root)
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         if slot not in FALLBACK_SLOTS:
             raise CoordinatorUnreachable(slot) from exc
@@ -313,7 +366,7 @@ def status(
             max_raw = client.get(max_key)
             result[slot] = {"holders": live, "max": int(max_raw) if max_raw is not None else None}
         return result
-    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
+    except (*_AUTH_ERRORS, redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         _warn_fallback("status", exc)
         return local_slots.status(state_root=state_root)
 
