@@ -166,7 +166,6 @@ def test_refused_login_on_a_non_bmo_slot_raises_and_is_not_unreachable(call, aut
         call({"redis_host": "127.0.0.1", "redis_port": auth_redis_port})
 
     message = str(caught.value)
-    assert caught.value.password_refused
     assert "unreachable" not in message
     assert "Check the Redis password" in message
 

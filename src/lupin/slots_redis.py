@@ -68,18 +68,11 @@ CoordinatorUnreachable = local_slots.CoordinatorUnreachable
 class CoordinatorAuthFailed(CoordinatorUnreachable):
     """Redis answered, but refused the login.
 
-    `password_refused` is True for a bad or missing password.
     The message never contains the password.
     """
 
-    def __init__(self, message: str, *, password_refused: bool) -> None:
-        super().__init__(message)
-        self.password_refused = password_refused
-
     def for_user(self, setting: str) -> str:
-        """Return the message for a user. For a bad password, it names `setting`."""
-        if not self.password_refused:
-            return f"{self}."
+        """Return the message for a user. It names `setting`."""
         return f"{self}. Set {setting}."
 
 
@@ -170,8 +163,7 @@ def _auth_failed(exc: Exception) -> CoordinatorAuthFailed:
     """
     reply = str(exc).rstrip(".")
     return CoordinatorAuthFailed(
-        f"redis refused the login. Check the Redis password. Redis said: {reply}",
-        password_refused=True,
+        f"redis refused the login. Check the Redis password. Redis said: {reply}"
     )
 
 
