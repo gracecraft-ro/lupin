@@ -44,17 +44,26 @@ import redis
 
 from . import commands, machines
 from .slots import CoordinatorUnreachable
-from .slots_redis import _call_with_retry, _client
+from .slots_redis import DEBRIEF_TIMEOUT_S, _call_with_retry, _client, debrief_client
 
 DEFAULT_BATCH = 20  # design: "ZRANGE the oldest 20"
 DEFAULT_POLL_INTERVAL = 2.0
 EXEC_TIMEOUT_S = 120.0
-# Time limit for loop.stop, in seconds. The stop subprocess runs its waits
-# one after another: the handoff wait (loop_runtime.HANDOFF_GRACE_S), the
-# debrief's gh calls (debrief.DEBRIEF_TIME_LIMIT_S), and the debrief's Redis
-# calls. tests/test_agent.py checks their worst-case sum. Redis calls outside
-# the subprocess and lock waits are not in this limit. See docs/redis-schema.md.
+# Time limit for loop.stop, in seconds, for the whole stop path. It counts
+# the stop subprocess and the Redis calls made on that path. See docs/redis-schema.md.
 ACTION_TIMEOUT_S = {"loop.stop": 1740.0}
+REDIS_ADDRESSES = 2  # IPv6 and IPv4 for localhost
+# Worst case for one debrief Redis call, in seconds. _call_with_retry makes
+# two attempts. Each attempt waits for one connect per address, then one read.
+# Each wait is up to DEBRIEF_TIMEOUT_S.
+DEBRIEF_CALL_WORST_S = 2 * (REDIS_ADDRESSES + 1) * DEBRIEF_TIMEOUT_S
+# Agent Redis calls on the loop.stop path: read command, claim result,
+# write result, dequeue, audit line. They use debrief_client.
+AGENT_REDIS_CALLS_ON_STOP = 5
+# Cap on the stop subprocess. The agent's Redis calls use the rest of the limit.
+SUBPROCESS_TIMEOUT_S = {
+    "loop.stop": ACTION_TIMEOUT_S["loop.stop"] - AGENT_REDIS_CALLS_ON_STOP * DEBRIEF_CALL_WORST_S,
+}
 OUTPUT_CAP = 8192  # 8 KiB, combined stdout+stderr -- design's "last 8 KiB combined"
 
 # Defense in depth: queue commands must pass this strict repo-name check.
@@ -371,7 +380,7 @@ def _process_one(client, machine: str, key: str, cmd_id: str) -> dict:
         return {"id": cmd_id, "state": "lost-race"}
 
     try:
-        proc = subprocess.run(argv, shell=False, capture_output=True, text=True, timeout=ACTION_TIMEOUT_S.get(action, EXEC_TIMEOUT_S))
+        proc = subprocess.run(argv, shell=False, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_S.get(action, EXEC_TIMEOUT_S))
         combined = (proc.stdout or "") + (proc.stderr or "")
         payload = {
             "id": cmd_id,
@@ -464,8 +473,10 @@ def poll_once(
         _call_with_retry(lambda: client.zremrangebyscore(qkey, "-inf", cutoff_ms))
 
         pending = _call_with_retry(lambda: client.zrange(qkey, 0, batch - 1))
+        # Command handling uses the debrief client, so its Redis calls fit the stop budget.
+        command_client = debrief_client(redis_host, redis_port, redis_username, redis_password)
         for cmd_id in pending:
-            touched.append(_process_one(client, machine, key, cmd_id))
+            touched.append(_process_one(command_client, machine, key, cmd_id))
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(machine) from exc
     return touched

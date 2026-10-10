@@ -373,44 +373,125 @@ fixed action table: `loop.stop`, `loop.run`, `loop.run-all`, `loop.peek`,
 `loop.stop` takes `repo` and an optional boolean `force`. Without `force`, the
 stop asks the agent for a handoff first.
 
-The agent gives `loop.stop` a time limit of 1740 seconds (29 minutes). The
-limit is `ACTION_TIMEOUT_S["loop.stop"]` in `agent.py`. It covers the stop
-subprocess only. Inside that subprocess, the waits run one after another. Their
-sum is 1317.25 seconds. The sum adds waits that cannot all happen on one path,
-so it is an upper bound. The test `test_stop_time_limit_covers_the_listed_timeouts`
-in `tests/test_agent.py` checks this sum.
+The agent gives `loop.stop` a time limit of 1740 seconds (29 minutes). This is
+`ACTION_TIMEOUT_S["loop.stop"]` in `agent.py`. The limit covers the whole stop
+path. The path has two parts:
 
-The debrief makes three Redis calls in the sum:
+- The stop subprocess. The agent ends it when its limit runs out. The limit is
+  `SUBPROCESS_TIMEOUT_S["loop.stop"]`.
+- Five Redis calls made by the agent, outside the subprocess. They read the
+  command, write the claim, write the result, remove the command from the queue,
+  and write the audit line.
 
-- A ledger read (one `XRANGE`).
-- A claims scan (one `SCAN` call).
-- A claims read (one `MGET` for all claim keys).
+The subprocess limit is the whole limit minus the time for the five Redis calls:
 
-Each has an upper bound of 108 seconds. `SCAN` returns keys in pages. A large
-keyspace needs more `SCAN` calls than the sum counts.
+    SUBPROCESS_TIMEOUT_S = 1740 - 5 x 6 = 1710 seconds
 
-These waits are not in the sum:
+Other actions get `EXEC_TIMEOUT_S`, which is 120 seconds.
 
-- Five Redis calls in `_process_one` (`agent.py`), outside the subprocess. They
-  read the command, claim it, write its result, remove it from the queue, and
-  log the event. The subprocess timeout does not bound them. Each has an upper
-  bound of 108 seconds. Together they are 540 seconds.
-- The repo lock in `stop_loop`. It has no time limit.
-- The machine lock in `_ensure_shared_server`. It has no time limit.
+## Debrief Redis client
 
-Whether the limit should count the five Redis calls is open. The limit stays at
-1740 seconds.
+`slots_redis.debrief_client` makes a Redis client with short timeouts. It is
+used for three things:
 
-One Redis call has an upper bound of 2 x (11 x A x 2 + 10) seconds. A is the
-number of addresses the host resolves to. On localhost, A is 2, so the upper
-bound is 108 seconds. The client tries twice. Each try makes 11 attempts, and
-each attempt tries every address with a 2 second connect limit. The client
-waits up to 1 second between attempts.
+- The five agent Redis calls on the stop path.
+- The three Redis calls in the debrief, inside the stop subprocess.
+- Command handling in `poll_once`, for every action. It is not only `loop.stop`.
 
-All `gh` calls in one debrief share one 10-second time limit
-(`DEBRIEF_TIME_LIMIT_S`). Redis reads are not in this limit. A call that hits
-the limit leaves a `Not collected` note in the debrief. Other actions get
-`EXEC_TIMEOUT_S`, which is 120 seconds.
+The client has these settings:
+
+- Each connect waits up to 1 second. This is `DEBRIEF_TIMEOUT_S`.
+- Each read waits up to 1 second.
+- redis-py does not retry (`retries=0`).
+- `_call_with_retry` makes one retry. That is two attempts in all.
+
+The default client (`_client`) does not change. Its timeout is 2 seconds, and
+redis-py retries. Other callers use it, including slots, claims, and ledger
+writes. The poll's prune and pending reads use it too. These calls are outside
+the stop budget.
+
+## One debrief Redis call
+
+The worst case for one debrief Redis call is 6 seconds. This is
+`DEBRIEF_CALL_WORST_S` in `agent.py`:
+
+    2 x (2 + 1) x 1 = 6
+
+- Two attempts (`_call_with_retry`).
+- Each attempt has up to two connect waits (IPv6 and IPv4) and one read wait.
+- Each wait is up to 1 second.
+
+This is an upper bound. The measured cases below took less.
+
+Measured 2026-10-10 on this machine, with a probe script that is not in the repo:
+
+| Case | Seconds | Result |
+| --- | --- | --- |
+| Healthy localhost, cold connect and PING, 20 calls | 0.0007 to 0.0015 | ok |
+| Read stall: accepts, never replies | 2.00 | TimeoutError |
+| Reply stall: answers `CLIENT SETINFO`, never answers `GET` | 2.00 | TimeoutError |
+| Connect stall, host `::1` only (accept queue full) | 2.00 | TimeoutError |
+| Connect stall, host `localhost` (IPv6 and IPv4) | 4.01 | TimeoutError |
+| Configured Redis host over the tailnet, cold connect and PING, 10 calls | 0.018 to 0.027 | ok |
+
+The tailnet row is one machine on one day. A cold tunnel after an idle period
+is not measured. A connect that takes longer than 1 second fails.
+
+## Debrief in the subprocess
+
+The debrief runs inside the stop subprocess, after the repo lock is released.
+Its waits:
+
+- One `gh` time limit of 10 seconds for all `gh` calls together
+  (`DEBRIEF_TIME_LIMIT_S`). A call that hits the limit leaves a `Not collected`
+  note in the debrief.
+- Three Redis calls, each up to 6 seconds:
+  - A ledger read (one `XRANGE`).
+  - A claims scan (`SCAN`). See known limits.
+  - A claims read. This is one batch of `GET` commands, sent together, with one
+    reply. It is not `MGET`. `MGET` returns nothing for a key of the wrong type,
+    so that claim would vanish. A `GET` batch raises the error.
+
+The debrief client is made with no connection arguments. It connects to
+`localhost:6379` without auth. The HEAD code did the same.
+
+## Lock waits
+
+Two lock waits have no time limit of their own. They are not in the budget table.
+
+- The repo lock in `stop_loop` (`loop_runtime.py:1112`, blocking `flock`).
+- The machine lock in `_ensure_shared_server` (`loop_runtime.py:771`, blocking
+  `flock`). The stop path reaches it only when the shared Herdr server is down.
+
+Both waits run inside the stop subprocess. Only the subprocess limit ends them.
+If a wait runs to that limit, the stop ends and the debrief is not written.
+
+## Known limits
+
+- The claims scan counts as one request and reply. `SCAN` returns keys in pages.
+  A keyspace of 2005 claim keys took 192 `SCAN` requests at the default COUNT of
+  10 (measured 2026-10-10). The budget does not count the extra pages. The fix
+  does not change the scan.
+- A slow server that keeps sending data is not a stall. Each read can wait up to
+  1 second, but the total is not limited. The budget does not bound this case.
+- Name lookup (`getaddrinfo`) is not covered by the timeouts.
+
+## Budget result
+
+Worst case, in seconds. The terms are in `tests/test_agent.py`.
+
+| Part | Terms | Seconds |
+| --- | --- | --- |
+| Subprocess, listed | loop_runtime waits 983.25; gh 10; three debrief Redis calls 3 x 6 | 1011.25 |
+| Subprocess limit | 1740 - 5 x 6 | 1710.00 |
+| Agent Redis calls | five calls at 6 | 30.00 |
+| Whole stop path, listed | 1011.25 + 30 | 1041.25 |
+| Whole stop path, limit | `ACTION_TIMEOUT_S["loop.stop"]` | 1740.00 |
+| Margin | 1740 - 1041.25 | 698.75 |
+
+`test_stop_time_limit_covers_the_listed_timeouts` checks the listed total against
+the whole limit. `test_stop_subprocess_cap_leaves_room_for_agent_redis_calls`
+checks the subprocess cap.
 
 ### `cmd:<id>`
 

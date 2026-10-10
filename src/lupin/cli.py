@@ -115,8 +115,10 @@ from . import loop_runtime
 DEFAULT_RESULT_WAIT_S = 20.0  # how long stop/peek/schedule/pause/resume
 # wait, by default, for a remote result before they report exit code 4
 # ("sent, result unknown"). This is not the time limit for the action
-# itself. agent.py sets that: EXEC_TIMEOUT_S, or ACTION_TIMEOUT_S for
-# loop.stop. A caller who wants to wait longer than 20 seconds passes --wait.
+# itself. agent.py sets that: EXEC_TIMEOUT_S. For loop.stop, the stop
+# subprocess has the cap SUBPROCESS_TIMEOUT_S. The whole stop path is
+# limited by ACTION_TIMEOUT_S. A caller who wants to wait longer than
+# 20 seconds passes --wait.
 
 
 def _route_args(parser: argparse.ArgumentParser) -> None:

@@ -208,6 +208,7 @@ def claims_for(
     redis_port: int | None = None,
     redis_username: str | None = None,
     redis_password: str | None = None,
+    client: "redis.Redis | None" = None,
 ) -> dict[str, dict]:
     """Return `{"<owner>/<repo>#<n>": {"host", "session", "since"}}` for
     every currently-claimed issue in `repos` (each an `"<owner>/<repo>"`
@@ -219,9 +220,12 @@ def claims_for(
     `CoordinatorUnreachable` if Redis can't be reached; there's no local
     fallback for claims, so a caller should treat that failure the same way
     `lupin claim` exiting 3 is treated elsewhere: start no new issue, but
-    don't disturb anything already in progress.
+    don't disturb anything already in progress. Pass `client` to use a ready
+    client (the debrief path does); otherwise one is made from the connection
+    arguments.
     """
-    client = _client(redis_host, redis_port, redis_username, redis_password)
+    if client is None:
+        client = _client(redis_host, redis_port, redis_username, redis_password)
     prefix = f"{PREFIX}claim:"
     try:
         keys = _call_with_retry(lambda: list(client.scan_iter(match=f"{prefix}*")))
@@ -234,11 +238,19 @@ def claims_for(
         result: dict[str, dict] = {}
         if not wanted:
             return result
-        # One call for all keys. The call count does not grow with the claim count.
-        raws = _call_with_retry(lambda: client.mget(wanted))
+        # One batch of GET commands for all keys, sent together. GET, not MGET,
+        # so a key of the wrong type raises an error. MGET would return None.
+        # The batch is built inside the retry, because execute() clears it.
+        def read_claims():
+            pipe = client.pipeline(transaction=False)
+            for key in wanted:
+                pipe.get(key)
+            return pipe.execute(raise_on_error=True)
+
+        raws = _call_with_retry(read_claims)
         for key, raw in zip(wanted, raws):
             if raw is None:
-                continue
+                continue  # expired between the scan and the read
             result[key[len(prefix) :]] = json.loads(raw)
         return result
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:

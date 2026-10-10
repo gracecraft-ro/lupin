@@ -19,7 +19,7 @@ from pathlib import Path
 
 import redis
 
-from . import claims, ledger, roadmap
+from . import claims, ledger, roadmap, slots_redis
 from .slots import CoordinatorUnreachable
 
 GH_TIMEOUT = 30.0
@@ -330,12 +330,14 @@ def write_debrief(
     claimed = None
     ledger_note = None
     if not forced:
+        # Both Redis reads use one debrief client. Its timeouts keep them in the stop budget.
+        client = slots_redis.debrief_client(None, None)
         try:
-            events = ledger.read_events(full_name, limit=None)
+            events = ledger.read_events(full_name, limit=None, client=client)
         except (CoordinatorUnreachable, redis.exceptions.RedisError, ValueError, KeyError) as exc:
             ledger_note = f"Ledger unavailable: {exc.__cause__ or exc}"
         try:
-            held = claims.claims_for([full_name])
+            held = claims.claims_for([full_name], client=client)
             claimed = {
                 int(key.rsplit("#", 1)[1]) for key in held if key.startswith(f"{full_name}#")
             }

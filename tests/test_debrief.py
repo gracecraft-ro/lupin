@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import stat
 import subprocess
-import functools
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -54,21 +53,9 @@ class FakeGh:
         return self.responses[key]
 
 
-class CountingRedis:
-    """Wraps a real client. Records each method name the debrief calls."""
-
-    def __init__(self, client):
-        self.client = client
-        self.calls: list[str] = []
-
-    def __getattr__(self, name):
-        attr = getattr(self.client, name)
-
-        def counted(*args, **kwargs):
-            self.calls.append(name)
-            return attr(*args, **kwargs)
-
-        return counted
+def _debrief_client_on(redis_port):
+    """Stand-in for slots_redis.debrief_client, pointed at the test server."""
+    return lambda *_args: redis.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
 
 
 RESPONSES = {
@@ -267,17 +254,8 @@ def test_malformed_ledger_row_keeps_other_sections(
     redis.Redis(host="127.0.0.1", port=redis_port).xadd(
         ledger._stream_key(FULL), {"host": "h", "event": "shipped"}
     )
-    real_read_events = debrief.ledger.read_events
-    real_claims_for = debrief.claims.claims_for
     monkeypatch.setattr(debrief, "_gh", FakeGh(dict(RESPONSES)))
-    monkeypatch.setattr(
-        debrief.ledger, "read_events",
-        functools.partial(real_read_events, redis_host="127.0.0.1", redis_port=redis_port),
-    )
-    monkeypatch.setattr(
-        debrief.claims, "claims_for",
-        functools.partial(real_claims_for, redis_host="127.0.0.1", redis_port=redis_port),
-    )
+    monkeypatch.setattr(debrief.slots_redis, "debrief_client", _debrief_client_on(redis_port))
 
     path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
 
@@ -301,17 +279,8 @@ def test_wrong_type_ledger_row_is_skipped_and_other_rows_kept(
         "ts": "2026-10-02T11:00:00Z", "host": "h", "event": "shipped", "issue": "5",
         "next": json.dumps(["Write docs"]),
     })
-    real_read_events = debrief.ledger.read_events
-    real_claims_for = debrief.claims.claims_for
     monkeypatch.setattr(debrief, "_gh", FakeGh(dict(RESPONSES)))
-    monkeypatch.setattr(
-        debrief.ledger, "read_events",
-        functools.partial(real_read_events, redis_host="127.0.0.1", redis_port=redis_port),
-    )
-    monkeypatch.setattr(
-        debrief.claims, "claims_for",
-        functools.partial(real_claims_for, redis_host="127.0.0.1", redis_port=redis_port),
-    )
+    monkeypatch.setattr(debrief.slots_redis, "debrief_client", _debrief_client_on(redis_port))
 
     path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
 
@@ -337,17 +306,8 @@ def test_ledger_times_that_overflow_utc_are_skipped(
         client.xadd(ledger._stream_key(FULL), {
             "ts": ts, "host": "h", "event": "shipped", "issue": "5", "next": json.dumps([text]),
         })
-    real_read_events = debrief.ledger.read_events
-    real_claims_for = debrief.claims.claims_for
     monkeypatch.setattr(debrief, "_gh", FakeGh(dict(RESPONSES)))
-    monkeypatch.setattr(
-        debrief.ledger, "read_events",
-        functools.partial(real_read_events, redis_host="127.0.0.1", redis_port=redis_port),
-    )
-    monkeypatch.setattr(
-        debrief.claims, "claims_for",
-        functools.partial(real_claims_for, redis_host="127.0.0.1", redis_port=redis_port),
-    )
+    monkeypatch.setattr(debrief.slots_redis, "debrief_client", _debrief_client_on(redis_port))
 
     path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
 
@@ -403,7 +363,7 @@ def test_claims_error_still_writes_the_debrief(tmp_path: Path, monkeypatch):
     path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
 
     text = path.read_text(encoding="utf-8")
-    claims_for.assert_called_once_with([FULL])
+    claims_for.assert_called_once_with([FULL], client=mock.ANY)
     assert "Claims not read. Listed issues may already be claimed." in text
     assert "- Issue #41: Ready two claimed" in text
 
@@ -422,26 +382,26 @@ def test_write_debrief_skips_issues_claimed_in_redis(tmp_path: Path, monkeypatch
     text = path.read_text(encoding="utf-8")
     assert "Ready two claimed" not in text
     assert "- Issue #40: Ready one" in text
-    debrief.claims.claims_for.assert_called_once_with([FULL])
+    debrief.claims.claims_for.assert_called_once_with([FULL], client=mock.ANY)
 
 
 def test_redis_calls_do_not_grow_with_the_claim_count(
-    tmp_path: Path, monkeypatch, redis_port, flush_redis
+    tmp_path: Path, monkeypatch, redis_port, flush_redis, counting_redis
 ):
     checkout = tmp_path / "widgets"
     checkout.mkdir()
     client = redis.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
     for number in range(1, 6):
         client.set(f"lupin:v1:claim:{FULL}#{number}", json.dumps({"host": "jesus", "session": "s", "since": 0}))
-    counting = CountingRedis(client)
+    counting = counting_redis(client)
     monkeypatch.setattr(debrief, "_gh", FakeGh(dict(RESPONSES)))
-    monkeypatch.setattr(debrief.ledger, "_client", lambda *_args: counting)
-    monkeypatch.setattr(debrief.claims, "_client", lambda *_args: counting)
+    monkeypatch.setattr(debrief.slots_redis, "debrief_client", lambda *_args: counting)
 
     debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
 
     # The stop budget lists three debrief Redis calls: ledger read, claims scan, claims read.
-    assert counting.calls == ["xrange", "scan_iter", "mget"]
+    # The claims read is one pipeline, so it shows as pipeline plus execute.
+    assert counting.calls == ["xrange", "scan_iter", "pipeline", "execute"]
 
 
 def test_write_debrief_forced_reads_no_redis(tmp_path: Path, monkeypatch):
