@@ -294,6 +294,18 @@ def test_future_once_without_enabled_repos_does_not_schedule(monkeypatch, tmp_pa
     assert not (tmp_path / "once").exists()
 
 
+def test_loops_unreadable_repos_file_exits_one_without_traceback(monkeypatch, tmp_path: Path, capsys):
+    repos = tmp_path / "repos"
+    repos.write_bytes(b"\xff\n")
+    monkeypatch.setattr(loop_runtime, "REPOS_FILE", repos)
+
+    assert cli.main(["loops"]) == 1
+
+    err = capsys.readouterr().err
+    assert f"could not read {repos}" in err
+    assert "Traceback" not in err
+
+
 
 @pytest.mark.parametrize(
     "argv, action, params",

@@ -58,9 +58,10 @@ EXEC_TIMEOUT_S = 120.0
 # after the command read and the Redis calls after it. See docs/redis-schema.md.
 ACTION_TIMEOUT_S = {"loop.stop": 1740.0}
 REDIS_ADDRESSES = 2  # IPv6 and IPv4 for localhost
-# Redis round trips for one command on a new connection: HELLO 3, CLIENT
-# MAINT_NOTIFICATIONS ON, CLIENT SETINFO LIB-NAME, CLIENT SETINFO LIB-VER,
-# then the command. Test test_command_takes_five_round_trips checks this.
+# One command on a new connection takes five Redis requests. The client
+# first sends HELLO 3, CLIENT MAINT_NOTIFICATIONS ON, CLIENT SETINFO
+# LIB-NAME, and CLIENT SETINFO LIB-VER. Then it sends the command.
+# The test test_command_takes_five_round_trips checks this.
 REDIS_ROUND_TRIPS = 5
 ATTEMPTS_PER_CALL = 2  # _call_with_retry makes two attempts
 # Worst case for one debrief_client call, in seconds. Each attempt waits
@@ -416,8 +417,8 @@ def _process_one(client, stop_client, machine: str, key: str, cmd_id: str) -> di
         raw = _call_with_retry(lambda: client.get(commands.res_key(cmd_id)))
         held = json.loads(raw) if raw else {}
         if held.get("state") != "running" or held.get("claim") != claim:
-            # Another poller racing on the same id claimed it first. Don't
-            # touch the queue or run anything -- the poller that made the
+            # Another poller racing on the same id claimed it first. Do not
+            # touch the queue or run anything. The poller that made the
             # claim finishes the job, including the dequeue.
             return {"id": cmd_id, "state": "lost-race"}
 

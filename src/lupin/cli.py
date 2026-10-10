@@ -1734,10 +1734,14 @@ def _cmd_loops(args: argparse.Namespace) -> int:
     local_host = machines.hostname()
     machine = args.machine or local_host
     if machine == local_host:
-        if args.repo:
-            rows = [loop_runtime.loop_state(args.repo)]
-        else:
-            rows = loop_runtime.status_rows()
+        try:
+            if args.repo:
+                rows = [loop_runtime.loop_state(args.repo)]
+            else:
+                rows = loop_runtime.status_rows()
+        except loop_runtime.LoopError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
     elif args.repo:
         try:
             result = loops_mod.dispatch_loop_action(

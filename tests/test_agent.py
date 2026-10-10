@@ -601,7 +601,7 @@ def test_double_claim_only_runs_once(redis_port, flush_redis, monkeypatch):
 
 class _ReplyLostOnce:
     # Wraps a redis client. The first claim (SET NX on the result key)
-    # applies on the server, then its reply is lost as a timeout.
+    # applies on the server. Its reply is then lost as a timeout.
     def __init__(self, client, res_key):
         self._client = client
         self._res_key = res_key

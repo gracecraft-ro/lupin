@@ -228,7 +228,7 @@ def claims_for(
     `CoordinatorUnreachable` if Redis can't be reached; there's no local
     fallback for claims, so a caller should treat that failure the same way
     `lupin claim` exiting 3 is treated elsewhere: start no new issue, but
-    don't disturb anything already in progress. Pass `client` to use a ready
+    do not disturb anything already in progress. Pass `client` to use a ready
     client (the debrief path does); otherwise one is made from the connection
     arguments.
     """

@@ -347,8 +347,8 @@ def _write(
     """Build the debrief for `[start, end]` and write it. Return its path.
 
     Raises `DebriefError` or a Redis error. Nothing is written then.
-    The gh calls share one time limit. A section whose gh call failed or
-    timed out, the file marks that section as not collected. `period` adds the
+    The gh calls share one time limit. If a section's gh call fails or
+    times out, the file marks that section as not collected. `period` adds the
     period to the file name.
     """
     time_limit = _TimeLimit(DEBRIEF_TIME_LIMIT_S)
