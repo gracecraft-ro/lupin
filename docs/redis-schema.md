@@ -480,9 +480,12 @@ Connect timeout 2s, 1 retry, then:
 | GitHub data cache | `pihome` calls `gh` directly anyway (it just can't publish for other machines). Every other machine reports "no data yet" instead of calling `gh` itself — no direct-call fallback here, unlike the resources above. |
 | Quota snapshot | A machine with real provider credentials still returns its own live reading (it just can't publish for other machines). A machine with no credentials for a provider has nothing to fall back to and reports "no data cached yet" for it. |
 
-A refused login (bad or missing password) and a refused command (the ACL
-does not allow it) follow the same fallback rule as an unreachable Redis.
-The message gives the real reason. It does not say "unreachable".
+For a slot call, a refused login or a refused command follows the same fallback rule as an unreachable Redis.
+The `bmo` slot falls back to `local`.
+Other slots raise `CoordinatorAuthFailed`.
+For a slot other than `bmo`, `renew` returns `False` for a refused login. It raises `NoPermissionError` for a refused command.
+The slot commands in `cli.py` print the real reason. So does the `benchmark_fetch.py` snapshot.
+Other commands and routes print "cannot reach" for a refused login.
 
 After an outage ends, a holder tries to renew its lease. If the lease
 already expired, `lupin` logs "lease lost" and tries to acquire again.

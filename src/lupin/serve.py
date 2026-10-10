@@ -3199,10 +3199,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self._repo_exists(repo) or max_value is None or max_value < 1:
             self.reply(render_error("bad slot-max request"), 400)
             return
+        slot = _repo_slot_name(repo)
         try:
-            slots_redis.set_max(_repo_slot_name(repo), max_value, **self.fleet_connection)
+            slots_redis.set_max(slot, max_value, **self.fleet_connection)
         except slots_redis.CoordinatorAuthFailed as exc:
-            self.reply(render_error(exc.for_user(_SERVE_PASSWORD_SETTING)), 502)
+            self.reply(render_error(f"{exc.for_user(_SERVE_PASSWORD_SETTING)} For slot {slot!r}."), 502)
             return
         except CoordinatorUnreachable:
             self.reply(render_error("cannot reach the machine registry"), 502)
@@ -3746,7 +3747,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             slots_redis.set_max(slot, max_value, **self.fleet_connection)
         except slots_redis.CoordinatorAuthFailed as exc:
-            self.reply(render_error(exc.for_user(_SERVE_PASSWORD_SETTING)), 502)
+            self.reply(render_error(f"{exc.for_user(_SERVE_PASSWORD_SETTING)} For slot {slot!r}."), 502)
             return
         except machines.CoordinatorUnreachable:
             self.reply(render_error("cannot reach the machine registry"), 502)

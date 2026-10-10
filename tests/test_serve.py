@@ -1,4 +1,5 @@
 import contextlib
+import html
 import io
 import socket
 import sys
@@ -1984,9 +1985,10 @@ class TestMachinesPageIntegration:
         handler.do_POST()
 
         assert handler.reply.call_args.args[1] == 502
-        body = handler.reply.call_args.args[0].decode()
+        body = html.unescape(handler.reply.call_args.args[0].decode())
         assert "Check the Redis password" in body
         assert "redis-password credential" in body
+        assert "For slot 'bmo'." in body
         assert "unreachable" not in body
 
     def test_slot_max_control_changes_what_status_reports(self, redis_port, flush_redis):
@@ -3508,6 +3510,19 @@ class TestReposPageRoutes:
         _post_body(handler, "/repos/slot-max", {"repo": "widgets", "max": "3"})
         handler.do_POST()
         assert handler.reply.call_args.args[1] == 502
+
+    def test_slot_max_route_refused_login_names_the_repo_slot(self, tmp_path, monkeypatch, auth_redis_port, no_client_retry):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        handler = _repos_handler(_kw(auth_redis_port))
+        _post_body(handler, "/repos/slot-max", {"repo": "widgets", "max": "3"})
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 502
+        body = html.unescape(handler.reply.call_args.args[0].decode())
+        assert "Check the Redis password" in body
+        assert "For slot 'repo:widgets'." in body
+        assert "unreachable" not in body
 
     def test_schedule_route_rejects_a_missing_repository(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))

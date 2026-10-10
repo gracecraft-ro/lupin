@@ -202,6 +202,19 @@ def test_command_the_acl_denies_names_the_acl_not_unreachable(auth_redis_port):
     assert "no-eval-pw" not in message
 
 
+def test_renew_re_raises_an_acl_denial_for_a_non_bmo_slot(auth_redis_port):
+    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
+    admin.execute_command("ACL", "SETUSER", "no-eval", "on", ">no-eval-pw", "~lupin:*", "+get", "+set", "+ping")
+    try:
+        with pytest.raises(redis_lib.exceptions.NoPermissionError):
+            slots_redis.renew(
+                "not-bmo:a", redis_username="no-eval", redis_password="no-eval-pw",
+                redis_host="127.0.0.1", redis_port=auth_redis_port,
+            )
+    finally:
+        admin.execute_command("ACL", "DELUSER", "no-eval")
+
+
 REDIS_ARGS = ["--redis-host", "127.0.0.1", "--redis-port", "{port}"]
 
 

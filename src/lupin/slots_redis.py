@@ -37,13 +37,16 @@ counts as unreachable too). Every other slot name raises
 for a hypothetical second fleet slot, v1 only has `bmo`, so this module does
 not invent a rule for a slot that does not exist yet.
 
-Redis can refuse a login (`AuthenticationError`) or refuse one command
-(`NoPermissionError`). `AuthenticationError` is a subclass of
-`ConnectionError`, so this module checks for both refusals before it
-checks for an unreachable server. The fallback rule above applies to both
-refusals. Where this module raises for them, it raises
-`CoordinatorAuthFailed`. That is a subclass of `CoordinatorUnreachable`, so
-older handlers and exit code 3 do not change.
+Redis can refuse a login. Redis can also refuse a command.
+redis-py raises `AuthenticationError` for a refused login.
+redis-py raises `NoPermissionError` for a refused command.
+`AuthenticationError` is a subclass of `ConnectionError`.
+This module checks for both refusals before it checks for an unreachable server.
+The fallback rule above applies to both refusals.
+When this module raises for a refusal, it raises `CoordinatorAuthFailed`.
+The one exception is `renew`. It re-raises `NoPermissionError` for a refused command.
+`CoordinatorAuthFailed` is a subclass of `CoordinatorUnreachable`.
+Older handlers still catch it. Exit code 3 is unchanged.
 
 Claims and ledger streams are fleet keys. `claims.py` and `ledger.py`
 implement them separately. Neither uses a local fallback when Redis is
@@ -292,10 +295,11 @@ def renew(
     redis_password: str | None = None,
     state_root: str | Path | None = None,
 ) -> bool:
-    """Push `lease`'s deadline out. Returns False if the lease is gone, or if
-    Redis is unreachable and `lease`'s slot has no local fallback -- this
-    never raises, since it runs on `hold`'s background renew timer, where
-    there is no caller left to catch an exception.
+    """Push `lease`'s deadline out. Return False if the lease is gone.
+
+    Return False if Redis is unreachable or refuses a login, and the slot has no local fallback.
+    Raise `NoPermissionError` if the ACL denies the command, and the slot has no local fallback.
+    The `hold` renew timer calls this. That timer does not catch errors.
     """
     slot, holder = split_lease(lease)
     client = _client(redis_host, redis_port, redis_username, redis_password)
@@ -307,6 +311,8 @@ def renew(
         return bool(result)
     except (*_AUTH_ERRORS, redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         if slot not in FALLBACK_SLOTS:
+            if isinstance(exc, redis.exceptions.NoPermissionError):
+                raise
             return False
         _warn_fallback(slot, exc)
         return local_slots.renew(lease, ttl=ttl, state_root=state_root)
