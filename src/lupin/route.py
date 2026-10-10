@@ -20,8 +20,8 @@ and applies three adjustments:
 - Quota is fleet-wide, not per-machine (every provider is one account shared
   by the whole fleet, confirmed in issue #36) -- so this is also where quota
   pacing happens, via `pace.py`. See `_apply_pacing` below for the three
-  rules (reserve, lean-in, exhaustion fallback). A lean-in moves to the
-  nearest higher entry on the *same* provider. A surplus is spent on that
+  rules (reserve, lean-in, exhaustion fallback). A lean-in moves one tier
+  up, to an entry on the *same* provider. A surplus is spent on that
   account, never on another account's quota.
 
 This module only decides; it never touches a lock, a scheduler, or a machine
@@ -108,17 +108,19 @@ def _resolve_tier(tiers: dict, tier: str) -> str:
 
 
 def _lean_in_entry(row: dict, tier: str, provider: str) -> dict | None:
-    """First entry on `provider` in the nearest tier above `tier`, or None.
+    """First entry on `provider` one tier up from `tier`, or None.
 
-    Tiers are checked from the lowest one up. Entries are checked in list
-    order. A lean-in must stay on one provider, so it never spends another
-    account's quota. None means no tier above `tier` has an entry on
-    `provider`, and the pick stays where it is.
+    One rung only: the next tier the row has above `tier`. A lean-in must
+    stay on one provider, so it never spends another account's quota. None
+    means that tier has no entry on `provider`, and the pick stays where it
+    is.
     """
-    for candidate in _TIER_ORDER[_TIER_ORDER.index(tier) + 1 :]:
-        for entry in row.get(candidate, []):
-            if provider_for_model(entry["model"]) == provider:
-                return entry
+    above = [candidate for candidate in _TIER_ORDER[_TIER_ORDER.index(tier) + 1 :] if candidate in row]
+    if not above:
+        return None
+    for entry in row[above[0]]:
+        if provider_for_model(entry["model"]) == provider:
+            return entry
     return None
 
 
@@ -153,7 +155,7 @@ def _apply_pacing(row: dict, tier: str, quota_rows: list[dict]) -> dict:
     """Quota pacing (issue #36's three rules, implemented in `pace.py`).
 
     A no-op when `quota_rows` is empty -- the caller already decided
-    whether to pass live data. Otherwise: lean up to the nearest higher
+    whether to pass live data. Otherwise: lean up one tier, to an
     entry on a provider's surplus (decision 2, skipped if blocked, and
     always staying on that same provider -- see `_lean_in_entry`), then, if
     the resulting pick is blocked (decision 1), search for another viable

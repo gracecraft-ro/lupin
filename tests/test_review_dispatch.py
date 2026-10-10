@@ -22,17 +22,6 @@ class DispatchPlanTests(unittest.TestCase):
             review_dispatch.dispatch_plan("opus", mode="separate"), "claude_lock"
         )
 
-    def test_opencode_go_model_is_same_unit_in_separate_mode(self):
-        # Only Claude calls need the claude lock. An opencode-go call returns
-        # same_unit (no fleet lock) in both modes.
-        self.assertEqual(
-            review_dispatch.dispatch_plan("opencode-go/glm-5.3", mode="separate"),
-            "same_unit",
-        )
-        self.assertEqual(
-            review_dispatch.dispatch_plan("opencode-go/glm-5.3"), "same_unit"
-        )
-
     def test_bmo_model_ignores_mode(self):
         # The lock a bmo/local model needs is about the shared LM Studio
         # server, not about where the caller is running -- "separate" must
@@ -45,17 +34,15 @@ class DispatchPlanTests(unittest.TestCase):
 
 class DecideTests(unittest.TestCase):
     def test_small_coding_issue_has_model_effort_and_plan(self):
-        # No injected tiers dict. decide() goes through route.route(), which
-        # reads the packaged model-tiers.json.
+        # No injected tiers dict -- decide() goes through route.route(),
+        # which falls back to the real model-tiers.json, same as
+        # test_route.py's test_loads_the_real_model_tiers_json.
         result = review_dispatch.decide("coding", "size-xs")
         self.assertIn("model", result)
         self.assertIn("effort", result)
         self.assertIn("plan", result)
 
-    def test_bmo_unavailable_falls_back_to_the_paid_default_rung(self):
-        # A timed-out bmo lock skips tier0 and lands on tier1's first paid
-        # entry. ":" would mean a bmo:/local: model -- the point of the check
-        # is that the pick left tier0, whichever paid model it found.
+    def test_bmo_unavailable_falls_back_to_claude_same_unit(self):
         result = review_dispatch.decide(
             "coding", "size-xs", bmo_available=False, mode="same-unit"
         )

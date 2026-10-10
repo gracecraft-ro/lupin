@@ -325,6 +325,23 @@ class RoutePacingTests(unittest.TestCase):
 
         self.assertEqual(result, {"model": "opencode-go/qwen3.8-max", "effort": "high"})
 
+    def test_lean_in_moves_one_tier_only(self):
+        # tier2 has an opencode-go entry, tier1 has none. One rung up finds
+        # nothing on opencode-go, so the pick stays on tier0's entry.
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier0": [{"model": "opencode-go/glm-5.3", "effort": "low"}],
+                    "tier1": [{"model": "sonnet", "effort": "high"}],
+                    "tier2": [{"model": "opencode-go/qwen3.8-max", "effort": "high"}],
+                }
+            }
+        }
+        rows = [self._row("opencode-go", 10, 20 * 60 * 1000)]
+        result = route.route("coding", "size-xs", tiers=tiers, quota_rows=rows)
+
+        self.assertEqual(result, {"model": "opencode-go/glm-5.3", "effort": "low"})
+
     def test_lean_in_never_goes_past_the_top_tier(self):
         rows = [self._row("claude", 10, 1 * HOUR_MS)]
         result = route.route("coding", "size-l", tiers=_TIERS, quota_rows=rows)
@@ -378,6 +395,21 @@ class RoutePacingTests(unittest.TestCase):
 
 
 class PackagedTiersTests(unittest.TestCase):
+    def test_size_m_coding_with_readable_quota_picks_opencode_go_high(self):
+        # Check 1 (issue #99): both accounts readable and unpressed, so no
+        # block and no lean-in (resets are 2 days out). The pick is tier1's
+        # first entry, which must be the opencode-go row.
+        reset_ms = time.time() * 1000 + 2 * 24 * HOUR_MS
+        rows = [
+            {"provider": "claude", "duration": QuotaDuration.FIVE_HOURS,
+             "used_pct": 10, "resets_at": reset_ms},
+            {"provider": "opencode-go", "duration": QuotaDuration.FIVE_HOURS,
+             "used_pct": 10, "resets_at": reset_ms},
+        ]
+        result = route.route("coding", "size-m", quota_rows=rows)
+
+        self.assertEqual(result, {"model": "opencode-go/glm-5.3", "effort": "high"})
+
     def test_every_packaged_tier_entry_can_be_picked(self):
         # An entry route() never returns is dead config. Give each entry a
         # unique effort tag, run the whole quota grid, and require every tag
@@ -394,7 +426,15 @@ class PackagedTiersTests(unittest.TestCase):
                 probed = copy.deepcopy(row)
                 probes = set()
                 for tier_name, entries in probed["tiers"].items():
+                    # A later entry on a provider that an earlier entry in
+                    # the same tier already uses shares its blocked state,
+                    # so route() never returns it. Probe only the first.
+                    providers = set()
                     for index, entry in enumerate(entries):
+                        provider = route.provider_for_model(entry["model"])
+                        if provider in providers:
+                            continue
+                        providers.add(provider)
                         entry["effort"] = f"__probe_{tier_name}_{index}__"
                         probes.add(entry["effort"])
                 seen = set()

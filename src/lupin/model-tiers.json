@@ -1,8 +1,8 @@
 {
-  "_comment": "One row per task category. Each tier is an ordered list of {model, effort}. route() picks the first entry of the tier, or a same-provider entry in a higher tier when that provider has surplus quota. If the pick's account is blocked, route() tries the rest of the tier, then lower tiers, then higher tiers. bmo: and local: entries are never used as a fallback. When bmo is not available, route() skips tier0 if tier0 has a bmo: entry.",
+  "_comment": "Model-tier matrix for delegation-loop review calls. Row = task category, each tier is an ordered list of {model, effort} fallbacks. See issue #179 for the research behind these picks and #182 for the schema.",
   "coding": {
-    "source": "Artificial Analysis Coding Agent Index v1.5 (retrieved 2026-10-07); prices from the 2026-10-08 fetch-models snapshot (models.dev)",
-    "last_verified": "2026-10-08",
+    "source": "Artificial Analysis Coding Agent Index",
+    "last_verified": "2026-10-03",
     "tiers": {
       "tier0": [
         {
@@ -14,12 +14,24 @@
         {
           "model": "opencode-go/glm-5.3",
           "effort": "high"
+        },
+        {
+          "model": "sonnet",
+          "effort": "medium"
+        },
+        {
+          "model": "sonnet",
+          "effort": "high"
         }
       ],
       "tier2": [
         {
-          "model": "sonnet",
+          "model": "opus",
           "effort": "high"
+        },
+        {
+          "model": "opus",
+          "effort": "xhigh"
         },
         {
           "model": "opencode-go/qwen3.8-max",
@@ -27,11 +39,11 @@
         }
       ]
     },
-    "note": "tier0 is a local model. tier1 and tier2 use subscriptions."
+    "note": "AA's Coding Agent Index number for \"qwen3.8-flash-next\" (73.1) was cited to justify bmo's tier0 placement here. CORRECTION (2026-10-03): the AA score above is for \"qwen3.8-flash-next\" by name, but bmo's live /v1/models endpoint actually serves \"swift-1.5-iq3_xxs\" -- a heavily-quantized (iq3_xxs) fine-tune of Qwen, a different artifact AA never scored. The AA number does not verify the real served model's quality. Treat bmo's tier0 placement here as unverified until something benchmarks swift-1.5-iq3_xxs directly on a real task, not qwen3.8-flash-next's published score."
   },
   "general": {
-    "source": "Artificial Analysis Intelligence Index (no cached scores on 2026-10-08); prices from the 2026-10-08 fetch-models snapshot (models.dev)",
-    "last_verified": "2026-10-08",
+    "source": "Artificial Analysis Intelligence Index",
+    "last_verified": "2026-10-03",
     "tiers": {
       "tier0": [
         {
@@ -43,12 +55,24 @@
         {
           "model": "opencode-go/glm-5.3",
           "effort": "high"
+        },
+        {
+          "model": "sonnet",
+          "effort": "medium"
+        },
+        {
+          "model": "sonnet",
+          "effort": "high"
         }
       ],
       "tier2": [
         {
-          "model": "sonnet",
+          "model": "opus",
           "effort": "high"
+        },
+        {
+          "model": "opus",
+          "effort": "xhigh"
         },
         {
           "model": "opencode-go/qwen3.8-max",
@@ -56,11 +80,11 @@
         }
       ]
     },
-    "note": "tier0 is a local model. tier1 and tier2 use subscriptions."
+    "note": "AA's Intelligence Index number for \"qwen3.8-flash-next\" (39.8) was cited to justify bmo's tier0 placement here. CORRECTION (2026-10-03): the AA score above is for \"qwen3.8-flash-next\" by name, but bmo's live /v1/models endpoint actually serves \"swift-1.5-iq3_xxs\" -- a heavily-quantized (iq3_xxs) fine-tune of Qwen, a different artifact AA never scored. The AA number does not verify the real served model's quality. Treat bmo's tier0 placement here as unverified until something benchmarks swift-1.5-iq3_xxs directly on a real task, not qwen3.8-flash-next's published score."
   },
   "frontend-ui": {
-    "source": "manual (mirrors ship/SKILL.md step 8 screenshot rule and delegation-loop/SKILL.md's visible-change effort floor); prices from the 2026-10-08 fetch-models snapshot (models.dev)",
-    "last_verified": "2026-10-08",
+    "source": "manual (mirrors ship/SKILL.md step 8 screenshot rule and delegation-loop/SKILL.md's visible-change effort floor)",
+    "last_verified": "2026-10-03",
     "tiers": {
       "tier1": [
         {
@@ -74,16 +98,20 @@
       ],
       "tier2": [
         {
-          "model": "sonnet",
+          "model": "opus",
           "effort": "high"
+        },
+        {
+          "model": "opus",
+          "effort": "xhigh"
         }
       ]
     },
-    "note": "No tier0 entry."
+    "note": "no tier0: UI review always escalates to tier2 on any user-visible change; there is no free-tier lane for this category"
   },
   "translation": {
-    "source": "Alconost Translation Quality Index + Linguist Evaluation (2025-2026 sample, alconost.com/en/blog/best-llm-for-translation-2026); prices from the 2026-10-08 fetch-models snapshot (models.dev)",
-    "last_verified": "2026-10-08",
+    "source": "Alconost Translation Quality Index + Linguist Evaluation (2025-2026 sample, alconost.com/en/blog/best-llm-for-translation-2026)",
+    "last_verified": "2026-10-03",
     "tiers": {
       "tier1": [
         {
@@ -92,21 +120,21 @@
         },
         {
           "model": "sonnet",
-          "effort": "high"
+          "effort": "medium"
         }
       ],
       "tier2": [
         {
-          "model": "sonnet",
+          "model": "opus",
           "effort": "high"
         }
       ]
     },
-    "note": "No tier0 entry."
+    "note": "No tier0 route. Alconost reports provider-family scores, not exact model-version scores. Gemini and GPT score higher than Claude but have no provider config here, so Claude is the best routed option for tier1/2. DeepSeek ranks fourth of five in the sample; this does not verify any exact DeepSeek model. The sample is general-purpose; its separate subtitle benchmark found different leaders."
   },
   "prose": {
-    "source": "LMArena Creative Writing leaderboard (BenchLeader snapshot, 2026-09-29) and EQ-Bench Creative Writing (Sept 2026) -- the two agree on a leader, unlike the translation sources; prices from the 2026-10-08 fetch-models snapshot (models.dev)",
-    "last_verified": "2026-10-08",
+    "source": "LMArena Creative Writing leaderboard (BenchLeader snapshot, 2026-09-29) and EQ-Bench Creative Writing (Sept 2026) -- the two agree on a leader, unlike the translation sources",
+    "last_verified": "2026-10-03",
     "tiers": {
       "tier1": [
         {
@@ -121,11 +149,11 @@
         }
       ]
     },
-    "note": "No tier0 entry."
+    "note": "No tier0: these public creative-writing leaderboards do not score a model currently routed by this repo, so tier0 quality is unknown."
   },
   "cad-spatial": {
-    "source": "P3D-Bench (arxiv 2606.11152); prices from the 2026-10-08 fetch-models snapshot (models.dev)",
-    "last_verified": "2026-10-08",
+    "source": "P3D-Bench (arxiv 2606.11152)",
+    "last_verified": "2026-10-03",
     "tiers": {
       "tier0": [
         {
@@ -147,9 +175,13 @@
         {
           "model": "opus",
           "effort": "high"
+        },
+        {
+          "model": "opus",
+          "effort": "xhigh"
         }
       ]
     },
-    "note": "tier0 is a local model. tier1 is ordered by value."
+    "note": "P3D-Bench compares Claude Opus 4.6, DeepSeek V4 Pro, and Qwen3.6-Plus on parametric 3D generation. These are different model versions from the routed models, so their scores do not verify this tier. GPT-5.5 and Gemini 3.1 Pro score highest but have no provider config here. The remaining tier0 route is bmo; its actual served model is not identified by this benchmark. Tier0 means the lowest-cost routed option, not a model validated for CAD work."
   }
 }
