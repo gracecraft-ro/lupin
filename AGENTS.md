@@ -304,10 +304,11 @@ worktree and prints its path. `stop` also keeps the worktree when its commit is
 on no branch. `stop` never passes `--force` to git and never deletes a branch
 with `-D`.
 
-Before removal, `stop` copies `.loop/loop-state.json` to
-`handoffs/<repo>.json` in the loop state directory. The next `run` prompt names
-that copy. Git deletes the other ignored files in the worktree, such as
-`HANDOFF.md`. Lupin does not keep them.
+Before removal, `stop` copies two files from the worktree into `handoffs/` in
+the loop state directory. `.loop/loop-state.json` becomes `<repo>.json`.
+`HANDOFF.md` becomes `<repo>.HANDOFF.md`. A file the worktree does not have
+keeps its earlier copy. The next `run` prompt names each copy that exists. Git
+deletes the other ignored files in the worktree. Lupin does not keep them.
 
 After removal, `stop` runs `git branch -d` on the run branch. Git refuses that
 when the checkout HEAD does not contain the branch tip. The branch then stays,

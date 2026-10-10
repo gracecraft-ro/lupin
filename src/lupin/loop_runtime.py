@@ -620,6 +620,12 @@ def _write_prompt(repo: str, note: str | None, resume: bool) -> str:
             f"The last run kept its ledger at {handoff}. Read it before you start.\n\n"
             + base
         )
+    handoff_doc = STATE_DIR / "handoffs" / f"{validate_repo(repo)}.HANDOFF.md"
+    if handoff_doc.is_file():
+        base = (
+            f"The last run kept its HANDOFF.md at {handoff_doc}. Read it before you start.\n\n"
+            + base
+        )
     if note:
         base += f"\n\nExtra instructions for this run:\n{note}\n"
     notes = STATE_DIR / "notes"
@@ -747,17 +753,22 @@ def _resumed_worktree(repo: str, metadata: dict | None) -> tuple[Path, str]:
 
 
 def _keep_handoff(repo: str, worktree: Path) -> None:
-    """Copy the run's ledger file out of the worktree before git deletes it.
+    """Copy handoff files out of the worktree before git deletes them.
 
-    git deletes ignored files with the worktree. Keep the earlier copy when this
-    worktree has no ledger file.
+    git deletes ignored files with the worktree. A file missing from this
+    worktree keeps its earlier copy.
     """
-    ledger = worktree / ".loop" / "loop-state.json"
-    if not ledger.is_file():
+    copies = [
+        (worktree / ".loop" / "loop-state.json", f"{repo}.json"),
+        (worktree / "HANDOFF.md", f"{repo}.HANDOFF.md"),
+    ]
+    found = [(source, name) for source, name in copies if source.is_file()]
+    if not found:
         return
     target = STATE_DIR / "handoffs"
     target.mkdir(parents=True, exist_ok=True, mode=0o750)
-    shutil.copyfile(ledger, target / f"{repo}.json")
+    for source, name in found:
+        shutil.copyfile(source, target / name)
 
 
 def _remove_worktree(repo: str, metadata: dict) -> tuple[bool, str]:
@@ -808,6 +819,28 @@ def _clear_previous_worktree(repo: str, metadata: dict | None) -> str:
     if not gone:
         raise LoopError(f"cannot start {repo}{note}. Save or remove that work, then start again.")
     return note
+
+
+def _finish_failed_start(repo: str, value: dict, resume: bool) -> str:
+    """Record a failed start and remove what it made. Return a note for the message.
+
+    A resume keeps the recorded worktree, so the next resume can reuse it.
+    Otherwise remove the worktree and its branch. When git keeps the worktree,
+    the note names its path. Metadata is written even if removal raises.
+    """
+    value["state"] = "failed"
+    removed_note = ""
+    try:
+        if not resume:
+            try:
+                _, removed_note = _remove_worktree(repo, value)
+            except LoopError as exc:
+                removed_note = f"; {exc}"
+    finally:
+        _write_metadata(repo, value)
+        if value["prompt_file"]:
+            Path(value["prompt_file"]).unlink(missing_ok=True)
+    return removed_note
 
 
 def start_loop(
@@ -874,24 +907,25 @@ def start_loop(
         else:
             previous_note = _clear_previous_worktree(repo, metadata)
             worktree, branch = _create_worktree(repo, checkout)
+        value = {
+            "version": 1,
+            "repo": repo,
+            "platform": selected,
+            "provider": provider,
+            "model": model,
+            "session": session,
+            "state": "starting",
+            "started_at": _now(),
+            "workspace_id": None,
+            "pane_id": None,
+            "prompt_file": None,
+            "resume": bool(resume),
+            "worktree": str(worktree),
+            "branch": branch,
+        }
         try:
             prompt_file = _write_prompt(repo, note, resume)
-            value = {
-                "version": 1,
-                "repo": repo,
-                "platform": selected,
-                "provider": provider,
-                "model": model,
-                "session": session,
-                "state": "starting",
-                "started_at": _now(),
-                "workspace_id": None,
-                "pane_id": None,
-                "prompt_file": prompt_file,
-                "resume": bool(resume),
-                "worktree": str(worktree),
-                "branch": branch,
-            }
+            value["prompt_file"] = prompt_file
             _write_metadata(repo, value)
             worker = _lupin_command(
                 "worker", "--repo", repo, "--platform", selected, "--session", session,
@@ -908,20 +942,13 @@ def start_loop(
                 credentials=worker_credentials,
                 claude_limits=selected == "claude",
             )
-        except BaseException:
-            if not resume:
-                _remove_worktree(repo, {"worktree": str(worktree), "branch": branch})
-            raise
+        except BaseException as exc:
+            removed_note = _finish_failed_start(repo, value, resume)
+            if not isinstance(exc, Exception):
+                raise
+            return False, (str(exc) or f"could not start loop service for {repo}") + removed_note
         if rc:
-            value["state"] = "failed"
-            removed_note = ""
-            if not resume:
-                try:
-                    _, removed_note = _remove_worktree(repo, value)
-                except LoopError as exc:
-                    removed_note = f"; {exc}"
-            _write_metadata(repo, value)
-            Path(prompt_file).unlink(missing_ok=True)
+            removed_note = _finish_failed_start(repo, value, resume)
             return False, (output or f"could not start loop service for {repo}") + removed_note
         return True, (
             f"started {repo} ({selected}) in Herdr session {session}; "

@@ -1222,6 +1222,36 @@ def test_next_prompt_names_the_kept_ledger_file_only_when_it_exists(monkeypatch,
     assert str(kept) in after
 
 
+def test_stop_keeps_an_ignored_handoff_file_outside_the_worktree(
+    monkeypatch, tmp_path: Path, make_checkout
+):
+    checkout, worktree, _ = _run_with_worktree(monkeypatch, tmp_path, make_checkout)
+    (checkout / ".git" / "info").mkdir(exist_ok=True)
+    (checkout / ".git" / "info" / "exclude").write_text("HANDOFF.md\n", encoding="utf-8")
+    (worktree / "HANDOFF.md").write_text("# Handoff\n", encoding="utf-8")
+    assert "!! HANDOFF.md" in _git_out(worktree, "status", "--porcelain", "--ignored")
+
+    loop_runtime.stop_loop("widgets", force=True)
+
+    kept = loop_runtime.STATE_DIR / "handoffs" / "widgets.HANDOFF.md"
+    assert kept.read_text(encoding="utf-8") == "# Handoff\n"
+    assert not worktree.exists()
+
+
+def test_next_prompt_names_the_kept_handoff_file_only_when_it_exists(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.delenv("LUPIN_LOOP_PROMPT_FILE", raising=False)
+    kept = tmp_path / "handoffs" / "widgets.HANDOFF.md"
+
+    before = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
+    assert str(kept) not in before
+
+    kept.parent.mkdir()
+    kept.write_text("# Handoff\n", encoding="utf-8")
+    after = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
+    assert str(kept) in after
+
+
 def test_resume_reuses_the_recorded_worktree(monkeypatch, tmp_path: Path, make_checkout):
     checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
     loop_runtime.start_loop("widgets", platform="claude")
@@ -1303,23 +1333,102 @@ def test_start_loop_refuses_when_the_previous_worktree_has_changes(
     assert loop_runtime._read_metadata("widgets")["worktree"] == str(first)
 
 
-@pytest.mark.parametrize("step", ["_write_prompt", "_write_metadata", "_systemd_run"])
-def test_start_loop_removes_its_new_worktree_when_a_later_step_raises(
-    monkeypatch, tmp_path: Path, make_checkout, step: str
+@pytest.mark.parametrize("dirty", [False, True], ids=["clean", "dirty"])
+@pytest.mark.parametrize(
+    "step, error",
+    [
+        ("_write_prompt", RuntimeError),
+        ("_write_metadata", RuntimeError),
+        ("_systemd_run", loop_runtime.LoopError),
+    ],
+)
+def test_start_failure_cleans_up_and_records_the_run_as_failed(
+    monkeypatch, tmp_path: Path, make_checkout, step: str, error: type, dirty: bool
 ):
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
+    real = getattr(loop_runtime, step)
+    worktrees = tmp_path / "state" / "worktrees" / "widgets"
+    fired = []
 
-    def broken(*args, **kwargs):
-        raise RuntimeError(f"forced {step}")
+    def fail():
+        fired.append(True)
+        if dirty:
+            (run_dir,) = worktrees.iterdir()
+            (run_dir / "unsaved.txt").write_text("work\n", encoding="utf-8")
+        raise error(f"forced {step}")
 
-    monkeypatch.setattr(loop_runtime, step, broken)
+    if step == "_write_metadata":
+        # Fail only the `starting` write, so the cleanup can still write metadata.
+        def fail_the_starting_write(repo, value):
+            if value["state"] == "starting" and not fired:
+                fail()
+            return real(repo, value)
 
-    with pytest.raises(RuntimeError, match=f"forced {step}"):
+        monkeypatch.setattr(loop_runtime, step, fail_the_starting_write)
+    else:
+        monkeypatch.setattr(loop_runtime, step, lambda *args, **kwargs: fail())
+
+    started, message = loop_runtime.start_loop("widgets", platform="claude")
+
+    assert started is False
+    metadata = loop_runtime._read_metadata("widgets")
+    assert metadata["state"] == "failed"
+    if not dirty:
+        assert message == f"forced {step}"
+        assert list(worktrees.iterdir()) == []
+        assert "worktree" not in metadata
+        assert "branch" not in metadata
+        assert _git_out(checkout, "branch", "--list", "lupin-loop/*") == ""
+        assert _worktree_count(checkout) == 1
+        monkeypatch.setattr(loop_runtime, step, real)
+        assert loop_runtime.start_loop("widgets", platform="claude")[0] is True
+        return
+    (run_dir,) = worktrees.iterdir()
+    assert message == f"forced {step}; worktree kept at {run_dir}: it has changes"
+    assert (run_dir / "unsaved.txt").read_text(encoding="utf-8") == "work\n"
+    assert metadata["worktree"] == str(run_dir)
+    with pytest.raises(loop_runtime.LoopError, match=re.escape(str(run_dir))):
         loop_runtime.start_loop("widgets", platform="claude")
 
-    assert list((tmp_path / "state" / "worktrees" / "widgets").iterdir()) == []
-    assert _git_out(checkout, "branch", "--list", "lupin-loop/*") == ""
-    assert _worktree_count(checkout) == 1
+
+def test_resume_failure_keeps_the_recorded_worktree_and_records_it_as_failed(
+    monkeypatch, tmp_path: Path, make_checkout
+):
+    checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
+    loop_runtime.start_loop("widgets", platform="claude")
+    worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
+    _set_state("widgets", "stopped")
+
+    def fail(*args, **kwargs):
+        raise loop_runtime.LoopError("forced _systemd_run")
+
+    monkeypatch.setattr(loop_runtime, "_systemd_run", fail)
+
+    started, message = loop_runtime.start_loop("widgets", platform="claude", resume=True)
+
+    assert (started, message) == (False, "forced _systemd_run")
+    assert worktree.is_dir()
+    metadata = loop_runtime._read_metadata("widgets")
+    assert metadata["state"] == "failed"
+    assert metadata["worktree"] == str(worktree)
+
+
+def test_start_failure_records_failed_when_the_handoff_copy_raises(
+    monkeypatch, tmp_path: Path, make_checkout
+):
+    _start_harness(monkeypatch, tmp_path, make_checkout)
+    monkeypatch.setattr(loop_runtime, "_systemd_run", lambda *args, **kwargs: (1, "boom"))
+
+    def copy_fails(repo, worktree):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(loop_runtime, "_keep_handoff", copy_fails)
+
+    # Follow-up: an OSError is not a LoopError, so it still escapes start_loop.
+    with pytest.raises(OSError, match="disk full"):
+        loop_runtime.start_loop("widgets", platform="claude")
+
+    assert loop_runtime._read_metadata("widgets")["state"] == "failed"
 
 
 def test_full_claude_slot_removes_the_new_worktree(monkeypatch, tmp_path: Path, make_checkout):
