@@ -201,6 +201,8 @@ def make_checkout(tmp_path):
 def clean_lupin_env(monkeypatch):
     """Delete every LUPIN_* variable from os.environ for this test.
 
+    The sandbox shell exports LUPIN_* variables. Without this fixture, a test can reach the shared Redis server.
+
     The list is built once, when this fixture runs. Variables set later stay.
     Modules that read variables at import time keep their values, for example
     STATE_DIR in loop_runtime.py.
