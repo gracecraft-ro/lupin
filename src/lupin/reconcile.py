@@ -196,7 +196,8 @@ def _release_quest_focuses(
     `idle_since` bookkeeping field). `quests` is `load_quests`'s result --
     passed in so a single reconcile run only reads GitHub once.
     """
-    records = machines.machines(connection)
+    # strict: a bad record must stop the pass. Skipping it would read as offline.
+    records = machines.machines(connection, strict=True)
     by_name = {record["name"]: record for record in records}
     dag_box: list[dict] = []  # fetched lazily, at most once -- most runs touch no focus at all
 
@@ -266,7 +267,8 @@ def _release_started_quests(repos: list[str], connection: dict, *, code_dir: str
     `place.place`'s own scoring, before ending the quest outright).
     """
     client = _client(connection)
-    records = machines.machines(connection)
+    # strict: as in `_release_quest_focuses`. A skipped record would read as offline.
+    records = machines.machines(connection, strict=True)
     by_name = {record["name"]: record for record in records}
 
     lines = []
@@ -293,7 +295,7 @@ def _release_started_quests(repos: list[str], connection: dict, *, code_dir: str
         state_word = _machine_state_word(machine_record)
         pick = None
         if issues:
-            placed = place_mod.place(str(issues[0]), connection)
+            placed = place_mod.place(str(issues[0]), connection, strict=True)
             pick = placed.get("pick")
         if pick and pick != machine_name:
             record["machine"] = pick

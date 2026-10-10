@@ -301,6 +301,14 @@ def test_machines_without_skipped_list_does_not_raise_on_unreadable_record(redis
     assert [m["name"] for m in result] == ["good-box"]
 
 
+def test_machines_strict_raises_on_unreadable_record(redis_port, flush_redis):
+    _write_raw_record(redis_port, "good-box")
+    _raw_client(redis_port).set("lupin:v1:machine:old-box", "not json")
+
+    with pytest.raises(json.JSONDecodeError):
+        machines.machines(_kw(redis_port), strict=True)
+
+
 def test_unreachable_redis_raises_coordinator_unreachable(closed_port):
     kw = {"redis_host": "127.0.0.1", "redis_port": closed_port}
     with pytest.raises(machines.CoordinatorUnreachable):

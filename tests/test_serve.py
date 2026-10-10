@@ -1709,7 +1709,7 @@ def test_do_post_quest_start_creates_quest_writes_redis_and_redirects(
     monkeypatch.setattr(
         quest.roadmap, "cached_dependency_dag", lambda repos, code_dir: {"repos": {}}
     )
-    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection: {"pick": "jesus"})
+    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection, **_: {"pick": "jesus"})
     monkeypatch.setattr(serve, "enabled_repos", lambda: ["repo-a"])
 
     handler = _quest_handler(redis_port)
@@ -1751,7 +1751,7 @@ def test_do_post_quest_stop_releases_claims_deletes_record_and_redirects(
     monkeypatch.setattr(
         quest.roadmap, "cached_dependency_dag", lambda repos, code_dir: {"repos": {}}
     )
-    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection: {"pick": "jesus"})
+    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection, **_: {"pick": "jesus"})
     started = quest.start([21], ["repo-a"], connection=_kw(redis_port))
 
     handler = _quest_handler(redis_port)
@@ -1842,7 +1842,7 @@ def test_quest_state_partitions_pending_and_done(redis_port, flush_redis, monkey
     monkeypatch.setattr(
         quest.roadmap, "cached_dependency_dag", lambda repos, code_dir: {"repos": {}}
     )
-    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection: {"pick": "jesus"})
+    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection, **_: {"pick": "jesus"})
     started = quest.start([31, 32], ["repo-a"], connection=_kw(redis_port))
     # Simulate #31 merging: something else (e.g. `reconcile`) releases its
     # claim the way a closed/merged issue's own claim gets released.
@@ -2781,6 +2781,17 @@ class ScheduleRunRouteUnitTests(unittest.TestCase):
             handler.do_POST()
         self.assertEqual(handler.reply.call_args.args[1], 400)
 
+    def test_placement_reads_the_registry_strictly(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "a-repo", "place": "any"})
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", return_value=[]) as fake_machines,
+        ):
+            handler.do_POST()
+        self.assertTrue(fake_machines.call_args.kwargs.get("strict"))
+
 
 
 class TestSchedulePageIntegration:
@@ -3319,7 +3330,7 @@ class TestReposPageRoutes:
             "repos": [{"repo": "widgets", "enabled": False, "loopable": True}],
         }
         monkeypatch.setattr(serve.machines, "hostname", lambda: "pihome")
-        monkeypatch.setattr(serve.machines, "machines", lambda connection: [machine])
+        monkeypatch.setattr(serve.machines, "machines", lambda connection, **_: [machine])
         dispatch = mock.Mock(return_value={"mode": "queued", "id": "cmd", "result": None})
         monkeypatch.setattr(serve.loops, "dispatch_loop_action", dispatch)
         handler = _repos_handler()

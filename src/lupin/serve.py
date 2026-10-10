@@ -3076,7 +3076,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("bad remote repo enable request"), 400)
             return
         try:
-            records = machines.machines(self.fleet_connection)
+            # strict: do not send a command based on a partial machine list.
+            records = machines.machines(self.fleet_connection, strict=True)
         except CoordinatorUnreachable:
             self.reply(render_error("cannot reach the redis coordinator"), 502)
             return
@@ -3468,7 +3469,8 @@ class Handler(BaseHTTPRequestHandler):
 
         local_host = machines.hostname()
         try:
-            records = machines.machines(self.fleet_connection)
+            # strict: do not place runs on a partial machine list.
+            records = machines.machines(self.fleet_connection, strict=True)
         except CoordinatorUnreachable:
             records = []
 

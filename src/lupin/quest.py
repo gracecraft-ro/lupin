@@ -445,7 +445,8 @@ def focus(
     if not ready:
         raise NoReadyTasks(quest["name"], _first_blocker(quest, dag))
 
-    records = machines.machines(connection)
+    # strict: a focus must not go to a machine picked from a partial list.
+    records = machines.machines(connection, strict=True)
     by_name = {record["name"]: record for record in records}
 
     if machine:
@@ -803,13 +804,14 @@ def _resolve_machine(machine: str | None, issue_numbers: list[int], connection: 
     one dedicated loop, so the first issue's routing stands in for the
     whole set.
     """
+    # strict: do not start a quest on a machine picked from a partial list.
     if machine:
-        records = {record["name"]: record for record in machines.machines(connection)}
+        records = {record["name"]: record for record in machines.machines(connection, strict=True)}
         record = records.get(machine)
         if record is not None and record["state"] == "draining":
             raise StartMachineDraining(machine)
         return machine
-    placed = place_mod.place(str(issue_numbers[0]), connection)
+    placed = place_mod.place(str(issue_numbers[0]), connection, strict=True)
     pick = placed.get("pick")
     if not pick:
         raise QuestError("no online machine can take this quest right now.")

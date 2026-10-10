@@ -350,7 +350,9 @@ def undrain(connection: dict) -> dict:
     return _set_state(connection, "online")
 
 
-def machines(connection: dict, skipped: list[str] | None = None) -> list[dict]:
+def machines(
+    connection: dict, skipped: list[str] | None = None, *, strict: bool = False
+) -> list[dict]:
     """Every registered machine, each as:
     `{"name", "state", "version", "heartbeat", "version_mismatch", "slots",
     "providers", "quota", "usage_detail", "loops", "session_backend",
@@ -373,6 +375,11 @@ def machines(connection: dict, skipped: list[str] | None = None) -> list[dict]:
     A record that cannot be read is left out. It is not JSON, not an object,
     or has no readable `heartbeat`. Its `machine:<name>` label is added to
     `skipped` when `skipped` is a list.
+
+    `strict=True` does not skip. It raises the error the old code raised
+    (`json.JSONDecodeError`, `KeyError`, or `AttributeError`). Use it when
+    the caller acts on the list. A skipped record would make the caller act
+    on a partial list.
     """
     client = slots_redis._client(
         connection.get("redis_host"),
@@ -392,10 +399,13 @@ def machines(connection: dict, skipped: list[str] | None = None) -> list[dict]:
             raw = client.get(key)
             if raw is None:
                 continue
-            record = _readable_record(raw)
-            if record is None:
-                unreadable.append(f"machine:{name}")
-                continue
+            if strict:
+                record = json.loads(raw)
+            else:
+                record = _readable_record(raw)
+                if record is None:
+                    unreadable.append(f"machine:{name}")
+                    continue
             state = record.get("state", "online")
             if now - _parse_iso(record["heartbeat"]) > OFFLINE_AFTER:
                 state = "offline"

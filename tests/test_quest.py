@@ -553,13 +553,13 @@ def test_resolve_machine_explicit_unknown_machine_is_allowed(redis_port, flush_r
 
 def test_resolve_machine_default_uses_place_pick(monkeypatch):
     monkeypatch.setattr(
-        quest.place_mod, "place", lambda task, connection: {"pick": "mini-2"}
+        quest.place_mod, "place", lambda task, connection, **_: {"pick": "mini-2"}
     )
     assert quest._resolve_machine(None, [23], {}) == "mini-2"
 
 
 def test_resolve_machine_default_raises_when_no_pick(monkeypatch):
-    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection: {"pick": None})
+    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection, **_: {"pick": None})
     with pytest.raises(quest.QuestError):
         quest._resolve_machine(None, [23], {})
 
@@ -615,7 +615,7 @@ def test_next_quest_id_increments(redis_port, flush_redis):
 def _patch_quest_boundaries(monkeypatch, locate_table, dag, pick="mac-studio"):
     monkeypatch.setattr(quest, "_locate_issue", _fake_locate(locate_table))
     monkeypatch.setattr(quest.roadmap, "cached_dependency_dag", lambda repos, code_dir: dag)
-    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection: {"pick": pick})
+    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection, **_: {"pick": pick})
 
 
 def test_start_writes_a_quest_record_and_claims_every_issue(redis_port, flush_redis, monkeypatch):
@@ -1156,28 +1156,37 @@ def test_focus_raises_no_ready_tasks(monkeypatch, redis_port, flush_redis):
 
 
 def test_focus_raises_machine_not_found(quests_fixture, monkeypatch, redis_port, flush_redis):
-    monkeypatch.setattr(machines, "machines", lambda connection: [])
+    monkeypatch.setattr(machines, "machines", lambda connection, **_: [])
     with pytest.raises(quest.MachineNotFound):
         quest.focus("session-rewrite", _kw(redis_port), ["repo"], machine="ghost")
 
 
 def test_focus_raises_machine_draining(quests_fixture, monkeypatch, redis_port, flush_redis):
-    monkeypatch.setattr(machines, "machines", lambda connection: [_machine("jesus", state="draining")])
+    monkeypatch.setattr(machines, "machines", lambda connection, **_: [_machine("jesus", state="draining")])
     with pytest.raises(quest.MachineDraining):
         quest.focus("session-rewrite", _kw(redis_port), ["repo"], machine="jesus")
 
 
 def test_focus_raises_no_machine_available(quests_fixture, monkeypatch, redis_port, flush_redis):
-    monkeypatch.setattr(machines, "machines", lambda connection: [_machine("jesus", state="draining")])
+    monkeypatch.setattr(machines, "machines", lambda connection, **_: [_machine("jesus", state="draining")])
     with pytest.raises(quest.NoMachineAvailable):
         quest.focus("session-rewrite", _kw(redis_port), ["repo"])
+
+
+def test_focus_raises_on_corrupt_machine_record_and_writes_no_focus(quests_fixture, redis_port, flush_redis):
+    redis_lib.Redis(host="127.0.0.1", port=redis_port).set(f"{machines.PREFIX}machine:jesus", "{not json")
+
+    with pytest.raises(json.JSONDecodeError):
+        quest.focus("session-rewrite", _kw(redis_port), ["repo"])
+
+    assert quest.read_focus("session-rewrite", **_kw(redis_port)) is None
 
 
 def test_focus_auto_picks_most_free_slots_and_writes_record(quests_fixture, monkeypatch, redis_port, flush_redis):
     monkeypatch.setattr(
         machines,
         "machines",
-        lambda connection: [_machine("mac-studio", used=3, max_=4), _machine("mini-2", used=0, max_=4)],
+        lambda connection, **_: [_machine("mac-studio", used=3, max_=4), _machine("mini-2", used=0, max_=4)],
     )
 
     result = quest.focus("session-rewrite", _kw(redis_port), ["repo"], pin=True)
@@ -1192,7 +1201,7 @@ def test_focus_explicit_machine_overrides_auto_pick(quests_fixture, monkeypatch,
     monkeypatch.setattr(
         machines,
         "machines",
-        lambda connection: [_machine("mac-studio", used=3, max_=4), _machine("mini-2", used=0, max_=4)],
+        lambda connection, **_: [_machine("mac-studio", used=3, max_=4), _machine("mini-2", used=0, max_=4)],
     )
 
     result = quest.focus("session-rewrite", _kw(redis_port), ["repo"], machine="mac-studio")
@@ -1201,7 +1210,7 @@ def test_focus_explicit_machine_overrides_auto_pick(quests_fixture, monkeypatch,
 
 
 def test_focus_raises_coordinator_unreachable(quests_fixture, monkeypatch, closed_port):
-    monkeypatch.setattr(machines, "machines", lambda connection: (_ for _ in ()).throw(machines.CoordinatorUnreachable("machine registry")))
+    monkeypatch.setattr(machines, "machines", lambda connection, **_: (_ for _ in ()).throw(machines.CoordinatorUnreachable("machine registry")))
     with pytest.raises(machines.CoordinatorUnreachable):
         quest.focus("session-rewrite", {"redis_host": "127.0.0.1", "redis_port": closed_port}, ["repo"])
 
@@ -1238,7 +1247,7 @@ def test_release_raises_coordinator_unreachable(quests_fixture, closed_port):
 def test_cli_quest_focus_prints_exact_copy_text(quests_fixture, monkeypatch, redis_port, flush_redis, capsys):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo"])
     monkeypatch.setattr(
-        cli.machines, "machines", lambda connection: [_machine("mac-studio", used=0, max_=4)]
+        cli.machines, "machines", lambda connection, **_: [_machine("mac-studio", used=0, max_=4)]
     )
 
     code = cli.main(
@@ -1255,7 +1264,7 @@ def test_cli_quest_focus_prints_exact_copy_text(quests_fixture, monkeypatch, red
 def test_cli_quest_focus_draining_machine_error(quests_fixture, monkeypatch, redis_port, flush_redis, capsys):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo"])
     monkeypatch.setattr(
-        cli.machines, "machines", lambda connection: [_machine("mac-studio", state="draining")]
+        cli.machines, "machines", lambda connection, **_: [_machine("mac-studio", state="draining")]
     )
 
     code = cli.main(
@@ -1316,7 +1325,7 @@ def test_cli_quest_focus_unreachable_redis_exits_3(quests_fixture, monkeypatch, 
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo"])
     monkeypatch.setattr(
         cli.machines, "machines",
-        lambda connection: (_ for _ in ()).throw(cli.machines.CoordinatorUnreachable("machine registry")),
+        lambda connection, **_: (_ for _ in ()).throw(cli.machines.CoordinatorUnreachable("machine registry")),
     )
 
     code = cli.main(
