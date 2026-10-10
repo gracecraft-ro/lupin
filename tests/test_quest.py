@@ -461,6 +461,17 @@ def test_check_claims_passes_when_nothing_claimed(redis_port, flush_redis):
     quest._check_claims(resolved, [23], _kw(redis_port))  # no raise
 
 
+def test_check_claims_refuses_when_a_claim_record_is_unreadable(redis_port, flush_redis):
+    """An unreadable claim must stop the quest start. Reading it as "not
+    claimed" would start an issue another loop may hold."""
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set("lupin:v1:claim:acme/repo-a#23", "not json")
+    resolved = {23: ("repo-a", "acme/repo-a#23")}
+
+    with pytest.raises(json.JSONDecodeError):
+        quest._check_claims(resolved, [23], _kw(redis_port))
+
+
 # --- _check_blocked_by / _dependency_order ---
 
 
@@ -590,6 +601,18 @@ def test_claim_all_rolls_back_when_a_later_issue_is_already_claimed(redis_port, 
     # #24 still belongs to its real, pre-existing holder -- our rollback
     # must not touch a claim it doesn't own.
     assert remaining["acme/repo-b#24"]["session"] == "someone-else"
+
+
+def test_claim_all_refuses_when_the_holder_record_is_unreadable(redis_port, flush_redis):
+    """The holder lookup after a refused claim is an acting read. An
+    unreadable record must raise. It must not name a holder that was never
+    read."""
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set("lupin:v1:claim:acme/repo-b#24", "not json")
+    resolved = {24: ("repo-b", "acme/repo-b#24")}
+
+    with pytest.raises(json.JSONDecodeError):
+        quest._claim_all(resolved, [24], "quest:q1", _kw(redis_port))
 
 
 def test_claim_all_succeeds_claims_every_target(redis_port, flush_redis):

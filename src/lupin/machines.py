@@ -351,7 +351,7 @@ def undrain(connection: dict) -> dict:
 
 
 def machines(
-    connection: dict, skipped: list[str] | None = None, *, strict: bool = False
+    connection: dict, skipped: list[str] | None = None, *, strict: bool = True
 ) -> list[dict]:
     """Every registered machine, each as:
     `{"name", "state", "version", "heartbeat", "version_mismatch", "slots",
@@ -372,14 +372,15 @@ def machines(
     `loops`/`repos`/`session_backend`/`actions` are optional additions. Old
     records return empty lists or `None` for these fields.
 
-    A record that cannot be read is left out. It is not JSON, not an object,
-    or has no readable `heartbeat`. Its `machine:<name>` label is added to
-    `skipped` when `skipped` is a list.
+    A record that cannot be read is not JSON, not an object, or has no
+    readable `heartbeat`.
 
-    `strict=True` does not skip. It raises the error the old code raised
-    (`json.JSONDecodeError`, `KeyError`, or `AttributeError`). Use it when
-    the caller acts on the list. A skipped record would make the caller act
-    on a partial list.
+    `strict=True` (the default) raises the error for that record
+    (`json.JSONDecodeError`, `KeyError`, or `AttributeError`). Acting
+    callers use it. A list without the record is a partial list.
+
+    `strict=False` leaves the record out. Its `machine:<name>` label is
+    added to `skipped` when `skipped` is a list. Display callers use it.
     """
     client = slots_redis._client(
         connection.get("redis_host"),

@@ -453,7 +453,7 @@ def fleet_state(connection: dict) -> dict:
     `gh` access) is silently skipped, same as `/roadmap` already tolerates.
     """
     try:
-        machine_list = machines.machines(connection)
+        machine_list = machines.machines(connection, strict=False)
     except machines.CoordinatorUnreachable as exc:
         return {"machines": [], "claims": {}, "fleet_error": str(exc)}
 
@@ -2886,7 +2886,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_dashboard(gather(self.peek_lines, self.fleet_connection)))
         elif url.path == "/roadmap":
             try:
-                machine_records = machines.machines(self.fleet_connection)
+                machine_records = machines.machines(self.fleet_connection, strict=False)
                 online = sum(record.get("state") == "online" for record in machine_records)
                 fleet_html = (
                     "<a class='machine-count' href='/machines' style='display:flex;align-items:center;gap:6px'>"
@@ -2966,7 +2966,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_model_tiers(sent=query.get("sent"), connection=self.fleet_connection))
         elif url.path == "/machines":
             try:
-                records = machines.machines(self.fleet_connection)
+                records = machines.machines(self.fleet_connection, strict=False)
                 slot_status = slots_redis.status(**self.fleet_connection)
                 timer_list = timers()
                 recurring_timer = next(

@@ -737,7 +737,7 @@ def _resolve_issues(
 
 def _check_claims(resolved: dict, issue_numbers: list[int], connection: dict) -> None:
     owner_repos = sorted({target.rpartition("#")[0] for _repo, target in resolved.values()})
-    existing = claims.claims_for(owner_repos, **connection)
+    existing = claims.claims_for(owner_repos, strict=True, **connection)
     for number in issue_numbers:
         _repo, target = resolved[number]
         held = existing.get(target)
@@ -832,7 +832,7 @@ def _claim_all(resolved: dict, issue_numbers: list[int], holder: str, connection
                 claims.claim(target, holder, **connection)
             except claims.ClaimHeld:
                 owner_repo = target.rpartition("#")[0]
-                existing = claims.claims_for([owner_repo], **connection)
+                existing = claims.claims_for([owner_repo], strict=True, **connection)
                 held = existing.get(target, {})
                 raise IssueClaimed(number, held.get("session", "another loop")) from None
             claimed_targets.append(target)

@@ -284,7 +284,7 @@ def test_machines_leaves_out_unreadable_records_and_reports_them(redis_port, flu
     raw.set("lupin:v1:machine:bad-time", json.dumps({"state": "online", "heartbeat": "yesterday"}))
     skipped = []
 
-    result = machines.machines(_kw(redis_port), skipped=skipped)
+    result = machines.machines(_kw(redis_port), skipped=skipped, strict=False)
 
     assert [m["name"] for m in result] == ["good-box"]
     assert sorted(skipped) == [
@@ -292,13 +292,12 @@ def test_machines_leaves_out_unreadable_records_and_reports_them(redis_port, flu
     ]
 
 
-def test_machines_without_skipped_list_does_not_raise_on_unreadable_record(redis_port, flush_redis):
+def test_machines_raises_on_unreadable_record_by_default(redis_port, flush_redis):
     _write_raw_record(redis_port, "good-box")
     _raw_client(redis_port).set("lupin:v1:machine:old-box", "not json")
 
-    result = machines.machines(_kw(redis_port))
-
-    assert [m["name"] for m in result] == ["good-box"]
+    with pytest.raises(json.JSONDecodeError):
+        machines.machines(_kw(redis_port))
 
 
 def test_machines_strict_raises_on_unreadable_record(redis_port, flush_redis):

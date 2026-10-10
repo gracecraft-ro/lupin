@@ -429,7 +429,7 @@ class MachinesRouteUnitTests(unittest.TestCase):
             mock.patch.object(serve.slots_redis, "status", return_value={}),
         ):
             handler.do_GET()
-        fake.assert_called_once_with({"redis_host": "127.0.0.1"})
+        fake.assert_called_once_with({"redis_host": "127.0.0.1"}, strict=False)
         handler.reply.assert_called_once()
 
     def test_machines_route_unreachable_coordinator_is_502(self):

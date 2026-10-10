@@ -94,6 +94,16 @@ def test_claims_for_skips_a_claim_that_is_not_a_json_object(redis_port, flush_re
     assert sorted(skipped) == ["claim:gracecraft/lupin#8", "claim:gracecraft/lupin#9"]
 
 
+@pytest.mark.parametrize("raw_value", ["not json", "[1, 2]"])
+def test_claims_for_strict_raises_on_a_claim_that_is_not_a_json_object(redis_port, flush_redis, raw_value):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set("lupin:v1:claim:gracecraft/lupin#9", raw_value)
+
+    with pytest.raises(ValueError):
+        claims.claims_for(["gracecraft/lupin"], strict=True, **kw)
+
+
 def test_claim_succeeds_and_is_visible_in_redis(redis_port, flush_redis):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     claims.claim("gracecraft/lupin#6", "host-a:session-1", **kw)

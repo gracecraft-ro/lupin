@@ -295,11 +295,12 @@ def _filter_candidates(
     return skipped, candidates, pick
 
 
-def place(task: str, connection: dict, *, tiers: dict | None = None, strict: bool = False) -> dict:
+def place(task: str, connection: dict, *, tiers: dict | None = None, strict: bool = True) -> dict:
     """Classify, route, and pick a machine for `task`. Raises
     `CoordinatorUnreachable` if the fleet registry can't be reached (same
-    exception `machines.machines()` raises). `strict` is passed to
-    `machines.machines()`. Callers that act on the pick pass `strict=True`.
+    exception `machines.machines()` raises). `strict` defaults to `True` and
+    is passed to `machines.machines()`. Only a caller that displays the pick
+    passes `strict=False`.
 
     Quota pacing is `route()`'s job now (issue #36 -- every provider is one
     account shared by the whole fleet, so it belongs with the model choice,
