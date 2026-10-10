@@ -371,8 +371,9 @@ fixed action table: `loop.stop`, `loop.run`, `loop.run-all`, `loop.peek`,
 `schedule.resume`.
 
 `loop.stop` takes `repo` and an optional boolean `force`. Without `force`, the
-stop asks the agent for a handoff first, so the agent allows `loop.stop` 900
-seconds to run. Other actions get 120 seconds.
+stop asks the agent for a handoff first. The agent allows `loop.stop` 1740
+seconds (29 minutes) to run. This budget covers every wait on the stop path,
+run one after another. Other actions get 120 seconds.
 
 ### `cmd:<id>`
 

@@ -37,6 +37,9 @@ DEFAULT_PROMPT = (
 )
 HERDR_TIMEOUT = 20.0
 SERVER_START_TIMEOUT = 30.0
+PANE_READ_TIMEOUT = 60.0
+SYSTEMCTL_CHECK_TIMEOUT = 3.0
+SYSTEMCTL_STOP_TIMEOUT = 30.0
 LEASE_TTL = 60.0
 HANDOFF_GRACE_S = 600.0
 HANDOFF_TEXT = (
@@ -1056,7 +1059,7 @@ def _save_report(repo: str, session: str, workspace: dict) -> Path:
     pane = _pane_id(workspace)
     if not pane:
         raise HerdrError("Herdr workspace has no pane ID")
-    output = _herdr(session, "pane", "read", pane, "--source", "recent", "--lines", "100000", "--format", "text", timeout=60.0)
+    output = _herdr(session, "pane", "read", pane, "--source", "recent", "--lines", "100000", "--format", "text", timeout=PANE_READ_TIMEOUT)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True, mode=0o750)
     path = REPORTS_DIR / f"{validate_repo(repo)}-{_stamp()}-{time.time_ns() % 1000000:06d}.log"
     temporary = path.with_suffix(path.suffix + ".part")
@@ -1122,11 +1125,11 @@ def stop_loop(repo: str, *, force: bool = False, grace: float = HANDOFF_GRACE_S)
             if not workspace_id:
                 raise HerdrError("Herdr workspace has no ID")
             _herdr_json(session, "workspace", "close", workspace_id)
-        _, state = _run(["systemctl", "is-active", f"{unit_name(repo)}.service"], timeout=3.0)
+        _, state = _run(["systemctl", "is-active", f"{unit_name(repo)}.service"], timeout=SYSTEMCTL_CHECK_TIMEOUT)
         if state in {"active", "activating", "deactivating"}:
             rc, output = _run(
                 _sudo_argv("systemctl", "stop", f"{unit_name(repo)}.service"),
-                timeout=30.0,
+                timeout=SYSTEMCTL_STOP_TIMEOUT,
             )
             if rc:
                 raise LoopError(output or f"could not stop Lupin worker for {repo}")

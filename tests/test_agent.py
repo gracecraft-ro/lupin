@@ -16,8 +16,9 @@ from types import SimpleNamespace
 
 import pytest
 import redis as redis_lib
+from redis._defaults import DEFAULT_RETRY_CAP, DEFAULT_RETRY_COUNT
 
-from lupin import agent, commands, slots
+from lupin import agent, commands, debrief, loop_runtime, slots, slots_redis
 
 KEY = "secret"
 ACTOR_KW = {"actor": "grace", "issuer": "test-host"}
@@ -262,6 +263,56 @@ def test_loop_stop_gets_more_time_than_other_actions(redis_port, flush_redis, mo
 
     assert timeouts == [agent.ACTION_TIMEOUT_S["loop.stop"]]
     assert timeouts[0] > agent.EXEC_TIMEOUT_S
+
+
+# One Redis call, worst case. slots_redis._call_with_retry tries twice. Each
+# try is redis-py's 1 + DEFAULT_RETRY_COUNT attempts. An attempt tries each
+# localhost address (::1, 127.0.0.1) with CONNECT_TIMEOUT. redis-py sleeps up
+# to DEFAULT_RETRY_CAP between attempts.
+REDIS_ADDRESSES = 2
+REDIS_CALL_S = 2 * (
+    (1 + DEFAULT_RETRY_COUNT) * REDIS_ADDRESSES * slots_redis.CONNECT_TIMEOUT
+    + DEFAULT_RETRY_COUNT * DEFAULT_RETRY_CAP
+)
+POLL_S = 0.25  # loop_runtime._wait_for_server, time.sleep(0.25)
+
+
+def test_stop_budget_covers_every_timeout_on_the_stop_path():
+    # Each term is one worst-case wait, in seconds, on the non-forced stop path.
+    # The test cannot see a timeout that is not listed here. Add new ones here.
+    terms = [
+        # Ensure the server (loop_runtime.py:784, 772, 775, 776, 758-763, 791, 794)
+        ("server: running check", loop_runtime.HERDR_TIMEOUT),
+        ("server: running check under the machine lock", loop_runtime.HERDR_TIMEOUT),
+        ("server: systemd-run start", loop_runtime.HERDR_TIMEOUT),
+        ("server: running check after failed start", loop_runtime.HERDR_TIMEOUT),
+        ("server: wait for server", loop_runtime.SERVER_START_TIMEOUT + loop_runtime.HERDR_TIMEOUT + POLL_S),
+        # Find the workspace (loop_runtime.py:288, 293)
+        ("workspace list", loop_runtime.HERDR_TIMEOUT),
+        ("pane list fallback", loop_runtime.HERDR_TIMEOUT),
+        # Ask for a handoff (loop_runtime.py:305, 1093-1096)
+        ("agent list", loop_runtime.HERDR_TIMEOUT),
+        ("agent prompt --wait", loop_runtime.HANDOFF_GRACE_S + loop_runtime.HERDR_TIMEOUT),
+        # Save report, close, stop worker (loop_runtime.py:1062, 1127, 1128, 1131-1132)
+        ("pane read for report", loop_runtime.PANE_READ_TIMEOUT),
+        ("workspace close", loop_runtime.HERDR_TIMEOUT),
+        ("systemctl is-active", loop_runtime.SYSTEMCTL_CHECK_TIMEOUT),
+        ("systemctl stop", loop_runtime.SYSTEMCTL_STOP_TIMEOUT),
+        # Stop a session other than the shared one (loop_runtime.py:1136, 1137)
+        ("session: workspace list", loop_runtime.HERDR_TIMEOUT),
+        ("session: pane list fallback", loop_runtime.HERDR_TIMEOUT),
+        ("session: session stop", loop_runtime.HERDR_TIMEOUT),
+        # Debrief, after the lock is released (debrief.py:262, 270, 274; claims.py:227, 234)
+        ("debrief: gh repo view", debrief.GH_TIMEOUT),
+        ("debrief: ledger read (Redis)", REDIS_CALL_S),
+        ("debrief: claims scan (Redis)", REDIS_CALL_S),
+        ("debrief: one failing claims get (Redis)", REDIS_CALL_S),
+        # debrief.py:138, 142, 172, 178, 194, 220 (twice)
+        ("debrief: 7 gh list calls", 7 * debrief.GH_TIMEOUT),
+    ]
+    budget = agent.ACTION_TIMEOUT_S["loop.stop"]
+    total = sum(seconds for _, seconds in terms)
+    assert total < budget, f"stop can take {total:.2f}s; budget is {budget:g}s"
 
 
 def test_command_for_a_different_machine_is_never_picked_up(redis_port, flush_redis, monkeypatch):
