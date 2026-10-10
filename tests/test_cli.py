@@ -8,7 +8,7 @@ from unittest import mock
 
 import pytest
 
-from lupin import cli, commands, loop_runtime, loops, machines, slots
+from lupin import agent, cli, commands, loop_runtime, loops, machines, slots
 
 
 @pytest.fixture(autouse=True)
@@ -266,6 +266,31 @@ def test_stop_json_shape(capsys):
     captured = capsys.readouterr()
     assert code == 0
     assert json.loads(captured.out) == {"mode": "local", "returncode": 0, "output": "ok"}
+
+
+def test_local_stop_runs_with_stop_time_limit(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, timeout=20.0):
+        seen["timeout"] = timeout
+        return 0, ""
+
+    monkeypatch.setattr(loops, "run_subprocess", fake_run)
+    code = cli.main(["stop", "widgets", "--machine", "h"])
+    assert code == 0
+    assert seen["timeout"] == agent.ACTION_TIMEOUT_S["loop.stop"]
+
+
+def test_remote_stop_queues_and_skips_local_runner(capsys):
+    with (
+        mock.patch.object(loops, "run_subprocess") as local_runner,
+        mock.patch.object(loops.commands, "enqueue", return_value="cmd-1") as enqueue,
+        mock.patch.object(loops.commands, "get_status", return_value={"state": "ok"}),
+    ):
+        code = cli.main(["stop", "widgets", "--machine", "other", "--signing-key", "k"])
+    assert code == 0
+    assert enqueue.call_args.args[:2] == ("other", "loop.stop")
+    local_runner.assert_not_called()
 
 
 @pytest.mark.parametrize(

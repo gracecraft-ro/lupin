@@ -49,10 +49,11 @@ from .slots_redis import _call_with_retry, _client
 DEFAULT_BATCH = 20  # design: "ZRANGE the oldest 20"
 DEFAULT_POLL_INTERVAL = 2.0
 EXEC_TIMEOUT_S = 120.0
-# A stop runs its timed waits one after another. They include the handoff
-# wait (loop_runtime.HANDOFF_GRACE_S) and the debrief's gh calls
-# (debrief.DEBRIEF_DEADLINE_S). The budget covers their worst-case sum.
-# Lock waits have no timeout and are not counted. tests/test_agent.py checks the sum.
+# Time limit for loop.stop, in seconds. The stop subprocess runs its waits
+# one after another: the handoff wait (loop_runtime.HANDOFF_GRACE_S) and the
+# debrief's gh calls (debrief.DEBRIEF_TIME_LIMIT_S). tests/test_agent.py checks
+# their worst-case sum. Redis calls outside the subprocess and lock waits are
+# not in this limit. See docs/redis-schema.md.
 ACTION_TIMEOUT_S = {"loop.stop": 1740.0}
 OUTPUT_CAP = 8192  # 8 KiB, combined stdout+stderr -- design's "last 8 KiB combined"
 

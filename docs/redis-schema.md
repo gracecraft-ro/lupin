@@ -371,20 +371,38 @@ fixed action table: `loop.stop`, `loop.run`, `loop.run-all`, `loop.peek`,
 `schedule.resume`.
 
 `loop.stop` takes `repo` and an optional boolean `force`. Without `force`, the
-stop asks the agent for a handoff first. The agent allows `loop.stop` 1740
-seconds (29 minutes) to run. The budget covers the timed waits on the stop
-path. The waits run one after another. The budget does not cover these waits:
+stop asks the agent for a handoff first.
 
-- The repo lock in `stop_loop`. The stop takes it with `fcntl.flock` and
-  `LOCK_EX`. It has no timeout.
-- The machine lock in `_ensure_shared_server`. It also uses `LOCK_EX`. It has
-  no timeout.
-- Extra claims reads. `claims_for` runs one scan. Then it makes one Redis `GET`
-  for each claim key of the repo. The budget counts one `GET`.
+The agent gives `loop.stop` a time limit of 1740 seconds (29 minutes). The
+limit is `ACTION_TIMEOUT_S["loop.stop"]` in `agent.py`. It covers the stop
+subprocess only. Inside that subprocess, the waits run one after another. Their
+worst-case sum is 1317.25 seconds. The test
+`test_stop_time_limit_covers_every_timeout_on_the_stop_path` in
+`tests/test_agent.py` checks this sum.
 
-The debrief's gh calls share one 10-second limit (`DEBRIEF_DEADLINE_S`). A call
-that hits the limit leaves a `Not collected` note in the debrief. Other actions
-get 120 seconds.
+These waits are not in the sum:
+
+- Five Redis calls in `agent.py`, outside the subprocess. They read the
+  command, claim it, write its result, remove it from the queue, and log the
+  event. Each has a worst case of 108 seconds. Together they are 540 seconds.
+- The repo lock in `stop_loop`. It has no time limit.
+- The machine lock in `_ensure_shared_server`. It has no time limit.
+- More claim reads. The sum counts one claims `get`. `claims_for` runs one
+  `get` for each claim key of the repo.
+
+With the five Redis calls, the worst case is 1857.25 seconds. That is more than
+1740 seconds. Open decision: raise the time limit, or count these calls in it.
+
+One Redis call has a worst case of 2 x (11 x A x 2 + 10) seconds. A is the
+number of addresses the host resolves to. On localhost, A is 2, so the worst
+case is 108 seconds. The client tries twice. Each try makes 11 attempts, and
+each attempt tries every address with a 2 second connect limit. The client
+waits up to 1 second between attempts.
+
+All `gh` calls in one debrief share one 10-second time limit
+(`DEBRIEF_TIME_LIMIT_S`). Redis reads are not in this limit. A call that hits
+the limit leaves a `Not collected` note in the debrief. Other actions get
+`EXEC_TIMEOUT_S`, which is 120 seconds.
 
 ### `cmd:<id>`
 

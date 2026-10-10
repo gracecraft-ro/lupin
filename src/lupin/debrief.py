@@ -23,7 +23,7 @@ from . import claims, ledger, roadmap
 from .slots import CoordinatorUnreachable
 
 GH_TIMEOUT = 30.0
-DEBRIEF_DEADLINE_S = 10.0  # Total time for all gh calls in one debrief. Redis reads are not counted.
+DEBRIEF_TIME_LIMIT_S = 10.0  # Time limit for all gh calls in one debrief. Redis reads do not count.
 LIST_LIMIT = "200"
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 FILE_RE = re.compile(r"^\d{8}-\d{6}\.md$")
@@ -70,7 +70,7 @@ def _gh(args: list[str], cwd: str | None = None, timeout: float = GH_TIMEOUT):
         raise DebriefError(f"gh {' '.join(args[:2])} sent bad JSON") from exc
 
 
-class _Budget:
+class _TimeLimit:
     """Time left for the gh calls of one debrief. Redis reads do not use it."""
 
     def __init__(self, seconds: float):
@@ -87,10 +87,10 @@ class _Budget:
             self.left -= time.monotonic() - started
 
 
-def _list(budget: _Budget, args: list[str]) -> list[dict] | None:
+def _list(time_limit: _TimeLimit, args: list[str]) -> list[dict] | None:
     """Return the items. None means the time limit cut the call."""
     try:
-        return budget.gh(args + ["--limit", LIST_LIMIT]) or []
+        return time_limit.gh(args + ["--limit", LIST_LIMIT]) or []
     except GhTimeout:
         return None
 
@@ -150,7 +150,7 @@ def build_markdown(
     events: list[dict] | None = None,
     ledger_note: str | None = None,
     claimed: set[int] | None = None,
-    budget: _Budget | None = None,
+    time_limit: _TimeLimit | None = None,
 ) -> str:
     """Return the debrief for `full_name` over `[start, end]` as markdown.
 
@@ -160,7 +160,7 @@ def build_markdown(
     """
     day = start.strftime("%Y-%m-%d")
     repo = ["--repo", full_name]
-    budget = _Budget(DEBRIEF_DEADLINE_S) if budget is None else budget
+    time_limit = _TimeLimit(DEBRIEF_TIME_LIMIT_S) if time_limit is None else time_limit
     window_events = (
         [] if forced or events is None
         else [e for e in events if _in_window(e.get("timestamp"), start, end)]
@@ -169,11 +169,11 @@ def build_markdown(
     lines.append("- Stop: forced, no handoff" if forced else "- Stop: normal")
     lines.append("")
 
-    merged_all = _list(budget, ["pr", "list", *repo, "--state", "merged",
+    merged_all = _list(time_limit, ["pr", "list", *repo, "--state", "merged",
                                 "--search", f"merged:>={day}",
                                 "--json", "number,title,mergedAt,mergeCommit"])
     merged = [pr for pr in merged_all or [] if _in_window(pr.get("mergedAt"), start, end)]
-    closed_all = _list(budget, ["issue", "list", *repo, "--state", "closed",
+    closed_all = _list(time_limit, ["issue", "list", *repo, "--state", "closed",
                                 "--search", f"closed:>={day}",
                                 "--json", "number,title,closedAt"])
     closed = [issue for issue in closed_all or [] if _in_window(issue.get("closedAt"), start, end)]
@@ -203,13 +203,13 @@ def build_markdown(
     lines.append("")
 
     failing = []
-    open_prs = _list(budget, ["pr", "list", *repo, "--state", "open",
+    open_prs = _list(time_limit, ["pr", "list", *repo, "--state", "open",
                               "--json", "number,title,statusCheckRollup"])
     for pr in open_prs or []:
         names = _failing_checks(pr)
         if names:
             failing.append((pr, names))
-    blocked = _list(budget, ["issue", "list", *repo, "--state", "open", "--label", "blocked",
+    blocked = _list(time_limit, ["issue", "list", *repo, "--state", "open", "--label", "blocked",
                              "--json", "number,title"])
     decisions = [text for event in window_events for text in event.get("decisions", [])]
     risk = []
@@ -225,7 +225,7 @@ def build_markdown(
     lines += _cut("Risk", "open PR", open_prs) + _cut("Risk", "blocked issue", blocked)
     lines.append("")
 
-    ready = _list(budget, ["issue", "list", *repo, "--state", "open", "--label", "ready",
+    ready = _list(time_limit, ["issue", "list", *repo, "--state", "open", "--label", "ready",
                            "--json", "number,title"])
     lines.append("## Opportunities")
     if forced:
@@ -252,7 +252,7 @@ def build_markdown(
                 "--search", f"updated:>={day}",
                 "--json", "number,title,body,comments,updatedAt"]),
     ):
-        items = _list(budget, args)
+        items = _list(time_limit, args)
         cut += _cut("Evidence", kind, items)
         complete = complete and items is not None
         for item in items or []:
@@ -296,8 +296,8 @@ def write_debrief(
     if not checkout.is_dir():
         raise DebriefError(f"no checkout at {checkout}")
     end = datetime.now(timezone.utc)
-    budget = _Budget(DEBRIEF_DEADLINE_S)
-    view = budget.gh(["repo", "view", "--json", "nameWithOwner"], cwd=str(checkout))
+    time_limit = _TimeLimit(DEBRIEF_TIME_LIMIT_S)
+    view = time_limit.gh(["repo", "view", "--json", "nameWithOwner"], cwd=str(checkout))
     full_name = view["nameWithOwner"]
 
     events = None
@@ -306,7 +306,7 @@ def write_debrief(
     if not forced:
         try:
             events = ledger.read_events(full_name, limit=None)
-        except (CoordinatorUnreachable, redis.exceptions.RedisError, ValueError) as exc:
+        except (CoordinatorUnreachable, redis.exceptions.RedisError, ValueError, KeyError) as exc:
             ledger_note = f"Ledger unavailable: {exc.__cause__ or exc}"
         try:
             held = claims.claims_for([full_name])
@@ -318,7 +318,7 @@ def write_debrief(
 
     text = build_markdown(
         full_name, start, end, forced=forced, events=events,
-        ledger_note=ledger_note, claimed=claimed, budget=budget,
+        ledger_note=ledger_note, claimed=claimed, time_limit=time_limit,
     )
     folder = root / "debriefs" / repo
     folder.mkdir(parents=True, exist_ok=True, mode=0o750)

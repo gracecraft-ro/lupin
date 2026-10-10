@@ -114,9 +114,9 @@ from . import loop_runtime
 
 DEFAULT_RESULT_WAIT_S = 20.0  # how long stop/peek/schedule/pause/resume
 # wait, by default, for a remote result before they report exit code 4
-# ("sent, result unknown"). This is not how long the action itself is
-# allowed to run -- that limit is agent.py's own EXEC_TIMEOUT_S (120s; 1740s for stop). A
-# caller who wants to wait longer than 20 seconds passes --wait.
+# ("sent, result unknown"). This is not the time limit for the action
+# itself. agent.py sets that: EXEC_TIMEOUT_S, or ACTION_TIMEOUT_S for
+# loop.stop. A caller who wants to wait longer than 20 seconds passes --wait.
 
 
 def _route_args(parser: argparse.ArgumentParser) -> None:
@@ -1733,6 +1733,7 @@ def _cmd_stop(args: argparse.Namespace) -> int:
             queue_action="loop.stop", queue_params={"repo": args.repo, "force": args.force},
             connection=connection, signing_key=args.signing_key,
             actor=os.environ.get("USER", "lupin"), issuer=local_host, wait_s=args.wait,
+            run_local=lambda argv: loops_mod.run_subprocess(argv, timeout=agent_mod.ACTION_TIMEOUT_S["loop.stop"]),
         )
     except slots.CoordinatorUnreachable:
         print(f"cannot reach the redis coordinator to stop {args.repo!r} on {machine!r}", file=sys.stderr)
