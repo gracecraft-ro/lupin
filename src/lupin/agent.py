@@ -73,8 +73,8 @@ COMMAND_READ_WORST_S = ATTEMPTS_PER_CALL * (
     + DEFAULT_CLIENT_RETRIES * DEFAULT_CLIENT_BACKOFF_CAP_S
 )
 # Agent Redis calls on the loop.stop path after the read: claim, claim
-# read-back (only when the claim reply was lost), write result, dequeue,
-# audit line. They use debrief_client.
+# read (only when the claim returns nil), write result, dequeue, audit
+# line. They use debrief_client.
 AGENT_REDIS_CALLS_ON_STOP = 5
 # Cap on the stop subprocess. The read and the agent's Redis calls use the rest of the limit.
 SUBPROCESS_TIMEOUT_S = {
@@ -406,14 +406,15 @@ def _process_one(client, stop_client, machine: str, key: str, cmd_id: str) -> di
         )
     )
     if not claimed:
-        # A retried SET NX returns nil when its first try applied. The
-        # claim token shows whether that first try was this attempt's.
+        # SET NX returns nil when the key exists. That can be this attempt's
+        # own claim, after a lost reply, or another poller's. The claim token
+        # shows which.
         raw = _call_with_retry(lambda: client.get(commands.res_key(cmd_id)))
         held = json.loads(raw) if raw else {}
         if held.get("state") != "running" or held.get("claim") != claim:
             # Another poller racing on the same id claimed it first. Don't
-            # touch the queue or run anything -- the claimant finishes the
-            # job, including the dequeue.
+            # touch the queue or run anything -- the poller that made the
+            # claim finishes the job, including the dequeue.
             return {"id": cmd_id, "state": "lost-race"}
 
     try:

@@ -379,10 +379,19 @@ cases. No single timer enforces it. It has three parts:
 
 - The command read. The agent reads the command with `_client`. The action is
   not known until the read ends, so every action uses `_client` for this read.
-- Up to five Redis calls after the read. They use `debrief_client`. They claim
-  the command, read the claim back, write the result, remove the command from
-  the queue, and write the audit line. The read-back runs only when the claim
-  reply was lost. The budget counts it anyway.
+- Up to five Redis calls after the read. They use `debrief_client`, in this
+  order:
+  - Claim the command.
+  - Read the claim entry again. This runs only when the claim returns nil.
+  - Write the result.
+  - Remove the command from the queue.
+  - Write the audit line.
+
+  A nil reply means the key already exists. The key may hold this attempt's
+  claim, after a lost reply. It may also hold another poller's claim. The entry
+  counts as this attempt's only when `state` is `running` and `claim` matches
+  this attempt's token. The budget counts five calls. It covers the claim read
+  even when that read does not run.
 - The stop subprocess. Its timer is `SUBPROCESS_TIMEOUT_S["loop.stop"]`, passed
   to `subprocess.run`.
 
@@ -408,7 +417,7 @@ The client has these settings:
 - Each connect waits up to 1 second. This is `DEBRIEF_TIMEOUT_S`.
 - Each read waits up to 1 second.
 - redis-py does not retry (`retries=0`).
-- `_call_with_retry` makes two attempts in all.
+- `_call_with_retry` makes at most two attempts.
 
 `_client` is the default client. Its timeout is 2 seconds. redis-py retries a
 failed command 10 times. The command read uses `_client`. So do the other
@@ -480,11 +489,11 @@ If a wait runs to that limit, the stop ends and the debrief is not written.
   makes an attempt fail. `_call_with_retry` then makes one more attempt. Three
   cases follow:
   - The first try writes the claim, and its reply is lost. The retry returns
-    nil. The read-back finds this attempt's claim token. The stop runs once.
-  - The claim is written, and the retry or the read-back also fails. The stop
-    does not run. The command stays queued, and the record stays `running`.
-    `lupin agent` exits with code 3. The next start marks the record `failed`
-    and removes the command from the queue (`startup_scan`).
+    nil. The claim read finds this attempt's claim token. The stop runs once.
+  - The claim is written, its reply is lost, and the retry or the claim read
+    fails. The stop does not run. The command stays queued, and the record
+    stays `running`. `lupin agent` exits with code 3. The next start marks the
+    record `failed` and removes the command from the queue (`startup_scan`).
   - Another poller claims the id first. This poller returns `lost-race`. It does
     not touch the queue or run the command.
 - Non-stop actions use `_client`, which allows 2 seconds per reply. They are not
@@ -494,14 +503,20 @@ If a wait runs to that limit, the stop ends and the debrief is not written.
   until the next start. The next start marks it `failed`, with a reason that
   starts with `orphaned`. So a stop that ran can show `failed`.
   `test_stop_result_write_failure_leaves_the_claim_until_restart` checks this.
-- A `ZREM` timeout after a run leaves the queue entry. The next poll returns
-  `lost-race` and does not run the command again.
+- A `ZREM` after a run can fail with a connection or timeout error. The error
+  ends the poll, and `lupin agent` exits with code 3. The entry stays queued.
+  `cmdres` holds the final state. `cmdlog` has no line for the run. When a poll
+  reaches the entry after a restart, it does this:
+  - Before `expires_at` + 30 seconds, it returns `lost-race`. It does not run
+    the command.
+  - From `expires_at` + 30 seconds on, it returns `expired`. It logs an
+    `expired` line with reason `ttl` to `cmdlog`. `cmdres` still says `ok`.
 - The claims scan counts as one request and reply. `SCAN` returns keys in pages.
   Each extra page is one more request and reply. The budget does not count the
   extra pages.
-- A server that keeps sending data slowly does not cause a stall. Each read can
-  wait up to 1 second. The total wait is not limited. The budget does not bound
-  this case.
+- A server that sends data slowly can keep one reply going. Each read waits up
+  to 1 second. The reply as a whole has no time limit, so the budget does not
+  bound this case.
 - Name lookup (`getaddrinfo`) is not covered by the timeouts.
 
 ## Budget result
@@ -556,30 +571,45 @@ so a compromised host can't forge a command for a different one.
 ### `cmdres:<id>`
 
 Claimed with `SET ... NX` (first writer wins a race between two pollers
-on the same id), then overwritten by the same claimant with the final
-result. `state` is one of `queued` (no `cmdres` yet — the `cmd:<id>` key
+on the same id), then overwritten with the final result by the poller that
+made the claim. `state` is one of `queued` (no `cmdres` yet — the `cmd:<id>` key
 is the only record), `running`, `ok`, `failed`, `rejected`, `expired`.
 
 A `running` entry has a `claim` field. It holds a new token for each claim
-attempt. If a retried `SET ... NX` returns nil, the claimant reads the entry
-back. The claim is its own when `claim` matches its token and `state` is
-`running`. Otherwise, another poller holds the claim.
+attempt. If `SET ... NX` returns nil, the poller reads the entry again. The
+claim belongs to this attempt when `claim` matches its token and `state` is
+`running`. Otherwise, another poller holds the claim, or a result exists.
 
 ```json
 {"id": "a1b2c3d4e5f6...", "state": "ok", "host": "jesus", "action": "loop.stop", "exit_code": 0, "output": "...", "truncated": false}
 ```
 
-A `running` entry still present when `lupin agent` restarts means the
-previous process crashed mid-command — the startup scan marks it `failed`
-rather than silently re-running it. `output` is the last 8 KiB of combined
-stdout+stderr; `rejected`/`failed`-without-a-run carry a `reason` string
-instead.
+A `running` entry that is still queued when `lupin agent` restarts is marked
+`failed`, with reason `orphaned: still running when the agent restarted`. The
+startup scan does this. It never runs the command again. Three cases can leave
+such an entry:
+
+- The agent process stopped while the stop subprocess ran. A crash or a kill
+  can cause this. The stop may have run in full or in part. The startup scan
+  does not check.
+- The claim was written, but its reply was lost. The retry or the claim read
+  then failed. The stop did not run. The agent exited with code 3.
+- The stop ran, but the result write failed. The agent exited with code 3. The
+  stop did run.
+
+`output` is the last 8 KiB of combined stdout+stderr;
+`rejected`/`failed`-without-a-run carry a `reason` string instead.
 
 ### `cmdlog`
 
 One stream entry per enqueue and one per terminal outcome
-(`ok`/`failed`/`rejected`/`expired`) — the audit trail, capped with
-`MAXLEN ~ 2000`.
+(`ok`/`failed`/`rejected`/`expired`), capped with `MAXLEN ~ 2000`. This is the
+audit trail. Some outcomes have no line:
+
+- A write is best effort. A Redis connection or timeout error drops the line.
+- A run whose `ZREM` fails has no line. If a later poll expires the entry, that
+  poll writes an `expired` line. `cmdres` still says `ok`. If the entry is
+  pruned first, no line is written.
 
 ## TTLs
 
