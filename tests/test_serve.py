@@ -429,7 +429,7 @@ class MachinesRouteUnitTests(unittest.TestCase):
             mock.patch.object(serve.slots_redis, "status", return_value={}),
         ):
             handler.do_GET()
-        fake.assert_called_once_with({"redis_host": "127.0.0.1"}, strict=False)
+        fake.assert_called_once_with({"redis_host": "127.0.0.1"}, strict=True)
         handler.reply.assert_called_once()
 
     def test_machines_route_unreachable_coordinator_is_502(self):
@@ -1193,6 +1193,7 @@ class FleetStateTests(unittest.TestCase):
         claims_for.assert_called_once_with(
             ["acme/widgets"],
             redis_host="127.0.0.1", redis_port=1, redis_username=None, redis_password=None,
+            strict=True,
         )
 
     def test_repos_with_no_resolvable_owner_skip_the_claims_lookup(self):
@@ -1380,6 +1381,96 @@ def test_dashboard_shows_real_fleet_data_from_redis(redis_port, flush_redis):
     assert "<span class='pill on'>online</span>" in body
     assert "acme/widgets#7" in body
     assert "loop-widgets#1" in body
+
+
+def _corrupt_raw(redis_port, key, raw):
+    """Write `raw` at `key` unchanged. The readers must refuse it."""
+    redis_lib.Redis(host="127.0.0.1", port=redis_port).set(key, raw)
+
+
+def _real_connection(redis_port):
+    return {
+        "redis_host": "127.0.0.1", "redis_port": redis_port,
+        "redis_username": None, "redis_password": None,
+    }
+
+
+def test_fleet_state_raises_on_unreadable_machine_record(redis_port, flush_redis):
+    """Dashboard overview reads stop on a bad machine record. They do not
+    show a partial fleet.
+    """
+    _corrupt_raw(redis_port, machines._record_key("bad"), "{not json")
+    with pytest.raises(json.JSONDecodeError):
+        serve.fleet_state(_real_connection(redis_port))
+
+
+def test_fleet_state_raises_on_unreadable_claim_record(redis_port, flush_redis):
+    _corrupt_raw(redis_port, "lupin:v1:claim:acme/widgets#7", "[]")
+    with (
+        mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+        mock.patch.object(serve.roadmap, "_repo_identity", return_value=("acme", "widgets", None)),
+        pytest.raises(ValueError, match="not a JSON object"),
+    ):
+        serve.fleet_state(_real_connection(redis_port))
+
+
+def test_machines_page_raises_on_unreadable_machine_record(redis_port, flush_redis):
+    _corrupt_raw(redis_port, machines._record_key("bad"), "{not json")
+    handler = _get_handler("/machines", _real_connection(redis_port))
+    with pytest.raises(json.JSONDecodeError):
+        handler.do_GET()
+    handler.reply.assert_not_called()
+
+
+def test_roadmap_page_warns_about_unreadable_machine_record(redis_port, flush_redis):
+    _write_machine_record(redis_port, "jesus", state="online")
+    _corrupt_raw(redis_port, machines._record_key("bad"), "{not json")
+    with (
+        mock.patch.object(serve, "code_repos", return_value=[]),
+        _live_dashboard(_real_connection(redis_port)) as port,
+    ):
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/roadmap", timeout=15) as response:
+            status = response.status
+            body = response.read().decode()
+    assert status == 200
+    assert "1 of 1 machines" in body
+    assert "warning: skipped unreadable Redis record(s): machine:bad" in body
+
+
+def test_quest_state_warns_when_a_claim_record_is_unreadable(
+    redis_port, flush_redis, monkeypatch
+):
+    locate_table = {
+        31: ("repo-a", "acme/repo-a", _issue_json(31)),
+        32: ("repo-a", "acme/repo-a", _issue_json(32)),
+    }
+    monkeypatch.setattr(quest, "_locate_issue", _fake_locate(locate_table))
+    monkeypatch.setattr(
+        quest.roadmap, "cached_dependency_dag", lambda repos, code_dir: {"repos": {}}
+    )
+    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection, **_: {"pick": "jesus"})
+    started = quest.start([31, 32], ["repo-a"], connection=_kw(redis_port))
+    _corrupt_raw(redis_port, "lupin:v1:claim:acme/repo-a#31", "[]")
+
+    state = _quest_handler(redis_port).quest_state(started["id"])
+
+    assert state["skipped"] == ["claim:acme/repo-a#31"]
+
+
+def test_render_page_warns_when_quest_progress_skipped_a_claim():
+    issues = [{"number": 5, "title": "Do thing", "body": "", "labels": []}]
+    model = roadmap.build_model(issues, {}, [], repo="nix")
+    render = lambda title, body, css, js: body
+    quest_state = {
+        "id": "q7", "machine": "jesus", "state": "running",
+        "pending": [5], "done": [], "total": 1,
+        "skipped": ["claim:acme/nix#5"],
+    }
+
+    page = roadmap.render_page("nix", ["nix"], model, render, quest_state)
+
+    assert "warning: skipped unreadable Redis record(s): claim:acme/nix#5" in page
+    assert "Progress may be wrong" in page
 
 
 def test_roadmap_route_reads_ledger_from_dashboard_connection(
