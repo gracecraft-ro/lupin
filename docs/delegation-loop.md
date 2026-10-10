@@ -18,9 +18,9 @@ worktree in the loop state directory. See "State" in `AGENTS.md`.
 The sandbox `gh` account is `gracecraft-ro`. It cannot push to
 `gracecraft-software/lupin` (`gh api repos/gracecraft-software/lupin --jq
 .permissions` -> `push: false, triage: false`). It owns a fork,
-`gracecraft-ro/lupin`, and can push there. So a worker pushes to the fork and
-opens a PR to the upstream repo. Closing or labeling an issue can fail
-without triage access. Check before you write it into a report.
+`gracecraft-ro/lupin`, and can push there. So a worker pushes to the fork. It opens
+the PR on the fork, against `release/next`. Closing or labeling an issue can
+fail without triage access. Check before you write it into a report.
 
 To work on an issue:
 
@@ -36,19 +36,21 @@ To work on an issue:
    `origin` in the clone points back at the mount. Do not push to it for a
    PR.
 
-2. Branch from the current `main`. Check that it is current first:
+2. Branch from the current `release/next` on the fork. Fetch the fork first:
 
    ```bash
-   git ls-remote /code/lupin
+   git -C ~/jobs/lupin-<task> fetch fork
+   git -C ~/jobs/lupin-<task> switch -c <branch> fork/release/next
    ```
 
-3. Use `/ship`. It runs `git push -u fork <branch>` and opens the PR.
+3. Use `/ship`. It runs `git push -u fork <branch>` and opens the PR. The PR
+   base is `release/next` on the fork.
 
 On a Herdr worker you can use a Herdr worktree instead of a clone:
 
 ```bash
 herdr worktree list --cwd /code/lupin
-herdr worktree create --branch <branch> --base main --cwd /code/lupin
+herdr worktree create --branch <branch> --base fork/release/next --cwd /code/lupin
 ```
 
 The worktree is a linked Git worktree, not a clone. It has no `fork` remote,
@@ -60,7 +62,7 @@ Every change goes through a pull request. The shared steps are in "Review and
 merge each pull request" in the `delegation-loop` skill. In this repo:
 
 1. The base branch is the integration branch, `release/next`, on the fork
-   (`gracecraft-ro/lupin`). A PR never targets upstream `main`.
+   (`gracecraft-ro/lupin`). A feature PR never targets upstream `main`.
 2. A worker uses `/ship` (see rule 1). If the push to the fork fails, it
    reports the branch name and commit range. The reviewer reviews that
    branch. Do not merge it until a PR exists on the fork.
@@ -78,6 +80,9 @@ merge each pull request" in the `delegation-loop` skill. In this repo:
    `gh pr merge --repo gracecraft-ro/lupin --merge`. Do not rebase. Do not
    force-push. A worker or reviewer never merges. Close the issue in the same
    pass as the merge.
+
+Changes to this policy go to upstream `main` for the owner to merge. Feature
+work goes to fork `release/next`. PR #130 stays on upstream `main`.
 
 At the end of a session, run `/handoff`.
 

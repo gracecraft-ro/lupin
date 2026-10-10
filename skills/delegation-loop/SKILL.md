@@ -168,8 +168,9 @@ a separate worktree and verify the worker's working directory. On a Herdr
 worker, use the Herdr worktree commands:
 
 ```sh
+git fetch fork
 herdr worktree list --cwd "$PWD"
-herdr worktree create --branch BRANCH --base REF --cwd "$PWD"
+herdr worktree create --branch BRANCH --base fork/release/next --cwd "$PWD"
 herdr worktree open --path PATH --cwd "$PWD"
 ```
 
@@ -323,6 +324,10 @@ does not. Any other exit code means the check failed. In that case, the worker
 merges `fork/release/next` into the branch. Then it pushes the branch to the
 fork. Do not rebase.
 
+If the merge of `fork/release/next` changes a file the reviewer already
+reviewed, the reviewer checks that change before the merge. The gate runs in
+every case.
+
 The orchestrator merges a branch into `release/next` only when both of these
 are true:
 
@@ -331,6 +336,8 @@ are true:
 - The repo's full gate passes on the branch, as it is at merge time. The gate
   command is in the repo's `AGENTS.md`. If the repo has no gate command, report
   that. Do not merge.
+
+A branch with no fork PR is not merged.
 
 No human approval is needed for this merge. Merge the PR with this command. It
 creates a merge commit:
@@ -350,6 +357,7 @@ Do not run a server for a feature branch.
 1. Create the preview worktree once. From the repo root, run:
 
    ```sh
+   git fetch fork
    git worktree add --detach .claude/worktrees/preview fork/release/next
    ```
 
