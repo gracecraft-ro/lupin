@@ -376,25 +376,30 @@ stop asks the agent for a handoff first.
 The agent gives `loop.stop` a time limit of 1740 seconds (29 minutes). The
 limit is `ACTION_TIMEOUT_S["loop.stop"]` in `agent.py`. It covers the stop
 subprocess only. Inside that subprocess, the waits run one after another. Their
-sum is 1317.25 seconds. The sum adds shared-only and non-shared-only waits, so
-it is an upper bound. The longest single path is 1277.25 seconds, on a
-non-shared session. The test
-`test_stop_time_limit_covers_the_listed_timeouts` in
-`tests/test_agent.py` checks this sum.
+sum is 1317.25 seconds. The sum adds waits that cannot all happen on one path,
+so it is an upper bound. The test `test_stop_time_limit_covers_the_listed_timeouts`
+in `tests/test_agent.py` checks this sum.
+
+The debrief makes three Redis calls in the sum:
+
+- A ledger read (one `XRANGE`).
+- A claims scan (one `SCAN` call).
+- A claims read (one `MGET` for all claim keys).
+
+Each has an upper bound of 108 seconds. `SCAN` returns keys in pages. A large
+keyspace needs more `SCAN` calls than the sum counts.
 
 These waits are not in the sum:
 
-- Five Redis calls in `agent.py`, outside the subprocess. They read the
-  command, claim it, write its result, remove it from the queue, and log the
-  event. Each has an upper bound of 108 seconds. Together they are 540 seconds.
+- Five Redis calls in `_process_one` (`agent.py`), outside the subprocess. They
+  read the command, claim it, write its result, remove it from the queue, and
+  log the event. The subprocess timeout does not bound them. Each has an upper
+  bound of 108 seconds. Together they are 540 seconds.
 - The repo lock in `stop_loop`. It has no time limit.
 - The machine lock in `_ensure_shared_server`. It has no time limit.
-- More claim reads. The sum counts one claims `get`. `claims_for` runs one
-  `get` for each claim key of the repo.
 
-With the five Redis calls, the longest path takes up to 1817.25 seconds
-(1277.25 + 540). That is 77.25 seconds more than 1740 seconds. Open decision:
-raise the time limit, or count these calls in it.
+Whether the limit should count the five Redis calls is open. The limit stays at
+1740 seconds.
 
 One Redis call has an upper bound of 2 x (11 x A x 2 + 10) seconds. A is the
 number of addresses the host resolves to. On localhost, A is 2, so the upper

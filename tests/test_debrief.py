@@ -54,6 +54,23 @@ class FakeGh:
         return self.responses[key]
 
 
+class CountingRedis:
+    """Wraps a real client. Records each method name the debrief calls."""
+
+    def __init__(self, client):
+        self.client = client
+        self.calls: list[str] = []
+
+    def __getattr__(self, name):
+        attr = getattr(self.client, name)
+
+        def counted(*args, **kwargs):
+            self.calls.append(name)
+            return attr(*args, **kwargs)
+
+        return counted
+
+
 RESPONSES = {
     "repo view": {"nameWithOwner": FULL},
     "pr list merged": [
@@ -406,6 +423,25 @@ def test_write_debrief_skips_issues_claimed_in_redis(tmp_path: Path, monkeypatch
     assert "Ready two claimed" not in text
     assert "- Issue #40: Ready one" in text
     debrief.claims.claims_for.assert_called_once_with([FULL])
+
+
+def test_redis_calls_do_not_grow_with_the_claim_count(
+    tmp_path: Path, monkeypatch, redis_port, flush_redis
+):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    client = redis.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    for number in range(1, 6):
+        client.set(f"lupin:v1:claim:{FULL}#{number}", json.dumps({"host": "jesus", "session": "s", "since": 0}))
+    counting = CountingRedis(client)
+    monkeypatch.setattr(debrief, "_gh", FakeGh(dict(RESPONSES)))
+    monkeypatch.setattr(debrief.ledger, "_client", lambda *_args: counting)
+    monkeypatch.setattr(debrief.claims, "_client", lambda *_args: counting)
+
+    debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
+
+    # The stop budget lists three debrief Redis calls: ledger read, claims scan, claims read.
+    assert counting.calls == ["xrange", "scan_iter", "mget"]
 
 
 def test_write_debrief_forced_reads_no_redis(tmp_path: Path, monkeypatch):

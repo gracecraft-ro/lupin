@@ -225,16 +225,21 @@ def claims_for(
     prefix = f"{PREFIX}claim:"
     try:
         keys = _call_with_retry(lambda: list(client.scan_iter(match=f"{prefix}*")))
-        result: dict[str, dict] = {}
+        wanted = []
         for key in keys:
             target = key[len(prefix) :]
             owner_repo, _sep, _number = target.rpartition("#")
-            if owner_repo not in repos:
-                continue
-            raw = _call_with_retry(lambda k=key: client.get(k))
+            if owner_repo in repos:
+                wanted.append(key)
+        result: dict[str, dict] = {}
+        if not wanted:
+            return result
+        # One call for all keys. The call count does not grow with the claim count.
+        raws = _call_with_retry(lambda: client.mget(wanted))
+        for key, raw in zip(wanted, raws):
             if raw is None:
                 continue
-            result[target] = json.loads(raw)
+            result[key[len(prefix) :]] = json.loads(raw)
         return result
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable("claims_for") from exc

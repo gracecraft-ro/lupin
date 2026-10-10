@@ -307,13 +307,49 @@ def test_stop_time_limit_covers_the_listed_timeouts():
         # Debrief, after the lock is released. All gh calls share one time limit.
         ("debrief: all gh calls (repo view and lists)", debrief.DEBRIEF_TIME_LIMIT_S),
         ("debrief: ledger read (Redis)", REDIS_CALL_S),
-        # Claims read is one scan plus one get per key. Only one get is listed.
+        # Claims read: one scan, then one mget for all keys.
         ("debrief: claims scan (Redis)", REDIS_CALL_S),
-        ("debrief: one failing claims get (Redis)", REDIS_CALL_S),
+        ("debrief: claims mget (Redis)", REDIS_CALL_S),
     ]
     time_limit = agent.ACTION_TIMEOUT_S["loop.stop"]
     total = sum(seconds for _, seconds in terms)
     assert total < time_limit, f"stop can take {total:.2f}s; time limit is {time_limit:g}s"
+
+
+class CountingRedis:
+    """Wraps a real client. Records each method name the debrief calls."""
+
+    def __init__(self, client):
+        self.client = client
+        self.calls: list[str] = []
+
+    def __getattr__(self, name):
+        attr = getattr(self.client, name)
+
+        def counted(*args, **kwargs):
+            self.calls.append(name)
+            return attr(*args, **kwargs)
+
+        return counted
+
+
+def test_debrief_redis_calls_fit_the_listed_redis_terms(tmp_path, monkeypatch, redis_port, flush_redis):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    client = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    for number in range(1, 6):
+        client.set(f"lupin:v1:claim:acme/widgets#{number}", json.dumps({"host": "jesus", "session": "s", "since": 0}))
+    counting = CountingRedis(client)
+    monkeypatch.setattr(debrief, "_gh", lambda args, cwd=None, timeout=None: (
+        {"nameWithOwner": "acme/widgets"} if args[0] == "repo" else []
+    ))
+    monkeypatch.setattr(debrief.ledger, "_client", lambda *_args: counting)
+    monkeypatch.setattr(debrief.claims, "_client", lambda *_args: counting)
+
+    debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
+
+    # The budget lists three debrief Redis terms: ledger read, claims scan, claims read.
+    assert len(counting.calls) <= 3, counting.calls
 
 
 def test_command_for_a_different_machine_is_never_picked_up(redis_port, flush_redis, monkeypatch):
