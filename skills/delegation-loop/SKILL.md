@@ -342,6 +342,41 @@ gh pr merge --repo gracecraft-ro/<repo> --merge
 Do not rebase. Do not force-push. The reviewer and worker do not merge their
 own PR.
 
+### Preview server
+
+Each repo runs one preview server. It serves the repo's `release/next` only.
+Do not run a server for a feature branch.
+
+1. Create the preview worktree once. From the repo root, run:
+
+   ```sh
+   git worktree add --detach .claude/worktrees/preview fork/release/next
+   ```
+
+2. After each merge into `release/next`, the orchestrator updates the preview.
+   From the repo root, run:
+
+   ```sh
+   git -C .claude/worktrees/preview fetch fork
+   git -C .claude/worktrees/preview checkout --detach fork/release/next
+   ```
+
+   Then it restarts the server.
+3. Bind the server to `127.0.0.1` or to the tailnet address. Never bind to
+   `0.0.0.0`.
+4. Set `LUPIN_LOOP_STATE_DIR` to a scratch path. Do not point the preview at
+   the real fleet Redis unless the test needs it.
+5. Keep the server under a supervisor. Use a Herdr pane or `systemd-run --user`.
+   The server must keep running after an agent session ends.
+6. The repo's `AGENTS.md` has a "Preview server" section. It names the start
+   command, the port, and the machine. It gives the tunnel command,
+   `ssh -N -L PORT:127.0.0.1:PORT MACHINE`, and the local URL,
+   `http://localhost:PORT`. The port must be free on that machine. Check with
+   `ss -ltn`, which lists listening ports. If the repo has no runnable app, that
+   section says `Preview server: none` and gives the reason.
+7. A PR does not need a tunnel command. The PR body says whether the change is
+   visible only after the merge.
+
 ## Monitor and finish
 
 Use `lupin machines`, `lupin peek`, and `lupin attach` to check live work. On
@@ -349,6 +384,11 @@ a Herdr worker, `herdr --session lupin-loops agent list` shows each loop's
 state, workspace, and pane in one call. Read the final diff and run the
 repo's required gate and a smoke check. A worker's success report is not
 proof. Re-read issue and PR comments before closure.
+
+After the merge and the preview restart, check that the preview port answers.
+Run `curl -fsS -o /dev/null http://127.0.0.1:PORT/` on the preview machine. Use
+the tailnet address instead if the server binds to one. Exit code 0 means the
+port answers. Report the result in the handoff.
 
 Append dispatch and handoff events to the shared Redis ledger:
 

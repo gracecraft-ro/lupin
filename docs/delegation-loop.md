@@ -81,6 +81,20 @@ merge each pull request" in the `delegation-loop` skill. In this repo:
 
 At the end of a session, run `/handoff`.
 
+### Preview server
+
+This repo follows "Preview server" in the `delegation-loop` skill. For this
+repo:
+
+- The start command, port, and machine are in "Preview server" in `AGENTS.md`.
+- The dashboard command is `lupin serve --bind 127.0.0.1 --port PORT`.
+- Set `LUPIN_LOOP_STATE_DIR` to a preview-only path. The default is
+  `/var/lib/delegation-loop`, which is the real fleet state.
+- Do not set `LUPIN_REDIS_HOST` to the fleet Redis unless the test needs it.
+- The state directory does not change the Herdr session. Herdr always uses the
+  `lupin-loops` session (`SESSION_NAME` in `src/lupin/loop_runtime.py`).
+- Do not use the start, stop, or run controls on the preview dashboard.
+
 ## Other rules
 
 This repo is a plain Python package and a Nix flake, not a live system

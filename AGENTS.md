@@ -414,3 +414,30 @@ Every change goes through a pull request to the integration branch,
    `/code-review`. The orchestrator merges after approval and a passing gate.
 3. At the end of a session, run `/handoff`. It runs `lupin ledger append`.
 4. Loop details for this repo: `docs/delegation-loop.md`.
+
+### Preview server
+
+This repo has a runnable dashboard. Its preview serves `release/next`.
+
+- Worktree: `.claude/worktrees/preview`. The skill gives the setup commands.
+- Start command. Run it from the preview worktree:
+
+```sh
+nix develop --command env \
+  LUPIN_LOOP_STATE_DIR="$HOME/.local/state/lupin-preview" PYTHONPATH=src \
+  python3 -c '
+import sys
+from lupin.cli import main
+sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
+'
+```
+
+- Port: `8789`. Check it is free with `ss -ltn` first.
+- Machine: not set yet. The owner names it.
+- Owner tunnel command: `ssh -N -L 8789:127.0.0.1:8789 MACHINE`.
+- Local URL: `http://localhost:8789`.
+- Supervisor: a Herdr pane, or `systemd-run --user`.
+- Never bind to `0.0.0.0`. This is a security rule.
+- Do not set `LUPIN_REDIS_HOST` to the fleet Redis unless the test needs it.
+- Do not use the start, stop, or run controls on this dashboard. Herdr uses
+  the `lupin-loops` session for every state directory.
