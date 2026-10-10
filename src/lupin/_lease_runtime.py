@@ -50,7 +50,7 @@ def run_with_lease(
                 renew(lease)
                 failing = False
             except Exception as exc:
-                # Keep renewing. Report only the first error in a row.
+                # Keep renewing. Print only the first failure after a success.
                 if not failing:
                     print(f"lupin: lease {lease} not renewed. {exc}", file=sys.stderr)
                 failing = True
