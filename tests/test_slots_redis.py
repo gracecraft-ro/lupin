@@ -178,6 +178,20 @@ def test_refused_login_on_bmo_status_raises(auth_redis_port, tmp_path, capsys, n
     assert "Falling back" not in capsys.readouterr().err
 
 
+def test_refused_login_makes_one_failed_login_per_call(auth_redis_port, no_client_retry):
+    # The server counts each failed AUTH in INFO stats. `no_client_retry`
+    # turns off redis-py's own retries, so this checks `_call_with_retry` only.
+    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
+    before = admin.info("stats")["acl_access_denied_auth"]
+
+    with pytest.raises(slots_redis.CoordinatorAuthFailed):
+        slots_redis.acquire(
+            "not-bmo", "a", redis_host="127.0.0.1", redis_port=auth_redis_port, redis_password="wrong-pass"
+        )
+
+    assert admin.info("stats")["acl_access_denied_auth"] - before == 1
+
+
 @pytest.mark.parametrize(
     "call, kw_fixture",
     [

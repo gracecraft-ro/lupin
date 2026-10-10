@@ -150,9 +150,12 @@ def _client(
 def _call_with_retry(func):
     """Try `func()`, retrying once on a connect/timeout error (the schema's
     "2s connect timeout, 1 retry"), then let the second failure propagate.
+    A refused login (`AuthenticationError`) is not retried.
     """
     try:
         return func()
+    except redis.exceptions.AuthenticationError:
+        raise
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError):
         return func()
 
