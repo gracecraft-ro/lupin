@@ -480,6 +480,11 @@ Connect timeout 2s, 1 retry, then:
 | GitHub data cache | `pihome` calls `gh` directly anyway (it just can't publish for other machines). Every other machine reports "no data yet" instead of calling `gh` itself — no direct-call fallback here, unlike the resources above. |
 | Quota snapshot | A machine with real provider credentials still returns its own live reading (it just can't publish for other machines). A machine with no credentials for a provider has nothing to fall back to and reports "no data cached yet" for it. |
 
+After an outage ends, a holder tries to renew its lease. If the lease
+already expired, `lupin` logs "lease lost" and tries to acquire again.
+
+## Refused login and ACL denial
+
 Redis refuses a login when the password is bad or missing.
 Redis refuses a command when the ACL denies it.
 Both cases are answers from Redis, not outages.
@@ -501,9 +506,6 @@ A failed renew or release during `hold` prints one line. `hold` keeps the exit c
 
 Known gap: some read paths still print `cannot reach` for a refused login.
 Some cache reads return no data for a refused login. Exit codes for these paths are not covered by the rule above.
-
-After an outage ends, a holder tries to renew its lease. If the lease
-already expired, `lupin` logs "lease lost" and tries to acquire again.
 
 ## Persistence
 

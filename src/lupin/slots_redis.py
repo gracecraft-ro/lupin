@@ -231,7 +231,8 @@ def set_max(
 
     Raises `CoordinatorUnreachable` if Redis can't be reached -- there is no
     local-backend equivalent of this call to fall back to, for `bmo` or any
-    other slot.
+    other slot. A refused login raises `CoordinatorAuthFailed` for every slot,
+    with no fallback. An ACL-denied command raises `NoPermissionError`.
     """
     client = _client(redis_host, redis_port, redis_username, redis_password)
     key = f"{PREFIX}slot:{slot}:max"
