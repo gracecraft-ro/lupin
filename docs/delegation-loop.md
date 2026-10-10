@@ -35,8 +35,16 @@ fail without triage access. Check before you write it into a report.
    git worktree add <path> -b <branch> fork/release/next
    ```
 
-3. Use `/ship` to push. Do not use its `--repo`. Open the PR with
-   `gh pr create --repo gracecraft-ro/lupin --base release/next`.
+3. Push the branch to the fork with `git push fork <branch>`. Never push to
+   `origin`. Do not add a remote. Do not use `/ship`. It pushes to `origin`
+   when direct push is allowed, and it can add a remote. Open the PR on the
+   fork:
+
+   <!-- markdownlint-disable MD013 -->
+   ```sh
+   gh pr create --repo gracecraft-ro/lupin --base release/next --title "<title>" --body "Closes #N"
+   ```
+   <!-- markdownlint-enable MD013 -->
 
 On a Herdr worker, use the Herdr worktree commands:
 
@@ -65,30 +73,32 @@ repo:
    (`gracecraft-ro/lupin`). A feature PR never targets upstream `main`.
 2. A worker uses `/ship` (see rule 1). If the push fails, the worker stops.
    Report the branch name and commit range. Do not review or merge the branch.
-3. The orchestrator dispatches `/code-review` for every PR,
-   including docs-only changes. The reviewer is not the worker. The
-   reviewer's model tier is not lower than the worker's.
+3. The orchestrator (the agent that dispatches and merges work) dispatches
+   `/code-review` for every PR, including docs-only changes. The reviewer is
+   not the worker. The reviewer's model tier is not lower than the worker's.
 4. If the review finds a problem, dispatch a fix worker with the exact
    finding. It uses `/ship` on the same PR. Repeat until the reviewer
-   approves.
+   approves the current head SHA. The head SHA is the newest commit ID on the
+   branch.
 5. The orchestrator posts the verdict on the PR.
 6. The orchestrator merges into `release/next` only when all four are true:
    1. The PR is open on the fork, `gracecraft-ro/lupin`, with base
       `release/next`.
    2. A reviewer approves the current head SHA.
    3. The fork branch contains the current `release/next`. The ancestor check
-      is in the `delegation-loop` skill.
+      asks git whether one branch contains another. The check is in the
+      `delegation-loop` skill.
    4. The repo's full gate, as its `AGENTS.md` defines it, passes.
    Record the approved SHA before you merge. Merge with
    `gh pr merge <PR-number> --repo gracecraft-ro/lupin --merge
    --match-head-commit <approved-SHA>`. Do not rebase. Do not force-push.
-   Before merge, the branch must contain the current `release/next`. See the
-   paragraph that starts "Before a branch is merged" in the `delegation-loop`
-   skill. A worker or reviewer never merges a pull request. Close the issue in
-   the same pass as the merge.
+   See the paragraph that starts "Before a branch is merged" in the
+   `delegation-loop` skill. A worker or reviewer never merges a pull request.
+   The PR body has `Closes #N`. The merge into `release/next` does not close
+   the issue. Close it by hand in the same pass.
 
-Changes to this policy go to upstream `main` for the owner to merge. The owner
-opens that PR. Feature work goes to fork `release/next`.
+Changes to this policy go to upstream `main`, which the owner merges. Feature
+work goes to fork `release/next`.
 
 At the end of a session, run `/handoff`.
 

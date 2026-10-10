@@ -283,9 +283,11 @@ the latest PR comments and reviews before merge.
 A worker ships only to the fork, with `/ship`. It does not push to upstream.
 The PR base is `release/next` on the fork:
 
+<!-- markdownlint-disable MD013 -->
 ```sh
-gh pr create --repo gracecraft-ro/<repo> --base release/next
+gh pr create --repo gracecraft-ro/<repo> --base release/next --title "<title>" --body "Closes #N"
 ```
+<!-- markdownlint-enable MD013 -->
 
 Do not open a feature PR against upstream `main`. If the push to the fork
 fails, the worker stops. The worker reports the local branch name and commit
@@ -306,7 +308,8 @@ it costs more.
 
 If the review finds a problem, dispatch a `fix` worker with the exact finding.
 Tell it to use `/ship` and update the same PR. Review the latest PR commit.
-Repeat until the reviewer approves it.
+Repeat until the reviewer approves the current head SHA. The head SHA is the
+newest commit ID on the branch.
 The orchestrator (the agent that dispatches and merges work) posts the verdict
 and findings on the PR.
 
@@ -319,25 +322,25 @@ git merge-base --is-ancestor fork/release/next fork/BRANCH
 ```
 
 Exit code 0 means the fork branch contains `release/next`. Then continue to
-the merge rules below. Exit code 1 means it does not. For an open, approved
-fork PR, the worker runs `git merge fork/release/next` on the PR branch. If the
-merge has conflicts, report them and stop. Then it pushes the branch to the
-fork. Run the check again. If it exits 0, continue to the merge rules.
-Otherwise stop. Do not rebase. Any other exit code from the first check means
-the check failed. Report it and stop. Do not merge.
+the merge rules below. Exit code 1 means it does not. For an open fork PR
+approved at its current head SHA, the worker runs `git merge fork/release/next`
+on the PR branch. If the merge has conflicts, report them and stop. Then it
+pushes the branch to the fork. Run the check again. If it exits 0, continue to
+the merge rules. Otherwise stop. Do not rebase. Any other exit code from the
+first check means the check failed. Report it and stop. Do not merge.
 
 An approval binds to the head SHA. If the sync changed the head, get a new
 approval at the new head before you merge. The reviewer may limit that review
 to the files the sync changed. The gate runs in every case.
 
-The orchestrator merges a PR into `release/next` only when all four of these
-are true:
+The orchestrator merges into `release/next` only when all four are true:
 
-- The branch has an open PR on the fork, `gracecraft-ro/<repo>`, with base
-  `release/next`.
-- A reviewer approves the PR at its current head SHA.
-- The fork branch contains the current `release/next`. Use the check above.
-- The repo's full gate, as its `AGENTS.md` defines it, passes at merge time.
+- The PR is open on the fork, `gracecraft-ro/<repo>`, with base `release/next`.
+- A reviewer approves the current head SHA.
+- The fork branch contains the current `release/next`. The ancestor check
+  asks git whether one branch contains another. The check is in the
+  `delegation-loop` skill.
+- The repo's full gate, as its `AGENTS.md` defines it, passes.
 
 The reviewer is a different agent from the worker. The gate command is in the
 repo's `AGENTS.md`. If the repo has no gate command, report that. Do not merge.
@@ -377,18 +380,19 @@ Do not run a server for a feature branch.
    ```
 
    Then it restarts the server.
-3. Bind the server to `127.0.0.1` or to the Tailscale IP address. Never bind
-   to `0.0.0.0`.
+3. Bind the server to `127.0.0.1` or to the Tailscale IP address. Tailscale
+   is a private network that links your own machines. Never bind to `0.0.0.0`.
 4. Set `LUPIN_LOOP_STATE_DIR` to a scratch path. Do not point the preview at
    the real fleet Redis unless the test needs it.
-5. Keep the server running in a Herdr pane or with `systemd-run --user`.
-   The server must keep running after an agent session ends.
+5. Keep the server running in a Herdr pane or with `systemd-run --user`. The
+   `systemd-run` command starts a command as a background service. The server
+   must keep running after an agent session ends.
 6. The repo's `AGENTS.md` has a "Preview server" section. It names the start
    command, the port, and the machine. It gives the tunnel command,
    `ssh -N -L PORT:127.0.0.1:PORT MACHINE`, and the local URL,
    `http://localhost:PORT`. The port must be free on that machine. Check with
-   `ss -ltn`, which lists listening ports. If the repo has no runnable app, that
-   section says `Preview server: none` and gives the reason.
+   `ss -ltn`. The `ss` command lists listening ports. If the repo has no
+   runnable app, that section says `Preview server: none` and gives the reason.
 7. A PR does not need a tunnel command. The PR body says whether the change is
    visible only after the merge.
 
