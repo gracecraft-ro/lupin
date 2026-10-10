@@ -73,30 +73,37 @@ repository or artifact-store location.
 
 ## Commit and open the pull request
 
-Commit the change.
+Commit the change. If the commit fails, report the error and stop.
 
 Workers never push to `origin`, `main`, or `release/next`. Push the feature
 branch to the fork. Open the PR on the fork. Then request review.
 
-1. Run `git remote get-url fork`. If it fails, stop. Report the missing remote.
-   Never run `git remote add`.
+1. Run `git remote get-url fork` (the fork is the GitHub copy you push to). It
+   must print `https://github.com/gracecraft-ro/<repo>.git`. If it does not, stop
+   and report. Never run `git remote add`.
 2. Push only the feature branch. Find it with `git branch --show-current`.
+   If the branch is empty, detached (no branch name), `main`, or `release/next`,
+   stop. Report it.
    Then run `git push -u fork <branch>`. Never push any other ref.
 3. Open the PR on the fork. Set `<repo>` to the repo name in the fork URL
-   from step 1. Run:
+   from step 1. If a PR for `<branch>` is already open, skip this step. Find its
+   number with `gh pr view <branch> --repo gracecraft-ro/<repo>`. Otherwise, run:
 
    ```sh
    gh pr create --repo gracecraft-ro/<repo> --base release/next \
      --head <branch> --title "..." --body "..."
    ```
 
-   Never use an upstream `--repo` in this flow.
+   Never use an upstream `--repo` in this flow. If it fails, report the error
+   and stop.
 4. Request review with one comment on the PR. Run:
 
    ```sh
    gh pr comment <PR_NUMBER> --repo gracecraft-ro/<repo> \
      --body "Review requested. Head: <sha>."
    ```
+
+   If it fails, report the PR number and stop.
 
    `<PR_NUMBER>` is the number at the end of the PR URL that `gh pr create`
    prints. `<sha>` is the output of `git rev-parse HEAD`. Then stop. Do not
@@ -119,5 +126,6 @@ Post a short report to the issue. Include:
 
 Keep the issue open while the PR waits for review or merge. Do not say it is
 shipped until the orchestrator approves and merges it. If you own the Lupin
-claim, release it when your work ends, remove the `claimed` label, and comment
-with the PR number or stop reason. The orchestrator owns the final merge.
+claim (a lock on the issue), release it when your work ends. Remove the
+`claimed` label. Then comment with the PR number or stop reason. If the label
+edit fails, report it and stop. The orchestrator owns the final merge.
