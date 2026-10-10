@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import signal
 import subprocess
+import sys
 import threading
 from typing import Callable
 
@@ -44,7 +45,11 @@ def run_with_lease(
 
     def _renew_loop() -> None:
         while not stop.wait(renew_interval):
-            renew(lease)
+            try:
+                renew(lease)
+            except Exception as exc:
+                # Keep renewing. The command still runs.
+                print(f"lupin: lease {lease} not renewed. {exc}", file=sys.stderr)
 
     renewer = threading.Thread(target=_renew_loop, daemon=True)
     renewer.start()

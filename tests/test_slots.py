@@ -100,6 +100,32 @@ def test_hold_releases_on_nonzero_exit(tmp_path):
     assert slots.status(state_root=root)["bmo"]["holders"] == 0
 
 
+def test_hold_keeps_renewing_after_one_renew_error(tmp_path, monkeypatch, capsys):
+    root = str(tmp_path)
+    real_renew = slots.renew
+    calls = []
+
+    def renew_fails_once(lease, **kwargs):
+        calls.append(lease)
+        if len(calls) == 1:
+            raise OSError("renew broke once")
+        return real_renew(lease, **kwargs)
+
+    monkeypatch.setattr(slots, "renew", renew_fails_once)
+    code = slots.hold(
+        [sys.executable, "-c", "import time; time.sleep(0.5)"],
+        slot="bmo",
+        holder="a",
+        max_holders=1,
+        ttl=0.3,
+        state_root=root,
+    )
+    assert code == 0
+    assert len(calls) >= 2, "renew was not called again after the error"
+    assert capsys.readouterr().err.count("renew broke once") == 1
+    assert slots.status(state_root=root)["bmo"]["holders"] == 0
+
+
 def _run_hold_and_signal_child(tmp_path, root, sig):
     """Start `hold` running a child that reports its own pid, then send it
     `sig` directly (not through `hold`, to prove release runs no matter how
