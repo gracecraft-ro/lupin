@@ -321,11 +321,10 @@ Exit code 0 means the branch contains `release/next`. Then continue to the
 merge rules below. Exit code 1 means it does not. For an open, approved fork
 PR, the worker runs `git merge fork/release/next` on the PR branch. Then it
 pushes the branch to the fork. Do not rebase. Any other exit code means the
-check failed. Report it. Do not merge.
+check failed. Report it and stop. Do not merge.
 
-If the merge of `fork/release/next` changes a file the reviewer already
-reviewed, the reviewer checks that change before the PR merge. The gate runs in
-every case.
+If the merge changes a file the reviewer already reviewed, the reviewer checks
+that change before the PR merge. The gate runs in every case.
 
 The orchestrator merges a PR into `release/next` only when all four of these
 are true:
@@ -343,7 +342,8 @@ repo's `AGENTS.md`. If the repo has no gate command, report that. Do not merge.
 A branch with no fork PR is not merged.
 
 When all four conditions above are true, merge the PR with this command. No
-human approval is needed. The command creates a merge commit:
+owner sign-off is needed. The reviewer approval above is still required.
+The command creates a merge commit:
 
 ```sh
 gh pr merge --repo gracecraft-ro/<repo> --merge

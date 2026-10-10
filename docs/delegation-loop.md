@@ -77,7 +77,8 @@ repo:
    `nix flake check` (see "Build and test" in `AGENTS.md`). Merge with
    `gh pr merge --repo gracecraft-ro/lupin --merge`. Do not rebase. Do not
    force-push. Before merge, the branch must contain the current `release/next`.
-   See the merge check in the `delegation-loop` skill. A worker or reviewer
+   See the paragraph that starts "Before a branch is merged" in the
+   `delegation-loop` skill. A worker or reviewer
    never merges a pull request. Close the issue in the same pass as the merge.
 
 Changes to this policy go to upstream `main` for the owner to merge. The owner
