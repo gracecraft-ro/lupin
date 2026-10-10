@@ -730,7 +730,11 @@ def _cmd_fetch_models(args: argparse.Namespace) -> int:
 
 
 def _cmd_fetch_benchmarks(args: argparse.Namespace) -> int:
-    data = benchmark_fetch.refresh_snapshot(force=args.force, **_fleet_connection(args))
+    try:
+        data = benchmark_fetch.refresh_snapshot(force=args.force, **_fleet_connection(args))
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, "the benchmark refresh", fleet=True)
+        return 3
     if args.json:
         print(json.dumps(data))
     else:
@@ -816,20 +820,9 @@ def _backend_kwargs(args: argparse.Namespace) -> dict:
 
 _REDIS_REFUSED = (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError)
 
-
-def _print_auth_failed(exc: Exception, what: str) -> None:
-    """Print a Redis refusal. `what` names the failed action, for example `slot 'bmo'`.
-    """
-    if isinstance(exc, redis.exceptions.NoPermissionError):
-        print(
-            "lupin: redis user is not allowed to run this command. "
-            f"Check the user's ACL in docs/redis-schema.md. Redis said: {str(exc).rstrip('.')}. "
-            f"For {what}.",
-            file=sys.stderr,
-        )
-        return
-    setting = "--redis-password or LUPIN_REDIS_PASSWORD"
-    print(f"lupin: {exc.for_user(setting)} For {what}.", file=sys.stderr)
+def _print_auth_failed(exc: Exception, what: str, *, fleet: bool = False) -> None:
+    """Print a Redis refusal or ACL denial. Never prints the password."""
+    print(f"lupin: {slots_redis.refusal_message(exc, what, fleet=fleet)}", file=sys.stderr)
 
 
 def _cmd_acquire(args: argparse.Namespace) -> int:
@@ -909,7 +902,11 @@ def _cmd_release(args: argparse.Namespace) -> int:
 
 def _cmd_status(args: argparse.Namespace) -> int:
     backend = _backend_module(args)
-    result = backend.status(state_root=args.state_root, **_backend_kwargs(args))
+    try:
+        result = backend.status(state_root=args.state_root, **_backend_kwargs(args))
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, "the slot status")
+        return 3
     if args.json:
         print(json.dumps(result))
     else:
@@ -938,6 +935,9 @@ def _cmd_claim(args: argparse.Namespace) -> int:
     except claims.ClaimHeld as exc:
         print(exc, file=sys.stderr)
         return 2
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, f"claim {args.target!r}")
+        return 3
     except slots.CoordinatorUnreachable:
         print(f"cannot reach the redis coordinator for claim {args.target!r}", file=sys.stderr)
         return 3
@@ -950,6 +950,9 @@ def _cmd_renew_claim(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 1
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, f"claim {args.target!r}")
+        return 3
     except slots.CoordinatorUnreachable:
         print(f"cannot reach the redis coordinator for claim {args.target!r}", file=sys.stderr)
         return 3
@@ -965,6 +968,9 @@ def _cmd_release_claim(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 1
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, f"claim {args.target!r}")
+        return 3
     except slots.CoordinatorUnreachable:
         print(f"cannot reach the redis coordinator for claim {args.target!r}", file=sys.stderr)
         return 3
@@ -994,6 +1000,9 @@ def _cmd_join(args: argparse.Namespace) -> int:
             loops=loop_runtime.local_loops(),
             repos=serve.local_repo_inventory(),
         )
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, "the machine join")
+        return 3
     except machines.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
         return 3
@@ -1008,6 +1017,9 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
             loops=loop_runtime.local_loops(),
             repos=serve.local_repo_inventory(),
         )
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, "the machine heartbeat", fleet=True)
+        return 3
     except machines.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
         return 3
@@ -1018,6 +1030,9 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
 def _cmd_drain(args: argparse.Namespace) -> int:
     try:
         record = machines.drain(_fleet_connection(args))
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, "the machine drain", fleet=True)
+        return 3
     except machines.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
         return 3
@@ -1028,6 +1043,9 @@ def _cmd_drain(args: argparse.Namespace) -> int:
 def _cmd_undrain(args: argparse.Namespace) -> int:
     try:
         record = machines.undrain(_fleet_connection(args))
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, "the machine undrain", fleet=True)
+        return 3
     except machines.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
         return 3
@@ -1038,6 +1056,9 @@ def _cmd_undrain(args: argparse.Namespace) -> int:
 def _cmd_machines(args: argparse.Namespace) -> int:
     try:
         result = machines.machines(_fleet_connection(args))
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, "the machine list", fleet=True)
+        return 3
     except machines.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
         return 3
@@ -1117,6 +1138,9 @@ def _format_place_explain(result: dict) -> str:
 def _cmd_place(args: argparse.Namespace) -> int:
     try:
         result = place_mod.place(args.task, _fleet_connection(args))
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, "the placement", fleet=True)
+        return 3
     except place_mod.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
         return 3
@@ -1156,6 +1180,9 @@ def _cmd_quest_focus(args: argparse.Namespace, repos: list[str], redis_kwargs: d
     except quest_mod.NoMachineAvailable as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, "quest focus")
+        return 3
     except quest_mod.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
         return 3
@@ -1178,6 +1205,9 @@ def _cmd_quest_release(args: argparse.Namespace, repos: list[str], redis_kwargs:
     except quest_mod.NoFocus as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, "quest release")
+        return 3
     except quest_mod.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
         return 3
@@ -1210,6 +1240,9 @@ def _cmd_quest(args: argparse.Namespace) -> int:
         except quest_mod.QuestError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return exc.exit_code
+        except _REDIS_REFUSED as exc:
+            _print_auth_failed(exc, "quest start")
+            return 3
         except slots.CoordinatorUnreachable as exc:
             print(f"cannot reach the redis coordinator for quest start: {exc}", file=sys.stderr)
             return 3
@@ -1228,6 +1261,9 @@ def _cmd_quest(args: argparse.Namespace) -> int:
         except quest_mod.QuestError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return exc.exit_code
+        except _REDIS_REFUSED as exc:
+            _print_auth_failed(exc, "quest stop")
+            return 3
         except slots.CoordinatorUnreachable as exc:
             print(f"cannot reach the redis coordinator for quest stop: {exc}", file=sys.stderr)
             return 3
@@ -1302,15 +1338,17 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
 
     try:
         lines, warnings = reconcile_mod.reconcile(repos, redis_kwargs)
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, "the reconcile run")
+        return 3
     except reconcile_mod.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
-        return 3
-    except redis.exceptions.NoPermissionError as exc:
-        _print_auth_failed(exc, "the reconcile run")
         return 3
     finally:
         try:
             slots_redis.release(lease, **redis_kwargs)
+        except slots_redis.CoordinatorAuthFailed:
+            raise
         except slots.CoordinatorUnreachable:
             pass
 
@@ -1367,6 +1405,9 @@ def _cmd_ledger(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"invalid ledger request: {exc}", file=sys.stderr)
         return 1
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, f"ledger {args.repo!r}", fleet=True)
+        return 3
     except slots.CoordinatorUnreachable:
         print(f"cannot reach the redis coordinator for ledger {args.repo!r}", file=sys.stderr)
         return 3
@@ -1406,6 +1447,9 @@ def _cmd_cmd(args: argparse.Namespace) -> int:
                 key=args.signing_key, actor=args.actor, issuer=args.issuer or machines.hostname(),
                 pickup_window=args.pickup_window, **_redis_kwargs(args),
             )
+        except _REDIS_REFUSED as exc:
+            _print_auth_failed(exc, f"send to {args.machine!r}")
+            return 3
         except slots.CoordinatorUnreachable:
             print(f"cannot reach the redis coordinator to send to {args.machine!r}", file=sys.stderr)
             return 3
@@ -1418,6 +1462,9 @@ def _cmd_cmd(args: argparse.Namespace) -> int:
     if args.cmd_action == "status":
         try:
             result = commands.get_status(args.id, **_redis_kwargs(args))
+        except _REDIS_REFUSED as exc:
+            _print_auth_failed(exc, f"command {args.id!r}")
+            return 3
         except slots.CoordinatorUnreachable:
             print(f"cannot reach the redis coordinator for command {args.id!r}", file=sys.stderr)
             return 3
@@ -1433,6 +1480,9 @@ def _cmd_cmd(args: argparse.Namespace) -> int:
     # args.cmd_action == "queue"
     try:
         entries = commands.get_queue(args.machine, **_redis_kwargs(args))
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, f"queue {args.machine!r}")
+        return 3
     except slots.CoordinatorUnreachable:
         print(f"cannot reach the redis coordinator for queue {args.machine!r}", file=sys.stderr)
         return 3
@@ -1454,6 +1504,9 @@ def _cmd_agent(args: argparse.Namespace) -> int:
             machine, args.signing_key,
             batch=args.batch, poll_interval=args.poll_interval, **_redis_kwargs(args),
         )
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, f"agent {machine!r}")
+        return 3
     except slots.CoordinatorUnreachable:
         print(f"cannot reach the redis coordinator for agent {machine!r}", file=sys.stderr)
         return 3
@@ -1525,7 +1578,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 wait_s=args.wait,
             )
         except _REDIS_REFUSED as exc:
-            _print_auth_failed(exc, f"the loop start on {machine!r}")
+            _print_auth_failed(exc, f"the loop start on {machine!r}", fleet=True)
             return 3
         except slots.CoordinatorUnreachable as exc:
             print(f"cannot reach the redis coordinator to start a loop on {machine!r}: {exc}", file=sys.stderr)
@@ -1590,7 +1643,7 @@ def _cmd_fleet_run(args: argparse.Namespace) -> int:
             connection=connection,
         )
     except _REDIS_REFUSED as exc:
-        _print_auth_failed(exc, "fleet-run")
+        _print_auth_failed(exc, "fleet-run", fleet=True)
         return 3
     except slots.CoordinatorUnreachable as exc:
         print(f"cannot reach the redis coordinator: {exc}", file=sys.stderr)
@@ -1691,6 +1744,9 @@ def _cmd_loops(args: argparse.Namespace) -> int:
                 issuer=local_host,
                 wait_s=args.wait,
             )
+        except _REDIS_REFUSED as exc:
+            _print_auth_failed(exc, f"loops on {machine!r}", fleet=True)
+            return 3
         except (slots.CoordinatorUnreachable, loops_mod.MissingSigningKey) as exc:
             print(str(exc), file=sys.stderr)
             return 3 if isinstance(exc, slots.CoordinatorUnreachable) else 1
@@ -1709,6 +1765,9 @@ def _cmd_loops(args: argparse.Namespace) -> int:
     else:
         try:
             records = machines.machines(_fleet_connection(args))
+        except _REDIS_REFUSED as exc:
+            _print_auth_failed(exc, "the machine list", fleet=True)
+            return 3
         except machines.CoordinatorUnreachable as exc:
             print(f"cannot reach the {exc}", file=sys.stderr)
             return 3
@@ -1766,6 +1825,9 @@ def _cmd_stop(args: argparse.Namespace) -> int:
         except loops_mod.AmbiguousMachine as exc:
             print(str(exc), file=sys.stderr)
             return 5
+        except _REDIS_REFUSED as exc:
+            _print_auth_failed(exc, "the machine lookup", fleet=True)
+            return 3
         except machines.CoordinatorUnreachable as exc:
             print(f"cannot reach the {exc}", file=sys.stderr)
             return 3
@@ -1777,6 +1839,9 @@ def _cmd_stop(args: argparse.Namespace) -> int:
             connection=connection, signing_key=args.signing_key,
             actor=os.environ.get("USER", "lupin"), issuer=local_host, wait_s=args.wait,
         )
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, f"stop {args.repo!r} on {machine!r}", fleet=True)
+        return 3
     except slots.CoordinatorUnreachable:
         print(f"cannot reach the redis coordinator to stop {args.repo!r} on {machine!r}", file=sys.stderr)
         return 3
@@ -1799,6 +1864,9 @@ def _cmd_peek(args: argparse.Namespace) -> int:
         except loops_mod.AmbiguousMachine as exc:
             print(str(exc), file=sys.stderr)
             return 5
+        except _REDIS_REFUSED as exc:
+            _print_auth_failed(exc, "the machine lookup", fleet=True)
+            return 3
         except machines.CoordinatorUnreachable as exc:
             print(f"cannot reach the {exc}", file=sys.stderr)
             return 3
@@ -1810,6 +1878,9 @@ def _cmd_peek(args: argparse.Namespace) -> int:
             connection=connection, signing_key=args.signing_key,
             actor=os.environ.get("USER", "lupin"), issuer=local_host, wait_s=args.wait,
         )
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, f"peek {args.repo!r} on {machine!r}", fleet=True)
+        return 3
     except slots.CoordinatorUnreachable:
         print(f"cannot reach the redis coordinator to peek {args.repo!r} on {machine!r}", file=sys.stderr)
         return 3
@@ -1836,6 +1907,9 @@ def _cmd_attach(args: argparse.Namespace) -> int:
         except loops_mod.AmbiguousMachine as exc:
             print(str(exc), file=sys.stderr)
             return 5
+        except _REDIS_REFUSED as exc:
+            _print_auth_failed(exc, "the machine lookup", fleet=True)
+            return 3
         except machines.CoordinatorUnreachable as exc:
             print(f"cannot reach the {exc}", file=sys.stderr)
             return 3
@@ -1890,6 +1964,9 @@ def _cmd_schedule(args: argparse.Namespace) -> int:
             connection=connection, signing_key=args.signing_key,
             actor=os.environ.get("USER", "lupin"), issuer=local_host, wait_s=args.wait,
         )
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, f"schedule on {machine!r}", fleet=True)
+        return 3
     except slots.CoordinatorUnreachable:
         print(f"cannot reach the redis coordinator to reach {machine!r}", file=sys.stderr)
         return 3
@@ -1922,6 +1999,9 @@ def _cmd_pause_resume(args: argparse.Namespace, verb: str) -> int:
     if args.all:
         try:
             targets = sorted(record["name"] for record in machines.machines(connection))
+        except _REDIS_REFUSED as exc:
+            _print_auth_failed(exc, f"{verb} --all", fleet=True)
+            return 3
         except machines.CoordinatorUnreachable as exc:
             print(f"cannot reach the {exc}", file=sys.stderr)
             return 3
@@ -1941,6 +2021,10 @@ def _cmd_pause_resume(args: argparse.Namespace, verb: str) -> int:
                 connection=connection, signing_key=args.signing_key,
                 actor=os.environ.get("USER", "lupin"), issuer=local_host, wait_s=args.wait,
             )
+        except _REDIS_REFUSED as exc:
+            _print_auth_failed(exc, f"{verb} {machine!r}", fleet=True)
+            results[machine] = {"machine": machine, "error": "redis refused or denied the command"}
+            code = 3
         except slots.CoordinatorUnreachable:
             print(f"cannot reach the redis coordinator to {verb} {machine!r}", file=sys.stderr)
             results[machine] = {"machine": machine, "error": "cannot reach the redis coordinator"}
@@ -1978,6 +2062,17 @@ def _cmd_resume(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run `_main`. A Redis refusal or ACL denial that no command caught
+    prints one line and exits 3. It never prints a traceback.
+    """
+    try:
+        return _main(argv)
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, "a Redis step in this command", fleet=True)
+        return 3
+
+
+def _main(argv: list[str] | None = None) -> int:
     raw = sys.argv[1:] if argv is None else argv
     if "--" in raw:
         split = raw.index("--")

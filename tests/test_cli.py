@@ -7,8 +7,9 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+import redis as redis_lib
 
-from lupin import cli, commands, loop_runtime, loops, machines, slots
+from lupin import benchmark_fetch, cli, commands, loop_runtime, loops, machines, slots
 
 
 @pytest.fixture(autouse=True)
@@ -130,7 +131,7 @@ def test_fleet_run_refused_login_names_the_password_setting(auth_redis_port, mon
     assert cli.main(["fleet-run"]) == 3
     err = capsys.readouterr().err
     assert "refused the login" in err
-    assert "Set --redis-password or LUPIN_REDIS_PASSWORD" in err
+    assert "Set --redis-password, LUPIN_REDIS_PASSWORD, or the systemd credential redis-password" in err
     assert "machine registry" not in err
 
 
@@ -145,7 +146,7 @@ def test_run_on_another_machine_refused_login_names_the_password_setting(
     assert cli.main(["run", "widgets", "--machine", "jesus"]) == 3
     err = capsys.readouterr().err
     assert "refused the login" in err
-    assert "Set --redis-password or LUPIN_REDIS_PASSWORD" in err
+    assert "Set --redis-password, LUPIN_REDIS_PASSWORD, or the systemd credential redis-password" in err
     assert "For the loop start on 'jesus'." in err
 
 
@@ -174,7 +175,7 @@ def test_fleet_run_acl_denial_exits_three_and_names_the_acl(
 
     assert cli.main(["fleet-run"]) == 3
     err = capsys.readouterr().err
-    assert "not allowed to run this command" in err
+    assert "redis denied the command" in err
     assert "User no-eval" in err
     assert "For fleet-run." in err
     assert "no-eval-pw" not in err
@@ -190,10 +191,36 @@ def test_run_on_another_machine_acl_denial_exits_three_and_names_the_acl(
 
     assert cli.main(["run", "widgets", "--machine", "jesus"]) == 3
     err = capsys.readouterr().err
-    assert "not allowed to run this command" in err
+    assert "redis denied the command" in err
     assert "User no-eval" in err
     assert "For the loop start on 'jesus'." in err
     assert "no-eval-pw" not in err
+
+
+def test_main_turns_an_uncaught_acl_denial_into_exit_three(monkeypatch, capsys):
+    def denied(argv):
+        raise redis_lib.exceptions.NoPermissionError("User x has no permissions to run the 'eval' command.")
+
+    monkeypatch.setattr(cli, "_main", denied)
+    assert cli.main(["status"]) == 3
+
+    err = capsys.readouterr().err
+    assert "redis denied the command" in err
+    assert "a Redis step in this command" in err
+    assert "Traceback" not in err
+
+
+def test_fetch_benchmarks_acl_denial_exits_three_and_names_the_refresh(monkeypatch, capsys):
+    def denied(**_kwargs):
+        raise redis_lib.exceptions.NoPermissionError("User x has no permissions to run the 'eval' command.")
+
+    monkeypatch.setattr(benchmark_fetch, "refresh_snapshot", denied)
+    assert cli.main(["fetch-benchmarks"]) == 3
+
+    err = capsys.readouterr().err
+    assert "redis denied the command" in err
+    assert "For the benchmark refresh." in err
+    assert "Traceback" not in err
 
 
 def test_fleet_run_queues_signed_run_to_worker(redis_port, flush_redis, monkeypatch, tmp_path, capsys):

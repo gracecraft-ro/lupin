@@ -37,13 +37,13 @@ counts as unreachable too). Every other slot name raises
 for a hypothetical second fleet slot, v1 only has `bmo`, so this module does
 not invent a rule for a slot that does not exist yet.
 
-Redis can refuse a login, or refuse one command.
-redis-py raises `AuthenticationError` for a refused login.
-redis-py raises `NoPermissionError` for a command that the ACL denies.
-`AuthenticationError` is a subclass of `ConnectionError`. This module checks for a refusal first.
-`docs/redis-schema.md` lists the result of each call.
-`CoordinatorAuthFailed` is a subclass of `CoordinatorUnreachable`.
-Existing handlers still catch it.
+Refusals never fall back to the local backend.
+
+A refused login raises `CoordinatorAuthFailed` for every slot. It is a
+subclass of `CoordinatorUnreachable`, so existing handlers still catch it.
+An ACL-denied command raises redis-py's `NoPermissionError` as-is.
+redis-py's `AuthenticationError` is a subclass of `ConnectionError`. Catch
+it first. `docs/redis-schema.md` lists the result of each call.
 
 Claims and ledger streams are fleet keys. `claims.py` and `ledger.py`
 implement them separately. Neither uses a local fallback when Redis is
@@ -83,10 +83,18 @@ class CoordinatorAuthFailed(CoordinatorUnreachable):
         return f"{self}. Set {setting}."
 
 
-_AUTH_ERRORS = (redis.exceptions.AuthenticationError, redis.exceptions.NoPermissionError)
-
 PREFIX = "lupin:v1:"
 FALLBACK_SLOTS = {"bmo"}
+
+# Where the Redis login comes from. Used in messages. The fleet settings
+# also cover the `lupin join` config and the systemd credential that
+# `machines.resolve_connection` reads.
+FLAG_SETTING = "--redis-password or LUPIN_REDIS_PASSWORD"
+FLAG_USER_SETTING = "--redis-username or LUPIN_REDIS_USERNAME"
+FLEET_PASSWORD_SETTING = (
+    "--redis-password, LUPIN_REDIS_PASSWORD, or the systemd credential redis-password"
+)
+FLEET_USER_SETTING = "--redis-username, LUPIN_REDIS_USERNAME, or the lupin join config"
 
 CONNECT_TIMEOUT = 2.0
 
@@ -167,15 +175,28 @@ def _auth_failed(exc: Exception) -> CoordinatorAuthFailed:
     )
 
 
-def _warn_fallback(slot: str, exc: Exception) -> None:
-    if isinstance(exc, redis.exceptions.AuthenticationError):
-        message = f"lupin: {_auth_failed(exc)}. Falling back to the local backend for slot {slot!r}"
-    else:
-        message = (
-            f"lupin: redis unreachable ({exc}); falling back to the local backend "
-            f"for slot {slot!r}"
+def refusal_message(exc: Exception, what: str, *, fleet: bool = False) -> str:
+    """Return the one-line text for a refusal or an ACL denial. `what` names
+    the failed action, for example `slot 'bmo'`. Never contains the password.
+    `fleet` also names the `lupin join` config and the systemd credential.
+    """
+    password_setting = FLEET_PASSWORD_SETTING if fleet else FLAG_SETTING
+    user_setting = FLEET_USER_SETTING if fleet else FLAG_USER_SETTING
+    if isinstance(exc, redis.exceptions.NoPermissionError):
+        return (
+            "redis denied the command. The redis user's ACL does not allow it. "
+            f"Check the ACL in docs/redis-schema.md. The user is set by {user_setting}. "
+            f"Redis said: {str(exc).rstrip('.')}. For {what}."
         )
-    print(message, file=sys.stderr)
+    return f"{exc.for_user(password_setting)} For {what}."
+
+
+def _warn_fallback(slot: str, exc: Exception) -> None:
+    print(
+        f"lupin: redis unreachable ({exc}); falling back to the local backend "
+        f"for slot {slot!r}",
+        file=sys.stderr,
+    )
 
 
 def _now_ms() -> int:
@@ -216,9 +237,7 @@ def set_max(
     key = f"{PREFIX}slot:{slot}:max"
     try:
         _call_with_retry(lambda: client.set(key, max_holders))
-    except _AUTH_ERRORS as exc:
-        if isinstance(exc, redis.exceptions.NoPermissionError):
-            raise
+    except redis.exceptions.AuthenticationError as exc:
         raise _auth_failed(exc) from exc
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(slot) from exc
@@ -242,7 +261,9 @@ def acquire(
     to `wait` seconds, polling; raises `SlotFull` once `wait` elapses).
 
     Falls back to the `local` backend for `slot == "bmo"` if Redis is
-    unreachable; raises `CoordinatorUnreachable` for any other slot.
+    unreachable. Raises `CoordinatorUnreachable` for any other slot.
+    A refused login raises `CoordinatorAuthFailed` for every slot, with no
+    fallback. An ACL-denied command raises `NoPermissionError`.
     """
     client = _client(redis_host, redis_port, redis_username, redis_password)
     key = f"{PREFIX}slot:{slot}"
@@ -255,15 +276,8 @@ def acquire(
             result = _call_with_retry(
                 lambda: client.eval(_ACQUIRE_SCRIPT, 1, key, holder, _now_ms(), ttl_ms, max_n)
             )
-        except _AUTH_ERRORS as exc:
-            if isinstance(exc, redis.exceptions.NoPermissionError):
-                raise
-            if slot not in FALLBACK_SLOTS:
-                raise _auth_failed(exc) from exc
-            _warn_fallback(slot, exc)
-            return local_slots.acquire(
-                slot, holder, wait=wait, ttl=ttl, max_holders=max_holders, state_root=state_root
-            )
+        except redis.exceptions.AuthenticationError as exc:
+            raise _auth_failed(exc) from exc
         except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
             if slot not in FALLBACK_SLOTS:
                 raise CoordinatorUnreachable(slot) from exc
@@ -290,10 +304,10 @@ def renew(
 ) -> bool:
     """Extend `lease`'s deadline. Return False if the lease is gone.
 
-    For a slot with no local fallback, return False if Redis is unreachable or refuses a login.
-    For `bmo`, an unreachable Redis or a refused login uses the local result.
-    Raise `NoPermissionError` if the ACL denies the command.
-    The `hold` renew timer calls this. That timer does not catch errors.
+    A slot with no local fallback returns False if Redis is unreachable.
+    `bmo` uses the local result instead.
+    A refused login raises `CoordinatorAuthFailed` for every slot.
+    An ACL-denied command raises `NoPermissionError`.
     """
     slot, holder = split_lease(lease)
     client = _client(redis_host, redis_port, redis_username, redis_password)
@@ -303,9 +317,9 @@ def renew(
             lambda: client.eval(_RENEW_SCRIPT, 1, key, holder, _now_ms(), int(ttl * 1000))
         )
         return bool(result)
-    except (*_AUTH_ERRORS, redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
-        if isinstance(exc, redis.exceptions.NoPermissionError):
-            raise
+    except redis.exceptions.AuthenticationError as exc:
+        raise _auth_failed(exc) from exc
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         if slot not in FALLBACK_SLOTS:
             return False
         _warn_fallback(slot, exc)
@@ -323,7 +337,9 @@ def release(
 ) -> bool:
     """Compare-and-delete release, same contract as `slots.release` (not an
     error to release twice). Falls back to the `local` backend for the
-    `bmo` slot if Redis is unreachable.
+    `bmo` slot if Redis is unreachable. A refused login raises
+    `CoordinatorAuthFailed` for every slot. An ACL-denied command raises
+    `NoPermissionError`.
     """
     slot, holder = split_lease(lease)
     client = _client(redis_host, redis_port, redis_username, redis_password)
@@ -331,13 +347,8 @@ def release(
     try:
         result = _call_with_retry(lambda: client.eval(_RELEASE_SCRIPT, 1, key, holder))
         return bool(result)
-    except _AUTH_ERRORS as exc:
-        if isinstance(exc, redis.exceptions.NoPermissionError):
-            raise
-        if slot not in FALLBACK_SLOTS:
-            raise _auth_failed(exc) from exc
-        _warn_fallback(slot, exc)
-        return local_slots.release(lease, state_root=state_root)
+    except redis.exceptions.AuthenticationError as exc:
+        raise _auth_failed(exc) from exc
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         if slot not in FALLBACK_SLOTS:
             raise CoordinatorUnreachable(slot) from exc
@@ -363,10 +374,9 @@ def status(
     slot directory outlives its last holder file) and should still show up
     with `holders: 0`, not disappear from the report.
 
-    Falls back to the `local` backend's status wholesale if Redis is
-    unreachable -- v1 has exactly one fleet slot (`bmo`), the one slot with
-    a local fallback, so there is nothing else this call could report that
-    the local backend wouldn't also have a view of.
+    Falls back to the `local` backend's status if Redis is unreachable.
+    A refused login raises `CoordinatorAuthFailed`, with no fallback.
+    An ACL-denied command raises `NoPermissionError`.
     """
     client = _client(redis_host, redis_port, redis_username, redis_password)
     try:
@@ -380,9 +390,9 @@ def status(
             max_raw = client.get(max_key)
             result[slot] = {"holders": live, "max": int(max_raw) if max_raw is not None else None}
         return result
-    except (*_AUTH_ERRORS, redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
-        if isinstance(exc, redis.exceptions.NoPermissionError):
-            raise
+    except redis.exceptions.AuthenticationError as exc:
+        raise _auth_failed(exc) from exc
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         _warn_fallback("status", exc)
         return local_slots.status(state_root=state_root)
 
@@ -404,6 +414,9 @@ def hold(
 ) -> int:
     """Same contract as `slots.hold`: acquire (unless `lease` is already
     held), run `command`, renew while it runs, release on exit.
+
+    A renew or release error prints one line. The command's exit code is
+    still returned.
     """
     if lease is None:
         if slot is None or holder is None:
@@ -421,25 +434,58 @@ def hold(
             state_root=state_root,
         )
 
-    return run_with_lease(
-        command,
-        lease,
-        ttl=ttl,
-        renew=lambda lease_id: renew(
-            lease_id,
-            ttl=ttl,
-            redis_host=redis_host,
-            redis_port=redis_port,
-            redis_username=redis_username,
-            redis_password=redis_password,
-            state_root=state_root,
-        ),
-        release=lambda lease_id: release(
-            lease_id,
-            redis_host=redis_host,
-            redis_port=redis_port,
-            redis_username=redis_username,
-            redis_password=redis_password,
-            state_root=state_root,
-        ),
-    )
+    renew_failed = False
+
+    def renew_during_run(lease_id: str) -> bool:
+        # Report the first error only. The command keeps running.
+        nonlocal renew_failed
+        if renew_failed:
+            return False
+        try:
+            return renew(
+                lease_id,
+                ttl=ttl,
+                redis_host=redis_host,
+                redis_port=redis_port,
+                redis_username=redis_username,
+                redis_password=redis_password,
+                state_root=state_root,
+            )
+        except (CoordinatorUnreachable, redis.exceptions.NoPermissionError) as exc:
+            renew_failed = True
+            _report_lease_error("renewed", lease_id, exc)
+            return False
+
+    def release_after_run(lease_id: str) -> bool:
+        # A failed release does not replace the command's exit code.
+        try:
+            return release(
+                lease_id,
+                redis_host=redis_host,
+                redis_port=redis_port,
+                redis_username=redis_username,
+                redis_password=redis_password,
+                state_root=state_root,
+            )
+        except (CoordinatorUnreachable, redis.exceptions.NoPermissionError) as exc:
+            _report_lease_error("released", lease_id, exc)
+            return False
+
+    return run_with_lease(command, lease, ttl=ttl, renew=renew_during_run, release=release_after_run)
+
+
+def _report_lease_error(action: str, lease: str, exc: Exception) -> None:
+    """Print one line for a failed renew or release during `hold`.
+    The message never contains the password.
+    """
+    if isinstance(exc, CoordinatorAuthFailed):
+        detail = exc.for_user(FLAG_SETTING)
+    elif isinstance(exc, redis.exceptions.NoPermissionError):
+        reply = str(exc).rstrip(".")
+        detail = (
+            "redis denied the command. Check the user's ACL in docs/redis-schema.md. "
+            f"Redis said: {reply}."
+        )
+    else:
+        detail = "redis is unreachable."
+    print(f"lupin: lease {lease} not {action}. {detail}", file=sys.stderr)

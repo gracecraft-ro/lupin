@@ -1923,6 +1923,21 @@ def _get_handler(path, connection):
     return handler
 
 
+def test_post_route_that_raises_an_acl_denial_is_502_not_a_traceback(monkeypatch):
+    handler = _post_handler("/quest/stop", b"id=quest-1", {"redis_host": "127.0.0.1", "redis_port": 1})
+
+    def denied(self, form):
+        raise redis_lib.exceptions.NoPermissionError("User x has no permissions to run the 'eval' command.")
+
+    monkeypatch.setattr(serve.Handler, "do_quest_stop", denied)
+    handler.do_POST()
+
+    assert handler.reply.call_args.args[1] == 502
+    body = html.unescape(handler.reply.call_args.args[0].decode())
+    assert "redis denied the command" in body
+    assert "For POST /quest/stop." in body
+
+
 class TestMachinesPageIntegration:
     """Real `redis-server` fixtures (issue #20), same rule as
     test_machines.py/test_slots_redis.py -- not mocked, so a rendering bug
@@ -1987,7 +2002,7 @@ class TestMachinesPageIntegration:
         assert handler.reply.call_args.args[1] == 502
         body = html.unescape(handler.reply.call_args.args[0].decode())
         assert "Check the Redis password" in body
-        assert "redis-password credential" in body
+        assert "or the systemd credential redis-password" in body
         assert "For slot 'bmo'." in body
         assert "unreachable" not in body
 

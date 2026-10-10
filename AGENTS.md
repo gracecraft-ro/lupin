@@ -74,14 +74,21 @@ plain form; the output is nested data, not a one-line result). A number
 that is neither an issue nor a PR gets `{"error": ...}` in its own slot
 instead of failing the whole batch.
 
-`acquire` prints a lease ID on success. Exit code 2 means the slot is full
-— the caller should skip and try again later. Exit code 3 means the `redis`
-backend cannot reach the coordinator and the slot has no local fallback.
-`bmo` is the exception. For `bmo`, `acquire`, `renew`, `release`, and `status` use `local` when Redis is unreachable or refuses a login. They print a warning.
-An ACL denial raises `NoPermissionError` on every slot. It never falls back to `local`.
-On a slot other than `bmo`, a refused login exits with code 3.
-The CLI also exits with code 3 for an ACL denial, on any slot. The message names the cause.
-For a refused login, it tells the user to set `--redis-password` or `LUPIN_REDIS_PASSWORD`.
+`acquire` prints a lease ID on success. Exit code 2 means the slot is full.
+The caller must skip and try again later. Exit code 3 means the `redis`
+backend cannot reach the coordinator. The slot has no local fallback.
+
+Only the `bmo` slot falls back to `local`. If Redis is unreachable, `acquire`,
+`renew`, `release`, and `status` use `local` for `bmo` and print a warning.
+A refused login never falls back. It raises `CoordinatorAuthFailed` for every
+slot. An ACL denial raises `NoPermissionError` for every slot. It never falls back.
+
+For a refused login or an ACL denial, the `lupin` command exits with code 3 and
+prints one line that names the setting to check. For a refused login, the setting
+is `--redis-password` or `LUPIN_REDIS_PASSWORD`. For a fleet command, it also names
+the systemd credential `redis-password`. The line never shows a password.
+Some read paths are not covered yet. See `docs/redis-schema.md`.
+
 The `local` backend's coordinator is the filesystem, so it never returns 3.
 
 `hold` acquires a lease (or reuses one from `--lease`), runs `<command>`,

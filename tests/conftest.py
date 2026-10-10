@@ -82,6 +82,15 @@ def no_set_kw(auth_redis_port):
 
 
 @pytest.fixture
+def no_scan_kw(auth_redis_port):
+    """Connection kwargs for a user that can run everything except SCAN."""
+    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
+    admin.execute_command("ACL", "SETUSER", "no-scan", "on", ">no-scan-pw", "~*", "+@all", "-scan")
+    yield {"redis_username": "no-scan", "redis_password": "no-scan-pw"}
+    admin.execute_command("ACL", "DELUSER", "no-scan")
+
+
+@pytest.fixture
 def closed_port() -> int:
     """A TCP port nothing listens on -- exercises the unreachable-redis path."""
     return _free_port()

@@ -482,22 +482,25 @@ Connect timeout 2s, 1 retry, then:
 
 Redis refuses a login when the password is bad or missing.
 Redis refuses a command when the ACL denies it.
-Both cases are answers from Redis, not outages. The table shows each result.
-In the table, login means a refused login. ACL means an ACL denial. Other means a slot other than `bmo`.
-"Uses `local`" means the call returns the result of the `local` backend.
+Both cases are answers from Redis, not outages.
 
-| Call | `bmo` login | `bmo` ACL | Other login | Other ACL |
-| --- | --- | --- | --- | --- |
-| `acquire` | Uses `local`; warns | `NoPermissionError` | `CoordinatorAuthFailed` | `NoPermissionError` |
-| `renew` | Uses `local`; warns | `NoPermissionError` | Returns `False` | `NoPermissionError` |
-| `release` | Uses `local`; warns | `NoPermissionError` | `CoordinatorAuthFailed` | `NoPermissionError` |
-| `set_max` | `CoordinatorAuthFailed` | `NoPermissionError` | `CoordinatorAuthFailed` | `NoPermissionError` |
-| `status` | Uses `local`; warns | `NoPermissionError` | Uses `local`; warns | `NoPermissionError` |
+| Call | Login refused | ACL denied |
+| --- | --- | --- |
+| `acquire` | `CoordinatorAuthFailed` | `NoPermissionError` |
+| `renew` | `CoordinatorAuthFailed` | `NoPermissionError` |
+| `release` | `CoordinatorAuthFailed` | `NoPermissionError` |
+| `set_max` | `CoordinatorAuthFailed` | `NoPermissionError` |
+| `status` | `CoordinatorAuthFailed` | `NoPermissionError` |
 
-The `acquire`, `hold`, `release`, `reconcile`, `run`, and `fleet-run` commands print the reason.
-For a refused login on a slot other than `bmo`, they exit with code 3.
-For an ACL denial, they also exit with code 3, on any slot.
-The message names the ACL and the user. It never shows the password.
+These results apply to every slot, `bmo` included. No refusal falls back to `local`.
+
+The `lupin` command exits with code 3 for a refused login and for an ACL denial.
+It prints one line that names the setting to check. It never shows the password.
+For a fleet command, the setting list includes the systemd credential `redis-password`.
+A failed renew or release during `hold` prints one line. `hold` keeps the exit code of its command.
+
+Known gap: some read paths still print `cannot reach` for a refused login.
+Some cache reads return no data for a refused login. Exit codes for these paths are not covered by the rule above.
 
 After an outage ends, a holder tries to renew its lease. If the lease
 already expired, `lupin` logs "lease lost" and tries to acquire again.

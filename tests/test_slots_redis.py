@@ -123,23 +123,20 @@ def test_unreachable_redis_raises_for_a_non_bmo_slot(closed_port):
         slots_redis.acquire("not-bmo", "a", redis_host="127.0.0.1", redis_port=closed_port)
 
 
-def test_missing_password_against_a_requirepass_server_falls_back_like_unreachable(
+def test_missing_password_against_a_requirepass_server_raises_for_bmo(
     auth_redis_port, tmp_path, capsys, no_client_retry
 ):
-    # redis-py's AuthenticationError is a ConnectionError subclass. A bad or
-    # missing password takes the same fallback path as an unreachable server.
-    # The warning names the refused login instead.
+    # redis-py's AuthenticationError is a ConnectionError subclass. A refused
+    # login raises for bmo too. It never falls back to the local backend.
     root = str(tmp_path)
-    lease = slots_redis.acquire(
-        "bmo", "a", max_holders=1, redis_host="127.0.0.1", redis_port=auth_redis_port, state_root=root
-    )
-    assert lease.startswith("bmo:")
-    assert slots.status(state_root=root)["bmo"]["holders"] == 1
-
-    err = capsys.readouterr().err
-    assert "refused the login" in err
-    assert "Check the Redis password" in err
-    assert "unreachable" not in err
+    with pytest.raises(slots_redis.CoordinatorAuthFailed) as caught:
+        slots_redis.acquire(
+            "bmo", "a", max_holders=1, redis_host="127.0.0.1", redis_port=auth_redis_port, state_root=root
+        )
+    assert "Check the Redis password" in str(caught.value)
+    assert "unreachable" not in str(caught.value)
+    assert "Falling back" not in capsys.readouterr().err
+    assert slots.status(state_root=root).get("bmo", {}).get("holders", 0) == 0
 
 
 def test_acquire_with_the_right_password_uses_redis_not_the_fallback(auth_redis_port):
@@ -174,13 +171,12 @@ def test_refused_login_on_a_non_bmo_slot_raises_and_is_not_unreachable(call, aut
     assert "Check the Redis password" in message
 
 
-def test_refused_login_warning_for_bmo_status_names_the_password(auth_redis_port, tmp_path, capsys, no_client_retry):
-    slots_redis.status(redis_host="127.0.0.1", redis_port=auth_redis_port, state_root=str(tmp_path))
+def test_refused_login_on_bmo_status_raises(auth_redis_port, tmp_path, capsys, no_client_retry):
+    with pytest.raises(slots_redis.CoordinatorAuthFailed) as caught:
+        slots_redis.status(redis_host="127.0.0.1", redis_port=auth_redis_port, state_root=str(tmp_path))
 
-    err = capsys.readouterr().err
-    assert "unreachable" not in err
-    assert "Check the Redis password" in err
-    assert "local backend" in err
+    assert "Check the Redis password" in str(caught.value)
+    assert "Falling back" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -214,8 +210,9 @@ def test_renew_re_raises_an_acl_denial_for_a_non_bmo_slot(auth_redis_port):
         admin.execute_command("ACL", "DELUSER", "no-eval")
 
 
-def test_renew_refused_login_on_a_non_bmo_slot_returns_false(auth_redis_port, no_client_retry):
-    assert slots_redis.renew("not-bmo:a", redis_host="127.0.0.1", redis_port=auth_redis_port) is False
+def test_renew_refused_login_on_a_non_bmo_slot_raises(auth_redis_port, no_client_retry):
+    with pytest.raises(slots_redis.CoordinatorAuthFailed):
+        slots_redis.renew("not-bmo:a", redis_host="127.0.0.1", redis_port=auth_redis_port)
 
 
 @pytest.mark.parametrize(
@@ -235,17 +232,23 @@ def test_bmo_acl_denial_raises_and_does_not_fall_back(call, auth_redis_port, no_
     assert "Falling back" not in capsys.readouterr().err
 
 
-def test_bmo_refused_login_falls_back_to_local_for_each_call(auth_redis_port, tmp_path, no_client_retry):
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda kw: slots_redis.acquire("bmo", "a", max_holders=1, **kw),
+        lambda kw: slots_redis.renew("bmo:a", **kw),
+        lambda kw: slots_redis.release("bmo:a", **kw),
+        lambda kw: slots_redis.status(**kw),
+    ],
+    ids=["acquire", "renew", "release", "status"],
+)
+def test_bmo_refused_login_raises_and_does_not_fall_back(call, auth_redis_port, tmp_path, no_client_retry, capsys):
     root = str(tmp_path)
     kw = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, "state_root": root}
-
-    lease = slots_redis.acquire("bmo", "a", max_holders=1, **kw)
-    assert lease.startswith("bmo:")
-    assert slots.status(state_root=root)["bmo"]["holders"] == 1
-    assert slots_redis.renew(lease, **kw) is True
-    assert slots_redis.status(**kw)["bmo"]["holders"] == 1
-    assert slots_redis.release(lease, **kw) is True
-    assert slots.status(state_root=root)["bmo"]["holders"] == 0
+    with pytest.raises(slots_redis.CoordinatorAuthFailed):
+        call(kw)
+    assert "Falling back" not in capsys.readouterr().err
+    assert slots.status(state_root=root).get("bmo", {}).get("holders", 0) == 0
 
 
 REDIS_ARGS = ["--redis-host", "127.0.0.1", "--redis-port", "{port}"]
@@ -258,8 +261,10 @@ REDIS_ARGS = ["--redis-host", "127.0.0.1", "--redis-port", "{port}"]
         (["hold", "not-bmo", "--holder", "a", "--backend", "redis", *REDIS_ARGS, "--", "true"], "For slot 'not-bmo'"),
         (["release", "--lease", "not-bmo:a", "--backend", "redis", *REDIS_ARGS], "For lease 'not-bmo:a'"),
         (["reconcile", *REDIS_ARGS], "For the reconcile slot"),
+        (["claim", "gracecraft/lupin#6", "--holder", "a", *REDIS_ARGS], "For claim 'gracecraft/lupin#6'"),
+        (["status", "--backend", "redis", *REDIS_ARGS], "For the slot status"),
     ],
-    ids=["acquire", "hold", "release", "reconcile"],
+    ids=["acquire", "hold", "release", "reconcile", "claim", "status"],
 )
 def test_cli_refused_login_exits_three_and_names_the_password_setting(
     argv, where, auth_redis_port, no_client_retry, monkeypatch, capsys
@@ -287,8 +292,74 @@ def test_cli_acl_denial_exits_three_and_names_the_acl(slot, where, auth_redis_po
 
     err = capsys.readouterr().err
     assert code == 3
-    assert "not allowed to run this command" in err
+    assert "redis denied the command" in err
     assert "User no-eval" in err
     assert "Falling back" not in err
     assert "no-eval-pw" not in err
     assert where in err
+
+
+@pytest.mark.parametrize(
+    "argv, fixture, where",
+    [
+        (["hold", "not-bmo", "--holder", "a", "--backend", "redis", *REDIS_ARGS, "--", "true"], "no_eval_kw", "For slot 'not-bmo'"),
+        (["release", "--lease", "not-bmo:a", "--backend", "redis", *REDIS_ARGS], "no_eval_kw", "For lease 'not-bmo:a'"),
+        (["claim", "gracecraft/lupin#6", "--holder", "a", *REDIS_ARGS], "no_eval_kw", "For claim 'gracecraft/lupin#6'"),
+        (["status", "--backend", "redis", *REDIS_ARGS], "no_scan_kw", "For the slot status"),
+        (["reconcile", *REDIS_ARGS], "no_scan_kw", "For the reconcile run"),
+    ],
+    ids=["hold", "release", "claim", "status", "reconcile"],
+)
+def test_cli_acl_denial_exits_three_for_each_command(
+    argv, fixture, where, auth_redis_port, request, monkeypatch, capsys
+):
+    monkeypatch.setattr(cli.serve, "enabled_repos", lambda: [])
+    login = request.getfixturevalue(fixture)
+    flags = ["--redis-username", login["redis_username"], "--redis-password", login["redis_password"]]
+    args = [arg.format(port=auth_redis_port) for arg in argv]
+    split = args.index("--") if "--" in args else len(args)
+    code = cli.main(args[:split] + flags + args[split:])
+
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "Traceback" not in err
+    assert "redis denied the command" in err
+    assert "cannot reach" not in err
+    assert where in err
+    assert "no-eval-pw" not in err
+    assert "no-scan-pw" not in err
+
+
+def test_hold_keeps_the_command_exit_code_when_release_is_denied(redis_port, flush_redis, monkeypatch, capsys):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    lease = slots_redis.acquire("not-bmo", "a", max_holders=1, **kw)
+
+    def denied(lease_id, **_kwargs):
+        raise redis_lib.exceptions.NoPermissionError("User x has no permissions to run the 'eval' command.")
+
+    monkeypatch.setattr(slots_redis, "release", denied)
+    code = slots_redis.hold(["sh", "-c", "exit 7"], lease=lease, **kw)
+
+    err = capsys.readouterr().err
+    assert code == 7
+    assert f"lease {lease} not released" in err
+    assert "Traceback" not in err
+
+
+def test_hold_prints_one_line_when_renew_is_denied_mid_run(redis_port, flush_redis, monkeypatch, capsys):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    lease = slots_redis.acquire("not-bmo", "a", max_holders=1, **kw)
+    calls = []
+
+    def denied(lease_id, **_kwargs):
+        calls.append(lease_id)
+        raise redis_lib.exceptions.NoPermissionError("User x has no permissions to run the 'eval' command.")
+
+    monkeypatch.setattr(slots_redis, "renew", denied)
+    code = slots_redis.hold(["sh", "-c", "sleep 1; exit 3"], lease=lease, ttl=0.3, **kw)
+
+    err = capsys.readouterr().err
+    assert code == 3
+    assert len(calls) == 1
+    assert f"lease {lease} not renewed" in err
+    assert "Traceback" not in err
