@@ -17,11 +17,14 @@ def local_host(monkeypatch):
     yield "h"
 
 
-def test_run_creates_herdr_worker_metadata_and_systemd_unit(monkeypatch, tmp_path, capsys):
+def test_run_creates_herdr_worker_metadata_and_systemd_unit(
+    monkeypatch, tmp_path, capsys, make_checkout
+):
     state_dir = tmp_path / "state"
     code_dir = tmp_path / "code"
     repo_dir = code_dir / "widgets"
-    (repo_dir / "docs").mkdir(parents=True)
+    make_checkout(repo_dir)
+    (repo_dir / "docs").mkdir()
     (repo_dir / "docs" / "delegation-loop.md").write_text("run this repo\n", encoding="utf-8")
     monkeypatch.setattr(loop_runtime, "STATE_DIR", state_dir)
     monkeypatch.setattr(loop_runtime, "LOOPS_DIR", state_dir / "herdr-loops")
