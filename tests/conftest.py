@@ -64,9 +64,63 @@ def flush_redis(redis_port):
 
 
 @pytest.fixture
+def no_eval_kw(auth_redis_port):
+    """Connection kwargs for a user that can only GET, SET and PING. EVAL and SCAN are denied."""
+    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
+    admin.execute_command("ACL", "SETUSER", "no-eval", "on", ">no-eval-pw", "~lupin:*", "+get", "+set", "+ping")
+    yield {"redis_username": "no-eval", "redis_password": "no-eval-pw"}
+    admin.execute_command("ACL", "DELUSER", "no-eval")
+
+
+@pytest.fixture
+def no_set_kw(auth_redis_port):
+    """Connection kwargs for a user that can only GET and PING. SET and EVAL are denied."""
+    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
+    admin.execute_command("ACL", "SETUSER", "no-set", "on", ">no-set-pw", "~lupin:*", "+get", "+ping")
+    yield {"redis_username": "no-set", "redis_password": "no-set-pw"}
+    admin.execute_command("ACL", "DELUSER", "no-set")
+
+
+@pytest.fixture
+def no_scan_kw(auth_redis_port):
+    """Connection kwargs for a user that can run everything except SCAN."""
+    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
+    admin.execute_command("ACL", "SETUSER", "no-scan", "on", ">no-scan-pw", "~*", "+@all", "-scan")
+    yield {"redis_username": "no-scan", "redis_password": "no-scan-pw"}
+    admin.execute_command("ACL", "DELUSER", "no-scan")
+
+
+@pytest.fixture
 def closed_port() -> int:
     """A TCP port nothing listens on -- exercises the unreachable-redis path."""
     return _free_port()
+
+
+@pytest.fixture
+def no_client_retry(monkeypatch):
+    """Make `slots_redis._client` return a client that does not retry.
+
+    A default client took about four seconds to report a refused login in a local run.
+    Use this fixture in tests that only check a refusal.
+    """
+    from redis.backoff import NoBackoff
+    from redis.retry import Retry
+
+    from lupin import slots_redis
+
+    def client(redis_host, redis_port, redis_username=None, redis_password=None):
+        return redis_lib.Redis(
+            host=redis_host or "localhost",
+            port=redis_port or 6379,
+            username=redis_username,
+            password=redis_password,
+            socket_connect_timeout=slots_redis.CONNECT_TIMEOUT,
+            socket_timeout=slots_redis.CONNECT_TIMEOUT,
+            decode_responses=True,
+            retry=Retry(NoBackoff(), 0),
+        )
+
+    monkeypatch.setattr(slots_redis, "_client", client)
 
 
 @pytest.fixture(scope="session")

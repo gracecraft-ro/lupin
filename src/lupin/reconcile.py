@@ -89,9 +89,13 @@ def _run(op):
     """Same convention as `machines._run`/`quest._run`: a connection
     failure becomes `CoordinatorUnreachable`, the one exception every
     caller of this module already knows how to turn into exit code 3.
+    A refused login becomes `CoordinatorAuthFailed`. A denied command
+    raises `NoPermissionError` as-is.
     """
     try:
         return slots_redis._call_with_retry(op)
+    except redis.exceptions.AuthenticationError as exc:
+        raise slots_redis._auth_failed(exc) from exc
     except _REDIS_ERRORS as exc:
         raise CoordinatorUnreachable("reconcile") from exc
 

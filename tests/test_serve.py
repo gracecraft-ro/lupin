@@ -1,4 +1,5 @@
 import contextlib
+import html
 import io
 import socket
 import sys
@@ -1932,6 +1933,21 @@ def _get_handler(path, connection):
     return handler
 
 
+def test_post_route_that_raises_an_acl_denial_is_502_not_a_traceback(monkeypatch):
+    handler = _post_handler("/quest/stop", b"id=quest-1", {"redis_host": "127.0.0.1", "redis_port": 1})
+
+    def denied(self, form):
+        raise redis_lib.exceptions.NoPermissionError("User x has no permissions to run the 'eval' command.")
+
+    monkeypatch.setattr(serve.Handler, "do_quest_stop", denied)
+    handler.do_POST()
+
+    assert handler.reply.call_args.args[1] == 502
+    body = html.unescape(handler.reply.call_args.args[0].decode())
+    assert "redis denied the command" in body
+    assert "For POST /quest/stop." in body
+
+
 class TestMachinesPageIntegration:
     """Real `redis-server` fixtures (issue #20), same rule as
     test_machines.py/test_slots_redis.py -- not mocked, so a rendering bug
@@ -1988,6 +2004,17 @@ class TestMachinesPageIntegration:
         handler = _get_handler("/machines", {"redis_host": "127.0.0.1", "redis_port": closed_port})
         handler.do_GET()
         assert handler.reply.call_args.args[1] == 502
+
+    def test_refused_login_on_slot_max_is_502_and_names_the_password(self, auth_redis_port, no_client_retry):
+        handler = _post_handler("/machines/slot-max", b"slot=bmo&max=5", _kw(auth_redis_port))
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 502
+        body = html.unescape(handler.reply.call_args.args[0].decode())
+        assert "Check the Redis password" in body
+        assert "or the systemd credential redis-password" in body
+        assert "For slot 'bmo'." in body
+        assert "unreachable" not in body
 
     def test_slot_max_control_changes_what_status_reports(self, redis_port, flush_redis):
         kw = _kw(redis_port)
@@ -3508,6 +3535,21 @@ class TestReposPageRoutes:
         _post_body(handler, "/repos/slot-max", {"repo": "widgets", "max": "3"})
         handler.do_POST()
         assert handler.reply.call_args.args[1] == 502
+
+    def test_slot_max_route_refused_login_names_the_repo_slot(
+        self, tmp_path, monkeypatch, auth_redis_port, no_client_retry
+    ):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        handler = _repos_handler(_kw(auth_redis_port))
+        _post_body(handler, "/repos/slot-max", {"repo": "widgets", "max": "3"})
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 502
+        body = html.unescape(handler.reply.call_args.args[0].decode())
+        assert "Check the Redis password" in body
+        assert "For slot 'repo:widgets'." in body
+        assert "unreachable" not in body
 
     def test_schedule_route_rejects_a_missing_repository(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
