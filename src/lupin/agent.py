@@ -38,8 +38,11 @@ import json
 import re
 import shutil
 import subprocess
+import sys
+import threading
 import time
 import uuid
+from collections.abc import Callable
 
 import redis
 
@@ -520,6 +523,19 @@ def poll_once(
     return touched
 
 
+def _run_periodic_debriefs(check: Callable[[], None], interval: float) -> None:
+    """Call `check` now, then every `interval` seconds. Runs on a daemon thread.
+
+    A failed call prints a warning. The loop keeps running.
+    """
+    while True:
+        try:
+            check()
+        except Exception as exc:
+            print(f"lupin agent: periodic debrief check failed: {exc}", file=sys.stderr)
+        time.sleep(interval)
+
+
 def run_forever(
     machine: str,
     key: str,
@@ -535,11 +551,12 @@ def run_forever(
     Doesn't return under normal operation."""
     conn = dict(redis_host=redis_host, redis_port=redis_port, redis_username=redis_username, redis_password=redis_password)
     startup_scan(machine, **conn)
-    next_periodic = 0.0
+    # Periodic debriefs run on their own thread. A slow debrief does not delay command polls.
+    threading.Thread(
+        target=_run_periodic_debriefs,
+        args=(loop_runtime.write_due_periodic_debriefs, PERIODIC_CHECK_S),
+        daemon=True,
+    ).start()
     while True:
         poll_once(machine, key, batch=batch, **conn)
-        # Runs on the poll thread. A slow debrief delays the next poll.
-        if time.monotonic() >= next_periodic:
-            loop_runtime.write_due_periodic_debriefs()
-            next_periodic = time.monotonic() + PERIODIC_CHECK_S
         time.sleep(poll_interval)

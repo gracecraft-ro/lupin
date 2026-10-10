@@ -1558,14 +1558,18 @@ def test_stop_keeps_a_branch_with_unmerged_commits(monkeypatch, tmp_path: Path, 
     assert f"branch {branch} kept" in result
 
 
-def test_loop_runtime_imports_in_a_fresh_process():
-    # A new process imports loop_runtime first. Shared test imports hide the cycle.
+@pytest.mark.parametrize(
+    "module",
+    ["lupin.loop_runtime", "lupin.agent", "lupin.roadmap", "lupin.debrief", "lupin.cli", "lupin.serve"],
+)
+def test_module_imports_in_a_fresh_process(module: str):
+    # A new process imports this module first. Shared test imports hide cycles.
     src = Path(__file__).resolve().parents[1] / "src"
     env = {key: value for key, value in os.environ.items() if not key.startswith("LUPIN_")}
     env["PYTHONPATH"] = str(src)
 
     result = subprocess.run(
-        [sys.executable, "-c", "import lupin.loop_runtime"],
+        [sys.executable, "-c", f"import {module}"],
         env=env, capture_output=True, text=True, timeout=60,
     )
 

@@ -2754,9 +2754,11 @@ def render_debrief_index(items: list[tuple[str, str]]) -> bytes:
 
 
 def _debrief_stamp(name: str) -> str:
-    """`20261010-120000.md` -> `2026-10-10 12:00:00 UTC`. Name is pre-checked."""
-    stamp = name[:-3]
-    return f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]} {stamp[9:11]}:{stamp[11:13]}:{stamp[13:15]} UTC"
+    """`20261010-120000.md` -> `2026-10-10 12:00:00 UTC`. Periodic files keep the suffix. Name is pre-checked."""
+    stamp = name[:15]
+    label = f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]} {stamp[9:11]}:{stamp[11:13]}:{stamp[13:15]} UTC"
+    period = name[15:-3]
+    return f"{label} {period}" if period else label
 
 
 def render_error(msg: str) -> bytes:

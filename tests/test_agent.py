@@ -693,28 +693,60 @@ def test_startup_scan_ignores_running_entries_for_other_machines(redis_port, flu
     assert status["state"] == "running"
 
 
-def test_run_forever_checks_periodic_debriefs_once_per_interval(monkeypatch):
+def test_run_forever_polls_while_a_periodic_check_is_slow(monkeypatch):
     class Stop(Exception):
         pass
 
+    started = threading.Event()
+    finished = threading.Event()
+    release = threading.Event()
     polls = []
-    checks = []
+    seen = []
+
+    def slow_check():
+        started.set()
+        release.wait(10)
+        finished.set()
 
     def poll_once(machine, key, **kwargs):
         polls.append(machine)
         if len(polls) == 3:
+            # The check must be running now. Polls do not wait for it.
+            seen.append(started.wait(10) and not finished.is_set())
             raise Stop()
         return []
 
     monkeypatch.setattr(agent, "startup_scan", lambda machine, **kwargs: [])
     monkeypatch.setattr(agent, "poll_once", poll_once)
-    monkeypatch.setattr(loop_runtime, "write_due_periodic_debriefs", lambda: checks.append(1))
+    monkeypatch.setattr(loop_runtime, "write_due_periodic_debriefs", slow_check)
 
-    with pytest.raises(Stop):
-        agent.run_forever("jesus", KEY, poll_interval=0)
+    try:
+        with pytest.raises(Stop):
+            agent.run_forever("jesus", KEY, poll_interval=0)
+    finally:
+        release.set()
 
     assert len(polls) == 3
-    assert checks == [1]
+    assert seen == [True]
+
+
+def test_periodic_check_failure_does_not_stop_the_loop(capsys):
+    class Stop(BaseException):
+        pass
+
+    calls = []
+
+    def check():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        raise Stop()
+
+    with pytest.raises(Stop):
+        agent._run_periodic_debriefs(check, 0)
+
+    assert len(calls) == 2
+    assert "lupin agent: periodic debrief check failed: boom" in capsys.readouterr().err
 
 
 def test_poll_once_unreachable_redis_raises(closed_port):

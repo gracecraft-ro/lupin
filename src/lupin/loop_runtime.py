@@ -409,7 +409,7 @@ def enabled_repos() -> dict[str, str]:
     values: dict[str, str] = {}
     try:
         lines = REPOS_FILE.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise LoopError(f"could not read {REPOS_FILE}: {exc}") from exc
     for line in lines:
         fields = line.split()
@@ -1400,6 +1400,7 @@ def stop_loop(repo: str, *, force: bool = False, grace: float = HANDOFF_GRACE_S)
 
 def _write_debrief(repo: str, metadata: dict, *, forced: bool) -> None:
     """Write the debrief. The stop already happened, so a failure only prints a warning."""
+    # Local import: debrief -> roadmap -> loop_runtime is a cycle.
     from . import debrief
 
     try:
@@ -1412,13 +1413,15 @@ def _write_debrief(repo: str, metadata: dict, *, forced: bool) -> None:
 
 def write_due_periodic_debriefs(now: datetime | None = None) -> None:
     """Write each periodic debrief that is due. A failure only prints a warning."""
+    # Local import: debrief -> roadmap -> loop_runtime is a cycle.
     from . import debrief
 
     now = datetime.now(timezone.utc) if now is None else now
     try:
         repos = enabled_repos()
-    except (LoopError, OSError, ValueError) as exc:
-        print(f"lupin agent: no periodic debriefs: {exc}", file=sys.stderr)
+    except (LoopError, OSError) as exc:
+        # enabled_repos writes the default file when it is missing. That write can raise OSError.
+        print(f"lupin agent: no periodic debriefs: {exc} ({REPOS_FILE})", file=sys.stderr)
         return
     for repo in repos:
         checkout = CODE_DIR / repo

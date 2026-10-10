@@ -2,8 +2,8 @@
 
 A debrief is one markdown file. A loop stop writes one. The agent writes
 periodic debriefs (`PERIODS`) on a timer. Facts come from GitHub (`gh`).
-Unless the debrief is for a forced stop, they also come from the ledger and
-claims in Redis. Files stay on the machine that wrote them.
+A normal stop and a periodic debrief also read the ledger and issue claims in
+Redis. A forced stop does not. Files stay on the machine that wrote them.
 """
 
 from __future__ import annotations
@@ -176,7 +176,7 @@ def build_markdown(
 
     `events` is None when the ledger was not read. `claimed` is None when
     claims were not read. A forced stop uses GitHub facts only. A section
-    whose gh call failed or timed out says so. `period` is set for a
+    whose gh call failed or timed out is marked as not collected. `period` is set for a
     periodic debrief. It replaces the Stop line.
     """
     day = start.strftime("%Y-%m-%d")
@@ -321,7 +321,8 @@ def write_debrief(
     """Write one debrief under `root/debriefs/<repo>/` and return its path.
 
     Raises `DebriefError` or a Redis error. Nothing is written then. The gh
-    calls share one time limit. A section whose gh call failed or timed out says so in the file.
+    calls share one time limit. If a gh call fails or times out, the file marks
+    that section as not collected.
     """
     if not REPO_RE.fullmatch(repo or ""):
         raise DebriefError(f"invalid repo name {repo!r}")
@@ -347,7 +348,8 @@ def _write(
 
     Raises `DebriefError` or a Redis error. Nothing is written then.
     The gh calls share one time limit. A section whose gh call failed or
-    timed out says so in the file. `period` adds the period to the file name.
+    timed out, the file marks that section as not collected. `period` adds the
+    period to the file name.
     """
     time_limit = _TimeLimit(DEBRIEF_TIME_LIMIT_S)
     view = time_limit.gh(["repo", "view", "--json", "nameWithOwner"], cwd=str(checkout))
@@ -357,7 +359,8 @@ def _write(
     claimed = None
     ledger_note = None
     if not forced:
-        # Both Redis reads use one debrief client. Its timeouts keep them in the stop budget.
+        # Both Redis reads use one debrief client. Each Redis read uses the
+        # debrief client timeouts (DEBRIEF_TIMEOUT_S).
         client = slots_redis.debrief_client(None, None)
         try:
             events = ledger.read_events(full_name, limit=None, client=client)
@@ -407,12 +410,15 @@ def last_period_end(root: Path, repo: str, period: str) -> datetime | None:
     for path in (root / "debriefs" / repo).glob(f"*-{period}.md"):
         if FILE_RE.fullmatch(path.name) and path.is_file():
             stamp = path.name[:-len(f"-{period}.md")]
-            ends.append(datetime.strptime(stamp, STAMP_FORMAT).replace(tzinfo=timezone.utc))
+            try:
+                ends.append(datetime.strptime(stamp, STAMP_FORMAT).replace(tzinfo=timezone.utc))
+            except ValueError:
+                pass  # Not a real date, such as month 13. Skip the file.
     return max(ends, default=None)
 
 
 def period_due(root: Path, repo: str, period: str, now: datetime) -> bool:
-    """Return True when no `period` debrief exists.
+    """Return True when a `period` debrief is due.
 
     Return True also when one full period has passed since the last one.
     """
@@ -425,8 +431,8 @@ def write_period(
 ) -> Path:
     """Write the `period` debrief for `repo` and return its path.
 
-    The window starts at the last `period` debrief. With none, it starts one
-    period before `now`. The window ends at `now`.
+    The window starts at the last `period` debrief. When there is none, the
+    window starts one period before `now`. The window ends at `now`.
     """
     end = datetime.now(timezone.utc) if now is None else now
     last = last_period_end(root, repo, period)

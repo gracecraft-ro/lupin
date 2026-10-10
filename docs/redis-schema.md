@@ -470,9 +470,12 @@ Its waits:
 The debrief client gets no host, port, or password from its caller. It connects
 to `localhost:6379` without auth. Issue #118 tracks this.
 
-Periodic debriefs run in the agent, not in the stop subprocess. They read the
-same Redis keys as stop debriefs. They add no new keys. Their file names end
-in `-6h`, `-24h`, or `-7d`.
+Periodic debriefs run on a background thread of `lupin agent`, not in the stop
+subprocess. They do not block commands. They read the same Redis keys as stop
+debriefs. They add no new keys. Their file names end in `-6h`, `-24h`, or
+`-7d`. They have no time budget entry. The "Budget result" section and the
+"Lock waits" section cover stop debriefs only. They connect to `localhost:6379`
+without auth, as stop debriefs do (issue #118).
 
 ## Lock waits
 

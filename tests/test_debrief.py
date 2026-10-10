@@ -555,18 +555,24 @@ def test_write_period_refuses_an_unknown_period(tmp_path: Path):
     assert not (tmp_path / "debriefs").exists()
 
 
-def test_period_due_is_true_without_a_file(tmp_path: Path):
-    assert debrief.period_due(tmp_path, "widgets", "6h", NOW) is True
-
-
 @pytest.mark.parametrize("period", list(debrief.PERIODS))
 def test_period_due_changes_at_exactly_one_period(tmp_path: Path, period: str):
+    assert debrief.period_due(tmp_path, "widgets", period, NOW) is True  # No file yet.
     last = datetime(2026, 10, 10, 6, 0, 0, tzinfo=timezone.utc)
     _debrief_file(tmp_path, "widgets", f"{last:%Y%m%d-%H%M%S}-{period}.md")
     span = debrief.PERIODS[period]
 
     assert debrief.period_due(tmp_path, "widgets", period, last + span - timedelta(seconds=1)) is False
     assert debrief.period_due(tmp_path, "widgets", period, last + span) is True
+
+
+def test_last_period_end_skips_an_impossible_date(tmp_path: Path):
+    _debrief_file(tmp_path, "widgets", "20261340-250000-7d.md")
+    _debrief_file(tmp_path, "widgets", "20261010-120000-7d.md")
+
+    last = debrief.last_period_end(tmp_path, "widgets", "7d")
+
+    assert last == datetime(2026, 10, 10, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_list_and_read_periodic_debriefs(tmp_path: Path):

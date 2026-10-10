@@ -3659,6 +3659,17 @@ def test_debrief_index_lists_newest_first_with_utc_stamps(tmp_path, monkeypatch)
     assert body.index("20261002-090000") < body.index("20261001-090000")
 
 
+def test_debrief_index_shows_the_period_of_a_periodic_debrief(tmp_path, monkeypatch):
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    _write_debrief_file(tmp_path, "widgets", "20261002-090000-6h.md", "# six\n")
+
+    handler = _get_handler("/debrief", {})
+    handler.do_GET()
+
+    body = handler.reply.call_args.args[0].decode()
+    assert "2026-10-02 09:00:00 UTC -6h" in body
+
+
 def test_debrief_index_says_when_there_are_none(tmp_path, monkeypatch):
     monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
 
