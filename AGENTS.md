@@ -404,8 +404,9 @@ nix shell nixpkgs#python3Packages.pytest -c pytest -v
 
 ## Pull requests, review, and handoff
 
-Every change goes through a pull request to the integration branch,
-`release/next`, on the fork. The loop policy is in `docs/delegation-loop.md`.
+Every feature change goes through a pull request to the fork's `release/next`.
+Policy changes go to upstream `main` for the owner to merge. The loop policy is
+in `docs/delegation-loop.md`.
 
 1. Use `/ship`. It pushes the branch to the fork and opens a PR with
    `Closes #N`. The PR base is `release/next` on the fork. If the push fails,

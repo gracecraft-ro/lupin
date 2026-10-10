@@ -168,8 +168,8 @@ a separate worktree and verify the worker's working directory. On a Herdr
 worker, use the Herdr worktree commands:
 
 ```sh
-git fetch fork
 herdr worktree list --cwd "$PWD"
+git fetch fork
 herdr worktree create --branch BRANCH --base fork/release/next --cwd "$PWD"
 herdr worktree open --path PATH --cwd "$PWD"
 ```
@@ -287,11 +287,11 @@ The PR base is `release/next` on the fork:
 gh pr create --repo gracecraft-ro/<repo> --base release/next
 ```
 
-Do not open a PR against upstream `main`. If the push to the fork fails, the
-worker reports the local branch name and commit range. The reviewer reviews
-`git diff fork/release/next...BRANCH`. The orchestrator posts the verdict as a
-comment on the issue, because there is no PR to post on. Do not merge the
-branch until a PR exists on the fork.
+Do not open a feature PR against upstream `main`. If the push to the fork
+fails, the worker reports the local branch name and commit range. The reviewer
+reviews `git diff fork/release/next...BRANCH`. The orchestrator posts the
+verdict as a comment on the issue, because there is no PR to post on. Do not
+merge the branch until a PR exists on the fork.
 
 Use `lupin review-route --category CATEGORY --size SIZE --mode separate` for
 a reviewer recommendation. Compare it with the issue's implementation route

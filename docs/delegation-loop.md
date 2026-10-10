@@ -50,16 +50,20 @@ On a Herdr worker you can use a Herdr worktree instead of a clone:
 
 ```bash
 herdr worktree list --cwd /code/lupin
+git -C /code/lupin fetch fork
 herdr worktree create --branch <branch> --base fork/release/next --cwd /code/lupin
 ```
+
+If the `fork` remote is missing, stop and report. Do not add a remote.
 
 The worktree is a linked Git worktree, not a clone. It has no `fork` remote,
 so `/ship` must add one before it pushes.
 
 ## Pull request and review
 
-Every change goes through a pull request. The shared steps are in "Review and
-merge each pull request" in the `delegation-loop` skill. In this repo:
+Every feature change goes through a pull request. The shared steps are in
+"Review and merge each pull request" in the `delegation-loop` skill. In this
+repo:
 
 1. The base branch is the integration branch, `release/next`, on the fork
    (`gracecraft-ro/lupin`). A feature PR never targets upstream `main`.
@@ -110,5 +114,6 @@ applies is rule 1 above — push to the fork, not to the upstream repo.
 Before you merge or dispatch anything, check for work already done:
 
 ```bash
-git -C /code/lupin branch --no-merged main
+git -C /code/lupin fetch fork
+git -C /code/lupin branch --no-merged fork/release/next
 ```
