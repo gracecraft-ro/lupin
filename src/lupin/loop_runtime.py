@@ -875,6 +875,9 @@ def _launch_agent(
         HERDR, "--session", session, "agent", "start", name, "--kind", platform,
         "--pane", pane, "--timeout", "300000", "--",
     ]
+    # Herdr passes arguments after `--` to the agent. It rejects this flag before `--`.
+    if platform == "claude":
+        argv.append("--dangerously-skip-permissions")
     if resume and platform == "claude":
         argv.append("--continue")
     if platform == "omp":

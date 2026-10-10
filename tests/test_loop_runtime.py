@@ -469,6 +469,7 @@ def test_launch_agent_uses_herdr_start_api(monkeypatch, tmp_path: Path):
         "--timeout",
         "300000",
         "--",
+        "--dangerously-skip-permissions",
         "--continue",
         "finish the handoff",
     ]
@@ -497,6 +498,40 @@ def test_launch_agent_passes_omp_provider_and_model(monkeypatch, tmp_path: Path)
         "--model", "opencode-go/step-5-preview-free:xhigh",
         "finish the handoff",
     ]
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_launch_agent_starts_claude_with_skip_permissions(monkeypatch, tmp_path: Path, resume: bool):
+    prompt_file = tmp_path / "prompt"
+    prompt_file.write_text("finish the handoff\n", encoding="utf-8")
+    workspace = {"id": "w1", "root_pane": {"pane_id": "w1:p1", "workspace_id": "w1"}}
+    calls = []
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: calls.append(argv) or (0, ""))
+    monkeypatch.setattr(loop_runtime, "_wait_agent", lambda got_session, workspace_id: 0)
+
+    loop_runtime._launch_agent(
+        "lupin-widgets-abc123", "claude", workspace, str(prompt_file), resume=resume
+    )
+
+    argv = calls[0]
+    assert argv[argv.index("--") + 1] == "--dangerously-skip-permissions"
+    assert ("--continue" in argv) == resume
+    assert argv[-1] == "finish the handoff"
+
+
+def test_launch_agent_omp_does_not_skip_permissions(monkeypatch, tmp_path: Path):
+    prompt_file = tmp_path / "prompt"
+    prompt_file.write_text("finish the handoff\n", encoding="utf-8")
+    workspace = {"id": "w1", "root_pane": {"pane_id": "w1:p1", "workspace_id": "w1"}}
+    calls = []
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: calls.append(argv) or (0, ""))
+    monkeypatch.setattr(loop_runtime, "_wait_agent", lambda got_session, workspace_id: 0)
+
+    loop_runtime._launch_agent(
+        "lupin-widgets-abc123", "omp", workspace, str(prompt_file), resume=False
+    )
+
+    assert "--dangerously-skip-permissions" not in calls[0]
 
 
 @pytest.mark.parametrize(
