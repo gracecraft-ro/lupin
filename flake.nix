@@ -73,6 +73,8 @@
               ]))
               # tests/conftest.py starts `redis-server` from PATH.
               pkgs.redis
+              # The roadmap tests run `git`, so it must be on PATH.
+              pkgs.git
             ];
           };
         }
