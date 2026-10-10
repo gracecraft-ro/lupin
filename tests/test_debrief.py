@@ -566,6 +566,31 @@ def test_period_due_changes_at_exactly_one_period(tmp_path: Path, period: str):
     assert debrief.period_due(tmp_path, "widgets", period, last + span) is True
 
 
+def test_period_due_when_the_last_stamp_is_later_today(tmp_path: Path):
+    _debrief_file(tmp_path, "widgets", "20261010-180000-6h.md")
+
+    assert debrief.period_due(tmp_path, "widgets", "6h", NOW) is True
+
+
+def test_period_due_when_the_last_stamp_is_in_2030(tmp_path: Path):
+    _debrief_file(tmp_path, "widgets", "20301010-120000-6h.md")
+
+    assert debrief.period_due(tmp_path, "widgets", "6h", NOW) is True
+
+
+def test_future_stamp_writes_one_window_and_then_waits(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    _stub_io(monkeypatch)
+    _debrief_file(tmp_path, "widgets", "20301010-120000-6h.md")
+
+    path = debrief.write_period(tmp_path, "widgets", checkout, "6h", now=NOW)
+
+    assert "- From: 2026-10-10T06:00:00Z" in path.read_text(encoding="utf-8")
+    # The new file ends at NOW, so the next check must wait a full period.
+    assert debrief.period_due(tmp_path, "widgets", "6h", NOW) is False
+
+
 def test_last_period_end_skips_an_impossible_date(tmp_path: Path):
     _debrief_file(tmp_path, "widgets", "20261340-250000-7d.md")
     _debrief_file(tmp_path, "widgets", "20261010-120000-7d.md")

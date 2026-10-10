@@ -397,10 +397,11 @@ def _write(
     return path
 
 
-def last_period_end(root: Path, repo: str, period: str) -> datetime | None:
+def last_period_end(root: Path, repo: str, period: str, now: datetime | None = None) -> datetime | None:
     """Return the end time of the newest `period` debrief for `repo`.
 
-    Return None when there is no such debrief.
+    Skip files that end after `now`. Their clock ran ahead. Return None when
+    there is no such debrief.
     """
     if period not in PERIODS:
         raise DebriefError(f"unknown period {period!r}")
@@ -414,6 +415,8 @@ def last_period_end(root: Path, repo: str, period: str) -> datetime | None:
                 ends.append(datetime.strptime(stamp, STAMP_FORMAT).replace(tzinfo=timezone.utc))
             except ValueError:
                 pass  # Not a real date, such as month 13. Skip the file.
+    if now is not None:
+        ends = [end for end in ends if end <= now]
     return max(ends, default=None)
 
 
@@ -421,8 +424,9 @@ def period_due(root: Path, repo: str, period: str, now: datetime) -> bool:
     """Return True when a `period` debrief is due.
 
     Return True also when one full period has passed since the last one.
+    A file that ends after `now` does not count.
     """
-    last = last_period_end(root, repo, period)
+    last = last_period_end(root, repo, period, now)
     return last is None or now - last >= PERIODS[period]
 
 
@@ -435,7 +439,7 @@ def write_period(
     window starts one period before `now`. The window ends at `now`.
     """
     end = datetime.now(timezone.utc) if now is None else now
-    last = last_period_end(root, repo, period)
+    last = last_period_end(root, repo, period, end)
     start = end - PERIODS[period] if last is None else last
     if not checkout.is_dir():
         raise DebriefError(f"no checkout at {checkout}")

@@ -137,8 +137,8 @@ def read_events(
     `limit` defaults to 10 and must be positive. Pass `None` to read the full
     stream. An empty stream returns an empty list. Raises
     `CoordinatorUnreachable` when Redis cannot be reached. Pass `client` to
-    use a ready client (the debrief path does); otherwise one is made from
-    the connection arguments.
+    use a ready client, as the debrief path does. Without it, a client is made
+    from the connection arguments.
     """
     key = _stream_key(repo)
     if limit is not None and (

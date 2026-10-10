@@ -535,9 +535,9 @@ Worst case, in seconds. The terms are in `tests/test_agent.py`.
 
 | Part | Terms | Seconds |
 | --- | --- | --- |
-| Subprocess, listed | loop_runtime waits 983.25; gh 10; three debrief Redis calls 3 x 14 | 1035.25 |
+| Subprocess, listed | loop_runtime waits 983.25 plus gh 10 plus three debrief Redis calls 3 x 14 | 1035.25 |
 | Subprocess timer | 1740 - 328 - 5 x 14 | 1342.00 |
-| Agent Redis calls | command read 328; five calls at 14 | 398.00 |
+| Agent Redis calls | command read 328 plus five calls at 14 | 398.00 |
 | Listed total | 1035.25 + 398 | 1433.25 |
 | Budget | `ACTION_TIMEOUT_S["loop.stop"]` | 1740.00 |
 | Margin | 1740 - 1433.25 | 306.75 |

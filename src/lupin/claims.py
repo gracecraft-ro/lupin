@@ -225,12 +225,11 @@ def claims_for(
     The integration point future `roadmap` (#10) and `quest` (#11) commands
     import to find out which of their issues are off-limits -- pass the
     repos you already know about, get back the claimed subset. Raises
-    `CoordinatorUnreachable` if Redis can't be reached; there's no local
-    fallback for claims, so a caller should treat that failure the same way
-    `lupin claim` exiting 3 is treated elsewhere: start no new issue, but
-    do not disturb anything already in progress. Pass `client` to use a ready
-    client (the debrief path does); otherwise one is made from the connection
-    arguments.
+    `CoordinatorUnreachable` if Redis cannot be reached. There is no local
+    fallback for claims. Treat that failure the same way `lupin claim`
+    exit 3 is treated elsewhere. Start no new issue. Do not disturb anything
+    already in progress. Pass `client` to use a ready client, as the debrief
+    path does. Without it, a client is made from the connection arguments.
     """
     if client is None:
         client = _client(redis_host, redis_port, redis_username, redis_password)

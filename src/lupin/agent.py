@@ -77,9 +77,9 @@ COMMAND_READ_WORST_S = ATTEMPTS_PER_CALL * (
     (DEFAULT_CLIENT_RETRIES + 1) * (REDIS_ADDRESSES + REDIS_ROUND_TRIPS) * CONNECT_TIMEOUT
     + DEFAULT_CLIENT_RETRIES * DEFAULT_CLIENT_BACKOFF_CAP_S
 )
-# Agent Redis calls on the loop.stop path after the read: claim, claim
-# read (only when the claim returns nil), write result, dequeue, audit
-# line. They use debrief_client.
+# The agent makes up to five Redis calls on the loop.stop path after the read.
+# The calls are: claim, claim read, write result, dequeue, and audit line.
+# The claim read runs only when the claim returns nil. They use debrief_client.
 AGENT_REDIS_CALLS_ON_STOP = 5
 # Cap on the stop subprocess. The read and the agent's Redis calls use the rest of the limit.
 SUBPROCESS_TIMEOUT_S = {

@@ -290,7 +290,7 @@ def test_stop_subprocess_cap_leaves_room_for_agent_redis_calls(redis_port, flush
     agent_s = agent.COMMAND_READ_WORST_S + agent.AGENT_REDIS_CALLS_ON_STOP * DEBRIEF_CALL_S
     worst = timeouts[0] + agent_s
     assert worst <= time_limit, (
-        f"subprocess {timeouts[0]:g}s + agent Redis calls {agent_s:g}s = {worst:g}s; "
+        f"subprocess {timeouts[0]:g}s + agent Redis calls {agent_s:g}s = {worst:g}s. "
         f"time limit is {time_limit:g}s"
     )
 
@@ -344,7 +344,7 @@ def test_stop_time_limit_covers_the_listed_timeouts():
     total = subprocess_s + agent_s
     time_limit = agent.ACTION_TIMEOUT_S["loop.stop"]
     assert total <= time_limit, (
-        f"stop can take {total:.2f}s (subprocess {subprocess_s:.2f}s + agent {agent_s:.2f}s); "
+        f"stop can take {total:.2f}s (subprocess {subprocess_s:.2f}s + agent {agent_s:.2f}s). "
         f"time limit is {time_limit:g}s"
     )
 
@@ -427,8 +427,8 @@ def _relay(listener, upstream_port, reply_delay_s, commands_seen=None):
 
 
 def test_non_stop_command_survives_a_reply_slower_than_the_stop_bound(redis_port, flush_redis, monkeypatch):
-    # 1.2 s per reply: over the 1 s bound on the loop.stop calls, under the
-    # 2 s bound on the other calls. A loop.peek must still run.
+    # Each reply takes 1.2 s. That is over the 1 s bound on loop.stop calls.
+    # It is under the 2 s bound on other calls. A loop.peek must still run.
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
     listener.listen(10)
