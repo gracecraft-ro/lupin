@@ -62,7 +62,7 @@ GitHub CLI 2.99.0 and newer supports `gh issue comment --attach`. Check
 an attachment. Attach evidence to the PR conversation:
 
 ```sh
-gh issue comment <PR_NUMBER> --repo OWNER/REPO \
+gh issue comment <PR_NUMBER> --repo gracecraft-ro/<repo> \
   --attach evidence/123/contact-sheet.png \
   --body-file report.md
 ```
