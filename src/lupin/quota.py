@@ -40,6 +40,12 @@ OMP_STATS_FILE = os.path.expanduser("~/.omp/stats.db")
 # "Python-urllib/x.y" user agent with a 403 (confirmed, issue #34).
 _USER_AGENT = "lupin-quota/1.0"
 
+# Notes for a provider the machine has no credentials for. place.py counts
+# these apart from read failures.
+NO_CLAUDE_CREDENTIALS = "no Claude credentials"
+NO_OPENCODE_GO_KEY = "no OpenCode Go API key available"
+NO_KEY_NOTES = frozenset({NO_CLAUDE_CREDENTIALS, NO_OPENCODE_GO_KEY})
+
 
 class QuotaDuration(str, Enum):
     FIVE_HOURS = "PT5H"
@@ -272,13 +278,29 @@ def quota_duration(limit: dict, window: dict) -> QuotaDuration:
         return QuotaDuration.MONTHLY
     return QuotaDuration.OTHER
 
-def claude_oauth_quota() -> list[dict]:
+def _claude_token() -> str | None:
+    """The OAuth access token, or None when the file or token is missing.
+
+    A file that exists but cannot be read or parsed raises. The caller
+    then reports a read failure.
+    """
     try:
         with open(CLAUDE_CREDENTIALS_FILE, encoding="utf-8") as credentials_file:
             credentials = json.load(credentials_file)
+    except FileNotFoundError:
+        return None
+    try:
         token = credentials["claudeAiOauth"]["accessToken"]
-        if not isinstance(token, str) or not token:
-            raise ValueError("missing OAuth access token")
+    except (KeyError, TypeError):
+        return None
+    return token if isinstance(token, str) and token else None
+
+
+def claude_oauth_quota() -> list[dict]:
+    try:
+        token = _claude_token()
+        if token is None:
+            return [{"provider": "claude", "note": NO_CLAUDE_CREDENTIALS}]
         request = urllib.request.Request(
             "https://api.anthropic.com/api/oauth/usage",
             headers={
@@ -326,7 +348,7 @@ def opencode_go_quota() -> list[dict]:
     if not key:
         key = os.environ.get("OPENCODE_API_KEY", "").strip()
     if not key:
-        return [{"provider": "opencode-go", "note": "no OpenCode Go API key available"}]
+        return [{"provider": "opencode-go", "note": NO_OPENCODE_GO_KEY}]
 
     request = urllib.request.Request(
         OPENCODE_GO_USAGE_URL,
@@ -429,6 +451,7 @@ def quota_source_label(provider: str) -> str:
 
 def snapshot() -> dict[str, dict]:
     """One number per provider: `{provider: {pct_left, resets_at, source}}`.
+    When `pct_left` is None the entry also has `note`, the reason.
 
     `quota_usage()` can return several rows per provider -- one per
     window (5 hours, 7 days, 30 days). This picks the 5-hour row when
@@ -451,9 +474,12 @@ def snapshot() -> dict[str, dict]:
     for provider, row in chosen.items():
         used = row.get("used_pct")
         pct_left = None if not isinstance(used, (int, float)) else max(0.0, 100 - used)
-        result[provider] = {
+        entry = {
             "pct_left": pct_left,
             "resets_at": row.get("resets_at"),
             "source": quota_source_label(provider),
         }
+        if pct_left is None:
+            entry["note"] = row.get("note")
+        result[provider] = entry
     return result

@@ -1072,11 +1072,15 @@ def _format_place_explain(result: dict) -> str:
     if result["candidates"]:
         lines.append(_format_place_table(result))
     skipped = result["skipped"]
-    total_skipped = skipped["offline"] + skipped["other_provider"]
+    total_skipped = sum(skipped.values())
     if total_skipped:
         reasons = []
         if skipped["other_provider"]:
             reasons.append(f"{skipped['other_provider']} run a different provider")
+        if skipped["no_key"]:
+            reasons.append(f"{skipped['no_key']} have no credentials for {result['provider']}")
+        if skipped["read_failed"]:
+            reasons.append(f"{skipped['read_failed']} cannot read {result['provider']} quota")
         if skipped["offline"]:
             reasons.append(f"{skipped['offline']} offline")
         lines.append(f"{total_skipped} machine(s) skipped: {', '.join(reasons)}")

@@ -7,10 +7,10 @@ reimplementing it:
 1. Classify + route (`classify.classify`, `route.route`) -- unchanged logic,
    just called from here with a synthetic issue dict when `<task>` is free
    text instead of a real GitHub issue.
-2. Map the routed model to a provider (`_PROVIDER_BY_MODEL` below -- a small
-   lookup table kept in this module, not model-tiers.json, since it is a
-   `place`-only concern and model-tiers.json's schema is about tiers, not
-   accounts).
+2. Map the routed model to a provider (`route.provider_for_model`, re-exported
+   here under the same name). The table lives in `route.py` because quota
+   pacing needs it too, not because it is a `place`-only concern, and
+   model-tiers.json's schema is about tiers, not accounts.
 3. Score every machine the registry (`machines.py`, issue #7) knows about
    that reports quota (`quota.py`, issue #8) for that provider, and rank the
    candidates.
@@ -18,11 +18,15 @@ reimplementing it:
 Judgment call -- "runs the provider": `machines.py`'s `providers` field is
 still an unpopulated stub (see its own docstring -- nothing writes it yet).
 The thing that *is* populated, per machine, every heartbeat, is `quota`
-(`quota.snapshot()`, keyed by provider). A machine reporting a quota entry
-for a provider is the only real signal this repo has today that the machine
-can serve it, so that is what `_runs_provider` below checks. When something
-starts writing `providers` for real, switch to that instead -- it is the
-more direct signal, this is a stand-in.
+(`quota.snapshot()`, keyed by provider). A machine with a real percentage
+for that provider is the signal this repo has today that the machine can
+serve it: the quota reader opens the same credentials file the agent uses,
+so a machine that cannot read a provider's quota does not have that
+provider's key. An entry with no percentage is therefore skipped, not
+ranked -- `snapshot()` writes one entry per known provider on every
+heartbeat, so "the entry exists" is true for all of them and proves
+nothing. When something starts writing `providers` for real, switch to that
+instead -- it is the more direct signal, this is a stand-in.
 
 Judgment call -- ranking and the `result` column: the issue's `--explain`
 example ranks by (state, quest focus, free slots, heartbeat age) and labels
@@ -82,6 +86,7 @@ from . import classify as classify_mod
 from . import gh_cache
 from . import machines
 from . import quest as quest_mod
+from . import quota as quota_mod
 from . import roadmap
 from . import route as route_mod
 
@@ -258,13 +263,22 @@ def _filter_candidates(
     """Split `records` into skip counts, ranked candidate rows, and a pick,
     for one `provider`.
 
-    Only two skip reasons now (issue #36 removes the third, `quota_exhausted`
-    -- that was a per-machine read of a fleet-wide number, and the number
-    has already been acted on by `route()` before this function ever runs):
-    `other_provider` (no quota entry at all for `provider` -- the stand-in
-    for "does this machine have credentials for it") and `offline`.
+    Skip reasons:
+    - `other_provider`: no quota entry at all for `provider`.
+    - `no_key`: no percentage, and the note says the machine has no
+      credentials for `provider`.
+    - `read_failed`: no percentage, and any other note.
+    - `offline`.
+
+    Why a missing percentage disqualifies: `quota.snapshot()` writes one
+    entry for every provider it knows about on every heartbeat, so "this
+    machine has a quota entry" is true for all of them and proves nothing.
+    A reading with a real percentage proves the opposite -- the machine has
+    that provider's credentials and can read its quota. Recommending a
+    machine without them would send the work to a machine that cannot make
+    the call, so the heartbeat's own data decides who can serve what.
     """
-    skipped = {"offline": 0, "other_provider": 0}
+    skipped = {"offline": 0, "other_provider": 0, "no_key": 0, "read_failed": 0}
     matched = []
     for record in records:
         entry = (record.get("quota") or {}).get(provider)
@@ -273,6 +287,12 @@ def _filter_candidates(
             continue
         if record["state"] == "offline":
             skipped["offline"] += 1
+            continue
+        if entry.get("pct_left") is None:
+            if entry.get("note") in quota_mod.NO_KEY_NOTES:
+                skipped["no_key"] += 1
+            else:
+                skipped["read_failed"] += 1
             continue
         matched.append(record)
 
@@ -325,7 +345,11 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
     now = time.time()
 
     if wait_seconds is not None:
-        skipped, candidates, pick = {"offline": 0, "other_provider": 0}, [], None
+        skipped, candidates, pick = (
+            {"offline": 0, "other_provider": 0, "no_key": 0, "read_failed": 0},
+            [],
+            None,
+        )
     else:
         skipped, candidates, pick = _filter_candidates(records, provider, quest_focus, now)
 
