@@ -436,6 +436,7 @@ in `docs/delegation-loop.md`.
       asks git whether one branch contains another. The check is in the
       `delegation-loop` skill.
    4. The repo's full gate, as its `AGENTS.md` defines it, passes.
+   A worker or reviewer never merges a pull request.
 3. At the end of a session, run `/handoff`. It runs `lupin ledger append`.
 4. Loop details for this repo: `docs/delegation-loop.md`.
 

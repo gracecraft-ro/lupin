@@ -59,7 +59,7 @@ checkout has no `fork` remote, stop. Then report the missing remote.
 Do not add a remote.
 
 `lupin run` still starts each loop from `origin/HEAD`, which is upstream `main`.
-`origin/HEAD` is the default branch on `origin`. It does not start from
+`origin/HEAD` is the default branch on `origin`. `lupin run` does not start from
 `fork/release/next`. Until the owner changes `lupin run`, do not use it for
 feature work. Create feature worktrees with the Herdr worktree commands above,
 or the manual steps in rule 1.
