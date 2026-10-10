@@ -75,31 +75,13 @@ repository or artifact-store location.
 
 Commit the change.
 
-Choose the push flow. First, check push rights on the upstream repo.
-The upstream repo is the one `origin` points to.
+Workers never push to `origin`, `main`, or `release/next`. Push the feature
+branch to the fork. Open the PR on the fork. Then request review.
 
-1. Find the upstream repo name with `git remote get-url origin`. Replace
-   `OWNER/REPO` with its owner and repo name. Then run:
-
-   ```sh
-   gh api repos/OWNER/REPO --jq .permissions.push
-   ```
-
-2. If the result is `true`, use the direct flow below, unchanged.
-3. If the result is `false`, use the fork flow below.
-4. If the command fails or prints anything else, stop. Report the output.
-   Do not guess.
-
-If direct push is allowed, push the branch and open or update
-its PR. Link the issue with `Closes #123`.
-
-Fork flow. Use it only when the result is `false`. Never push to `origin`
-in this flow.
-
-1. Check that a `fork` remote exists. Run `git remote get-url fork`. If it
-   fails, stop. Report the missing remote. Never run `git remote add`.
-2. Push the branch to the fork. Find the current branch with
-   `git branch --show-current`. Then run `git push -u fork <branch>`.
+1. Run `git remote get-url fork`. If it fails, stop. Report the missing remote.
+   Never run `git remote add`.
+2. Push only the feature branch. Find it with `git branch --show-current`.
+   Then run `git push -u fork <branch>`. Never push any other ref.
 3. Open the PR on the fork. Set `<repo>` to the repo name in the fork URL
    from step 1. Run:
 
@@ -109,8 +91,18 @@ in this flow.
    ```
 
    Never use an upstream `--repo` in this flow.
-4. If the push fails, report the branch name and the commit range. Do not
-   merge.
+4. Request review with one comment on the PR. Run:
+
+   ```sh
+   gh pr comment <PR_NUMBER> --repo gracecraft-ro/<repo> \
+     --body "Review requested. Head: <sha>."
+   ```
+
+   `<PR_NUMBER>` is the number at the end of the PR URL that `gh pr create`
+   prints. `<sha>` is the output of `git rev-parse HEAD`. Then stop. Do not
+   merge. Do not wait for approval. The orchestrator dispatches a reviewer.
+5. If the push or PR creation fails, report the branch name and the commit
+   range. Then stop.
 
 If the repo does not allow fork PRs, keep the local branch and report its name
 and commit range. A local commit is not a pull request and is not shipped.
