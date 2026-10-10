@@ -72,9 +72,9 @@ repo:
    finding. It uses `/ship` on the same PR. Repeat until the reviewer
    approves.
 5. The orchestrator posts the verdict on the PR.
-6. The orchestrator merges the PR on the fork into `release/next` only after
-   the reviewer approves it and the gate passes. The gate is `nix flake check`
-   (see "Build and test" in `AGENTS.md`). Merge with
+6. The orchestrator merges the PR on the fork into `release/next` only when
+   the `delegation-loop` skill's four conditions are true. The gate is
+   `nix flake check` (see "Build and test" in `AGENTS.md`). Merge with
    `gh pr merge --repo gracecraft-ro/lupin --merge`. Do not rebase. Do not
    force-push. Before merge, the branch must contain the current `release/next`.
    See the merge check in the `delegation-loop` skill. A worker or reviewer

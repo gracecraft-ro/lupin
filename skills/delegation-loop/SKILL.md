@@ -317,13 +317,14 @@ git fetch fork
 git merge-base --is-ancestor fork/release/next BRANCH
 ```
 
-Exit code 0 means the branch contains `release/next`. Exit code 1 means it
-does not. In that case, the worker runs `git merge fork/release/next` on the
-branch. Then it pushes the branch to the fork. Do not rebase. Any other exit
-code means the check failed. Report it. Do not merge.
+Exit code 0 means the branch contains `release/next`. Then continue to the
+merge rules below. Exit code 1 means it does not. For an open, approved fork
+PR, the worker runs `git merge fork/release/next` on the PR branch. Then it
+pushes the branch to the fork. Do not rebase. Any other exit code means the
+check failed. Report it. Do not merge.
 
 If the merge of `fork/release/next` changes a file the reviewer already
-reviewed, the reviewer checks that change before the merge. The gate runs in
+reviewed, the reviewer checks that change before the PR merge. The gate runs in
 every case.
 
 The orchestrator merges a PR into `release/next` only when all four of these
@@ -332,7 +333,8 @@ are true:
 - The branch has an open PR on the fork, `gracecraft-ro/<repo>`, with base
   `release/next`.
 - A reviewer approves that PR.
-- The branch contains the current `release/next`. Use the ancestor check above.
+- The branch contains the current `release/next`. Use the check above, which
+  tests whether the branch contains `release/next`.
 - The repo's full gate passes on the branch, as it is at merge time.
 
 The reviewer is a different agent from the worker. The gate command is in the
@@ -340,15 +342,15 @@ repo's `AGENTS.md`. If the repo has no gate command, report that. Do not merge.
 
 A branch with no fork PR is not merged.
 
-No human approval is needed for this merge. Merge the PR with this command. It
-creates a merge commit:
+When all four conditions above are true, merge the PR with this command. No
+human approval is needed. The command creates a merge commit:
 
 ```sh
 gh pr merge --repo gracecraft-ro/<repo> --merge
 ```
 
-Do not rebase. Do not force-push. The reviewer and worker do not merge their
-own PR.
+Do not rebase. Do not force-push. A worker or reviewer never merges a pull
+request.
 
 ### Preview server
 
