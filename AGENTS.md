@@ -74,9 +74,21 @@ plain form; the output is nested data, not a one-line result). A number
 that is neither an issue nor a PR gets `{"error": ...}` in its own slot
 instead of failing the whole batch.
 
-`acquire` prints a lease ID on success. Exit code 2 means the slot is full
-— the caller should skip and try again later. Exit code 3 means the `redis`
-backend cannot reach the coordinator and the slot has no local fallback.
+`acquire` prints a lease ID on success. Exit code 2 means the slot is full.
+The caller must skip and try again later. Exit code 3 means the `redis`
+backend cannot reach the coordinator. The slot has no local fallback.
+
+Only the `bmo` slot falls back to `local`. If Redis is unreachable, `acquire`,
+`renew`, `release`, and `status` use `local` for `bmo` and print a warning.
+A refused login never falls back. It raises `CoordinatorAuthFailed` for every
+slot. An ACL denial raises `NoPermissionError` for every slot. It never falls back.
+
+For a refused login or an ACL denial, the `lupin` command exits with code 3 and
+prints one line that names the setting to check. For a refused login, the setting
+is `--redis-password` or `LUPIN_REDIS_PASSWORD`. For a fleet command, it also names
+the systemd credential `redis-password`. The line never shows a password.
+Some read paths are not covered yet. See `docs/redis-schema.md`.
+
 The `local` backend's coordinator is the filesystem, so it never returns 3.
 
 `hold` acquires a lease (or reuses one from `--lease`), runs `<command>`,
@@ -100,7 +112,9 @@ does not empty its row in the fleet snapshot. The fetch keeps that
 subscription's last verified list, marks it `live: false` with the reason,
 and the Models page shows the rows with that reason under each one.
 
-`run <repo>` starts a Lupin worker and a Herdr workspace. `run --all`
+`run <repo>` starts a Lupin worker and a Herdr workspace. The agent works
+in a new Git worktree, not in the main checkout (see "State"). `run` refuses
+to start if the main checkout has an unfinished Git operation. `run --all`
 starts every enabled repo. Add `--machine M` to use the signed fleet queue
 on another machine; `run --all --machine M` starts its enabled repos.
 Without a profile, Lupin uses the repo's configured platform. To let Lupin
@@ -184,7 +198,8 @@ need `--machine` if Lupin cannot find one machine for the repo.
 
 `stop` asks the agent to run `/handoff` before it closes anything. It waits up
 to 10 minutes for the agent to finish. Then it saves a report, closes the
-workspace, and stops the worker. If the wait ends first, `stop` continues and
+workspace, and stops the worker. Then it removes the run's worktree and branch,
+if git allows it (see "State"). If the wait ends first, `stop` continues and
 says so in its output. If Herdr cannot send the request (for example, the
 agent waits for your answer), `stop` closes nothing and exits non-zero. Use
 `--force` to stop at once without a handoff. A remote `stop` can take longer
@@ -264,12 +279,53 @@ several machines must see. Its schema is in `docs/redis-schema.md`.
 Loop state is stored under `$LUPIN_LOOP_STATE_DIR` or
 `/var/lib/delegation-loop`. Lupin stores enabled repos in `repos`, per-repo
 orchestrator profiles in `orchestrators.json`, loop metadata in
-`herdr-loops/`, run prompts in `notes/`, stop reports in `reports/`, and
-one-off schedules in `once/`. `locks/` serializes local start and stop
-actions. Herdr keeps its own session and workspace state.
+`herdr-loops/`, run prompts in `notes/`, stop reports in `reports/`, run
+worktrees in `worktrees/`, and one-off schedules in `once/`. `locks/`
+serializes local start and stop actions. Herdr keeps its own session and
+workspace state.
 The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 The same file also holds each checkout's repo identity, so a restart does
 not pay for `gh` again.
+
+Each run has its own Git worktree in `worktrees/<repo>/` in the loop state
+directory. A worktree is a second working copy of the repo, with its own files
+and branch. This one is on a new branch, `lupin-loop/<time>`. `run` runs
+`git fetch origin` first. The branch starts at the fetched remote default
+branch: the target of `origin/HEAD`, or else `origin/main` or `origin/master`.
+If the fetch fails, `run` refuses to start. The agent works in this worktree.
+The main checkout in `LUPIN_LOOP_CODE_DIR` is never the agent's working
+directory.
+
+`run` removes the previous run's worktree and branch before it adds a new one.
+If git keeps that worktree, `run` refuses to start and names its path. With
+`--resume`, `run` reuses the worktree that the last run recorded. It never
+creates a worktree on resume. If that worktree is missing, or is on another
+branch, `run` refuses and names the path. If `run` fails after it adds a
+worktree, it removes that worktree and branch. If git keeps the worktree, the
+error names its path. If the platform slot is full when the agent launches, the
+loop removes its worktree at once.
+
+`run` refuses to start when the main checkout has a merge, rebase,
+cherry-pick, or revert in progress, or has unmerged files. The error names the
+state and the path. Lupin never aborts, resets, stashes, or cleans the
+checkout. Fix the checkout by hand, then run again.
+
+`stop` removes the run's worktree, then its branch. Git refuses to remove a
+worktree that has modified or untracked files. In that case `stop` keeps the
+worktree and prints its path. `stop` also keeps the worktree when its commit is
+on no branch. `stop` never passes `--force` to git and never deletes a branch
+with `-D`.
+
+Before removal, `stop` copies two files from the worktree into `handoffs/` in
+the loop state directory. `.loop/loop-state.json` becomes `<repo>.json`.
+`HANDOFF.md` becomes `<repo>.HANDOFF.md`. A file the worktree does not have
+keeps its earlier copy. The next `run` prompt names each copy that exists. Git
+deletes the other ignored files in the worktree. Lupin does not keep them.
+
+After removal, `stop` runs `git branch -d` on the run branch. Git refuses that
+when the checkout HEAD does not contain the branch tip. The branch then stays,
+and `stop` prints its name. Delete it by hand after its work is merged.
+`git -C <checkout> worktree list` shows kept worktrees.
 
 `/roadmap` returns the page shell at once and fills in the board or list
 from `/roadmap/board`, which renders one HTML fragment per query and keeps

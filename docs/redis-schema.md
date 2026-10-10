@@ -667,6 +667,30 @@ Connect timeout 2s, 1 retry, then:
 After an outage ends, a holder tries to renew its lease. If the lease
 already expired, `lupin` logs "lease lost" and tries to acquire again.
 
+## Refused login and ACL denial
+
+Redis refuses a login when the password is bad or missing.
+Redis refuses a command when the ACL denies it.
+Both cases are answers from Redis, not outages.
+
+| Call | Login refused | ACL denied |
+| --- | --- | --- |
+| `acquire` | `CoordinatorAuthFailed` | `NoPermissionError` |
+| `renew` | `CoordinatorAuthFailed` | `NoPermissionError` |
+| `release` | `CoordinatorAuthFailed` | `NoPermissionError` |
+| `set_max` | `CoordinatorAuthFailed` | `NoPermissionError` |
+| `status` | `CoordinatorAuthFailed` | `NoPermissionError` |
+
+These results apply to every slot, `bmo` included. No refusal falls back to `local`.
+
+The `lupin` command exits with code 3 for a refused login and for an ACL denial.
+It prints one line that names the setting to check. It never shows the password.
+For a fleet command, the setting list includes the systemd credential `redis-password`.
+A failed renew or release during `hold` prints one line. `hold` keeps the exit code of its command.
+
+Known gap: some read paths still print `cannot reach` for a refused login.
+Some cache reads return no data for a refused login. Exit codes for these paths are not covered by the rule above.
+
 ## Persistence
 
 AOF, `appendfsync everysec`, so the claim ledger survives a restart. Leases

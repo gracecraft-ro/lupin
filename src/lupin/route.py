@@ -11,8 +11,8 @@ the matching row in model-tiers.json (issue #182), turns size into a tier,
 and applies three adjustments:
 
 - bmo can cold-sleep for ~300s. A caller that already tried the bmo lock with
-  a short timeout (~20-30s) and gave up passes bmo_available=False here, and
-  a tier0 pick that depends on bmo is skipped in favor of tier1 -- no block
+  a short timeout (~20-30s) and gave up passes bmo_available=False here. If
+  tier0 has a bmo: entry, tier0 is skipped and tier1 is used -- no block
   (#179 research).
 - A review call doesn't need to match the primary pass's effort. If the
   primary ran at high/xhigh, the review still gets the tier's base (lowest)
@@ -20,7 +20,9 @@ and applies three adjustments:
 - Quota is fleet-wide, not per-machine (every provider is one account shared
   by the whole fleet, confirmed in issue #36) -- so this is also where quota
   pacing happens, via `pace.py`. See `_apply_pacing` below for the three
-  rules (reserve, lean-in, exhaustion fallback).
+  rules (reserve, lean-in, exhaustion fallback). A lean-in moves one tier
+  up, to an entry on the *same* provider. A surplus is spent on that
+  account, never on another account's quota.
 
 This module only decides; it never touches a lock, a scheduler, or a machine
 itself.
@@ -35,9 +37,9 @@ from importlib import resources
 from . import pace
 from . import quota as quota_mod
 
-# size-xs/s: mechanical, low-risk -> free tier. size-m: default -> same-tier
-# Sonnet. size-l/xl, size-? (unknown -- the least certain case, so it gets
-# the most capable model, not the cheapest): frontier. See #179 §3.
+# Size -> tier. size-xs and size-s: tier0. size-m: tier1. size-l, size-xl
+# and size-?: tier2. size-? is unknown, so it gets tier2, not the cheapest
+# tier. See #179 §3.
 _SIZE_TO_TIER = {
     "size-xs": "tier0",
     "size-s": "tier0",
@@ -57,12 +59,19 @@ _TIER_ORDER = ("tier0", "tier1", "tier2")
 _PROVIDER_BY_MODEL = {
     "sonnet": "claude",
     "opus": "claude",
-    "fable": "opencode-go",
+    # fable is served by the claude account. It shares that account's quota
+    # with sonnet and opus.
+    "fable": "claude",
 }
 
 
 def provider_for_model(model: str) -> str:
     """Map a routed model to the provider `quota.py` tracks it under.
+
+    The prefix is the same one `lupin run`/`lupin enable --orchestrator` use
+    for a model selector, so `opencode-go/glm-5.3` is the opencode-go
+    subscription's glm-5.3. A bare name (sonnet/opus/fable) is a Claude
+    subscription alias.
 
     "bmo:"/"local:" models run on local/shared-GPU inference, not a cloud
     account with a quota reading -- `pace.py` never has rows for them, so
@@ -73,6 +82,10 @@ def provider_for_model(model: str) -> str:
         return "bmo"
     if model.startswith("local:"):
         return "local"
+    if model.startswith("opencode-go/"):
+        return "opencode-go"
+    if model.startswith("openai/"):
+        return "openai"
     return _PROVIDER_BY_MODEL.get(model, model)
 
 
@@ -94,12 +107,21 @@ def _resolve_tier(tiers: dict, tier: str) -> str:
     raise KeyError(f"no tier at or above {tier!r} in this row")
 
 
-def _bump_tier(row: dict, tier: str) -> str:
-    """One tier up from `tier`, never past the top (never a no-op loop)."""
-    next_index = _TIER_ORDER.index(tier) + 1
-    if next_index < len(_TIER_ORDER):
-        return _resolve_tier(row, _TIER_ORDER[next_index])
-    return tier
+def _lean_in_entry(row: dict, tier: str, provider: str) -> dict | None:
+    """First entry on `provider` one tier up from `tier`, or None.
+
+    One rung only: the next tier the row has above `tier`. A lean-in must
+    stay on one provider, so it never spends another account's quota. None
+    means that tier has no entry on `provider`, and the pick stays where it
+    is.
+    """
+    above = [candidate for candidate in _TIER_ORDER[_TIER_ORDER.index(tier) + 1 :] if candidate in row]
+    if not above:
+        return None
+    for entry in row[above[0]]:
+        if provider_for_model(entry["model"]) == provider:
+            return entry
+    return None
 
 
 def _fallback_entries(row: dict, tier: str) -> list[dict]:
@@ -133,16 +155,18 @@ def _apply_pacing(row: dict, tier: str, quota_rows: list[dict]) -> dict:
     """Quota pacing (issue #36's three rules, implemented in `pace.py`).
 
     A no-op when `quota_rows` is empty -- the caller already decided
-    whether to pass live data. Otherwise: lean up one tier on a provider's
-    surplus (decision 2, skipped if blocked), then, if the resulting pick
-    is blocked (decision 1), search for another viable entry (decision 3).
+    whether to pass live data. Otherwise: lean up one tier, to an
+    entry on a provider's surplus (decision 2, skipped if blocked, and
+    always staying on that same provider -- see `_lean_in_entry`), then, if
+    the resulting pick is blocked (decision 1), search for another viable
+    entry (decision 3).
 
     Returns `{"model", "effort"}` on an ordinary pick, plus
     `"downgraded_from"` when decision 3 had to move off a blocked pick, or
     plus `"wait_seconds"` (and no change to `"model"`/`"effort"`) when
     every entry decision 3 tried -- the original blocked pick included --
     is itself blocked. Waiting for the reset is Grace's call for that case:
-    no silent fallback to a local/flash model to dodge it.
+    no silent fallback to a bmo: or local: model to dodge it.
     """
     choice = row[tier][0]
     if not quota_rows:
@@ -153,10 +177,12 @@ def _apply_pacing(row: dict, tier: str, quota_rows: list[dict]) -> dict:
     is_blocked = pace.blocked(quota_rows, provider, now_ms)
 
     if not is_blocked and pace.lean_in(quota_rows, provider, now_ms):
-        tier = _bump_tier(row, tier)
-        choice = row[tier][0]
-        provider = provider_for_model(choice["model"])
-        is_blocked = pace.blocked(quota_rows, provider, now_ms)
+        # `_lean_in_entry` only ever returns an entry on `provider` itself, so
+        # the block check above already covers the rung it moves to; nothing
+        # to re-check here.
+        lean_choice = _lean_in_entry(row, tier, provider)
+        if lean_choice is not None:
+            choice = lean_choice
 
     if not is_blocked:
         return {"model": choice["model"], "effort": choice["effort"]}
@@ -186,8 +212,8 @@ def route(
 ) -> dict:
     """Return `{"model": ..., "effort": ...}` for a (category, size) pair.
 
-    `bmo_available=False` models a timed-out bmo lock: skip a bmo-dependent
-    tier0 pick and use tier1 instead. `primary_effort` is the primary
+    `bmo_available=False` models a timed-out bmo lock: if tier0 has a bmo:
+    entry, skip tier0 and use tier1. `primary_effort` is the primary
     pass's effort level ("low"/"medium"/"high"/"xhigh"); it is accepted so
     a caller can log or assert on it, but it never escalates the result --
     a review call always gets the tier's base effort, never matching a

@@ -12,6 +12,10 @@
       ],
       "tier1": [
         {
+          "model": "opencode-go/glm-5.3",
+          "effort": "high"
+        },
+        {
           "model": "sonnet",
           "effort": "medium"
         },
@@ -28,6 +32,10 @@
         {
           "model": "opus",
           "effort": "xhigh"
+        },
+        {
+          "model": "opencode-go/qwen3.8-max",
+          "effort": "high"
         }
       ]
     },
@@ -45,6 +53,10 @@
       ],
       "tier1": [
         {
+          "model": "opencode-go/glm-5.3",
+          "effort": "high"
+        },
+        {
           "model": "sonnet",
           "effort": "medium"
         },
@@ -61,6 +73,10 @@
         {
           "model": "opus",
           "effort": "xhigh"
+        },
+        {
+          "model": "opencode-go/qwen3.8-max",
+          "effort": "high"
         }
       ]
     },
@@ -71,6 +87,10 @@
     "last_verified": "2026-10-03",
     "tiers": {
       "tier1": [
+        {
+          "model": "opencode-go/glm-5.3",
+          "effort": "high"
+        },
         {
           "model": "sonnet",
           "effort": "high"
@@ -142,6 +162,10 @@
         }
       ],
       "tier1": [
+        {
+          "model": "opencode-go/mimo-v2.5-pro",
+          "effort": "high"
+        },
         {
           "model": "sonnet",
           "effort": "high"

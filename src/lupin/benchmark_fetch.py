@@ -617,8 +617,10 @@ def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connec
         `live: False` snapshot instead of raising or inventing data.
         `read_snapshot()` itself swallows a connection error into `None`
         (its own best-effort contract), so that case surfaces here via
-        `slots_redis.acquire`'s `CoordinatorUnreachable` instead -- same
-        end result either way, nothing ever raises past this function.
+        `slots_redis.acquire`'s `CoordinatorUnreachable` instead.
+      - Refused login: raises `CoordinatorAuthFailed`. ACL-denied command:
+        raises `NoPermissionError`. Neither returns a snapshot, so the CLI
+        can exit 3 with a message that names the setting.
     """
     client = _client(connection)
     cached = read_snapshot(**connection)
@@ -634,6 +636,8 @@ def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connec
         lease = slots_redis.acquire(LOCK_SLOT, holder, wait=0.0, ttl=_lock_ttl(len(needed)), max_holders=1, **connection)
     except slots_redis.SlotFull:
         return cached or _unavailable("another machine is already fetching benchmarks; no cached snapshot yet")
+    except slots_redis.CoordinatorAuthFailed:
+        raise
     except CoordinatorUnreachable as exc:
         return _unavailable(f"redis unreachable: {exc}")
 
@@ -646,6 +650,8 @@ def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connec
     finally:
         try:
             slots_redis.release(lease, **connection)
+        except slots_redis.CoordinatorAuthFailed:
+            raise
         except CoordinatorUnreachable:
             pass
 

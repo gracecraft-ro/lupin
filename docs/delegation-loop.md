@@ -10,6 +10,9 @@ This repo is `gracecraft-software/lupin`. The owner clones it to
 `/code/lupin`, the same way `ghostbook.nix` is mounted at
 `/code/ghostbook.nix`.
 
+A loop agent does not work in `/code/lupin`. Each run gets its own Git
+worktree in the loop state directory. See "State" in `AGENTS.md`.
+
 ## Rule 1: push to the fork, not to the upstream repo
 
 The sandbox `gh` account is `gracecraft-ro`. It cannot push to

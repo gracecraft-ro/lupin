@@ -7,8 +7,9 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+import redis as redis_lib
 
-from lupin import agent, cli, commands, loop_runtime, loops, machines, slots
+from lupin import agent, benchmark_fetch, cli, commands, loop_runtime, loops, machines, slots
 
 
 @pytest.fixture(autouse=True)
@@ -17,11 +18,14 @@ def local_host(monkeypatch):
     yield "h"
 
 
-def test_run_creates_herdr_worker_metadata_and_systemd_unit(monkeypatch, tmp_path, capsys):
+def test_run_creates_herdr_worker_metadata_and_systemd_unit(
+    monkeypatch, tmp_path, capsys, make_checkout
+):
     state_dir = tmp_path / "state"
     code_dir = tmp_path / "code"
     repo_dir = code_dir / "widgets"
-    (repo_dir / "docs").mkdir(parents=True)
+    make_checkout(repo_dir)
+    (repo_dir / "docs").mkdir()
     (repo_dir / "docs" / "delegation-loop.md").write_text("run this repo\n", encoding="utf-8")
     monkeypatch.setattr(loop_runtime, "STATE_DIR", state_dir)
     monkeypatch.setattr(loop_runtime, "LOOPS_DIR", state_dir / "herdr-loops")
@@ -120,6 +124,106 @@ def test_fleet_run_uses_only_per_machine_signing_keys(monkeypatch, tmp_path, cap
         {"repo": "widgets", "machine": "jesus", "queued": True, "id": "cmd-1"}
     ]
 
+
+
+def test_fleet_run_refused_login_names_the_password_setting(auth_redis_port, monkeypatch, capsys):
+    connection = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port}
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: connection)
+
+    assert cli.main(["fleet-run"]) == 3
+    err = capsys.readouterr().err
+    assert "refused the login" in err
+    assert "Set --redis-password, LUPIN_REDIS_PASSWORD, or the systemd credential redis-password" in err
+    assert "machine registry" not in err
+
+
+def test_run_on_another_machine_refused_login_names_the_password_setting(
+    auth_redis_port, monkeypatch, capsys
+):
+    connection = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port}
+    monkeypatch.setenv("LUPIN_CMD_SIGNING_KEY", "shared-secret")
+    monkeypatch.setattr(machines, "hostname", lambda: "pihome")
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: connection)
+
+    assert cli.main(["run", "widgets", "--machine", "jesus"]) == 3
+    err = capsys.readouterr().err
+    assert "refused the login" in err
+    assert "Set --redis-password, LUPIN_REDIS_PASSWORD, or the systemd credential redis-password" in err
+    assert "For the loop start on 'jesus'." in err
+
+
+def test_fleet_run_acl_denial_exits_three_and_names_the_acl(
+    auth_redis_port, no_eval_kw, monkeypatch, tmp_path, capsys
+):
+    connection = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, **no_eval_kw}
+    key_dir = tmp_path / "keys"
+    key_dir.mkdir()
+    (key_dir / "jesus").write_text("jesus-secret\n", encoding="utf-8")
+    records = [
+        {
+            "name": "jesus",
+            "state": "online",
+            "actions": ["loop.run"],
+            "repos": [{"repo": "widgets", "loopable": True}],
+            "loops": [],
+            "slots": {},
+        }
+    ]
+    monkeypatch.setenv("LUPIN_CMD_SIGNING_KEYS_DIR", str(key_dir))
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
+    monkeypatch.setattr(machines, "hostname", lambda: "pihome")
+    monkeypatch.setattr(machines, "machines", lambda connection: records)
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: connection)
+
+    assert cli.main(["fleet-run"]) == 3
+    err = capsys.readouterr().err
+    assert "redis denied the command" in err
+    assert "User no-eval" in err
+    assert "For fleet-run." in err
+    assert "no-eval-pw" not in err
+
+
+def test_run_on_another_machine_acl_denial_exits_three_and_names_the_acl(
+    auth_redis_port, no_eval_kw, monkeypatch, capsys
+):
+    connection = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, **no_eval_kw}
+    monkeypatch.setenv("LUPIN_CMD_SIGNING_KEY", "shared-secret")
+    monkeypatch.setattr(machines, "hostname", lambda: "pihome")
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: connection)
+
+    assert cli.main(["run", "widgets", "--machine", "jesus"]) == 3
+    err = capsys.readouterr().err
+    assert "redis denied the command" in err
+    assert "User no-eval" in err
+    assert "For the loop start on 'jesus'." in err
+    assert "no-eval-pw" not in err
+
+
+def test_main_turns_an_uncaught_acl_denial_into_exit_three(monkeypatch, capsys):
+    def denied(argv):
+        raise redis_lib.exceptions.NoPermissionError("User x has no permissions to run the 'eval' command.")
+
+    monkeypatch.setattr(cli, "_main", denied)
+    assert cli.main(["status"]) == 3
+
+    err = capsys.readouterr().err
+    assert "redis denied the command" in err
+    assert "a Redis step in this command" in err
+    assert "Traceback" not in err
+
+
+def test_fetch_benchmarks_acl_denial_exits_three_and_names_the_refresh(monkeypatch, capsys):
+    def denied(**_kwargs):
+        raise redis_lib.exceptions.NoPermissionError("User x has no permissions to run the 'eval' command.")
+
+    monkeypatch.setattr(benchmark_fetch, "refresh_snapshot", denied)
+    assert cli.main(["fetch-benchmarks"]) == 3
+
+    err = capsys.readouterr().err
+    assert "redis denied the command" in err
+    assert "For the benchmark refresh." in err
+    assert "Traceback" not in err
 
 
 def test_fleet_run_queues_signed_run_to_worker(redis_port, flush_redis, monkeypatch, tmp_path, capsys):

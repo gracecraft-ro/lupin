@@ -1,4 +1,5 @@
 import json
+import subprocess
 import unittest
 from unittest import mock
 
@@ -170,6 +171,15 @@ class PrefetchTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 rc = review_dispatch.main(["--prefetch", "1"])
         self.assertEqual(rc, 0)
+
+
+class GhRunTests(unittest.TestCase):
+    def test_missing_gh_program_is_reported_as_not_installed(self):
+        with mock.patch.object(subprocess, "run", side_effect=FileNotFoundError):
+            data, error = review_dispatch._run_gh_json(["issue", "view", "1"])
+
+        self.assertIsNone(data)
+        self.assertEqual(error, "gh is not installed")
 
 
 if __name__ == "__main__":

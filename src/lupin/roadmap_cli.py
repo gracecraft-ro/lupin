@@ -489,6 +489,17 @@ def run(
     `--redis-*` flags. `build_roadmap` falls back to `gh_cache`'s own
     resolution when it is None, which reads the same fleet config.
     """
+    if repo and "/" in repo:
+        # Checkouts use the short name under code_dir, not owner/name.
+        short_name = repo.rsplit("/", 1)[1]
+        path = os.path.join(code_dir, short_name)
+        if not short_name or not os.path.isdir(path):
+            return (
+                f"No checkout at {path}. Use the short name "
+                "(the checkout directory name) with --repo.",
+                2,
+            )
+        repo = short_name
     if repo:
         repos = [repo]
         explicit_repo = True
