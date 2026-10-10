@@ -87,17 +87,19 @@ class _TimeLimit:
             self.left -= time.monotonic() - started
 
 
-def _list(time_limit: _TimeLimit, args: list[str]) -> list[dict] | None:
-    """Return the items. None means the time limit cut the call."""
+def _list(time_limit: _TimeLimit, args: list[str]) -> tuple[list[dict] | None, str]:
+    """Return (items, reason). Items is None when the call failed. Reason says why."""
     try:
-        return time_limit.gh(args + ["--limit", LIST_LIMIT]) or []
+        return time_limit.gh(args + ["--limit", LIST_LIMIT]) or [], ""
     except GhTimeout:
-        return None
+        return None, "time limit reached"
+    except DebriefError:
+        return None, "gh error"
 
 
-def _cut(section: str, name: str, items: list | None) -> list[str]:
+def _cut(section: str, name: str, items: list | None, reason: str) -> list[str]:
     if items is None:
-        return [f"- Not collected: time limit reached. {section}: {name} list."]
+        return [f"- Not collected: {reason}. {section}: {name} list."]
     if len(items) < int(LIST_LIMIT):
         return []
     return [f"- {section}: {name} list cut at {LIST_LIMIT} items. Some items may be missing."]
@@ -112,7 +114,11 @@ def _parse(value) -> datetime | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    try:
+        return parsed.astimezone(timezone.utc)
+    except OverflowError:
+        # Years 1 and 9999 can leave the datetime range when shifted to UTC.
+        return None
 
 
 def _iso(when: datetime) -> str:
@@ -165,7 +171,7 @@ def build_markdown(
 
     `events` is None when the ledger was not read. `claimed` is None when
     claims were not read. A forced stop uses GitHub facts only. A section
-    whose gh call the time limit cut says so.
+    whose gh call failed or timed out says so.
     """
     day = start.strftime("%Y-%m-%d")
     repo = ["--repo", full_name]
@@ -181,11 +187,11 @@ def build_markdown(
     lines.append("- Stop: forced, no handoff" if forced else "- Stop: normal")
     lines.append("")
 
-    merged_all = _list(time_limit, ["pr", "list", *repo, "--state", "merged",
+    merged_all, merged_reason = _list(time_limit, ["pr", "list", *repo, "--state", "merged",
                                 "--search", f"merged:>={day}",
                                 "--json", "number,title,mergedAt,mergeCommit"])
     merged = [pr for pr in merged_all or [] if _in_window(pr.get("mergedAt"), start, end)]
-    closed_all = _list(time_limit, ["issue", "list", *repo, "--state", "closed",
+    closed_all, closed_reason = _list(time_limit, ["issue", "list", *repo, "--state", "closed",
                                 "--search", f"closed:>={day}",
                                 "--json", "number,title,closedAt"])
     closed = [issue for issue in closed_all or [] if _in_window(issue.get("closedAt"), start, end)]
@@ -197,7 +203,8 @@ def build_markdown(
         lines.append(f"- Issue #{issue['number']}: {issue['title']} (closed {issue['closedAt']})")
     if not merged and not closed and merged_all is not None and closed_all is not None:
         lines.append("- None.")
-    lines += _cut("Shipped", "merged PR", merged_all) + _cut("Shipped", "closed issue", closed_all)
+    lines += _cut("Shipped", "merged PR", merged_all, merged_reason)
+    lines += _cut("Shipped", "closed issue", closed_all, closed_reason)
     lines.append("")
 
     lines.append("## Follow-up tasks")
@@ -215,14 +222,14 @@ def build_markdown(
     lines.append("")
 
     failing = []
-    open_prs = _list(time_limit, ["pr", "list", *repo, "--state", "open",
+    open_prs, open_reason = _list(time_limit, ["pr", "list", *repo, "--state", "open",
                               "--json", "number,title,statusCheckRollup"])
     for pr in open_prs or []:
         names = _failing_checks(pr)
         if names:
             failing.append((pr, names))
-    blocked = _list(time_limit, ["issue", "list", *repo, "--state", "open", "--label", "blocked",
-                             "--json", "number,title"])
+    blocked, blocked_reason = _list(time_limit, ["issue", "list", *repo, "--state", "open",
+                                                 "--label", "blocked", "--json", "number,title"])
     decisions = [text for event in window_events for text in event.get("decisions", [])]
     risk = []
     for pr, names in failing:
@@ -231,14 +238,21 @@ def build_markdown(
         risk.append(f"- Issue #{issue['number']}: {issue['title']} (labelled blocked)")
     for text in decisions:
         risk.append(f"- Decision: {text}")
+    decisions_read = not forced and events is not None
     lines.append("## Risk")
     lines.append("Derived from GitHub facts and ledger decisions in the window.")
-    lines += risk or (["- None."] if open_prs is not None and blocked is not None else [])
-    lines += _cut("Risk", "open PR", open_prs) + _cut("Risk", "blocked issue", blocked)
+    lines += risk or (
+        ["- None."] if decisions_read and open_prs is not None and blocked is not None else []
+    )
+    if not decisions_read:
+        why = "forced stop" if forced else (ledger_note or "no ledger read")
+        lines.append(f"- Decisions not collected: {why}.")
+    lines += _cut("Risk", "open PR", open_prs, open_reason)
+    lines += _cut("Risk", "blocked issue", blocked, blocked_reason)
     lines.append("")
 
-    ready = _list(time_limit, ["issue", "list", *repo, "--state", "open", "--label", "ready",
-                           "--json", "number,title"])
+    ready, ready_reason = _list(time_limit, ["issue", "list", *repo, "--state", "open",
+                                             "--label", "ready", "--json", "number,title"])
     lines.append("## Opportunities")
     if forced:
         lines.append("Forced stop. Claims not read.")
@@ -249,7 +263,7 @@ def build_markdown(
         lines.append(f"- Issue #{issue['number']}: {issue['title']}")
     if not unclaimed and ready is not None:
         lines.append("- None.")
-    lines += _cut("Opportunities", "ready issue", ready)
+    lines += _cut("Opportunities", "ready issue", ready, ready_reason)
     lines.append("")
 
     lines.append("## Evidence")
@@ -264,8 +278,8 @@ def build_markdown(
                 "--search", f"updated:>={day}",
                 "--json", "number,title,body,comments,updatedAt"]),
     ):
-        items = _list(time_limit, args)
-        cut += _cut("Evidence", kind, items)
+        items, reason = _list(time_limit, args)
+        cut += _cut("Evidence", kind, items, reason)
         complete = complete and items is not None
         for item in items or []:
             texts = []
@@ -298,7 +312,7 @@ def write_debrief(
     """Write one debrief under `root/debriefs/<repo>/` and return its path.
 
     Raises `DebriefError` or a Redis error. Nothing is written then. The gh
-    calls share one time limit. A section that the time limit cut says so in the file.
+    calls share one time limit. A section whose gh call failed or timed out says so in the file.
     """
     if not REPO_RE.fullmatch(repo or ""):
         raise DebriefError(f"invalid repo name {repo!r}")

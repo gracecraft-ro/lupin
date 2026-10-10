@@ -49,6 +49,8 @@ class FakeGh:
         key = _key(args)
         if key not in self.responses:
             raise AssertionError(f"unexpected gh call: {key!r}")
+        if isinstance(self.responses[key], Exception):
+            raise self.responses[key]
         return self.responses[key]
 
 
@@ -184,6 +186,17 @@ def test_forced_stop_uses_github_facts_only():
     assert "Use the cache" not in md
 
 
+NO_RISK = {"pr list open": [], "issue list open blocked": []}
+
+
+def test_forced_risk_says_decisions_were_not_collected():
+    md = _markdown(NO_RISK, forced=True)
+
+    risk = _section(md, "Risk")
+    assert "- None." not in risk
+    assert "- Decisions not collected: forced stop." in risk
+
+
 def test_evidence_keeps_only_github_attachment_uuids():
     md = _markdown()
 
@@ -209,6 +222,23 @@ def test_write_debrief_keeps_other_sections_when_ledger_is_down(tmp_path: Path, 
     assert path.parent == tmp_path / "debriefs" / "widgets"
     assert path.name.endswith(".md") and debrief.FILE_RE.fullmatch(path.name)
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+def test_failed_list_call_cuts_only_its_section(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    responses = {**RESPONSES, "pr list merged": debrief.DebriefError("gh pr list exited 1: boom")}
+    monkeypatch.setattr(debrief, "_gh", FakeGh(responses))
+    monkeypatch.setattr(debrief.ledger, "read_events", lambda repo, **kw: [])
+    monkeypatch.setattr(debrief.claims, "claims_for", lambda repos, **kw: {})
+
+    path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
+
+    text = path.read_text(encoding="utf-8")
+    shipped = _section(text, "Shipped")
+    assert "- Not collected: gh error. Shipped: merged PR list." in shipped
+    assert "- Issue #5: Closed in window" in shipped
+    assert "- PR #20: Red build" in _section(text, "Risk")
 
 
 def test_malformed_ledger_row_keeps_other_sections(
@@ -275,6 +305,42 @@ def test_wrong_type_ledger_row_is_skipped_and_other_rows_kept(
     assert "## Evidence" in text
 
 
+def test_ledger_times_that_overflow_utc_are_skipped(
+    tmp_path: Path, monkeypatch, redis_port, flush_redis
+):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    # Two times that overflow when shifted to UTC, then one normal row. Real Redis.
+    client = redis.Redis(host="127.0.0.1", port=redis_port)
+    for ts, text in (
+        ("9999-12-31T23:59:59-01:00", "Too late"),
+        ("0001-01-01T00:00:00+01:00", "Too early"),
+        ("2026-10-02T10:00:00Z", "Write docs"),
+    ):
+        client.xadd(ledger._stream_key(FULL), {
+            "ts": ts, "host": "h", "event": "shipped", "issue": "5", "next": json.dumps([text]),
+        })
+    real_read_events = debrief.ledger.read_events
+    real_claims_for = debrief.claims.claims_for
+    monkeypatch.setattr(debrief, "_gh", FakeGh(dict(RESPONSES)))
+    monkeypatch.setattr(
+        debrief.ledger, "read_events",
+        functools.partial(real_read_events, redis_host="127.0.0.1", redis_port=redis_port),
+    )
+    monkeypatch.setattr(
+        debrief.claims, "claims_for",
+        functools.partial(real_claims_for, redis_host="127.0.0.1", redis_port=redis_port),
+    )
+
+    path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
+
+    text = path.read_text(encoding="utf-8")
+    assert "- #5: Write docs" in _section(text, "Follow-up tasks")
+    assert "Too late" not in text
+    assert "Too early" not in text
+    assert "- PR #11: Shipped feature" in text
+
+
 def test_ledger_note_gives_the_redis_reason(tmp_path: Path, monkeypatch):
     checkout = tmp_path / "widgets"
     checkout.mkdir()
@@ -289,6 +355,24 @@ def test_ledger_note_gives_the_redis_reason(tmp_path: Path, monkeypatch):
     path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
 
     assert "Ledger unavailable: Connection refused" in _section(path.read_text(encoding="utf-8"), "Follow-up tasks")
+
+
+def test_ledger_failure_risk_says_decisions_were_not_collected(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+
+    def read_events(repo, **kwargs):
+        raise CoordinatorUnreachable(repo) from redis.exceptions.ConnectionError("Connection refused")
+
+    monkeypatch.setattr(debrief, "_gh", FakeGh({**RESPONSES, **NO_RISK}))
+    monkeypatch.setattr(debrief.ledger, "read_events", read_events)
+    monkeypatch.setattr(debrief.claims, "claims_for", lambda repos, **kw: {})
+
+    path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
+
+    risk = _section(path.read_text(encoding="utf-8"), "Risk")
+    assert "- None." not in risk
+    assert "- Decisions not collected: Ledger unavailable: Connection refused." in risk
 
 
 def test_claims_error_still_writes_the_debrief(tmp_path: Path, monkeypatch):
