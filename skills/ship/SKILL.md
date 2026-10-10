@@ -101,8 +101,8 @@ branch to the fork. Open the PR on the fork. Then request review.
      --head <branch> --title "..." --body "..."
    ```
 
-   Never use an upstream `--repo` in this flow. If it fails, report the error
-   and stop.
+   Never use an upstream `--repo` in this flow. If it fails, report the error.
+   Then go to "Report and release" below.
 4. Request review with one comment on the PR. Run:
 
    ```sh
