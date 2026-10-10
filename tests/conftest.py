@@ -64,6 +64,24 @@ def flush_redis(redis_port):
 
 
 @pytest.fixture
+def no_eval_kw(auth_redis_port):
+    """Connection kwargs for a user that can only GET, SET and PING. EVAL and SCAN are denied."""
+    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
+    admin.execute_command("ACL", "SETUSER", "no-eval", "on", ">no-eval-pw", "~lupin:*", "+get", "+set", "+ping")
+    yield {"redis_username": "no-eval", "redis_password": "no-eval-pw"}
+    admin.execute_command("ACL", "DELUSER", "no-eval")
+
+
+@pytest.fixture
+def no_set_kw(auth_redis_port):
+    """Connection kwargs for a user that can only GET and PING. SET and EVAL are denied."""
+    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
+    admin.execute_command("ACL", "SETUSER", "no-set", "on", ">no-set-pw", "~lupin:*", "+get", "+ping")
+    yield {"redis_username": "no-set", "redis_password": "no-set-pw"}
+    admin.execute_command("ACL", "DELUSER", "no-set")
+
+
+@pytest.fixture
 def closed_port() -> int:
     """A TCP port nothing listens on -- exercises the unreachable-redis path."""
     return _free_port()

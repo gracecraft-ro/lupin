@@ -183,23 +183,22 @@ def test_refused_login_warning_for_bmo_status_names_the_password(auth_redis_port
     assert "local backend" in err
 
 
-def test_command_the_acl_denies_names_the_acl_not_unreachable(auth_redis_port):
-    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
-    admin.execute_command("ACL", "SETUSER", "no-eval", "on", ">no-eval-pw", "~lupin:*", "+get", "+set", "+ping")
-    try:
-        with pytest.raises(slots_redis.CoordinatorAuthFailed) as caught:
-            slots_redis.acquire(
-                "not-bmo", "a", redis_username="no-eval", redis_password="no-eval-pw",
-                redis_host="127.0.0.1", redis_port=auth_redis_port,
-            )
-    finally:
-        admin.execute_command("ACL", "DELUSER", "no-eval")
+@pytest.mark.parametrize(
+    "call, kw_fixture",
+    [
+        (lambda kw: slots_redis.acquire("not-bmo", "a", **kw), "no_eval_kw"),
+        (lambda kw: slots_redis.release("not-bmo:a", **kw), "no_eval_kw"),
+        (lambda kw: slots_redis.set_max("bmo", 3, **kw), "no_set_kw"),
+    ],
+    ids=["acquire-not-bmo", "release-not-bmo", "set_max-bmo"],
+)
+def test_acl_denial_is_raised_as_is_not_wrapped(call, kw_fixture, auth_redis_port, request):
+    kw = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, **request.getfixturevalue(kw_fixture)}
+    with pytest.raises(redis_lib.exceptions.NoPermissionError) as caught:
+        call(kw)
 
-    message = str(caught.value)
-    assert not caught.value.password_refused
-    assert "unreachable" not in message
-    assert "ACL" in message
-    assert "no-eval-pw" not in message
+    assert "no-eval-pw" not in str(caught.value)
+    assert "no-set-pw" not in str(caught.value)
 
 
 def test_renew_re_raises_an_acl_denial_for_a_non_bmo_slot(auth_redis_port):
@@ -217,15 +216,6 @@ def test_renew_re_raises_an_acl_denial_for_a_non_bmo_slot(auth_redis_port):
 
 def test_renew_refused_login_on_a_non_bmo_slot_returns_false(auth_redis_port, no_client_retry):
     assert slots_redis.renew("not-bmo:a", redis_host="127.0.0.1", redis_port=auth_redis_port) is False
-
-
-@pytest.fixture
-def no_eval_kw(auth_redis_port):
-    """Connection kwargs for a user that can only GET, SET and PING. EVAL and SCAN are denied."""
-    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
-    admin.execute_command("ACL", "SETUSER", "no-eval", "on", ">no-eval-pw", "~lupin:*", "+get", "+set", "+ping")
-    yield {"redis_username": "no-eval", "redis_password": "no-eval-pw"}
-    admin.execute_command("ACL", "DELUSER", "no-eval")
 
 
 @pytest.mark.parametrize(
@@ -282,4 +272,23 @@ def test_cli_refused_login_exits_three_and_names_the_password_setting(
     assert "cannot reach" not in err
     assert "unreachable" not in err
     assert "Set --redis-password or LUPIN_REDIS_PASSWORD." in err
+    assert where in err
+
+
+@pytest.mark.parametrize(
+    "slot, where",
+    [("bmo", "For slot 'bmo'"), ("not-bmo", "For slot 'not-bmo'")],
+    ids=["bmo", "not-bmo"],
+)
+def test_cli_acl_denial_exits_three_and_names_the_acl(slot, where, auth_redis_port, no_eval_kw, capsys):
+    argv = ["acquire", slot, "--holder", "a", "--backend", "redis", *REDIS_ARGS]
+    login = ["--redis-username", no_eval_kw["redis_username"], "--redis-password", no_eval_kw["redis_password"]]
+    code = cli.main([arg.format(port=auth_redis_port) for arg in argv] + login)
+
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "not allowed to run this command" in err
+    assert "User no-eval" in err
+    assert "Falling back" not in err
+    assert "no-eval-pw" not in err
     assert where in err

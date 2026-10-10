@@ -149,6 +149,53 @@ def test_run_on_another_machine_refused_login_names_the_password_setting(
     assert "For the loop start on 'jesus'." in err
 
 
+def test_fleet_run_acl_denial_exits_three_and_names_the_acl(
+    auth_redis_port, no_eval_kw, monkeypatch, tmp_path, capsys
+):
+    connection = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, **no_eval_kw}
+    key_dir = tmp_path / "keys"
+    key_dir.mkdir()
+    (key_dir / "jesus").write_text("jesus-secret\n", encoding="utf-8")
+    records = [
+        {
+            "name": "jesus",
+            "state": "online",
+            "actions": ["loop.run"],
+            "repos": [{"repo": "widgets", "loopable": True}],
+            "loops": [],
+            "slots": {},
+        }
+    ]
+    monkeypatch.setenv("LUPIN_CMD_SIGNING_KEYS_DIR", str(key_dir))
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
+    monkeypatch.setattr(machines, "hostname", lambda: "pihome")
+    monkeypatch.setattr(machines, "machines", lambda connection: records)
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: connection)
+
+    assert cli.main(["fleet-run"]) == 3
+    err = capsys.readouterr().err
+    assert "not allowed to run this command" in err
+    assert "User no-eval" in err
+    assert "For fleet-run." in err
+    assert "no-eval-pw" not in err
+
+
+def test_run_on_another_machine_acl_denial_exits_three_and_names_the_acl(
+    auth_redis_port, no_eval_kw, monkeypatch, capsys
+):
+    connection = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, **no_eval_kw}
+    monkeypatch.setenv("LUPIN_CMD_SIGNING_KEY", "shared-secret")
+    monkeypatch.setattr(machines, "hostname", lambda: "pihome")
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: connection)
+
+    assert cli.main(["run", "widgets", "--machine", "jesus"]) == 3
+    err = capsys.readouterr().err
+    assert "not allowed to run this command" in err
+    assert "User no-eval" in err
+    assert "For the loop start on 'jesus'." in err
+    assert "no-eval-pw" not in err
+
+
 def test_fleet_run_queues_signed_run_to_worker(redis_port, flush_redis, monkeypatch, tmp_path, capsys):
     connection = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     key_dir = tmp_path / "keys"

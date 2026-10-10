@@ -66,10 +66,9 @@ CoordinatorUnreachable = local_slots.CoordinatorUnreachable
 
 
 class CoordinatorAuthFailed(CoordinatorUnreachable):
-    """Redis answered, but refused the login or one command.
+    """Redis answered, but refused the login.
 
     `password_refused` is True for a bad or missing password.
-    It is False for an ACL denial.
     The message never contains the password.
     """
 
@@ -158,16 +157,10 @@ def _call_with_retry(func):
 
 
 def _auth_failed(exc: Exception) -> CoordinatorAuthFailed:
-    """Build the exception for a refused login or command.
+    """Build the exception for a refused login.
     The message never contains the password.
     """
     reply = str(exc).rstrip(".")
-    if isinstance(exc, redis.exceptions.NoPermissionError):
-        return CoordinatorAuthFailed(
-            "redis user is not allowed to run this command. "
-            f"Check the user's ACL in docs/redis-schema.md. Redis said: {reply}",
-            password_refused=False,
-        )
     return CoordinatorAuthFailed(
         f"redis refused the login. Check the Redis password. Redis said: {reply}",
         password_refused=True,
@@ -175,7 +168,7 @@ def _auth_failed(exc: Exception) -> CoordinatorAuthFailed:
 
 
 def _warn_fallback(slot: str, exc: Exception) -> None:
-    if isinstance(exc, _AUTH_ERRORS):
+    if isinstance(exc, redis.exceptions.AuthenticationError):
         message = f"lupin: {_auth_failed(exc)}. Falling back to the local backend for slot {slot!r}"
     else:
         message = (
@@ -224,6 +217,8 @@ def set_max(
     try:
         _call_with_retry(lambda: client.set(key, max_holders))
     except _AUTH_ERRORS as exc:
+        if isinstance(exc, redis.exceptions.NoPermissionError):
+            raise
         raise _auth_failed(exc) from exc
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(slot) from exc
@@ -261,10 +256,10 @@ def acquire(
                 lambda: client.eval(_ACQUIRE_SCRIPT, 1, key, holder, _now_ms(), ttl_ms, max_n)
             )
         except _AUTH_ERRORS as exc:
-            if slot not in FALLBACK_SLOTS:
-                raise _auth_failed(exc) from exc
             if isinstance(exc, redis.exceptions.NoPermissionError):
                 raise
+            if slot not in FALLBACK_SLOTS:
+                raise _auth_failed(exc) from exc
             _warn_fallback(slot, exc)
             return local_slots.acquire(
                 slot, holder, wait=wait, ttl=ttl, max_holders=max_holders, state_root=state_root
@@ -337,10 +332,10 @@ def release(
         result = _call_with_retry(lambda: client.eval(_RELEASE_SCRIPT, 1, key, holder))
         return bool(result)
     except _AUTH_ERRORS as exc:
-        if slot not in FALLBACK_SLOTS:
-            raise _auth_failed(exc) from exc
         if isinstance(exc, redis.exceptions.NoPermissionError):
             raise
+        if slot not in FALLBACK_SLOTS:
+            raise _auth_failed(exc) from exc
         _warn_fallback(slot, exc)
         return local_slots.release(lease, state_root=state_root)
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:

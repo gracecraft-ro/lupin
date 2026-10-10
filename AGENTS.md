@@ -77,11 +77,10 @@ instead of failing the whole batch.
 `acquire` prints a lease ID on success. Exit code 2 means the slot is full
 — the caller should skip and try again later. Exit code 3 means the `redis`
 backend cannot reach the coordinator and the slot has no local fallback.
-`bmo` is the exception. For `bmo`, `acquire`, `renew`, `release`, and `status`
-use `local` and print a warning when Redis is unreachable or refuses a login.
-For `bmo`, an ACL denial in those calls raises `NoPermissionError`. The CLI does not catch it.
-On a slot other than `bmo`, `acquire` and `release` exit with code 3 for a refused login.
-They also exit with code 3 for an ACL denial. The message names the cause.
+`bmo` is the exception. For `bmo`, `acquire`, `renew`, `release`, and `status` use `local` when Redis is unreachable or refuses a login. They print a warning.
+An ACL denial raises `NoPermissionError` on every slot. It never falls back to `local`.
+On a slot other than `bmo`, a refused login exits with code 3.
+The CLI also exits with code 3 for an ACL denial, on any slot. The message names the cause.
 For a refused login, it tells the user to set `--redis-password` or `LUPIN_REDIS_PASSWORD`.
 The `local` backend's coordinator is the filesystem, so it never returns 3.
 

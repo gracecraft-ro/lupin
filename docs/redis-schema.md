@@ -488,15 +488,16 @@ In the table, login means a refused login. ACL means an ACL denial. Other means 
 
 | Call | `bmo` login | `bmo` ACL | Other login | Other ACL |
 | --- | --- | --- | --- | --- |
-| `acquire` | Uses `local`; warns | `NoPermissionError` | `CoordinatorAuthFailed` | `CoordinatorAuthFailed` |
+| `acquire` | Uses `local`; warns | `NoPermissionError` | `CoordinatorAuthFailed` | `NoPermissionError` |
 | `renew` | Uses `local`; warns | `NoPermissionError` | Returns `False` | `NoPermissionError` |
-| `release` | Uses `local`; warns | `NoPermissionError` | `CoordinatorAuthFailed` | `CoordinatorAuthFailed` |
-| `set_max` | `CoordinatorAuthFailed` | `CoordinatorAuthFailed` | `CoordinatorAuthFailed` | `CoordinatorAuthFailed` |
+| `release` | Uses `local`; warns | `NoPermissionError` | `CoordinatorAuthFailed` | `NoPermissionError` |
+| `set_max` | `CoordinatorAuthFailed` | `NoPermissionError` | `CoordinatorAuthFailed` | `NoPermissionError` |
 | `status` | Uses `local`; warns | `NoPermissionError` | Uses `local`; warns | `NoPermissionError` |
 
-The `acquire`, `hold`, `release`, `reconcile`, `run`, and `fleet-run`
-commands print the reason and exit with code 3 for a refused login.
-The CLI does not catch `NoPermissionError`.
+The `acquire`, `hold`, `release`, `reconcile`, `run`, and `fleet-run` commands print the reason.
+For a refused login on a slot other than `bmo`, they exit with code 3.
+For an ACL denial, they also exit with code 3, on any slot.
+The message names the ACL and the user. It never shows the password.
 
 After an outage ends, a holder tries to renew its lease. If the lease
 already expired, `lupin` logs "lease lost" and tries to acquire again.

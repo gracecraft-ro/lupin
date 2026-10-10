@@ -90,6 +90,8 @@ import sys
 import time
 from datetime import datetime
 
+import redis
+
 from . import agent as agent_mod
 from . import benchmark_fetch
 from . import claims
@@ -812,9 +814,20 @@ def _backend_kwargs(args: argparse.Namespace) -> dict:
     return {}
 
 
-def _print_auth_failed(exc: slots_redis.CoordinatorAuthFailed, what: str) -> None:
+_REDIS_REFUSED = (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError)
+
+
+def _print_auth_failed(exc: Exception, what: str) -> None:
     """Print a Redis refusal. `what` names the failed action, for example `slot 'bmo'`.
     """
+    if isinstance(exc, redis.exceptions.NoPermissionError):
+        print(
+            "lupin: redis user is not allowed to run this command. "
+            f"Check the user's ACL in docs/redis-schema.md. Redis said: {str(exc).rstrip('.')}. "
+            f"For {what}.",
+            file=sys.stderr,
+        )
+        return
     setting = "--redis-password or LUPIN_REDIS_PASSWORD"
     print(f"lupin: {exc.for_user(setting)} For {what}.", file=sys.stderr)
 
@@ -834,7 +847,7 @@ def _cmd_acquire(args: argparse.Namespace) -> int:
     except slots.SlotFull:
         print(f"slot {args.slot!r} is full", file=sys.stderr)
         return 2
-    except slots_redis.CoordinatorAuthFailed as exc:
+    except _REDIS_REFUSED as exc:
         _print_auth_failed(exc, f"slot {args.slot!r}")
         return 3
     except slots.CoordinatorUnreachable:
@@ -870,7 +883,7 @@ def _cmd_hold(args: argparse.Namespace, command: list[str]) -> int:
     except slots.SlotFull:
         print(f"slot {args.slot!r} is full", file=sys.stderr)
         return 2
-    except slots_redis.CoordinatorAuthFailed as exc:
+    except _REDIS_REFUSED as exc:
         _print_auth_failed(exc, f"slot {args.slot!r}")
         return 3
     except slots.CoordinatorUnreachable:
@@ -885,7 +898,7 @@ def _cmd_release(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 1
-    except slots_redis.CoordinatorAuthFailed as exc:
+    except _REDIS_REFUSED as exc:
         _print_auth_failed(exc, f"lease {args.lease!r}")
         return 3
     except slots.CoordinatorUnreachable:
@@ -1280,7 +1293,7 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
     except slots.SlotFull:
         print("reconcile is already running on another machine", file=sys.stderr)
         return 2
-    except slots_redis.CoordinatorAuthFailed as exc:
+    except _REDIS_REFUSED as exc:
         _print_auth_failed(exc, "the reconcile slot")
         return 3
     except slots.CoordinatorUnreachable:
@@ -1291,6 +1304,9 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
         lines, warnings = reconcile_mod.reconcile(repos, redis_kwargs)
     except reconcile_mod.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
+        return 3
+    except redis.exceptions.NoPermissionError as exc:
+        _print_auth_failed(exc, "the reconcile run")
         return 3
     finally:
         try:
@@ -1508,7 +1524,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 issuer=local_host,
                 wait_s=args.wait,
             )
-        except slots_redis.CoordinatorAuthFailed as exc:
+        except _REDIS_REFUSED as exc:
             _print_auth_failed(exc, f"the loop start on {machine!r}")
             return 3
         except slots.CoordinatorUnreachable as exc:
@@ -1573,7 +1589,7 @@ def _cmd_fleet_run(args: argparse.Namespace) -> int:
             signing_keys=signing_keys,
             connection=connection,
         )
-    except slots_redis.CoordinatorAuthFailed as exc:
+    except _REDIS_REFUSED as exc:
         _print_auth_failed(exc, "fleet-run")
         return 3
     except slots.CoordinatorUnreachable as exc:
