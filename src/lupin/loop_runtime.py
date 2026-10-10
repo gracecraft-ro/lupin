@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import debrief, slots, slots_redis
+from . import slots, slots_redis
 
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 PLATFORMS = {"claude", "omp"}
@@ -1400,6 +1400,8 @@ def stop_loop(repo: str, *, force: bool = False, grace: float = HANDOFF_GRACE_S)
 
 def _write_debrief(repo: str, metadata: dict, *, forced: bool) -> None:
     """Write the debrief. The stop already happened, so a failure only prints a warning."""
+    from . import debrief
+
     try:
         debrief.write_debrief(
             STATE_DIR, repo, CODE_DIR / repo, metadata.get("started_at"), forced=forced,
@@ -1410,10 +1412,12 @@ def _write_debrief(repo: str, metadata: dict, *, forced: bool) -> None:
 
 def write_due_periodic_debriefs(now: datetime | None = None) -> None:
     """Write each periodic debrief that is due. A failure only prints a warning."""
+    from . import debrief
+
     now = datetime.now(timezone.utc) if now is None else now
     try:
         repos = enabled_repos()
-    except (LoopError, OSError) as exc:
+    except (LoopError, OSError, ValueError) as exc:
         print(f"lupin agent: no periodic debriefs: {exc}", file=sys.stderr)
         return
     for repo in repos:

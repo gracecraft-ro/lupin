@@ -629,6 +629,16 @@ def test_periodic_check_survives_a_bad_repos_file(monkeypatch, capsys):
     assert "lupin agent: no periodic debriefs: could not read repos" in capsys.readouterr().err
 
 
+def test_periodic_check_survives_a_non_utf8_repos_file(monkeypatch, tmp_path: Path, capsys):
+    repos = tmp_path / "repos"
+    repos.write_bytes(b"\xff\n")
+    monkeypatch.setattr(loop_runtime, "REPOS_FILE", repos)
+
+    loop_runtime.write_due_periodic_debriefs(now=NOW)
+
+    assert "lupin agent: no periodic debriefs:" in capsys.readouterr().err
+
+
 @pytest.fixture
 def checkout(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"

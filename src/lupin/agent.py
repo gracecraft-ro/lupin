@@ -43,9 +43,7 @@ import uuid
 
 import redis
 
-# Load debrief before loop_runtime. In the other order, a circular import fails.
-# roadmap reads loop_runtime.CODE_DIR before loop_runtime finishes loading.
-from . import commands, debrief, loop_runtime, machines
+from . import commands, loop_runtime, machines
 from .slots import CoordinatorUnreachable
 from .slots_redis import CONNECT_TIMEOUT, DEBRIEF_TIMEOUT_S, _call_with_retry, _client, debrief_client
 
