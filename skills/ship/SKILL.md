@@ -73,28 +73,44 @@ repository or artifact-store location.
 
 ## Commit and open the pull request
 
-Commit the change. If direct push is allowed, push the branch and open or update
+Commit the change.
+
+Choose the push flow. First, check push rights on the upstream repo.
+The upstream repo is the one `origin` points to.
+
+1. Find the upstream repo name with `git remote get-url origin`. Replace
+   `OWNER/REPO` with its owner and repo name. Then run:
+
+   ```sh
+   gh api repos/OWNER/REPO --jq .permissions.push
+   ```
+
+2. If the result is `true`, use the direct flow below, unchanged.
+3. If the result is `false`, use the fork flow below.
+4. If the command fails or prints anything else, stop. Report the output.
+   Do not guess.
+
+If direct push is allowed, push the branch and open or update
 its PR. Link the issue with `Closes #123`.
 
-If direct push is denied, check the repository's fork policy. Use an existing
-fork or create one if the repository permits it. Make sure a `fork` remote
-points to that fork. If it is missing, add it:
+Fork flow. Use it only when the result is `false`. Never push to `origin`
+in this flow.
 
-```sh
-git remote add fork https://github.com/FORK_OWNER/REPO.git
-```
+1. Check that a `fork` remote exists. Run `git remote get-url fork`. If it
+   fails, stop. Report the missing remote. Never run `git remote add`.
+2. Push the branch to the fork. Find the current branch with
+   `git branch --show-current`. Then run `git push -u fork <branch>`.
+3. Open the PR on the fork. Set `<repo>` to the repo name in the fork URL
+   from step 1. Run:
 
-Then push the branch and open a PR to the upstream repo:
+   ```sh
+   gh pr create --repo gracecraft-ro/<repo> --base release/next \
+     --head <branch> --title "..." --body "..."
+   ```
 
-```sh
-git push -u fork <branch>
-gh pr create --repo OWNER/REPO --base <base> \
-  --head FORK_OWNER:<branch> --title "..." --body "Closes #123"
-```
-
-This `--head` form works for a user-owned fork. If the fork belongs to an
-organization, check `gh pr create --help`; this CLI does not support an
-organization name in `--head`.
+   Never use an upstream `--repo` in this flow.
+4. If the push fails, report the branch name and the commit range. Do not
+   merge.
 
 If the repo does not allow fork PRs, keep the local branch and report its name
 and commit range. A local commit is not a pull request and is not shipped.
