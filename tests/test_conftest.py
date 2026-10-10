@@ -1,14 +1,9 @@
-"""Checks for the clean_lupin_env fixture in conftest.py."""
+"""Checks for the autouse clean_lupin_env fixture in conftest.py."""
 
 import os
 
-import pytest
 
-
-@pytest.fixture
-def leaked_env(monkeypatch):
-    monkeypatch.setenv("LUPIN_REDIS_HOST", "127.0.0.1")
-
-
-def test_clean_lupin_env_removes_leaked_redis_host(leaked_env, clean_lupin_env):
-    assert "LUPIN_REDIS_HOST" not in os.environ
+def test_clean_lupin_env_leaves_only_local_backend():
+    lupin_names = sorted(name for name in os.environ if name.startswith("LUPIN_"))
+    assert lupin_names == ["LUPIN_BACKEND"]
+    assert os.environ["LUPIN_BACKEND"] == "local"

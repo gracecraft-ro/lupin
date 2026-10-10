@@ -197,11 +197,14 @@ def make_checkout(tmp_path):
     return make
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def clean_lupin_env(monkeypatch):
-    """Delete every LUPIN_* variable from os.environ for this test.
+    """Run each test with a clean LUPIN_* environment and the local backend.
 
     The sandbox shell exports LUPIN_* variables. Without this fixture, a test can reach the shared Redis server.
+
+    Every LUPIN_* variable is deleted, then LUPIN_BACKEND is set to local.
+    Tests that need Redis set their own values after this fixture runs.
 
     The list is built once, when this fixture runs. Variables set later stay.
     Modules that read variables at import time keep their values, for example
@@ -209,3 +212,4 @@ def clean_lupin_env(monkeypatch):
     """
     for name in [key for key in os.environ if key.startswith("LUPIN_")]:
         monkeypatch.delenv(name)
+    monkeypatch.setenv("LUPIN_BACKEND", "local")
