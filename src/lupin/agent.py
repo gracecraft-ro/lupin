@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import time
+import uuid
 
 import redis
 
@@ -49,8 +50,8 @@ from .slots_redis import CONNECT_TIMEOUT, DEBRIEF_TIMEOUT_S, _call_with_retry, _
 DEFAULT_BATCH = 20  # design: "ZRANGE the oldest 20"
 DEFAULT_POLL_INTERVAL = 2.0
 EXEC_TIMEOUT_S = 120.0
-# Time limit for loop.stop, in seconds, for the whole stop path. It counts
-# the stop subprocess and the Redis calls made on that path. See docs/redis-schema.md.
+# Budget for loop.stop, in seconds. The stop subprocess gets what is left
+# after the command read and the Redis calls after it. See docs/redis-schema.md.
 ACTION_TIMEOUT_S = {"loop.stop": 1740.0}
 REDIS_ADDRESSES = 2  # IPv6 and IPv4 for localhost
 # Redis round trips for one command on a new connection: HELLO 3, CLIENT
@@ -71,9 +72,10 @@ COMMAND_READ_WORST_S = ATTEMPTS_PER_CALL * (
     (DEFAULT_CLIENT_RETRIES + 1) * (REDIS_ADDRESSES + REDIS_ROUND_TRIPS) * CONNECT_TIMEOUT
     + DEFAULT_CLIENT_RETRIES * DEFAULT_CLIENT_BACKOFF_CAP_S
 )
-# Agent Redis calls on the loop.stop path after the read: claim, write
-# result, dequeue, audit line. They use debrief_client.
-AGENT_REDIS_CALLS_ON_STOP = 4
+# Agent Redis calls on the loop.stop path after the read: claim, claim
+# read-back (only when the claim reply was lost), write result, dequeue,
+# audit line. They use debrief_client.
+AGENT_REDIS_CALLS_ON_STOP = 5
 # Cap on the stop subprocess. The read and the agent's Redis calls use the rest of the limit.
 SUBPROCESS_TIMEOUT_S = {
     "loop.stop": ACTION_TIMEOUT_S["loop.stop"] - COMMAND_READ_WORST_S - AGENT_REDIS_CALLS_ON_STOP * DEBRIEF_CALL_WORST_S,
@@ -384,19 +386,35 @@ def _process_one(client, stop_client, machine: str, key: str, cmd_id: str) -> di
         return _reject(client, machine, cmd_id, action, str(exc))
 
     started_at = time.time()
+    # New for each attempt. After a retry, the poll checks for this token.
+    claim = uuid.uuid4().hex
     claimed = _call_with_retry(
         lambda: client.set(
             commands.res_key(cmd_id),
-            json.dumps({"id": cmd_id, "state": "running", "host": machine, "action": action, "started_at": started_at}),
+            json.dumps(
+                {
+                    "id": cmd_id,
+                    "state": "running",
+                    "host": machine,
+                    "action": action,
+                    "started_at": started_at,
+                    "claim": claim,
+                }
+            ),
             nx=True,
             px=int(commands.RESULT_TTL_S * 1000),
         )
     )
     if not claimed:
-        # Another poller racing on the same id claimed it first. Don't
-        # touch the queue or run anything -- the claimant finishes the
-        # job, including the dequeue.
-        return {"id": cmd_id, "state": "lost-race"}
+        # A retried SET NX returns nil when its first try applied. The
+        # claim token shows whether that first try was this attempt's.
+        raw = _call_with_retry(lambda: client.get(commands.res_key(cmd_id)))
+        held = json.loads(raw) if raw else {}
+        if held.get("state") != "running" or held.get("claim") != claim:
+            # Another poller racing on the same id claimed it first. Don't
+            # touch the queue or run anything -- the claimant finishes the
+            # job, including the dequeue.
+            return {"id": cmd_id, "state": "lost-race"}
 
     try:
         proc = subprocess.run(argv, shell=False, capture_output=True, text=True, timeout=SUBPROCESS_TIMEOUT_S.get(action, EXEC_TIMEOUT_S))

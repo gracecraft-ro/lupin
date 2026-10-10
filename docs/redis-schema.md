@@ -373,31 +373,35 @@ fixed action table: `loop.stop`, `loop.run`, `loop.run-all`, `loop.peek`,
 `loop.stop` takes `repo` and an optional boolean `force`. Without `force`, the
 stop asks the agent for a handoff first.
 
-The agent gives `loop.stop` a time limit of 1740 seconds (29 minutes). This is
-`ACTION_TIMEOUT_S["loop.stop"]` in `agent.py`. The limit covers the whole stop
-path. The path has three parts:
+The agent gives `loop.stop` a budget of 1740 seconds (29 minutes). This is
+`ACTION_TIMEOUT_S["loop.stop"]` in `agent.py`. The budget is a sum of worst
+cases. No single timer enforces it. It has three parts:
 
-- The command read. The agent reads the command with `_client`. The read
-  happens before the action is known, so it uses `_client` for all actions.
-- Four Redis calls after the read. They claim the command, write the result,
-  remove the command from the queue, and write the audit line. They use
-  `debrief_client`.
-- The stop subprocess. The agent ends it when its limit runs out. The limit is
-  `SUBPROCESS_TIMEOUT_S["loop.stop"]`.
+- The command read. The agent reads the command with `_client`. The action is
+  not known until the read ends, so every action uses `_client` for this read.
+- Up to five Redis calls after the read. They use `debrief_client`. They claim
+  the command, read the claim back, write the result, remove the command from
+  the queue, and write the audit line. The read-back runs only when the claim
+  reply was lost. The budget counts it anyway.
+- The stop subprocess. Its timer is `SUBPROCESS_TIMEOUT_S["loop.stop"]`, passed
+  to `subprocess.run`.
 
-The subprocess limit is the whole limit minus the worst case for the other two
+The subprocess timer is the budget minus the worst case for the other two
 parts:
 
     COMMAND_READ_WORST_S = 328 seconds
-    SUBPROCESS_TIMEOUT_S = 1740 - 328 - 4 x 14 = 1356 seconds
+    SUBPROCESS_TIMEOUT_S = 1740 - 328 - 5 x 14 = 1342 seconds
+
+The budget does not cover the prune read, the pending-list read, or earlier
+commands in the same poll. See known limits.
 
 Other actions get `EXEC_TIMEOUT_S`, which is 120 seconds.
 
 ## Redis clients
 
 `slots_redis.debrief_client` makes a Redis client with short timeouts. The stop
-path uses it for the four calls after the read. The debrief uses it for its
-three Redis calls.
+path uses it for the calls after the read. The debrief uses it for its three
+Redis calls.
 
 The client has these settings:
 
@@ -407,9 +411,8 @@ The client has these settings:
 - `_call_with_retry` makes two attempts in all.
 
 `_client` is the default client. Its timeout is 2 seconds. redis-py retries a
-failed command 10 times, with a backoff of up to 1 second between tries. The
-command read uses `_client`. So do the other callers, such as slots, claims, and
-the ledger.
+failed command 10 times. The command read uses `_client`. So do the other
+callers, such as slots, claims, and the ledger.
 
 ## One debrief_client call
 
@@ -429,34 +432,16 @@ The worst case is 14 seconds. This is `DEBRIEF_CALL_WORST_S` in `agent.py`:
 
 The worst case is 328 seconds. This is `COMMAND_READ_WORST_S` in `agent.py`:
 
-    2 x (11 x (2 + 5) x 2 + 10 x 1) = 328
+    2 x (11 x (2 + 5) x 2 + 10 x DEFAULT_CLIENT_BACKOFF_CAP_S) = 328
 
 - Two attempts (`_call_with_retry`).
 - Each attempt makes 11 tries. That is one try, then 10 redis-py retries.
 - Each try waits for one connect per address, then for five round trips. Each
-  wait is up to 2 seconds.
-- Each retry waits up to 1 second before its try.
+  wait is up to `CONNECT_TIMEOUT`, which is 2 seconds.
+- Each retry waits up to `DEFAULT_CLIENT_BACKOFF_CAP_S`, the redis-py backoff
+  cap, before its try.
 
-This is an upper bound. In the measurement below, one stalled read took 51.94
-seconds.
-
-## Measured waits
-
-Measured 2026-10-10 with a probe script that is not in the repo. Each case calls
-`_call_with_retry` on `debrief_client`, unless the row says `_client`.
-
-| Case | Seconds | Result |
-| --- | --- | --- |
-| Stall at the first reply | 2.003 | TimeoutError |
-| Four replies at 0.999 s each, then a stall | 9.999 | TimeoutError |
-| Every reply at 0.999 s, no stall | 4.998 | ok, five commands sent |
-| Connect stall, host `127.0.0.1` only | 2.002 | TimeoutError |
-| Connect stall, host `localhost` (`::1`, then `127.0.0.1`) | 4.005 | TimeoutError |
-| Worst combined: `::1` connect stall, then four slow replies, then a stall | 12.002 | TimeoutError |
-| `_client`, stall at the first reply | 51.94 | TimeoutError, 22 connections |
-
-The worst measured `debrief_client` call took 12.002 seconds. Its bound is 14
-seconds. The measured `_client` call took 51.94 seconds. Its bound is 328 seconds.
+This is the worst case, not a measured time.
 
 ## Debrief in the subprocess
 
@@ -489,23 +474,34 @@ If a wait runs to that limit, the stop ends and the debrief is not written.
 
 ## Known limits
 
-- The budget starts when the stop action starts. The prune read, the pending-list
-  read, and earlier commands in the same poll run before that. The budget does
-  not count them.
-- A reply that takes more than 1 second makes a `debrief_client` call fail. A
-  stop fails at its claim, before the subprocess starts. The command stays
-  queued, and `lupin agent` exits with code 3. Non-stop actions use `_client`,
-  which allows 2 seconds per reply. They are not affected by this limit.
+- The budget does not cover the prune read, the pending-list read, or earlier
+  commands in the same poll. These run before the command read.
+- The stop claim uses `debrief_client`. A reply that takes more than 1 second
+  makes an attempt fail. `_call_with_retry` then makes one more attempt. Three
+  cases follow:
+  - The first try writes the claim, and its reply is lost. The retry returns
+    nil. The read-back finds this attempt's claim token. The stop runs once.
+  - The claim is written, and the retry or the read-back also fails. The stop
+    does not run. The command stays queued, and the record stays `running`.
+    `lupin agent` exits with code 3. The next start marks the record `failed`
+    and removes the command from the queue (`startup_scan`).
+  - Another poller claims the id first. This poller returns `lost-race`. It does
+    not touch the queue or run the command.
+- Non-stop actions use `_client`, which allows 2 seconds per reply. They are not
+  affected by this limit.
   `test_non_stop_command_survives_a_reply_slower_than_the_stop_bound` checks this.
-- If the stop runs, but its result write fails, the result stays `running`. The
-  next start marks it `failed`, with the reason `orphaned`.
+- If the stop runs, but the result write fails, the record stays `running`
+  until the next start. The next start marks it `failed`, with a reason that
+  starts with `orphaned`. So a stop that ran can show `failed`.
   `test_stop_result_write_failure_leaves_the_claim_until_restart` checks this.
+- A `ZREM` timeout after a run leaves the queue entry. The next poll returns
+  `lost-race` and does not run the command again.
 - The claims scan counts as one request and reply. `SCAN` returns keys in pages.
-  A keyspace of 2005 claim keys took 192 `SCAN` requests at the default COUNT of
-  10 (measured 2026-10-10, with the claim key pattern in `claims.py`). The budget
-  does not count the extra pages.
-- A slow server that keeps sending data is not a stall. Each read can wait up to
-  1 second, but the total is not limited. The budget does not bound this case.
+  Each extra page is one more request and reply. The budget does not count the
+  extra pages.
+- A server that keeps sending data slowly does not cause a stall. Each read can
+  wait up to 1 second. The total wait is not limited. The budget does not bound
+  this case.
 - Name lookup (`getaddrinfo`) is not covered by the timeouts.
 
 ## Budget result
@@ -515,15 +511,15 @@ Worst case, in seconds. The terms are in `tests/test_agent.py`.
 | Part | Terms | Seconds |
 | --- | --- | --- |
 | Subprocess, listed | loop_runtime waits 983.25; gh 10; three debrief Redis calls 3 x 14 | 1035.25 |
-| Subprocess limit | 1740 - 328 - 4 x 14 | 1356.00 |
-| Agent Redis calls | command read 328; four calls at 14 | 384.00 |
-| Whole stop path, listed | 1035.25 + 384 | 1419.25 |
-| Whole stop path, limit | `ACTION_TIMEOUT_S["loop.stop"]` | 1740.00 |
-| Margin | 1740 - 1419.25 | 320.75 |
+| Subprocess timer | 1740 - 328 - 5 x 14 | 1342.00 |
+| Agent Redis calls | command read 328; five calls at 14 | 398.00 |
+| Listed total | 1035.25 + 398 | 1433.25 |
+| Budget | `ACTION_TIMEOUT_S["loop.stop"]` | 1740.00 |
+| Margin | 1740 - 1433.25 | 306.75 |
 
 `test_stop_time_limit_covers_the_listed_timeouts` checks the listed total against
-the whole limit. `test_stop_subprocess_cap_leaves_room_for_agent_redis_calls`
-checks the subprocess cap.
+the budget. `test_stop_subprocess_cap_leaves_room_for_agent_redis_calls` checks
+the subprocess timer.
 
 ### `cmd:<id>`
 
@@ -563,6 +559,11 @@ Claimed with `SET ... NX` (first writer wins a race between two pollers
 on the same id), then overwritten by the same claimant with the final
 result. `state` is one of `queued` (no `cmdres` yet — the `cmd:<id>` key
 is the only record), `running`, `ok`, `failed`, `rejected`, `expired`.
+
+A `running` entry has a `claim` field. It holds a new token for each claim
+attempt. If a retried `SET ... NX` returns nil, the claimant reads the entry
+back. The claim is its own when `claim` matches its token and `state` is
+`running`. Otherwise, another poller holds the claim.
 
 ```json
 {"id": "a1b2c3d4e5f6...", "state": "ok", "host": "jesus", "action": "loop.stop", "exit_code": 0, "output": "...", "truncated": false}

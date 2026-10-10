@@ -329,9 +329,11 @@ def test_stop_time_limit_covers_the_listed_timeouts():
         ("debrief: claims scan (Redis)", DEBRIEF_CALL_S),
         ("debrief: claims read (Redis)", DEBRIEF_CALL_S),
     ]
-    # The command read uses _client. The four calls after it use debrief_client.
+    # The command read uses _client. The five calls after it use debrief_client.
+    # The claim read-back runs only when the claim reply was lost. It is listed anyway.
     agent_terms = [
         ("agent: write claim", DEBRIEF_CALL_S),
+        ("agent: read claim back", DEBRIEF_CALL_S),
         ("agent: write result", DEBRIEF_CALL_S),
         ("agent: dequeue", DEBRIEF_CALL_S),
         ("agent: audit line", DEBRIEF_CALL_S),
@@ -595,6 +597,57 @@ def test_double_claim_only_runs_once(redis_port, flush_redis, monkeypatch):
     assert states.count("ok") == 1
     final = commands.get_status(cmd_id, **kw)
     assert final["state"] == "ok"
+
+
+class _ReplyLostOnce:
+    # Wraps a redis client. The first claim (SET NX on the result key)
+    # applies on the server, then its reply is lost as a timeout.
+    def __init__(self, client, res_key):
+        self._client = client
+        self._res_key = res_key
+        self.lost = False
+
+    def set(self, name, value, *args, **kwargs):
+        applied = self._client.set(name, value, *args, **kwargs)
+        if not self.lost and name == self._res_key and kwargs.get("nx"):
+            self.lost = True
+            raise redis_lib.exceptions.TimeoutError("reply lost after the claim applied")
+        return applied
+
+    def __getattr__(self, attr):
+        return getattr(self._client, attr)
+
+
+def test_claim_whose_reply_was_lost_still_runs_once(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    cmd_id = commands.enqueue("jesus", "loop.stop", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)
+    wrapper = _ReplyLostOnce(agent.debrief_client("127.0.0.1", redis_port), commands.res_key(cmd_id))
+    monkeypatch.setattr(agent, "debrief_client", lambda *_args, **_kwargs: wrapper)
+    fake = _fake_run(returncode=0)
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert wrapper.lost
+    assert len(fake.calls) == 1
+    assert touched == [{"id": cmd_id, "state": "ok"}]
+    assert commands.get_status(cmd_id, **kw)["state"] == "ok"
+
+
+def test_claim_held_by_another_token_is_lost_race_and_not_run(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    cmd_id = commands.enqueue("jesus", "loop.stop", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set(commands.res_key(cmd_id), json.dumps({"id": cmd_id, "state": "running", "claim": "another-process"}))
+    fake = _fake_run(returncode=0)
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+
+    result = agent._process_one(
+        agent._client("127.0.0.1", redis_port), agent.debrief_client("127.0.0.1", redis_port), "jesus", KEY, cmd_id
+    )
+
+    assert result == {"id": cmd_id, "state": "lost-race"}
+    assert fake.calls == []
 
 
 def test_startup_scan_marks_orphaned_running_entry_as_failed(redis_port, flush_redis, monkeypatch):
