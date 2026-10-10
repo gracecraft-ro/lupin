@@ -1299,12 +1299,18 @@ def _cmd_roadmap(args: argparse.Namespace) -> int:
     # which has no such flag, and `resolve_connection` falls back to the
     # same default fleet config every other reader uses.
     connection = machines.resolve_connection(**_claim_kwargs(args))
-    claims_lookup = functools.partial(claims.claims_for, with_ttl=True, **connection)
+    # Records that `machines` or `claims` skipped. `run` reports the count.
+    unreadable: list[str] = []
+    claims_lookup = functools.partial(
+        claims.claims_for, with_ttl=True, skipped=unreadable, **connection
+    )
     text, code = roadmap_cli.run(
         args.repo, args.limit, args.stage, args.dag, args.json, args.refresh,
         claims_lookup=claims_lookup,
         connection=connection,
-        machine_records=functools.partial(machines.machines, connection),
+        code_dir=os.environ.get("LUPIN_LOOP_CODE_DIR", "/code"),
+        machine_records=functools.partial(machines.machines, connection, skipped=unreadable),
+        unreadable=unreadable,
     )
     print(text)
     return code

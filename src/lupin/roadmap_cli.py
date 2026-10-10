@@ -28,7 +28,8 @@ one illustrative example, not a full algorithm:
   machine reads a repo only through its own checkout. A repo with no
   checkout gets a warning that names it.
 - `--json` has a `claims` array: every active claim in the repos shown.
-  `claims.claims_for(with_ttl=True)` reads each claim and its time to live.
+  `--dag --json` has no claims. Claim TTLs come from
+  `claims.claims_for(with_ttl=True)`.
 - Quest grouping (the mockup's "quest session-rewrite · 2 of 5 done" line)
   is issue #11's data. `_quest_for` is the hook: it always returns None
   today, so every node renders in one ungrouped list. #11 fills it in.
@@ -158,7 +159,7 @@ def build_roadmap(
     full_names = {repo: f"{owners[repo]}/{repo}" for repo in repos if owners.get(repo)}
     claimed_sessions: dict[tuple[str, int], str] = {}
     claim_rows: list[dict] = []
-    now = time.time()
+    now = _now()
     if full_names:
         try:
             raw_claims = claims_lookup(list(full_names.values()))
@@ -227,6 +228,11 @@ def build_roadmap(
         "warnings": warnings,
         "claims": sorted(claim_rows, key=_claim_sort_key),
     }
+
+
+def _now() -> float:
+    """Wall clock for claim ages. Tests patch this, not `time.time`."""
+    return time.time()
 
 
 def _claim_row(target: str, info: dict, now: float) -> dict:
@@ -563,6 +569,7 @@ def run(
     connection: dict | None = None,
     machine_records=None,
     local_host: str | None = None,
+    unreadable: list[str] | None = None,
 ) -> tuple[str, int]:
     """Build and render `lupin roadmap`. Returns (output text, exit code).
 
@@ -575,6 +582,10 @@ def run(
     added (see `fleet_repos`). It is a function that returns the machine
     registry's records. If the registry cannot be read, a warning says so
     and only this machine's repos are shown.
+
+    `unreadable` is the list that `machines.machines` and
+    `claims.claims_for` fill with the records they skipped. If it has
+    entries, a warning gives the count.
     """
     fleet_warnings: list[str] = []
     if repo:
@@ -592,8 +603,7 @@ def run(
                 records = machine_records()
             except CoordinatorUnreachable as exc:
                 fleet_warnings.append(
-                    f"machine registry is unavailable: {exc}. "
-                    "Showing the repos that this machine enables."
+                    f"{exc} is unavailable. Showing the repos that this machine enables."
                 )
             else:
                 repos, fleet_warnings = fleet_repos(
@@ -611,6 +621,9 @@ def run(
     else:
         model = {"repos": {}, "cycles": [], "warnings": [], "claims": []}
     model["warnings"] = fleet_warnings + model["warnings"]
+    if unreadable:
+        names = ", ".join(sorted(unreadable))
+        model["warnings"].append(f"skipped {len(unreadable)} unreadable Redis record(s): {names}")
     multi_repo = len(repos) > 1
 
     if dag:

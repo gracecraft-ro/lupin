@@ -14,6 +14,7 @@ import functools
 import json
 import os
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -634,8 +635,10 @@ class FleetRoadmapTests(unittest.TestCase):
         payload = json.loads(text)
         self.assertEqual(code, 0)
         self.assertEqual(list(payload["repos"]), ["plantsmith"])
-        self.assertEqual(len(payload["warnings"]), 1)
-        self.assertIn("machine registry is unavailable", payload["warnings"][0])
+        self.assertEqual(
+            payload["warnings"],
+            ["machine registry is unavailable. Showing the repos that this machine enables."],
+        )
 
     def test_explicit_repo_does_not_read_the_registry(self):
         records = mock.Mock(return_value=[_record("ralpha", [("bodysmith", True)])])
@@ -668,10 +671,13 @@ class ClaimsArrayTests(unittest.TestCase):
                  ),
              ), \
              mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir: dag), \
-             mock.patch.object(roadmap_cli.time, "time", return_value=10_000.0):
-            return roadmap_cli.run(
+             mock.patch.object(roadmap_cli, "_now", return_value=10_000.0):
+            result = roadmap_cli.run(
                 "bodysmith", 10, "ready", False, as_json, False, claims_lookup=claims_lookup
             )
+            # The clock patch must not reach the stdlib `time` module.
+            self.assertNotEqual(time.time(), 10_000.0)
+        return result
 
     def test_json_lists_every_active_claim_in_the_repos_shown(self):
         lookup = lambda repos: {
@@ -735,6 +741,26 @@ class ClaimsArrayTests(unittest.TestCase):
 
 
 class RoadmapCommandWiringTests(unittest.TestCase):
+    def _code_dir_run_gets(self, value):
+        """The `code_dir` that `roadmap` passes to `run`, with LUPIN_LOOP_CODE_DIR set to `value`."""
+        connection = {
+            "redis_host": "h", "redis_port": 1, "redis_username": None, "redis_password": None,
+        }
+        with mock.patch.dict(os.environ), \
+             mock.patch.object(machines, "resolve_connection", return_value=connection), \
+             mock.patch.object(roadmap_cli, "run", return_value=("{}", 0)) as run:
+            os.environ.pop("LUPIN_LOOP_CODE_DIR", None)
+            if value is not None:
+                os.environ["LUPIN_LOOP_CODE_DIR"] = value
+            cli.main(["roadmap", "--json"])
+        return run.call_args.kwargs["code_dir"]
+
+    def test_command_reads_the_code_dir_from_the_environment(self):
+        self.assertEqual(self._code_dir_run_gets("/srv/code"), "/srv/code")
+
+    def test_command_defaults_the_code_dir_to_code(self):
+        self.assertEqual(self._code_dir_run_gets(None), "/code")
+
     def test_command_passes_the_registry_and_the_claim_ttl_to_run(self):
         connection = {
             "redis_host": "h", "redis_port": 1, "redis_username": None, "redis_password": None,
@@ -804,3 +830,74 @@ def test_roadmap_json_reads_other_machines_and_claims_from_redis(redis_port, flu
     assert entry["host"] == machines.hostname()
     assert 6590 <= entry["ttl_seconds"] <= 6600
     assert 0 <= entry["age_seconds"] <= 10
+
+
+def _cli_roadmap_json(redis_port, capsys, code_dir):
+    """Run `lupin roadmap --json` against the Redis on `redis_port`.
+
+    GitHub and the dependency DAG are faked. Checkouts are read from `code_dir`.
+    """
+    connection = {
+        "redis_host": "127.0.0.1", "redis_port": redis_port,
+        "redis_username": None, "redis_password": None,
+    }
+    dag = {
+        "repos": {"bodysmith": [{"number": 161, "blockedBy": [], "blocking": []}]},
+        "cycles": [],
+        "warnings": {},
+    }
+    with mock.patch.object(roadmap, "_repo_identity", side_effect=_identity()), \
+         mock.patch.object(
+             roadmap, "cached_github",
+             side_effect=lambda repo, path, state="open", **kw: (
+                 ([_issue(161, "stretch plan", "P1")], {}, []) if state == "open" else ([], {}, [])
+             ),
+         ), \
+         mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir: dag), \
+         mock.patch.dict(os.environ, {"LUPIN_LOOP_CODE_DIR": code_dir}), \
+         mock.patch.object(machines, "resolve_connection", return_value=connection), \
+         mock.patch("lupin.serve.enabled_repos", return_value=[]):
+        code = cli.main(["roadmap", "--json"])
+    return code, json.loads(capsys.readouterr().out)
+
+
+def _seed_good_box(redis_port):
+    """Write a fresh registry record for `good-box`, which enables `bodysmith`."""
+    import redis as redis_lib
+
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    record = _record("good-box", [("bodysmith", True)])
+    record["heartbeat"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    raw.set("lupin:v1:machine:good-box", json.dumps(record))
+    return raw
+
+
+def test_roadmap_json_skips_unreadable_redis_records_and_counts_them(
+    redis_port, flush_redis, tmp_path, capsys
+):
+    raw = _seed_good_box(redis_port)
+    raw.set("lupin:v1:machine:old-box", "not json")
+    raw.set("lupin:v1:machine:ralpha", json.dumps({"name": "ralpha", "state": "online"}))
+    raw.set("lupin:v1:claim:acme/bodysmith#9", "not json")
+    (tmp_path / "bodysmith").mkdir()
+
+    code, payload = _cli_roadmap_json(redis_port, capsys, str(tmp_path))
+
+    assert code == 0
+    assert list(payload["repos"]) == ["bodysmith"]
+    assert payload["warnings"] == [
+        "skipped 3 unreadable Redis record(s): claim:acme/bodysmith#9, machine:old-box, machine:ralpha"
+    ]
+
+
+def test_roadmap_json_reads_checkouts_under_the_loop_code_dir(
+    redis_port, flush_redis, tmp_path, capsys
+):
+    _seed_good_box(redis_port)
+    (tmp_path / "bodysmith").mkdir()
+
+    code, payload = _cli_roadmap_json(redis_port, capsys, str(tmp_path))
+
+    assert code == 0
+    assert payload["warnings"] == []
+    assert payload["repos"]["bodysmith"]["issues"][0]["number"] == 161
