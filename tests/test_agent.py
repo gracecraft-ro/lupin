@@ -330,7 +330,7 @@ def test_stop_time_limit_covers_the_listed_timeouts():
         ("debrief: claims read (Redis)", DEBRIEF_CALL_S),
     ]
     # The command read uses _client. The five calls after it use debrief_client.
-    # The claim read-back runs only when SET NX returns nil. It is listed anyway.
+    # The claim read runs only when SET NX returns nil. It is listed even when it does not run.
     agent_terms = [
         ("agent: write claim", DEBRIEF_CALL_S),
         ("agent: read claim back", DEBRIEF_CALL_S),

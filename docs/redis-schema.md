@@ -607,9 +607,9 @@ One stream entry per enqueue and one per terminal outcome
 audit trail. Some outcomes have no line:
 
 - A Redis connection or timeout error on the write drops the line.
-- A run whose `ZREM` fails has no line. If a later poll expires the entry, and its ZREM succeeds, that
-  poll writes an `expired` line. `cmdres` still says `ok`. If the prune removes the entry
-  first, no line is written.
+- A run whose `ZREM` fails has no line. If a later poll expires the entry,
+  and its ZREM succeeds, that poll writes an `expired` line. `cmdres` still
+  says `ok`. If the prune removes the entry first, no line is written.
 
 ## TTLs
 
