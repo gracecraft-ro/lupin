@@ -404,7 +404,8 @@ nix shell nixpkgs#python3Packages.pytest -c pytest -v
 
 ## Pull requests, review, and handoff
 
-Every change goes through a pull request. The base branch is `main`.
+Every change goes through a pull request to the integration branch,
+`release/next`, on the fork. The loop policy is in `docs/delegation-loop.md`.
 
 1. Use `/ship`. It pushes the branch and opens a PR with `Closes #N`. If the
    push is denied, it pushes to a fork. If that fails, report the branch name

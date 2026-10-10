@@ -59,9 +59,11 @@ so `/ship` must add one before it pushes.
 Every change goes through a pull request. The shared steps are in "Review and
 merge each pull request" in the `delegation-loop` skill. In this repo:
 
-1. The base branch is `main`.
+1. The base branch is the integration branch, `release/next`, on the fork
+   (`gracecraft-ro/lupin`). A PR never targets upstream `main`.
 2. A worker uses `/ship` (see rule 1). If the push to the fork fails, it
-   reports the branch name and commit range. That branch is the PR.
+   reports the branch name and commit range. The reviewer reviews that
+   branch. Do not merge it until a PR exists on the fork.
 3. The orchestrator dispatches `/code-review` for every PR or branch,
    including docs-only changes. The reviewer is not the worker. The
    reviewer's model tier is not lower than the worker's.
@@ -70,9 +72,12 @@ merge each pull request" in the `delegation-loop` skill. In this repo:
    reviewer approves.
 5. The orchestrator posts the verdict on the PR (or on the issue, for a
    branch).
-6. Merge only after approval and a passing gate:
-   `nix shell nixpkgs#python3Packages.pytest -c pytest -v`. A worker or
-   reviewer never merges. Close the issue in the same pass as the merge.
+6. The orchestrator merges into `release/next` only after the reviewer
+   approves and the gate passes. The gate is `nix flake check` (see "Build
+   and test" in `AGENTS.md`). Merge with
+   `gh pr merge --repo gracecraft-ro/lupin --merge`. Do not rebase. Do not
+   force-push. A worker or reviewer never merges. Close the issue in the same
+   pass as the merge.
 
 At the end of a session, run `/handoff`.
 

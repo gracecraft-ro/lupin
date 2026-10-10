@@ -16,9 +16,24 @@ Read the root `AGENTS.md` first. If `docs/delegation-loop.md` exists, read
 it; Lupin can run without it. Follow the repo's branch, worktree, test, and
 release rules. Read the latest issue comments.
 
+Upstream repos (`gracecraft-software/<repo>`) are read-only for loops. A loop
+does not push to upstream. It does not merge into upstream.
+
+Each repo has one integration branch on the fork (`gracecraft-ro/<repo>`),
+named `release/next`. It starts from the upstream default branch. The fork
+default branch is not used for work.
+
 Use an isolated worktree for each worker. Do not let parallel workers edit the
-same checkout. Record the machine, worktree path, branch, and issue in the
-dispatch and the repository's handoff record. When a worker runs in a Herdr
+same checkout. Each worker creates its worktree from the integration branch:
+
+```sh
+git fetch fork
+git worktree add <path> -b <branch> fork/release/next
+```
+
+Keep each worktree under `.claude/worktrees/`. Record the machine, worktree
+path, branch, and issue in the dispatch and the repository's handoff record.
+When a worker runs in a Herdr
 pane, also record the agent name, workspace ID, pane ID, tab ID, and cwd.
 `herdr agent list` reports all of them. See "Talk to an agent in a Herdr
 pane" below.
@@ -264,12 +279,18 @@ Dispatch `/code-review` for every pull request, including docs-only changes.
 Review the current PR diff, not only the issue or a worker's report. Re-fetch
 the latest PR comments and reviews before merge.
 
-A worker opens the PR with `/ship`. `/ship` tries a direct push first, then a
-push to a fork. If neither works, the worker reports the local branch name and
-commit range. Treat that branch as the PR. The reviewer reviews
-`git diff BASE...BRANCH`. The orchestrator posts the verdict as a comment on
-the issue, because there is no PR to post on. Merge the branch locally only
-after approval.
+A worker ships only to the fork, with `/ship`. It does not push to upstream.
+The PR base is `release/next` on the fork:
+
+```sh
+gh pr create --repo gracecraft-ro/<repo> --base release/next
+```
+
+Do not open a PR against upstream `main`. If the push to the fork fails, the
+worker reports the local branch name and commit range. The reviewer reviews
+`git diff fork/release/next...BRANCH`. The orchestrator posts the verdict as a
+comment on the issue, because there is no PR to post on. Do not merge the
+branch until a PR exists on the fork.
 
 Use `lupin review-route --category CATEGORY --size SIZE --mode separate` for
 a reviewer recommendation. Compare it with the issue's implementation route
@@ -289,8 +310,37 @@ Tell it to use `/ship` and update the same PR. Review the latest PR commit.
 Repeat until the reviewer approves it.
 The orchestrator posts the verdict and findings on the PR (or on the issue for a branch).
 
-After approval and required checks pass, the orchestrator merges locally using
-the repo's merge rules. The reviewer and worker do not merge their own PR.
+Before a branch is merged, it must contain the current `release/next`. Fetch
+the fork first. Then run this check:
+
+```sh
+git fetch fork
+git merge-base --is-ancestor fork/release/next BRANCH
+```
+
+Exit code 0 means the branch contains `release/next`. Exit code 1 means it
+does not. Any other exit code means the check failed. In that case, the worker
+merges `fork/release/next` into the branch. Then it pushes the branch to the
+fork. Do not rebase.
+
+The orchestrator merges a branch into `release/next` only when both of these
+are true:
+
+- A reviewer approves the branch. The reviewer is a different agent from the
+  worker. The reviewer's model tier is not lower than the worker's.
+- The repo's full gate passes on the branch, as it is at merge time. The gate
+  command is in the repo's `AGENTS.md`. If the repo has no gate command, report
+  that. Do not merge.
+
+No human approval is needed for this merge. Merge the PR with this command. It
+creates a merge commit:
+
+```sh
+gh pr merge --repo gracecraft-ro/<repo> --merge
+```
+
+Do not rebase. Do not force-push. The reviewer and worker do not merge their
+own PR.
 
 ## Monitor and finish
 
@@ -316,6 +366,17 @@ Use `.loop/loop-state.json` only when a ledger command exits 3. The
 `handoff` skill gives the format. At the start of a session, read the ledger
 and that file.
 
-Keep working while requested, unblocked work remains. Hand off when the
-backlog is done, work is dispatched up to capacity, or the rest is blocked.
-State the exact next action and any missing owner input.
+A worker's task ends when its issue is merged into `release/next`. A task also
+ends when it is blocked on an owner decision. A pull request that waits for
+review is not blocked. The orchestrator dispatches the review and any fix. The
+fix goes on the same branch.
+
+"Blocked" means an owner decision is needed. An example is a model-routing
+policy change.
+
+Upstream `main` is owner-only. The owner opens one pull request from
+`release/next` to `main` when they choose. Loops do not wait for it.
+
+Continue working until the backlog is empty or every remaining item is blocked
+on an owner decision. Then run `/handoff`. State the exact next action and any
+missing owner input.
