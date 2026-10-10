@@ -36,6 +36,15 @@ DEFAULT_PROMPT = (
     "it; otherwise continue without repo-specific delegation notes."
 )
 HERDR_TIMEOUT = 20.0
+GIT_TIMEOUT = 60.0
+# Files in the git directory that show an unfinished git operation.
+UNFINISHED_GIT_STATES = (
+    ("MERGE_HEAD", "merge"),
+    ("rebase-merge", "rebase"),
+    ("rebase-apply", "rebase"),
+    ("CHERRY_PICK_HEAD", "cherry-pick"),
+    ("REVERT_HEAD", "revert"),
+)
 SERVER_START_TIMEOUT = 30.0
 LEASE_TTL = 60.0
 HANDOFF_GRACE_S = 600.0
@@ -631,6 +640,105 @@ def validate_omp_options(
     return provider, model
 
 
+def _git(directory: Path, *args: str) -> str:
+    """Run git in `directory`. Return its output. Raise LoopError if git fails."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(directory), *args],
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LoopError(f"could not run git in {directory}: {exc}") from exc
+    if proc.returncode:
+        detail = (proc.stderr or proc.stdout).strip()
+        raise LoopError(f"git {args[0]} failed in {directory}: {detail}")
+    return proc.stdout
+
+
+def _refuse_unfinished_git_work(checkout: Path) -> None:
+    """Raise LoopError if the checkout has an unfinished git operation or unmerged files.
+
+    This function only reads. It never aborts, resets, stashes, or cleans.
+    """
+    git_dir = Path(_git(checkout, "rev-parse", "--absolute-git-dir").strip())
+    for name, label in UNFINISHED_GIT_STATES:
+        marker = git_dir / name
+        if marker.exists():
+            raise LoopError(
+                f"{checkout} has a {label} in progress ({marker}). "
+                "Lupin does not change it. Finish or cancel it, then start the loop again."
+            )
+    entries = _git(checkout, "ls-files", "-u", "-z").split("\0")
+    unmerged = sorted({entry.split("\t", 1)[1] for entry in entries if "\t" in entry})
+    if unmerged:
+        shown = ", ".join(unmerged[:5])
+        if len(unmerged) > 5:
+            shown += f" and {len(unmerged) - 5} more"
+        raise LoopError(
+            f"{checkout} has unmerged files: {shown}. "
+            "Lupin does not change them. Resolve them, then start the loop again."
+        )
+
+
+def _default_base(checkout: Path) -> str:
+    """Return the remote branch that a run starts from, for example `origin/main`."""
+    try:
+        base = _git(checkout, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").strip()
+    except LoopError:
+        base = ""
+    if base:
+        return base
+    for candidate in ("origin/main", "origin/master"):
+        try:
+            _git(checkout, "rev-parse", "--verify", "--quiet", f"refs/remotes/{candidate}")
+        except LoopError:
+            continue
+        return candidate
+    raise LoopError(
+        f"cannot find the default branch of {checkout}. "
+        "Run `git remote set-head origin --auto` in it."
+    )
+
+
+def _create_worktree(repo: str, checkout: Path) -> Path:
+    """Add a worktree for one run, on a new branch from the default branch.
+
+    The worktree is under the loop state directory, not under CODE_DIR.
+    """
+    base = _default_base(checkout)
+    run_id = f"{_stamp()}-{time.time_ns() % 1000000:06d}"
+    path = STATE_DIR / "worktrees" / repo / run_id
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+    _git(checkout, "worktree", "add", "--no-track", "-b", f"lupin-loop/{run_id}", str(path), base)
+    return path
+
+
+def _remove_clean_worktree(repo: str, metadata: dict) -> str:
+    """Remove the run's worktree if `git status --porcelain` shows no changes.
+
+    Return a note for the stop message. The note is empty when the worktree is
+    gone. If the worktree has changes, or git fails, the worktree stays and the
+    note gives its path. This function never uses `--force`. It removes
+    "worktree" from `metadata` only when the worktree is gone.
+    """
+    value = metadata.get("worktree")
+    if not value:
+        return ""
+    path = Path(value)
+    if path.is_dir():
+        try:
+            if _git(path, "status", "--porcelain").strip():
+                return f"; worktree kept at {path}: it has changes"
+            _git(CODE_DIR / repo, "worktree", "remove", str(path))
+        except LoopError as exc:
+            return f"; worktree kept at {path}: {exc}"
+    metadata.pop("worktree", None)
+    return ""
+
+
 def start_loop(
     repo: str,
     *,
@@ -643,9 +751,9 @@ def start_loop(
     repo = validate_repo(repo)
     selected = validate_platform(platform or enabled_repos().get(repo, "claude"))
     provider, model = validate_omp_options(selected, provider, model)
-    directory = CODE_DIR / repo
-    if not directory.is_dir():
-        return False, f"skip {repo}: no checkout at {directory}"
+    checkout = CODE_DIR / repo
+    if not checkout.is_dir():
+        return False, f"skip {repo}: no checkout at {checkout}"
     if note is not None and (
         not isinstance(note, str) or len(note) > 8000 or "\x00" in note
     ):
@@ -688,6 +796,8 @@ def start_loop(
                 provider = choice["provider"]
                 model = choice["model"]
         provider, model = validate_omp_options(selected, provider, model)
+        _refuse_unfinished_git_work(checkout)
+        worktree = _create_worktree(repo, checkout)
         prompt_file = _write_prompt(repo, note, resume)
         value = {
             "version": 1,
@@ -702,6 +812,7 @@ def start_loop(
             "pane_id": None,
             "prompt_file": prompt_file,
             "resume": bool(resume),
+            "worktree": str(worktree),
         }
         _write_metadata(repo, value)
         worker = _lupin_command(
@@ -720,11 +831,12 @@ def start_loop(
             claude_limits=selected == "claude",
         )
         if rc:
+            _remove_clean_worktree(repo, value)
             value["state"] = "failed"
             _write_metadata(repo, value)
             Path(prompt_file).unlink(missing_ok=True)
             return False, output or f"could not start loop service for {repo}"
-        return True, f"started {repo} ({selected}) in Herdr session {session}"
+        return True, f"started {repo} ({selected}) in Herdr session {session}; worktree {worktree}"
     finally:
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         lock.close()
@@ -913,10 +1025,17 @@ def _agent_command(
 
 
 
+def _run_worktree(repo: str, metadata: dict) -> Path:
+    """Return the run's worktree. The agent never works in the main checkout."""
+    value = metadata.get("worktree")
+    if not isinstance(value, str) or not Path(value).is_dir():
+        raise LoopError(f"the run for {repo} has no worktree; stop it and start again")
+    return Path(value)
+
+
 def _monitor_loop(
     repo: str, platform: str, session: str, prompt_file: str, resume: bool
 ) -> int:
-    directory = CODE_DIR / repo
     _ensure_server(repo, session, platform)
     metadata = _metadata_for_session(repo, session)
     workspace = _find_workspace(session, metadata)
@@ -926,7 +1045,7 @@ def _monitor_loop(
         raise LoopError(f"saved Herdr workspace for {repo} is missing; review it before starting again")
     launch = workspace is None
     if launch:
-        workspace = _create_workspace(session, directory, repo)
+        workspace = _create_workspace(session, _run_worktree(repo, metadata), repo)
         metadata = _record_workspace(repo, metadata, workspace)
     else:
         workspace_id = _workspace_id(workspace)
@@ -1132,12 +1251,18 @@ def stop_loop(repo: str, *, force: bool = False, grace: float = HANDOFF_GRACE_S)
                 raise LoopError(output or f"could not stop Lupin worker for {repo}")
         if session != SESSION_NAME and not _workspaces(session):
             _herdr_json(None, "session", "stop", session, "--json")
+        worktree_note = _remove_clean_worktree(repo, metadata)
         metadata["state"] = "stopped"
         metadata["stopped_at"] = _now()
         metadata["workspace_id"] = None
         metadata["pane_id"] = None
         _write_metadata(repo, metadata)
-        return f"stopped {repo}" + (f"; report saved to {report}" if report else "") + handoff_note
+        return (
+            f"stopped {repo}"
+            + (f"; report saved to {report}" if report else "")
+            + handoff_note
+            + worktree_note
+        )
     finally:
         lock.close()
 
