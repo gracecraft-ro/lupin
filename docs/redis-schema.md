@@ -515,9 +515,9 @@ If a wait runs to that limit, the stop ends and the debrief is not written.
   Each extra page is one more request and reply. The budget does not count the
   extra pages.
 - A server that sends data slowly can keep one reply going. Each read on
-  `debrief_client` waits up to 1 second. These are the calls after the command
-  read. Each read on `_client`, which makes the command read, waits up to
-  2 seconds. The reply as a whole has no time limit.
+  `debrief_client` waits up to 1 second. For `loop.stop`, these are the calls
+  after the command read. Each read on `_client`, which makes the command read,
+  waits up to 2 seconds. The reply as a whole has no time limit.
   The budget does not bound this case.
 - Name lookup (`getaddrinfo`) is not covered by the timeouts.
 
