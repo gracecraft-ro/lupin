@@ -99,7 +99,11 @@ def lean_in(rows: list[dict], provider: str, now_ms: float) -> bool:
     if window is None:
         return False
     remaining = window["resets_at"] - now_ms
-    if remaining < LEAN_IN_SOON_MS:
+    duration_ms = window["duration"].milliseconds
+    # Surplus: used_pct is below the percent of the window already elapsed.
+    elapsed_pct = 100 * (duration_ms - remaining) / duration_ms
+    has_surplus = window["used_pct"] < elapsed_pct
+    if remaining < LEAN_IN_SOON_MS and has_surplus:
         return True
     return window["used_pct"] < LEAN_IN_LOW_USE_PCT and remaining < LEAN_IN_LOW_USE_WINDOW_MS
 

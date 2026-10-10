@@ -70,15 +70,47 @@ class BlockedTests(unittest.TestCase):
 
 
 class LeanInTests(unittest.TestCase):
-    """Lean-in rule (decision 2): <30m to reset, OR <50% used AND <24h to
-    reset, on the provider's longest window with real data."""
+    """Lean-in rule (decision 2): <30m to reset with a surplus, OR <50% used
+    AND <24h to reset, on the provider's longest window with real data.
+    A surplus means used% is below the elapsed% of that window."""
 
     def test_under_30_minutes_to_reset_leans_in(self):
+        # 80% used, 29m left on 5h: about 90% elapsed, so a surplus.
         rows = [_row("claude", 80, 29 * MIN_MS)]
         self.assertTrue(pace.lean_in(rows, "claude", 0))
 
+    def test_under_30_minutes_without_surplus_does_not_lean_in(self):
+        # 93% used, 29m left on 5h: about 90% elapsed, so no surplus.
+        rows = [_row("claude", 93, 29 * MIN_MS)]
+        self.assertFalse(pace.lean_in(rows, "claude", 0))
+
+    def test_surplus_is_measured_on_the_longest_window(self):
+        # 5h window has a surplus (10% used, about 90% elapsed). The 7-day
+        # window is the longest: 90% used, 20h left, about 88% elapsed, so
+        # no surplus. The result follows the 7-day window: no lean-in.
+        rows = [
+            _row("claude", 10, 29 * MIN_MS, duration=QuotaDuration.FIVE_HOURS),
+            _row("claude", 90, 20 * HOUR_MS, duration=QuotaDuration.WEEKLY),
+        ]
+        self.assertFalse(pace.lean_in(rows, "claude", 0))
+
     def test_exactly_30_minutes_to_reset_does_not_lean_in(self):
         rows = [_row("claude", 80, 30 * MIN_MS)]
+        self.assertFalse(pace.lean_in(rows, "claude", 0))
+
+    def test_exactly_30_minutes_with_surplus_does_not_lean_in(self):
+        # 80% used, 30m left on 5h: about 90% elapsed, so a surplus.
+        # The 30m check is strict. Exactly 30m does not qualify.
+        rows = [_row("claude", 80, 30 * MIN_MS)]
+        self.assertFalse(pace.lean_in(rows, "claude", 0))
+
+    def test_blocked_under_30_minutes_never_leans_in(self):
+        # 5h window at 100% is blocked. The 7-day window (longest) has a
+        # surplus with 29m left, so it would lean in alone. Blocked wins.
+        rows = [
+            _row("claude", 100, 29 * MIN_MS, duration=QuotaDuration.FIVE_HOURS),
+            _row("claude", 10, 29 * MIN_MS, duration=QuotaDuration.WEEKLY),
+        ]
         self.assertFalse(pace.lean_in(rows, "claude", 0))
 
     def test_low_use_and_under_24h_leans_in(self):

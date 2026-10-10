@@ -115,10 +115,6 @@
     "tiers": {
       "tier1": [
         {
-          "model": "opencode-go/deepseek-v4-pro",
-          "effort": "high"
-        },
-        {
           "model": "sonnet",
           "effort": "medium"
         }

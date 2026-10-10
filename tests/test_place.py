@@ -12,6 +12,7 @@ which always register *this* process's own hostname), the same approach
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -422,6 +423,36 @@ def test_place_counts_a_read_failure_apart_from_a_missing_key(
     assert result["provider"] == "opencode-go"
     assert result["pick"] is None
     assert result["skipped"] == {"offline": 0, "other_provider": 0, "no_key": 0, "read_failed": 1}
+
+
+def test_place_size_m_coding_with_readable_quota_picks_glm_on_that_machine(
+    redis_port, flush_redis, monkeypatch
+):
+    # Issue #99 check 1, offline substitute for the live `place` run.
+    # Real route(). Live quota is patched to two accounts with low use.
+    # Expects glm-5.3 high, placed on the machine that reads opencode-go quota.
+    reset_ms = time.time() * 1000 + 2 * 24 * 60 * 60 * 1000
+    monkeypatch.setattr(place.classify_mod, "classify", lambda *a, **kw: ("coding", "size-m"))
+    monkeypatch.setattr(
+        place.route_mod.quota_mod, "quota_usage",
+        lambda: [
+            {"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS,
+             "used_pct": 10, "resets_at": reset_ms},
+            {"provider": "opencode-go", "duration": quota.QuotaDuration.FIVE_HOURS,
+             "used_pct": 10, "resets_at": reset_ms},
+        ],
+    )
+    _write_machine(
+        redis_port, "opencode-box",
+        quota={"opencode-go": {"pct_left": 90.0, "resets_at": None, "source": "test"}},
+    )
+
+    result = place.place("fix the retry backoff", _kw(redis_port))
+
+    assert result["model"] == "opencode-go/glm-5.3"
+    assert result["effort"] == "high"
+    assert result["provider"] == "opencode-go"
+    assert result["pick"] == "opencode-box"
 
 
 def test_place_raises_coordinator_unreachable(closed_port):
