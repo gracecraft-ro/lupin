@@ -71,15 +71,16 @@ repo:
 
 1. The base branch is the integration branch, `release/next`, on the fork
    (`gracecraft-ro/lupin`). A feature PR never targets upstream `main`.
-2. A worker uses `/ship` (see rule 1). If the push fails, the worker stops.
+2. A worker follows rule 1 to push and open the PR. It can use `/ship` for
+   the work and the report. If the push fails, the worker stops.
    Report the branch name and commit range. Do not review or merge the branch.
 3. The orchestrator (the agent that dispatches and merges work) dispatches
    `/code-review` for every PR, including docs-only changes. The reviewer is
    not the worker. The reviewer's model tier is not lower than the worker's.
 4. If the review finds a problem, dispatch a fix worker with the exact
-   finding. It uses `/ship` on the same PR. Repeat until the reviewer
-   approves the current head SHA. The head SHA is the newest commit ID on the
-   branch.
+   finding. It pushes the fix to the same branch with `git push fork <branch>`.
+   Repeat until the reviewer approves the current head SHA. The head SHA is the
+   newest commit ID on the branch.
 5. The orchestrator posts the verdict on the PR.
 6. The orchestrator merges into `release/next` only when all four are true:
    1. The PR is open on the fork, `gracecraft-ro/lupin`, with base

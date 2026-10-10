@@ -154,8 +154,8 @@ Give each worker a short brief with:
 - Machine, absolute worktree path, and branch.
 - Required tests and smoke checks.
 
-Tell implementation workers to use `/ship`. Do not repeat its implementation
-checklist.
+Tell implementation workers to follow the push and PR steps in AGENTS.md
+item 1. Do not repeat the `/ship` implementation checklist.
 
 When an issue makes a major change to a web app's user interface or key user
 journey, and a preview is ready, dispatch a separate QA task with
@@ -280,8 +280,8 @@ Dispatch `/code-review` for every pull request, including docs-only changes.
 Review the current PR diff, not only the issue or a worker's report. Re-fetch
 the latest PR comments and reviews before merge.
 
-A worker ships only to the fork, with `/ship`. It does not push to upstream.
-The PR base is `release/next` on the fork:
+A worker pushes only to the fork, with `git push fork <branch>`. It does not
+push to upstream. The PR base is `release/next` on the fork:
 
 <!-- markdownlint-disable MD013 -->
 ```sh
@@ -307,7 +307,8 @@ Never dispatch Fable without the user's approval. Use Opus sparingly because
 it costs more.
 
 If the review finds a problem, dispatch a `fix` worker with the exact finding.
-Tell it to use `/ship` and update the same PR. Review the latest PR commit.
+Tell it to push with `git push fork <branch>`, as in AGENTS.md item 1, and
+update the same PR. Review the latest PR commit.
 Repeat until the reviewer approves the current head SHA. The head SHA is the
 newest commit ID on the branch.
 The orchestrator (the agent that dispatches and merges work) posts the verdict
