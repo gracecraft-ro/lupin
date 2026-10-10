@@ -21,7 +21,7 @@ import redis
 from . import claims, ledger, roadmap
 from .slots import CoordinatorUnreachable
 
-GH_TIMEOUT = 60.0
+GH_TIMEOUT = 30.0
 LIST_LIMIT = "200"
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 FILE_RE = re.compile(r"^\d{8}-\d{6}\.md$")
@@ -64,6 +64,12 @@ def _gh(args: list[str], cwd: str | None = None):
 
 def _list(args: list[str]) -> list[dict]:
     return _gh(args + ["--limit", LIST_LIMIT]) or []
+
+
+def _cut(section: str, name: str, items: list) -> list[str]:
+    if len(items) < int(LIST_LIMIT):
+        return []
+    return [f"- {section}: {name} list cut at {LIST_LIMIT} items. Some items may be missing."]
 
 
 def _parse(value) -> datetime | None:
@@ -129,18 +135,14 @@ def build_markdown(
     lines.append("- Stop: forced, no handoff" if forced else "- Stop: normal")
     lines.append("")
 
-    merged = [
-        pr for pr in _list(["pr", "list", *repo, "--state", "merged",
-                            "--search", f"merged:>={day}",
-                            "--json", "number,title,mergedAt,mergeCommit"])
-        if _in_window(pr.get("mergedAt"), start, end)
-    ]
-    closed = [
-        issue for issue in _list(["issue", "list", *repo, "--state", "closed",
-                                  "--search", f"closed:>={day}",
-                                  "--json", "number,title,closedAt"])
-        if _in_window(issue.get("closedAt"), start, end)
-    ]
+    merged_all = _list(["pr", "list", *repo, "--state", "merged",
+                        "--search", f"merged:>={day}",
+                        "--json", "number,title,mergedAt,mergeCommit"])
+    merged = [pr for pr in merged_all if _in_window(pr.get("mergedAt"), start, end)]
+    closed_all = _list(["issue", "list", *repo, "--state", "closed",
+                        "--search", f"closed:>={day}",
+                        "--json", "number,title,closedAt"])
+    closed = [issue for issue in closed_all if _in_window(issue.get("closedAt"), start, end)]
     lines.append("## Shipped")
     for pr in merged:
         commit = (pr.get("mergeCommit") or {}).get("oid", "")[:7]
@@ -149,6 +151,7 @@ def build_markdown(
         lines.append(f"- Issue #{issue['number']}: {issue['title']} (closed {issue['closedAt']})")
     if not merged and not closed:
         lines.append("- None.")
+    lines += _cut("Shipped", "merged PR", merged_all) + _cut("Shipped", "closed issue", closed_all)
     lines.append("")
 
     lines.append("## Follow-up tasks")
@@ -166,8 +169,9 @@ def build_markdown(
     lines.append("")
 
     failing = []
-    for pr in _list(["pr", "list", *repo, "--state", "open",
-                     "--json", "number,title,statusCheckRollup"]):
+    open_prs = _list(["pr", "list", *repo, "--state", "open",
+                      "--json", "number,title,statusCheckRollup"])
+    for pr in open_prs:
         names = _failing_checks(pr)
         if names:
             failing.append((pr, names))
@@ -184,6 +188,7 @@ def build_markdown(
     lines.append("## Risk")
     lines.append("Derived from GitHub facts and ledger decisions. Not checked against real ledger rows.")
     lines += risk or ["- None."]
+    lines += _cut("Risk", "open PR", open_prs) + _cut("Risk", "blocked issue", blocked)
     lines.append("")
 
     ready = _list(["issue", "list", *repo, "--state", "open", "--label", "ready",
@@ -198,10 +203,12 @@ def build_markdown(
         lines.append(f"- Issue #{issue['number']}: {issue['title']}")
     if not unclaimed:
         lines.append("- None.")
+    lines += _cut("Opportunities", "ready issue", ready)
     lines.append("")
 
     lines.append("## Evidence")
     seen = []
+    cut = []
     for kind, args in (
         ("Issue", ["issue", "list", *repo, "--state", "all",
                    "--search", f"updated:>={day}",
@@ -210,7 +217,9 @@ def build_markdown(
                 "--search", f"updated:>={day}",
                 "--json", "number,title,body,comments,updatedAt"]),
     ):
-        for item in _list(args):
+        items = _list(args)
+        cut += _cut("Evidence", kind, items)
+        for item in items:
             texts = []
             if _in_window(item.get("updatedAt"), start, end):
                 texts.append(item.get("body"))
@@ -225,6 +234,7 @@ def build_markdown(
                     lines.append(f"- {kind} #{item['number']}: ![{kind} {item['number']} image]({url})")
     if not seen:
         lines.append("- None.")
+    lines += cut
     lines.append("")
     return "\n".join(lines)
 

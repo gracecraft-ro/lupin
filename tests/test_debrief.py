@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import stat
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
-from lupin import debrief, loop_runtime
+from lupin import agent, debrief, loop_runtime
 from lupin.slots import CoordinatorUnreachable
 
 FULL = "acme/widgets"
@@ -404,3 +406,60 @@ def test_stop_writes_a_debrief_after_the_stop(monkeypatch, tmp_path: Path):
         tmp_path / "state", "widgets", tmp_path / "code" / "widgets",
         "2026-10-02T09:00:00Z", forced=True,
     )
+
+
+def test_stop_budget_fits_loop_stop_timeout(monkeypatch, tmp_path: Path):
+    """Handoff wait plus the debrief's gh calls must fit in loop.stop's timeout.
+
+    Each gh call in one debrief gets GH_TIMEOUT. The stop waits
+    HANDOFF_GRACE_S first. The sum must stay under ACTION_TIMEOUT_S["loop.stop"].
+    """
+    gh_runs = []
+
+    def fake_run(argv, **kwargs):
+        gh_runs.append((argv, kwargs["timeout"]))
+        body = {"repo": {"nameWithOwner": FULL}}.get(argv[1], [])
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(body), stderr="")
+
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    monkeypatch.setattr(debrief.subprocess, "run", fake_run)
+    monkeypatch.setattr(debrief.ledger, "read_events", lambda repo, **kw: [])
+    monkeypatch.setattr(debrief.claims, "claims_for", lambda repos, **kw: {})
+
+    path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
+
+    assert path.is_file()
+    assert gh_runs, "the debrief made no gh calls"
+    assert {timeout for _, timeout in gh_runs} == {debrief.GH_TIMEOUT}
+    budget = loop_runtime.HANDOFF_GRACE_S + len(gh_runs) * debrief.GH_TIMEOUT
+    assert budget < agent.ACTION_TIMEOUT_S["loop.stop"], (
+        f"{len(gh_runs)} gh calls x {debrief.GH_TIMEOUT}s + "
+        f"{loop_runtime.HANDOFF_GRACE_S}s grace = {budget}s"
+    )
+
+
+def _every_list_returns(count: int):
+    items = [
+        {"number": n, "title": f"item {n}", "body": None, "comments": [],
+         "mergedAt": None, "closedAt": None, "updatedAt": None,
+         "mergeCommit": None, "statusCheckRollup": []}
+        for n in range(1, count + 1)
+    ]
+    return mock.patch.object(debrief, "_gh", lambda args, cwd=None: list(items))
+
+
+def test_cut_list_is_named_in_its_section():
+    with _every_list_returns(200):
+        md = debrief.build_markdown(FULL, START, END, events=[], claimed=set())
+
+    notes = {line.split(":", 1)[0][2:] for line in md.splitlines() if "list cut at" in line}
+    assert notes == {"Shipped", "Risk", "Opportunities", "Evidence"}
+    assert "- Opportunities: ready issue list cut at 200 items. Some items may be missing." in md
+
+
+def test_list_under_the_limit_gives_no_note():
+    with _every_list_returns(199):
+        md = debrief.build_markdown(FULL, START, END, events=[], claimed=set())
+
+    assert "cut at" not in md
