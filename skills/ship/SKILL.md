@@ -86,8 +86,15 @@ branch to the fork. Open the PR on the fork. Then request review.
    stop. Report it.
    Then run `git push -u fork <branch>`. Never push any other ref.
 3. Open the PR on the fork. Set `<repo>` to the repo name in the fork URL
-   from step 1. If a PR for `<branch>` is already open, skip this step. Find its
-   number with `gh pr view <branch> --repo gracecraft-ro/<repo>`. Otherwise, run:
+   from step 1. Look for an open PR on the branch first. Run:
+
+   ```sh
+   gh pr list --repo gracecraft-ro/<repo> --head <branch> --state open \
+     --json number --jq '.[0].number'
+   ```
+
+   If the output is not empty, skip the create step. Use that number as
+   `<PR_NUMBER>`. If it is empty, run:
 
    ```sh
    gh pr create --repo gracecraft-ro/<repo> --base release/next \
@@ -106,10 +113,12 @@ branch to the fork. Open the PR on the fork. Then request review.
    If it fails, report the PR number and stop.
 
    `<PR_NUMBER>` is the number at the end of the PR URL that `gh pr create`
-   prints. `<sha>` is the output of `git rev-parse HEAD`. Then stop. Do not
-   merge. Do not wait for approval. The orchestrator dispatches a reviewer.
+   prints. If step 3 skipped `gh pr create`, use the number from the lookup in
+   step 3. `<sha>` is the output of `git rev-parse HEAD`. Then go to "Report and
+   release" below. Do not merge. Do not wait for approval. The orchestrator
+   dispatches a reviewer.
 5. If the push or PR creation fails, report the branch name and the commit
-   range. Then stop.
+   range. Then go to "Report and release" below.
 
 If the repo does not allow fork PRs, keep the local branch and report its name
 and commit range. A local commit is not a pull request and is not shipped.
