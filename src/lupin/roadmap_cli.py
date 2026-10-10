@@ -37,6 +37,7 @@ one illustrative example, not a full algorithm:
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -106,7 +107,7 @@ def build_roadmap(
     repos: list[str],
     code_dir: str = roadmap.CODE_DIR,
     refresh: bool = False,
-    claims_lookup=claims.claims_for,
+    claims_lookup=functools.partial(claims.claims_for, strict=True),
     connection: dict | None = None,
 ) -> dict:
     """Fetch open issues and the dependency DAG for `repos`, mark claimed
@@ -565,7 +566,7 @@ def run(
     refresh: bool,
     code_dir: str = roadmap.CODE_DIR,
     enabled_repos=None,
-    claims_lookup=claims.claims_for,
+    claims_lookup=functools.partial(claims.claims_for, strict=True),
     connection: dict | None = None,
     machine_records=None,
     local_host: str | None = None,
@@ -586,6 +587,10 @@ def run(
     `unreadable` is the list that `machines.machines` and
     `claims.claims_for` fill with the records they skipped. If it has
     entries, a warning gives the count.
+
+    Claims are read strictly when `claims_lookup` is not given. A corrupt
+    claim then raises. A caller that passes its own lookup, with a
+    `skipped` list, can skip a corrupt claim.
     """
     fleet_warnings: list[str] = []
     if repo:
@@ -629,12 +634,8 @@ def run(
     if dag:
         text, exit_code = render_dag(model, multi_repo)
         if as_json:
-            if exit_code != 0:
-                return json.dumps({"cycles": _cycles_json(model["cycles"])}), exit_code
-            return json.dumps(dag_to_json(model, multi_repo)), 0
-        if exit_code == 0:
-            text = _append_warnings(text, model["warnings"])
-        return text, exit_code
+            return json.dumps(dag_to_json(model, multi_repo)), exit_code
+        return _append_warnings(text, model["warnings"]), exit_code
 
     if as_json:
         return json.dumps(to_json(model, limit, stage)), 0
