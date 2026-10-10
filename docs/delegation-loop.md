@@ -10,71 +10,113 @@ This repo is `gracecraft-software/lupin`. The owner clones it to
 `/code/lupin`, the same way `ghostbook.nix` is mounted at
 `/code/ghostbook.nix`.
 
-A loop agent does not work in `/code/lupin`. Each run gets its own Git
-worktree in the loop state directory. See "State" in `AGENTS.md`.
+A loop agent does not edit the main checkout in `/code/lupin`. Each run gets
+its own Git worktree in the loop state directory. See "State" in `AGENTS.md`.
 
 ## Rule 1: push to the fork, not to the upstream repo
 
 The sandbox `gh` account is `gracecraft-ro`. It cannot push to
 `gracecraft-software/lupin` (`gh api repos/gracecraft-software/lupin --jq
 .permissions` -> `push: false, triage: false`). It owns a fork,
-`gracecraft-ro/lupin`, and can push there. So a worker pushes to the fork and
-opens a PR to the upstream repo. Closing or labeling an issue can fail
-without triage access. Check before you write it into a report.
+`gracecraft-ro/lupin`, and can push there. So a worker pushes to the fork. It opens
+the PR on the fork, against `release/next`. Closing or labeling an issue can
+fail without triage access. Check before you write it into a report.
 
-To work on an issue:
-
-1. Clone it to a task directory, and work on a branch there, not in the
-   mount itself:
+1. Fetch the fork. From the repo checkout, run:
 
    ```bash
-   test ! -e ~/jobs/lupin-<task> || { echo "job dir exists"; exit 1; }
-   git clone --shared /code/lupin ~/jobs/lupin-<task>
-   git -C ~/jobs/lupin-<task> remote add fork https://github.com/gracecraft-ro/lupin.git
+   git fetch fork
    ```
 
-   `origin` in the clone points back at the mount. Do not push to it for a
-   PR.
-
-2. Branch from the current `main`. Check that it is current first:
+2. Create a worktree for your branch. Keep its path under `.claude/worktrees/`.
+   Run:
 
    ```bash
-   git ls-remote /code/lupin
+   git worktree add <path> -b <branch> fork/release/next
    ```
 
-3. Use `/ship`. It runs `git push -u fork <branch>` and opens the PR.
+3. Push the branch to the fork with `git push fork <branch>`. Never push to
+   `origin`. Do not add a remote. Do not use `/ship`. It pushes to `origin`
+   when direct push is allowed, and it can add a remote. Open the PR on the
+   fork:
 
-On a Herdr worker you can use a Herdr worktree instead of a clone:
+   <!-- markdownlint-disable MD013 -->
+   ```sh
+   gh pr create --repo gracecraft-ro/lupin --base release/next --title "<title>" --body "Closes #N"
+   ```
+   <!-- markdownlint-enable MD013 -->
+
+On a Herdr worker, use the Herdr worktree commands:
 
 ```bash
 herdr worktree list --cwd /code/lupin
-herdr worktree create --branch <branch> --base main --cwd /code/lupin
+git -C /code/lupin fetch fork
+herdr worktree create --branch <branch> --base fork/release/next --cwd /code/lupin
 ```
 
-The worktree is a linked Git worktree, not a clone. It has no `fork` remote,
-so `/ship` must add one before it pushes.
+A linked worktree shares its remotes with the checkout it came from. If that
+checkout has no `fork` remote, stop. Then report the missing remote.
+Do not add a remote.
+
+`lupin run` still starts each loop from `origin/HEAD`, which is upstream `main`.
+It does not start from `fork/release/next`. Until the owner changes `lupin run`,
+do not use it for feature work. Create feature worktrees with the Herdr
+worktree commands above, or the manual steps in rule 1.
 
 ## Pull request and review
 
-Every change goes through a pull request. The shared steps are in "Review and
-merge each pull request" in the `delegation-loop` skill. In this repo:
+Every feature change goes through a pull request. The shared steps are in
+"Review and merge each pull request" in the `delegation-loop` skill. In this
+repo:
 
-1. The base branch is `main`.
-2. A worker uses `/ship` (see rule 1). If the push to the fork fails, it
-   reports the branch name and commit range. That branch is the PR.
-3. The orchestrator dispatches `/code-review` for every PR or branch,
-   including docs-only changes. The reviewer is not the worker. The
-   reviewer's model tier is not lower than the worker's.
+1. The base branch is the integration branch, `release/next`, on the fork
+   (`gracecraft-ro/lupin`). A feature PR never targets upstream `main`.
+2. A worker follows rule 1 to push and open the PR. It can use `/ship` for
+   the work and the report. If the push fails, the worker stops.
+   Report the branch name and commit range. Do not review or merge the branch.
+3. The orchestrator (the agent that dispatches and merges work) dispatches
+   `/code-review` for every PR, including docs-only changes. The reviewer is
+   not the worker. The reviewer's model tier is not lower than the worker's.
 4. If the review finds a problem, dispatch a fix worker with the exact
-   finding. It uses `/ship` on the same PR or branch. Repeat until the
-   reviewer approves.
-5. The orchestrator posts the verdict on the PR (or on the issue, for a
-   branch).
-6. Merge only after approval and a passing gate:
-   `nix shell nixpkgs#python3Packages.pytest -c pytest -v`. A worker or
-   reviewer never merges. Close the issue in the same pass as the merge.
+   finding. It pushes the fix to the same branch with `git push fork <branch>`.
+   Repeat until the reviewer approves the current head SHA. The head SHA is the
+   newest commit ID on the branch.
+5. The orchestrator posts the verdict on the PR.
+6. The orchestrator merges into `release/next` only when all four are true:
+   1. The PR is open on the fork, `gracecraft-ro/lupin`, with base
+      `release/next`.
+   2. A reviewer approves the current head SHA.
+   3. The fork branch contains the current `release/next`. The ancestor check
+      asks git whether one branch contains another. The check is in the
+      `delegation-loop` skill.
+   4. The repo's full gate, as its `AGENTS.md` defines it, passes.
+   Record the approved SHA before you merge. Merge with
+   `gh pr merge <PR-number> --repo gracecraft-ro/lupin --merge
+   --match-head-commit <approved-SHA>`. Do not rebase. Do not force-push.
+   See the paragraph that starts "Before a branch is merged" in the
+   `delegation-loop` skill. A worker or reviewer never merges a pull request.
+   The PR body has `Closes #N`. The merge into `release/next` does not close
+   the issue. Close it by hand in the same pass.
+
+Changes to this policy go to upstream `main`, which the owner merges. Feature
+work goes to fork `release/next`.
 
 At the end of a session, run `/handoff`.
+
+### Preview server
+
+This repo follows "Preview server" in the `delegation-loop` skill. For this
+repo:
+
+- The start command and port are in "Preview server" in `AGENTS.md`. The
+  machine is not named yet.
+- Set `LUPIN_LOOP_STATE_DIR` to a preview-only path. The default is
+  `/var/lib/delegation-loop`, which is the real fleet state.
+- Do not set `LUPIN_REDIS_HOST` to the fleet Redis unless the test needs it.
+- The state directory does not change the Herdr session. New runs use the
+  `lupin-loops` session (`SESSION_NAME` in `src/lupin/loop_runtime.py`). Older
+  loops may use an old session until they stop.
+- Do not use the start, stop, or run controls on the preview dashboard.
 
 ## Other rules
 
@@ -86,5 +128,6 @@ applies is rule 1 above — push to the fork, not to the upstream repo.
 Before you merge or dispatch anything, check for work already done:
 
 ```bash
-git -C /code/lupin branch --no-merged main
+git -C /code/lupin fetch fork
+git -C /code/lupin branch --no-merged fork/release/next
 ```

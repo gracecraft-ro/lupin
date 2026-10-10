@@ -404,12 +404,65 @@ nix shell nixpkgs#python3Packages.pytest -c pytest -v
 
 ## Pull requests, review, and handoff
 
-Every change goes through a pull request. The base branch is `main`.
+Every feature change goes through a pull request to the fork's `release/next`.
+Policy changes go to upstream `main` for the owner to merge. The loop policy is
+in `docs/delegation-loop.md`.
 
-1. Use `/ship`. It pushes the branch and opens a PR with `Closes #N`. If the
-   push is denied, it pushes to a fork. If that fails, report the branch name
-   and commit range. That branch is the PR.
+1. Push the branch to the fork with `git push fork <branch>`. Never push to
+   `origin`. Do not add a remote. Do not use `/ship`. It pushes to `origin`
+   when direct push is allowed, and it can add a remote. Open the PR on the
+   fork:
+
+   <!-- markdownlint-disable MD013 -->
+   ```sh
+   gh pr create --repo gracecraft-ro/<repo> --base release/next --title "<title>" --body "Closes #N"
+   ```
+   <!-- markdownlint-enable MD013 -->
+
+   The PR body has `Closes #N`. The merge into `release/next` does not close
+   the issue. Close it by hand in the same pass. If the push fails, report the
+   branch name and commit range. Do not merge that branch. The merge rules are
+   in the `delegation-loop` skill.
 2. Do not merge your own work. A reviewer who is not the author runs
-   `/code-review`. The orchestrator merges after approval and a passing gate.
+   `/code-review`. The orchestrator (the agent that dispatches and merges
+   work) merges into `release/next` only when all four are true:
+   1. The PR is open on the fork, `gracecraft-ro/<repo>`, with base
+      `release/next`.
+   2. A reviewer approves the current head SHA. The head SHA is the newest
+      commit ID on the branch.
+   3. The fork branch contains the current `release/next`. The ancestor check
+      asks git whether one branch contains another. The check is in the
+      `delegation-loop` skill.
+   4. The repo's full gate, as its `AGENTS.md` defines it, passes.
 3. At the end of a session, run `/handoff`. It runs `lupin ledger append`.
 4. Loop details for this repo: `docs/delegation-loop.md`.
+
+### Preview server
+
+This repo has a runnable dashboard. Its preview serves `release/next`.
+
+- Worktree: `.claude/worktrees/preview`. The skill gives the setup commands.
+- Start command. Run it from the preview worktree:
+
+```sh
+nix develop --command env \
+  LUPIN_LOOP_STATE_DIR="$HOME/.local/state/lupin-preview" PYTHONPATH=src \
+  python3 -c '
+import sys
+from lupin.cli import main
+sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
+'
+```
+
+- Port: `8789`. Check it is free with `ss -ltn` first. The `ss` command lists
+  listening ports.
+- Machine: not set yet. The owner names it.
+- Owner tunnel command: `ssh -N -L 8789:127.0.0.1:8789 MACHINE`.
+- Local URL: `http://localhost:8789`.
+- Keep it running: a Herdr pane, or `systemd-run --user`. The `systemd-run`
+  command starts a command as a background service.
+- Never bind to `0.0.0.0`. This is a security rule.
+- Do not set `LUPIN_REDIS_HOST` to the fleet Redis unless the test needs it.
+- Do not use the start, stop, or run controls on this dashboard. New runs use
+  the `lupin-loops` session. Older loops may use an old session until they
+  stop.
