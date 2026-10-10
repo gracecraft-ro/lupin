@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import slots, slots_redis
+from . import debrief, slots, slots_redis
 
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 PLATFORMS = {"claude", "omp"}
@@ -1137,9 +1137,21 @@ def stop_loop(repo: str, *, force: bool = False, grace: float = HANDOFF_GRACE_S)
         metadata["workspace_id"] = None
         metadata["pane_id"] = None
         _write_metadata(repo, metadata)
-        return f"stopped {repo}" + (f"; report saved to {report}" if report else "") + handoff_note
+        message = f"stopped {repo}" + (f"; report saved to {report}" if report else "") + handoff_note
     finally:
         lock.close()
+    _write_debrief(repo, metadata, forced=force)
+    return message
+
+
+def _write_debrief(repo: str, metadata: dict, *, forced: bool) -> None:
+    """Best effort: the stop has already happened, so a failure only warns."""
+    try:
+        debrief.write_debrief(
+            STATE_DIR, repo, CODE_DIR / repo, metadata.get("started_at"), forced=forced,
+        )
+    except Exception as exc:
+        print(f"lupin loop: no debrief for {repo}: {exc}", file=sys.stderr)
 
 
 def peek_loop(repo: str, lines: int = 60) -> str:
