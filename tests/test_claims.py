@@ -93,6 +93,28 @@ def test_claims_for_across_repos_mixed_claimed_and_unclaimed(redis_port, flush_r
     assert result["gracecraft/nix#212"]["session"] == "holder-b"
 
 
+def test_claims_for_reports_seconds_left_only_when_asked(redis_port, flush_redis):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    claims.claim("gracecraft/lupin#6", "holder-a", ttl=100, **kw)
+
+    plain = claims.claims_for(["gracecraft/lupin"], **kw)
+    timed = claims.claims_for(["gracecraft/lupin"], with_ttl=True, **kw)
+
+    assert "ttl" not in plain["gracecraft/lupin#6"]
+    assert 90 < timed["gracecraft/lupin#6"]["ttl"] <= 100
+    assert timed["gracecraft/lupin#6"]["session"] == "holder-a"
+
+
+def test_claims_for_ttl_is_none_when_the_key_never_expires(redis_port, flush_redis):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set("lupin:v1:claim:gracecraft/lupin#7", '{"host": "h", "session": "s", "since": 1}')
+
+    result = claims.claims_for(["gracecraft/lupin"], with_ttl=True, **kw)
+
+    assert result["gracecraft/lupin#7"]["ttl"] is None
+
+
 def test_claims_for_only_returns_repos_asked_for(redis_port, flush_redis):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     claims.claim("gracecraft/lupin#6", "holder-a", **kw)

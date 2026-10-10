@@ -201,6 +201,16 @@ def release_claim(
     return bool(result)
 
 
+def _get_with_ttl(client, key: str) -> tuple[str | None, int]:
+    """The value and the milliseconds left, read in one Redis round trip so
+    the two always describe the same claim.
+    """
+    pipe = client.pipeline()
+    pipe.get(key)
+    pipe.pttl(key)
+    return tuple(pipe.execute())
+
+
 def claims_for(
     repos: list[str],
     *,
@@ -208,10 +218,14 @@ def claims_for(
     redis_port: int | None = None,
     redis_username: str | None = None,
     redis_password: str | None = None,
+    with_ttl: bool = False,
 ) -> dict[str, dict]:
     """Return `{"<owner>/<repo>#<n>": {"host", "session", "since"}}` for
     every currently-claimed issue in `repos` (each an `"<owner>/<repo>"`
     string, no issue number).
+
+    With `with_ttl=True`, each value also has `"ttl"`: the seconds Redis
+    still holds the claim. It is `None` if the key has no expiry.
 
     The integration point future `roadmap` (#10) and `quest` (#11) commands
     import to find out which of their issues are off-limits -- pass the
@@ -231,10 +245,12 @@ def claims_for(
             owner_repo, _sep, _number = target.rpartition("#")
             if owner_repo not in repos:
                 continue
-            raw = _call_with_retry(lambda k=key: client.get(k))
+            raw, ttl_ms = _call_with_retry(lambda k=key: _get_with_ttl(client, k))
             if raw is None:
                 continue
             result[target] = json.loads(raw)
+            if with_ttl:
+                result[target]["ttl"] = ttl_ms / 1000 if ttl_ms >= 0 else None
         return result
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable("claims_for") from exc

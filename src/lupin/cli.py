@@ -341,7 +341,7 @@ def _ledger_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _roadmap_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--repo", default=None, help="only this repo (default: every enabled repo)")
+    parser.add_argument("--repo", default=None, help="only this repo (default: every repo that any machine enables)")
     parser.add_argument("--limit", type=int, default=10, help="show the top N (default: 10)")
     parser.add_argument("--stage", choices=["ready", "blocked", "all"], default="ready")
     parser.add_argument("--dag", action="store_true", help="draw dependencies between tasks")
@@ -1299,11 +1299,12 @@ def _cmd_roadmap(args: argparse.Namespace) -> int:
     # which has no such flag, and `resolve_connection` falls back to the
     # same default fleet config every other reader uses.
     connection = machines.resolve_connection(**_claim_kwargs(args))
-    claims_lookup = functools.partial(claims.claims_for, **connection)
+    claims_lookup = functools.partial(claims.claims_for, with_ttl=True, **connection)
     text, code = roadmap_cli.run(
         args.repo, args.limit, args.stage, args.dag, args.json, args.refresh,
         claims_lookup=claims_lookup,
         connection=connection,
+        machine_records=functools.partial(machines.machines, connection),
     )
     print(text)
     return code
