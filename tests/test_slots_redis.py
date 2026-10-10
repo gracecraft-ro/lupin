@@ -8,6 +8,8 @@ there and shared with any future redis-backed test module.
 from __future__ import annotations
 
 import json
+import socket
+import threading
 import time
 
 import pytest
@@ -178,9 +180,9 @@ def test_refused_login_on_bmo_status_raises(auth_redis_port, tmp_path, capsys, n
     assert "Falling back" not in capsys.readouterr().err
 
 
-def test_refused_login_makes_one_failed_login_per_call(auth_redis_port, no_client_retry):
-    # The server counts each failed AUTH in INFO stats. `no_client_retry`
-    # turns off redis-py's own retries, so this checks `_call_with_retry` only.
+def test_refused_login_makes_one_failed_login_per_call(auth_redis_port):
+    # Production client, real server. The server counts each failed AUTH in
+    # INFO stats. redis-py's own retry must not send the password again.
     admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
     before = admin.info("stats")["acl_access_denied_auth"]
 
@@ -190,6 +192,52 @@ def test_refused_login_makes_one_failed_login_per_call(auth_redis_port, no_clien
         )
 
     assert admin.info("stats")["acl_access_denied_auth"] - before == 1
+
+
+def test_refused_login_is_not_retried_by_the_lupin_layer(auth_redis_port, no_client_retry):
+    # `no_client_retry` turns off redis-py's own retries, so this checks
+    # `_call_with_retry` alone.
+    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
+    before = admin.info("stats")["acl_access_denied_auth"]
+
+    with pytest.raises(slots_redis.CoordinatorAuthFailed):
+        slots_redis.acquire(
+            "not-bmo", "a", redis_host="127.0.0.1", redis_port=auth_redis_port, redis_password="wrong-pass"
+        )
+
+    assert admin.info("stats")["acl_access_denied_auth"] - before == 1
+
+
+def test_dropped_connection_is_still_retried():
+    # A real socket. Every connection is closed at once, which redis-py sees
+    # as a transient ConnectionError. The lupin layer makes two tries on its
+    # own, so more than two connections means the client retried too.
+    listener = socket.create_server(("127.0.0.1", 0))
+    listener.settimeout(0.1)
+    port = listener.getsockname()[1]
+    accepted = []
+    stop = threading.Event()
+
+    def hang_up_on_every_connection():
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except socket.timeout:
+                continue
+            accepted.append(conn)
+            conn.close()
+
+    thread = threading.Thread(target=hang_up_on_every_connection, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(slots.CoordinatorUnreachable):
+            slots_redis.acquire("not-bmo", "a", redis_host="127.0.0.1", redis_port=port)
+    finally:
+        stop.set()
+        thread.join()
+        listener.close()
+
+    assert len(accepted) > 2
 
 
 @pytest.mark.parametrize(

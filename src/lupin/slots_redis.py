@@ -43,7 +43,8 @@ A refused login raises `CoordinatorAuthFailed` for every slot. It is a
 subclass of `CoordinatorUnreachable`, so existing handlers still catch it.
 An ACL-denied command raises redis-py's `NoPermissionError` as-is.
 redis-py's `AuthenticationError` is a subclass of `ConnectionError`. Catch
-it first. `docs/redis-schema.md` lists the result of each call.
+it first. The client's own retry skips it too (`_RetryUnlessRefused`).
+`docs/redis-schema.md` lists the result of each call.
 
 Claims and ledger streams are fleet keys. `claims.py` and `ledger.py`
 implement them separately. Neither uses a local fallback when Redis is
@@ -57,6 +58,8 @@ import time
 from pathlib import Path
 
 import redis
+from redis.backoff import ExponentialWithJitterBackoff
+from redis.retry import Retry
 
 from . import slots as local_slots
 from ._lease_runtime import run_with_lease, split_lease
@@ -130,6 +133,22 @@ return 0
 """
 
 
+class _RetryUnlessRefused(Retry):
+    """redis-py's default retry, except a refused login is not retried.
+
+    redis-py's AuthenticationError is a ConnectionError, so the default
+    Retry tries again. Each try sends the password again.
+    """
+
+    def call_with_retry(self, do, fail, is_retryable=None, with_failure_count=False):
+        def retryable(exc):
+            if isinstance(exc, redis.exceptions.AuthenticationError):
+                return False
+            return is_retryable is None or is_retryable(exc)
+
+        return super().call_with_retry(do, fail, retryable, with_failure_count)
+
+
 def _client(
     redis_host: str | None,
     redis_port: int | None,
@@ -144,6 +163,8 @@ def _client(
         socket_connect_timeout=CONNECT_TIMEOUT,
         socket_timeout=CONNECT_TIMEOUT,
         decode_responses=True,
+        # Same backoff and count as redis-py's default Retry.
+        retry=_RetryUnlessRefused(ExponentialWithJitterBackoff(base=0.01, cap=1), retries=10),
     )
 
 
