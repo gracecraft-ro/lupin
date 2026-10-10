@@ -124,6 +124,17 @@ def _in_window(value, start: datetime, end: datetime) -> bool:
     return when is not None and start <= when <= end
 
 
+def _well_formed(event: dict) -> bool:
+    """Return False when a field the debrief reads has the wrong type."""
+    if not isinstance(event.get("issue", 0), int):
+        return False
+    for key in ("next", "decisions"):
+        texts = event.get(key, [])
+        if not isinstance(texts, list) or not all(isinstance(text, str) for text in texts):
+            return False
+    return True
+
+
 def _failing_checks(pr: dict) -> list[str]:
     names = []
     for check in pr.get("statusCheckRollup") or []:
@@ -163,7 +174,10 @@ def build_markdown(
     time_limit = _TimeLimit(DEBRIEF_TIME_LIMIT_S) if time_limit is None else time_limit
     window_events = (
         [] if forced or events is None
-        else [e for e in events if _in_window(e.get("timestamp"), start, end)]
+        else [
+            e for e in events
+            if _well_formed(e) and _in_window(e.get("timestamp"), start, end)
+        ]
     )
     lines = [f"# Debrief: {full_name}", "", "## Window", f"- From: {_iso(start)}", f"- To: {_iso(end)}"]
     lines.append("- Stop: forced, no handoff" if forced else "- Stop: normal")

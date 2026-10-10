@@ -240,6 +240,41 @@ def test_malformed_ledger_row_keeps_other_sections(
     assert "## Evidence" in text
 
 
+def test_wrong_type_ledger_row_is_skipped_and_other_rows_kept(
+    tmp_path: Path, monkeypatch, redis_port, flush_redis
+):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    # The first row has "next" as the number 5, not a list. Real Redis, real ledger.read_events.
+    client = redis.Redis(host="127.0.0.1", port=redis_port)
+    client.xadd(ledger._stream_key(FULL), {
+        "ts": "2026-10-02T10:00:00Z", "host": "h", "event": "shipped", "next": "5",
+    })
+    client.xadd(ledger._stream_key(FULL), {
+        "ts": "2026-10-02T11:00:00Z", "host": "h", "event": "shipped", "issue": "5",
+        "next": json.dumps(["Write docs"]),
+    })
+    real_read_events = debrief.ledger.read_events
+    real_claims_for = debrief.claims.claims_for
+    monkeypatch.setattr(debrief, "_gh", FakeGh(dict(RESPONSES)))
+    monkeypatch.setattr(
+        debrief.ledger, "read_events",
+        functools.partial(real_read_events, redis_host="127.0.0.1", redis_port=redis_port),
+    )
+    monkeypatch.setattr(
+        debrief.claims, "claims_for",
+        functools.partial(real_claims_for, redis_host="127.0.0.1", redis_port=redis_port),
+    )
+
+    path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
+
+    text = path.read_text(encoding="utf-8")
+    assert "- #5: Write docs" in _section(text, "Follow-up tasks")
+    assert "- PR #11: Shipped feature" in text
+    assert "## Risk" in text
+    assert "## Evidence" in text
+
+
 def test_ledger_note_gives_the_redis_reason(tmp_path: Path, monkeypatch):
     checkout = tmp_path / "widgets"
     checkout.mkdir()
