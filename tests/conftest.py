@@ -73,9 +73,8 @@ def closed_port() -> int:
 def no_client_retry(monkeypatch):
     """Make `slots_redis._client` return a client that does not retry.
 
-    redis-py retries a refused login about ten times, with backoff. That
-    takes several seconds per call. A refusal is the same error with or
-    without retries, so tests that only check the refusal use this.
+    A default client took about four seconds to report a refused login in a local run.
+    Use this fixture in tests that only check a refusal.
     """
     from redis.backoff import NoBackoff
     from redis.retry import Retry

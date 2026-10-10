@@ -122,6 +122,33 @@ def test_fleet_run_uses_only_per_machine_signing_keys(monkeypatch, tmp_path, cap
 
 
 
+def test_fleet_run_refused_login_names_the_password_setting(auth_redis_port, monkeypatch, capsys):
+    connection = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port}
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: connection)
+
+    assert cli.main(["fleet-run"]) == 3
+    err = capsys.readouterr().err
+    assert "refused the login" in err
+    assert "Set --redis-password or LUPIN_REDIS_PASSWORD" in err
+    assert "machine registry" not in err
+
+
+def test_run_on_another_machine_refused_login_names_the_password_setting(
+    auth_redis_port, monkeypatch, capsys
+):
+    connection = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port}
+    monkeypatch.setenv("LUPIN_CMD_SIGNING_KEY", "shared-secret")
+    monkeypatch.setattr(machines, "hostname", lambda: "pihome")
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: connection)
+
+    assert cli.main(["run", "widgets", "--machine", "jesus"]) == 3
+    err = capsys.readouterr().err
+    assert "refused the login" in err
+    assert "Set --redis-password or LUPIN_REDIS_PASSWORD" in err
+    assert "For the loop start on 'jesus'." in err
+
+
 def test_fleet_run_queues_signed_run_to_worker(redis_port, flush_redis, monkeypatch, tmp_path, capsys):
     connection = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     key_dir = tmp_path / "keys"

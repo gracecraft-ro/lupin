@@ -54,9 +54,9 @@ Exit codes, by design (see #198's architecture plan):
      unreachable -- `bmo` falls back to the `local` backend instead (see
      `slots_redis.py`), so it does not reach this exit code. Claims have no
      local fallback at all, so `claim`/`renew-claim`/`release-claim` return
-     3 for every unreachable-Redis case. A slot call that Redis refuses (a
-     bad login, or a command the ACL denies) also returns 3, except for
-     `bmo`. The message names the cause.
+     3 for every unreachable-Redis case. For a slot other than `bmo`,
+     `acquire` and `release` return 3 when Redis refuses a login. They also
+     return 3 when the ACL denies a command. The message names the cause.
   1  any other error (malformed lease id, bad JSON input, hold with neither
      --lease nor <slot>/--holder, etc.) -- also `renew-claim`/`release-claim`
      when the caller isn't the claim's current holder.
@@ -813,8 +813,7 @@ def _backend_kwargs(args: argparse.Namespace) -> dict:
 
 
 def _print_auth_failed(exc: slots_redis.CoordinatorAuthFailed, what: str) -> None:
-    """Print a Redis refusal. `what` names the slot or lease, as the
-    unreachable message does.
+    """Print a Redis refusal. `what` names the failed action, for example `slot 'bmo'`.
     """
     setting = "--redis-password or LUPIN_REDIS_PASSWORD"
     print(f"lupin: {exc.for_user(setting)} For {what}.", file=sys.stderr)
@@ -1509,6 +1508,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 issuer=local_host,
                 wait_s=args.wait,
             )
+        except slots_redis.CoordinatorAuthFailed as exc:
+            _print_auth_failed(exc, f"the loop start on {machine!r}")
+            return 3
         except slots.CoordinatorUnreachable as exc:
             print(f"cannot reach the redis coordinator to start a loop on {machine!r}: {exc}", file=sys.stderr)
             return 3
@@ -1571,6 +1573,9 @@ def _cmd_fleet_run(args: argparse.Namespace) -> int:
             signing_keys=signing_keys,
             connection=connection,
         )
+    except slots_redis.CoordinatorAuthFailed as exc:
+        _print_auth_failed(exc, "fleet-run")
+        return 3
     except slots.CoordinatorUnreachable as exc:
         print(f"cannot reach the redis coordinator: {exc}", file=sys.stderr)
         return 3

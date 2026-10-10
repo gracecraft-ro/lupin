@@ -2732,7 +2732,7 @@ def render_loop_fullscreen(entry: dict, tail: str | None, lines: int, group: str
     ).encode("utf-8")
 
 
-# Where `lupin serve` reads the fleet Redis password. See `machines.resolve_connection`.
+# `lupin serve` reads the fleet Redis password through `machines.resolve_connection`.
 _SERVE_PASSWORD_SETTING = "--redis-password, LUPIN_REDIS_PASSWORD, or the redis-password credential"
 
 

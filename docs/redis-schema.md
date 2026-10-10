@@ -480,12 +480,23 @@ Connect timeout 2s, 1 retry, then:
 | GitHub data cache | `pihome` calls `gh` directly anyway (it just can't publish for other machines). Every other machine reports "no data yet" instead of calling `gh` itself — no direct-call fallback here, unlike the resources above. |
 | Quota snapshot | A machine with real provider credentials still returns its own live reading (it just can't publish for other machines). A machine with no credentials for a provider has nothing to fall back to and reports "no data cached yet" for it. |
 
-For a slot call, a refused login or a refused command follows the same fallback rule as an unreachable Redis.
-The `bmo` slot falls back to `local`.
-Other slots raise `CoordinatorAuthFailed`.
-For a slot other than `bmo`, `renew` returns `False` for a refused login. It raises `NoPermissionError` for a refused command.
-The slot commands in `cli.py` print the real reason. So does the `benchmark_fetch.py` snapshot.
-Other commands and routes print "cannot reach" for a refused login.
+Redis refuses a login when the password is bad or missing.
+Redis refuses a command when the ACL denies it.
+Both cases are answers from Redis, not outages. The table shows each result.
+In the table, login means a refused login. ACL means an ACL denial. Other means a slot other than `bmo`.
+"Uses `local`" means the call returns the result of the `local` backend.
+
+| Call | `bmo` login | `bmo` ACL | Other login | Other ACL |
+| --- | --- | --- | --- | --- |
+| `acquire` | Uses `local`; warns | `NoPermissionError` | `CoordinatorAuthFailed` | `CoordinatorAuthFailed` |
+| `renew` | Uses `local`; warns | `NoPermissionError` | Returns `False` | `NoPermissionError` |
+| `release` | Uses `local`; warns | `NoPermissionError` | `CoordinatorAuthFailed` | `CoordinatorAuthFailed` |
+| `set_max` | `CoordinatorAuthFailed` | `CoordinatorAuthFailed` | `CoordinatorAuthFailed` | `CoordinatorAuthFailed` |
+| `status` | Uses `local`; warns | `NoPermissionError` | Uses `local`; warns | `NoPermissionError` |
+
+The `acquire`, `hold`, `release`, `reconcile`, `run`, and `fleet-run`
+commands print the reason and exit with code 3 for a refused login.
+The CLI does not catch `NoPermissionError`.
 
 After an outage ends, a holder tries to renew its lease. If the lease
 already expired, `lupin` logs "lease lost" and tries to acquire again.

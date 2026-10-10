@@ -3511,7 +3511,9 @@ class TestReposPageRoutes:
         handler.do_POST()
         assert handler.reply.call_args.args[1] == 502
 
-    def test_slot_max_route_refused_login_names_the_repo_slot(self, tmp_path, monkeypatch, auth_redis_port, no_client_retry):
+    def test_slot_max_route_refused_login_names_the_repo_slot(
+        self, tmp_path, monkeypatch, auth_redis_port, no_client_retry
+    ):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
         _make_repo(tmp_path, "widgets")
         handler = _repos_handler(_kw(auth_redis_port))

@@ -215,6 +215,49 @@ def test_renew_re_raises_an_acl_denial_for_a_non_bmo_slot(auth_redis_port):
         admin.execute_command("ACL", "DELUSER", "no-eval")
 
 
+def test_renew_refused_login_on_a_non_bmo_slot_returns_false(auth_redis_port, no_client_retry):
+    assert slots_redis.renew("not-bmo:a", redis_host="127.0.0.1", redis_port=auth_redis_port) is False
+
+
+@pytest.fixture
+def no_eval_kw(auth_redis_port):
+    """Connection kwargs for a user that can only GET, SET and PING. EVAL and SCAN are denied."""
+    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
+    admin.execute_command("ACL", "SETUSER", "no-eval", "on", ">no-eval-pw", "~lupin:*", "+get", "+set", "+ping")
+    yield {"redis_username": "no-eval", "redis_password": "no-eval-pw"}
+    admin.execute_command("ACL", "DELUSER", "no-eval")
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda kw: slots_redis.acquire("bmo", "a", max_holders=1, **kw),
+        lambda kw: slots_redis.renew("bmo:a", **kw),
+        lambda kw: slots_redis.release("bmo:a", **kw),
+        lambda kw: slots_redis.status(**kw),
+    ],
+    ids=["acquire", "renew", "release", "status"],
+)
+def test_bmo_acl_denial_raises_and_does_not_fall_back(call, auth_redis_port, no_eval_kw, tmp_path, capsys):
+    kw = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, "state_root": str(tmp_path), **no_eval_kw}
+    with pytest.raises(redis_lib.exceptions.NoPermissionError):
+        call(kw)
+    assert "Falling back" not in capsys.readouterr().err
+
+
+def test_bmo_refused_login_falls_back_to_local_for_each_call(auth_redis_port, tmp_path, no_client_retry):
+    root = str(tmp_path)
+    kw = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, "state_root": root}
+
+    lease = slots_redis.acquire("bmo", "a", max_holders=1, **kw)
+    assert lease.startswith("bmo:")
+    assert slots.status(state_root=root)["bmo"]["holders"] == 1
+    assert slots_redis.renew(lease, **kw) is True
+    assert slots_redis.status(**kw)["bmo"]["holders"] == 1
+    assert slots_redis.release(lease, **kw) is True
+    assert slots.status(state_root=root)["bmo"]["holders"] == 0
+
+
 REDIS_ARGS = ["--redis-host", "127.0.0.1", "--redis-port", "{port}"]
 
 
