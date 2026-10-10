@@ -409,9 +409,9 @@ Policy changes go to upstream `main` for the owner to merge. The loop policy is
 in `docs/delegation-loop.md`.
 
 1. Use `/ship`. It pushes the branch to the fork and opens a PR with
-   `Closes #N`. The PR base is `release/next` on the fork. If the push fails,
-   report the branch name and commit range. Do not merge that branch. The merge
-   rules are in the `delegation-loop` skill.
+   `Closes #N`. Pass `--base release/next` to `gh pr create`. If the push
+   fails, report the branch name and commit range. Do not merge that branch.
+   The merge rules are in the `delegation-loop` skill.
 2. Do not merge your own work. A reviewer who is not the author runs
    `/code-review`. The orchestrator merges into `release/next` only when all
    four conditions in the `delegation-loop` skill are true.
@@ -439,7 +439,7 @@ sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
 - Machine: not set yet. The owner names it.
 - Owner tunnel command: `ssh -N -L 8789:127.0.0.1:8789 MACHINE`.
 - Local URL: `http://localhost:8789`.
-- Supervisor: a Herdr pane, or `systemd-run --user`.
+- Keep it running: a Herdr pane, or `systemd-run --user`.
 - Never bind to `0.0.0.0`. This is a security rule.
 - Do not set `LUPIN_REDIS_HOST` to the fleet Redis unless the test needs it.
 - Do not use the start, stop, or run controls on this dashboard. Herdr uses
