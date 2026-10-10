@@ -107,3 +107,36 @@ def auth_redis_port():
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+@pytest.fixture
+def make_checkout(tmp_path):
+    """Return a function that makes a real git checkout with an `origin` remote.
+
+    The checkout has one commit on `main`, and `origin/HEAD` points to
+    `origin/main`. The bare `origin` repo is under `tmp_path/origins`.
+    """
+
+    def git(cwd, *args):
+        subprocess.run(
+            [
+                "git", "-c", "user.name=test", "-c", "user.email=test@example.com",
+                "-c", "commit.gpgsign=false", *args,
+            ],
+            cwd=cwd, check=True, capture_output=True,
+        )
+
+    def make(path):
+        origin = tmp_path / "origins" / f"{path.name}.git"
+        origin.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+        git(tmp_path, "clone", "-q", str(origin), str(path))
+        (path / "README.md").write_text("hello\n", encoding="utf-8")
+        git(path, "add", "README.md")
+        git(path, "commit", "-q", "-m", "first commit")
+        git(path, "push", "-q", "origin", "main")
+        git(path, "remote", "set-head", "origin", "--auto")
+        return path
+
+    return make
