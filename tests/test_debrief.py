@@ -58,6 +58,13 @@ def _debrief_client_on(redis_port):
     return lambda *_args: redis.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
 
 
+def _assert_claims_client_is_bounded(claims_for):
+    # write_debrief passes the short-timeout client from debrief_client.
+    client = claims_for.call_args.kwargs["client"]
+    assert client.connection_pool.connection_kwargs["socket_timeout"] == debrief.slots_redis.DEBRIEF_TIMEOUT_S
+    assert client.get_retry().get_retries() == 0
+
+
 RESPONSES = {
     "repo view": {"nameWithOwner": FULL},
     "pr list merged": [
@@ -363,7 +370,9 @@ def test_claims_error_still_writes_the_debrief(tmp_path: Path, monkeypatch):
     path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
 
     text = path.read_text(encoding="utf-8")
-    claims_for.assert_called_once_with([FULL], client=mock.ANY)
+    claims_for.assert_called_once()
+    assert claims_for.call_args.args == ([FULL],)
+    _assert_claims_client_is_bounded(claims_for)
     assert "Claims not read. Listed issues may already be claimed." in text
     assert "- Issue #41: Ready two claimed" in text
 
@@ -382,7 +391,9 @@ def test_write_debrief_skips_issues_claimed_in_redis(tmp_path: Path, monkeypatch
     text = path.read_text(encoding="utf-8")
     assert "Ready two claimed" not in text
     assert "- Issue #40: Ready one" in text
-    debrief.claims.claims_for.assert_called_once_with([FULL], client=mock.ANY)
+    debrief.claims.claims_for.assert_called_once()
+    assert debrief.claims.claims_for.call_args.args == ([FULL],)
+    _assert_claims_client_is_bounded(debrief.claims.claims_for)
 
 
 def test_redis_calls_do_not_grow_with_the_claim_count(
