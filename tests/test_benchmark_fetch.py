@@ -536,6 +536,20 @@ def test_refresh_unreachable_redis_is_honest_not_a_crash(closed_port):
     assert "unreachable" in result["stale_reason"]
 
 
+def test_refresh_refused_login_says_so_not_unreachable(auth_redis_port, no_client_retry):
+    with (
+        mock.patch.object(benchmark_fetch, "fetch_benchmark_scores") as fetch,
+        mock.patch.object(benchmark_fetch, "model_ids_for_scoring", return_value=["x"]),
+    ):
+        result = benchmark_fetch.refresh_snapshot(redis_host="127.0.0.1", redis_port=auth_redis_port)
+
+    fetch.assert_not_called()
+    assert result["live"] is False
+    assert "unreachable" not in result["stale_reason"]
+    assert "Check the Redis password" in result["stale_reason"]
+    assert "redis-password credential or LUPIN_REDIS_PASSWORD" in result["stale_reason"]
+
+
 def test_refresh_releases_lock_even_if_fetch_raises(redis_port, flush_redis):
     with (
         mock.patch.object(benchmark_fetch, "fetch_benchmark_scores", side_effect=RuntimeError("boom")),

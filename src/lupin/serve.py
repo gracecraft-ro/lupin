@@ -2732,6 +2732,10 @@ def render_loop_fullscreen(entry: dict, tail: str | None, lines: int, group: str
     ).encode("utf-8")
 
 
+# Where `lupin serve` reads the fleet Redis password. See `machines.resolve_connection`.
+_SERVE_PASSWORD_SETTING = "--redis-password, LUPIN_REDIS_PASSWORD, or the redis-password credential"
+
+
 def render_error(msg: str) -> bytes:
     return page(
         "error",
@@ -3197,6 +3201,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             slots_redis.set_max(_repo_slot_name(repo), max_value, **self.fleet_connection)
+        except slots_redis.CoordinatorAuthFailed as exc:
+            self.reply(render_error(exc.for_user(_SERVE_PASSWORD_SETTING)), 502)
+            return
         except CoordinatorUnreachable:
             self.reply(render_error("cannot reach the machine registry"), 502)
             return
@@ -3738,6 +3745,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             slots_redis.set_max(slot, max_value, **self.fleet_connection)
+        except slots_redis.CoordinatorAuthFailed as exc:
+            self.reply(render_error(exc.for_user(_SERVE_PASSWORD_SETTING)), 502)
+            return
         except machines.CoordinatorUnreachable:
             self.reply(render_error("cannot reach the machine registry"), 502)
             return

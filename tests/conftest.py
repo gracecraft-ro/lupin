@@ -69,6 +69,34 @@ def closed_port() -> int:
     return _free_port()
 
 
+@pytest.fixture
+def no_client_retry(monkeypatch):
+    """Make `slots_redis._client` return a client that does not retry.
+
+    redis-py retries a refused login about ten times, with backoff. That
+    takes several seconds per call. A refusal is the same error with or
+    without retries, so tests that only check the refusal use this.
+    """
+    from redis.backoff import NoBackoff
+    from redis.retry import Retry
+
+    from lupin import slots_redis
+
+    def client(redis_host, redis_port, redis_username=None, redis_password=None):
+        return redis_lib.Redis(
+            host=redis_host or "localhost",
+            port=redis_port or 6379,
+            username=redis_username,
+            password=redis_password,
+            socket_connect_timeout=slots_redis.CONNECT_TIMEOUT,
+            socket_timeout=slots_redis.CONNECT_TIMEOUT,
+            decode_responses=True,
+            retry=Retry(NoBackoff(), 0),
+        )
+
+    monkeypatch.setattr(slots_redis, "_client", client)
+
+
 @pytest.fixture(scope="session")
 def auth_redis_port():
     """A separate server from `redis_port`, with `requirepass` set -- tests

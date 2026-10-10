@@ -634,6 +634,8 @@ def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connec
         lease = slots_redis.acquire(LOCK_SLOT, holder, wait=0.0, ttl=_lock_ttl(len(needed)), max_holders=1, **connection)
     except slots_redis.SlotFull:
         return cached or _unavailable("another machine is already fetching benchmarks; no cached snapshot yet")
+    except slots_redis.CoordinatorAuthFailed as exc:
+        return _unavailable(exc.for_user("the redis-password credential or LUPIN_REDIS_PASSWORD"))
     except CoordinatorUnreachable as exc:
         return _unavailable(f"redis unreachable: {exc}")
 

@@ -1979,6 +1979,16 @@ class TestMachinesPageIntegration:
         handler.do_GET()
         assert handler.reply.call_args.args[1] == 502
 
+    def test_refused_login_on_slot_max_is_502_and_names_the_password(self, auth_redis_port, no_client_retry):
+        handler = _post_handler("/machines/slot-max", b"slot=bmo&max=5", _kw(auth_redis_port))
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 502
+        body = handler.reply.call_args.args[0].decode()
+        assert "Check the Redis password" in body
+        assert "redis-password credential" in body
+        assert "unreachable" not in body
+
     def test_slot_max_control_changes_what_status_reports(self, redis_port, flush_redis):
         kw = _kw(redis_port)
         slots_redis.acquire("bmo", "a", max_holders=2, **kw)
