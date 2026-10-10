@@ -10,8 +10,8 @@ This repo is `gracecraft-software/lupin`. The owner clones it to
 `/code/lupin`, the same way `ghostbook.nix` is mounted at
 `/code/ghostbook.nix`.
 
-A loop agent does not work in `/code/lupin`. Each run gets its own Git
-worktree in the loop state directory. See "State" in `AGENTS.md`.
+A loop agent does not edit the main checkout in `/code/lupin`. Each run gets
+its own Git worktree in the loop state directory. See "State" in `AGENTS.md`.
 
 ## Rule 1: push to the fork, not to the upstream repo
 
@@ -47,11 +47,11 @@ herdr worktree create --branch <branch> --base fork/release/next --cwd /code/lup
 ```
 
 A linked worktree shares its remotes with the checkout it came from. If that
-checkout has no `fork` remote, stop and report. Do not add a remote.
+checkout has no `fork` remote, stop. Then report it. Do not add a remote.
 
 `lupin run` still starts each loop from `origin/HEAD`, which is upstream `main`.
-It does not start from `fork/release/next`. Until the owner changes it, start
-feature work with the Herdr worktree commands above.
+It does not start from `fork/release/next`. Until the owner changes `lupin run`,
+create feature worktrees with the steps above, not with `lupin run`.
 
 ## Pull request and review
 
@@ -62,15 +62,14 @@ repo:
 1. The base branch is the integration branch, `release/next`, on the fork
    (`gracecraft-ro/lupin`). A feature PR never targets upstream `main`.
 2. A worker uses `/ship` (see rule 1). If the push fails, the item stops.
-   Report the branch name and commit range. Do not review or merge it.
-3. The orchestrator dispatches `/code-review` for every PR or branch,
+   Report the branch name and commit range. Do not review or merge the branch.
+3. The orchestrator dispatches `/code-review` for every PR,
    including docs-only changes. The reviewer is not the worker. The
    reviewer's model tier is not lower than the worker's.
 4. If the review finds a problem, dispatch a fix worker with the exact
-   finding. It uses `/ship` on the same PR or branch. Repeat until the
-   reviewer approves.
-5. The orchestrator posts the verdict on the PR (or on the issue, for a
-   branch).
+   finding. It uses `/ship` on the same PR. Repeat until the reviewer
+   approves.
+5. The orchestrator posts the verdict on the PR.
 6. The orchestrator merges into `release/next` only after the reviewer
    approves and the gate passes. The gate is `nix flake check` (see "Build
    and test" in `AGENTS.md`). Merge with
@@ -96,7 +95,7 @@ repo:
 - Do not set `LUPIN_REDIS_HOST` to the fleet Redis unless the test needs it.
 - The state directory does not change the Herdr session. New runs use the
   `lupin-loops` session (`SESSION_NAME` in `src/lupin/loop_runtime.py`). Older
-  loops may use a legacy session until they stop.
+  loops may use an old session until they stop.
 - Do not use the start, stop, or run controls on the preview dashboard.
 
 ## Other rules
