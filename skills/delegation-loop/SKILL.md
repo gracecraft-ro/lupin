@@ -320,8 +320,9 @@ git merge-base --is-ancestor fork/release/next BRANCH
 Exit code 0 means the branch contains `release/next`. Then continue to the
 merge rules below. Exit code 1 means it does not. For an open, approved fork
 PR, the worker runs `git merge fork/release/next` on the PR branch. Then it
-pushes the branch to the fork. Do not rebase. Any other exit code means the
-check failed. Report it and stop. Do not merge.
+pushes the branch to the fork. Run the check again. If the merge has conflicts,
+report them and stop. Do not rebase. Any other exit code means the check
+failed. Report it and stop. Do not merge.
 
 If the merge changes a file the reviewer already reviewed, the reviewer checks
 that change before the PR merge. The gate runs in every case.
@@ -343,10 +344,11 @@ A branch with no fork PR is not merged.
 
 When all four conditions above are true, merge the PR with this command. No
 owner sign-off is needed. The reviewer approval above is still required.
-The command creates a merge commit:
+Record the approved SHA before you merge. The command creates a merge commit:
 
 ```sh
-gh pr merge --repo gracecraft-ro/<repo> --merge
+gh pr merge <PR-number> --repo gracecraft-ro/<repo> --merge \
+  --match-head-commit <approved-SHA>
 ```
 
 Do not rebase. Do not force-push. A worker or reviewer never merges a pull
@@ -373,11 +375,11 @@ Do not run a server for a feature branch.
    ```
 
    Then it restarts the server.
-3. Bind the server to `127.0.0.1` or to the tailnet address. Never bind to
-   `0.0.0.0`.
+3. Bind the server to `127.0.0.1` or to the Tailscale IP address. Never bind
+   to `0.0.0.0`.
 4. Set `LUPIN_LOOP_STATE_DIR` to a scratch path. Do not point the preview at
    the real fleet Redis unless the test needs it.
-5. Keep the server under a supervisor. Use a Herdr pane or `systemd-run --user`.
+5. Keep the server running in a Herdr pane or with `systemd-run --user`.
    The server must keep running after an agent session ends.
 6. The repo's `AGENTS.md` has a "Preview server" section. It names the start
    command, the port, and the machine. It gives the tunnel command,
@@ -398,8 +400,8 @@ proof. Re-read issue and PR comments before closure.
 
 After the merge and the preview restart, check that the preview port answers.
 Run `curl -fsS -o /dev/null http://127.0.0.1:PORT/` on the preview machine. Use
-the tailnet address instead if the server binds to one. Exit code 0 means the
-port answers. Report the result in the handoff.
+the Tailscale IP address instead if the server binds to one. Exit code 0
+means the port answers. Report the result in the handoff.
 
 Append dispatch and handoff events to the shared Redis ledger:
 

@@ -35,8 +35,8 @@ fail without triage access. Check before you write it into a report.
    git worktree add <path> -b <branch> fork/release/next
    ```
 
-3. Use `/ship`. It runs `git push -u fork <branch>` and opens the PR. The PR
-   base is `release/next` on the fork.
+3. Use `/ship`. It runs `git push -u fork <branch>` and opens the PR. Pass
+   `--base release/next` to `gh pr create`.
 
 On a Herdr worker, use the Herdr worktree commands:
 
@@ -74,12 +74,14 @@ repo:
 5. The orchestrator posts the verdict on the PR.
 6. The orchestrator merges the PR on the fork into `release/next` only when
    the `delegation-loop` skill's four conditions are true. The gate is
-   `nix flake check` (see "Build and test" in `AGENTS.md`). Merge with
-   `gh pr merge --repo gracecraft-ro/lupin --merge`. Do not rebase. Do not
-   force-push. Before merge, the branch must contain the current `release/next`.
-   See the paragraph that starts "Before a branch is merged" in the
-   `delegation-loop` skill. A worker or reviewer
-   never merges a pull request. Close the issue in the same pass as the merge.
+   `nix flake check` (see "Build and test" in `AGENTS.md`). Record the
+   approved SHA before you merge. Merge with
+   `gh pr merge <PR-number> --repo gracecraft-ro/lupin --merge
+   --match-head-commit <approved-SHA>`. Do not rebase. Do not force-push.
+   Before merge, the branch must contain the current `release/next`. See the
+   paragraph that starts "Before a branch is merged" in the `delegation-loop`
+   skill. A worker or reviewer never merges a pull request. Close the issue in
+   the same pass as the merge.
 
 Changes to this policy go to upstream `main` for the owner to merge. The owner
 opens that PR. Feature work goes to fork `release/next`.

@@ -410,10 +410,11 @@ in `docs/delegation-loop.md`.
 
 1. Use `/ship`. It pushes the branch to the fork and opens a PR with
    `Closes #N`. The PR base is `release/next` on the fork. If the push fails,
-   report the branch name and commit range. Do not merge that branch until a PR
-   exists on the fork.
+   report the branch name and commit range. Do not merge that branch. The merge
+   rules are in the `delegation-loop` skill.
 2. Do not merge your own work. A reviewer who is not the author runs
-   `/code-review`. The orchestrator merges after approval and a passing gate.
+   `/code-review`. The orchestrator merges into `release/next` only when all
+   four conditions in the `delegation-loop` skill are true.
 3. At the end of a session, run `/handoff`. It runs `lupin ledger append`.
 4. Loop details for this repo: `docs/delegation-loop.md`.
 
