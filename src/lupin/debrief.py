@@ -240,7 +240,7 @@ def build_markdown(
         risk.append(f"- Decision: {text}")
     decisions_read = not forced and events is not None
     lines.append("## Risk")
-    lines.append("Derived from GitHub facts and ledger decisions in the window.")
+    lines.append("Derived from GitHub facts and ledger decisions. Not checked against real ledger rows.")
     lines += risk or (
         ["- None."] if decisions_read and open_prs is not None and blocked is not None else []
     )

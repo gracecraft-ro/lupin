@@ -147,7 +147,7 @@ def test_risk_lists_failing_prs_blocked_issues_and_window_decisions():
     assert "- Issue #30: Waits on vendor (labelled blocked)" in risk
     assert "- Decision: Use the cache" in risk
     assert "Old decision" not in risk
-    assert "Derived from GitHub facts and ledger decisions in the window." in risk
+    assert "Derived from GitHub facts and ledger decisions. Not checked against real ledger rows." in risk
 
 
 def test_opportunities_skip_issues_claimed_in_redis():
