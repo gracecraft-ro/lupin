@@ -5,7 +5,7 @@ can run without it. Read the root `AGENTS.md` first.
 
 ## Where this repo lives
 
-This repo is `gracecraft-software/lupin`. The owner keeps a checkout at
+This repo is `gracecraft-software/lupin`. The owner clones it to
 `~/Code/Projects/lupin` and OrbStack mounts it into the `jesus` sandbox at
 `/code/lupin`, the same way `ghostbook.nix` is mounted at
 `/code/ghostbook.nix`.
