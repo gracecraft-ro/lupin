@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -351,7 +352,7 @@ def test_start_loop_starts_without_delegation_doc_and_skips_duplicate(
 
     started, message = loop_runtime.start_loop(
         "widgets", platform="omp", provider="openai", model="openai/gpt-5.2",
-        note="review", resume=True
+        note="review",
     )
 
     assert started
@@ -378,7 +379,6 @@ def test_start_loop_starts_without_delegation_doc_and_skips_duplicate(
         loop_runtime.session_name("widgets"),
         "--prompt-file",
         metadata["prompt_file"],
-        "--resume",
     ]
     assert options["claude_limits"] is False
 
@@ -1065,6 +1065,29 @@ def test_start_loop_removes_its_new_worktree_when_the_service_does_not_start(
     assert "worktree" not in metadata
 
 
+def test_start_loop_reports_a_worktree_git_keeps_when_the_service_does_not_start(
+    monkeypatch, tmp_path: Path, make_checkout
+):
+    checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
+    locked = []
+
+    def fail_and_lock(*args, **kwargs):
+        (path,) = (tmp_path / "state" / "worktrees" / "widgets").iterdir()
+        _git_out(checkout, "worktree", "lock", str(path))
+        locked.append(path)
+        return 1, "boom"
+
+    monkeypatch.setattr(loop_runtime, "_systemd_run", fail_and_lock)
+
+    started, message = loop_runtime.start_loop("widgets", platform="claude")
+
+    assert started is False
+    assert message.startswith(f"boom; worktree kept at {locked[0]}")
+    metadata = loop_runtime._read_metadata("widgets")
+    assert metadata["state"] == "failed"
+    assert metadata["worktree"] == str(locked[0])
+
+
 def test_default_base_uses_origin_main_when_origin_head_is_not_set(tmp_path: Path, make_checkout):
     checkout = make_checkout(tmp_path / "code" / "widgets")
     assert loop_runtime._default_base(checkout) == "origin/main"
@@ -1130,16 +1153,260 @@ def test_stop_removes_a_clean_worktree_and_never_forces(monkeypatch, tmp_path: P
     assert ("worktree", "remove", str(worktree)) in calls
     assert not any(arg in {"--force", "-f"} for args in calls for arg in args)
     assert "worktree" not in writes[-1]
-    assert branch in _git_out(checkout, "branch", "--list")  # The branch stays.
+    assert branch not in _git_out(checkout, "branch", "--list")  # Merged, so git -d removes it.
 
 
-def test_stop_keeps_a_clean_worktree_that_git_will_not_remove(monkeypatch, tmp_path: Path, make_checkout):
+def test_stop_fails_and_keeps_metadata_when_git_will_not_remove_a_clean_worktree(
+    monkeypatch, tmp_path: Path, make_checkout
+):
     checkout, worktree, writes = _run_with_worktree(monkeypatch, tmp_path, make_checkout)
     _git_out(checkout, "worktree", "lock", str(worktree))
+
+    with pytest.raises(loop_runtime.LoopError, match=re.escape(f"worktree kept at {worktree}")):
+        loop_runtime.stop_loop("widgets", force=True)
+
+    assert worktree.is_dir()
+    assert writes == []  # Metadata keeps the worktree path.
+
+
+# --- review fixes: ledger copy, resume, cleanup, fetch ----------------------
+
+
+def _git_as(path: Path, *args: str) -> str:
+    """Run git in `path` with a test identity. Return its output."""
+    return subprocess.run(
+        ["git", "-C", str(path), "-c", "user.name=t", "-c", "user.email=t@example.com",
+         "-c", "commit.gpgsign=false", *args],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def _set_state(repo: str, state: str) -> None:
+    value = loop_runtime._read_metadata(repo)
+    value["state"] = state
+    loop_runtime._write_metadata(repo, value)
+
+
+def _worktree_count(checkout: Path) -> int:
+    return _git_out(checkout, "worktree", "list", "--porcelain").count("worktree ")
+
+
+def test_stop_keeps_an_ignored_ledger_file_outside_the_worktree(
+    monkeypatch, tmp_path: Path, make_checkout
+):
+    checkout, worktree, _ = _run_with_worktree(monkeypatch, tmp_path, make_checkout)
+    (checkout / ".git" / "info").mkdir(exist_ok=True)
+    (checkout / ".git" / "info" / "exclude").write_text(".loop/\n", encoding="utf-8")
+    (worktree / ".loop").mkdir()
+    (worktree / ".loop" / "loop-state.json").write_text('{"entries": []}\n', encoding="utf-8")
+    assert "!! .loop/" in _git_out(worktree, "status", "--porcelain", "--ignored")
+
+    loop_runtime.stop_loop("widgets", force=True)
+
+    kept = loop_runtime.STATE_DIR / "handoffs" / "widgets.json"
+    assert kept.read_text(encoding="utf-8") == '{"entries": []}\n'
+    assert not worktree.exists()
+
+
+def test_next_prompt_names_the_kept_ledger_file_only_when_it_exists(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.delenv("LUPIN_LOOP_PROMPT_FILE", raising=False)
+    kept = tmp_path / "handoffs" / "widgets.json"
+
+    before = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
+    assert str(kept) not in before
+
+    kept.parent.mkdir()
+    kept.write_text("{}\n", encoding="utf-8")
+    after = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
+    assert str(kept) in after
+
+
+def test_resume_reuses_the_recorded_worktree(monkeypatch, tmp_path: Path, make_checkout):
+    checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
+    loop_runtime.start_loop("widgets", platform="claude")
+    worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
+    _set_state("widgets", "stopped")
+
+    started, message = loop_runtime.start_loop("widgets", platform="claude", resume=True)
+
+    assert started, message
+    assert Path(loop_runtime._read_metadata("widgets")["worktree"]) == worktree
+    assert _worktree_count(checkout) == 2  # No new worktree.
+    assert "--resume" in launches[-1][2]
+
+
+def test_resume_refuses_a_missing_worktree_and_names_it(monkeypatch, tmp_path: Path, make_checkout):
+    checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
+    loop_runtime.start_loop("widgets", platform="claude")
+    worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
+    _set_state("widgets", "stopped")
+    shutil.rmtree(worktree)
+    _git_out(checkout, "worktree", "prune")
+    launched = len(launches)
+
+    with pytest.raises(loop_runtime.LoopError, match=re.escape(str(worktree))):
+        loop_runtime.start_loop("widgets", platform="claude", resume=True)
+
+    assert len(launches) == launched
+    assert _worktree_count(checkout) == 1  # No new worktree.
+
+
+def test_resume_refuses_a_worktree_on_another_branch(monkeypatch, tmp_path: Path, make_checkout):
+    checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
+    loop_runtime.start_loop("widgets", platform="claude")
+    value = loop_runtime._read_metadata("widgets")
+    worktree = Path(value["worktree"])
+    value["branch"] = "lupin-loop/other"
+    value["state"] = "stopped"
+    loop_runtime._write_metadata("widgets", value)
+    launched = len(launches)
+
+    with pytest.raises(loop_runtime.LoopError, match=re.escape(str(worktree))):
+        loop_runtime.start_loop("widgets", platform="claude", resume=True)
+
+    assert len(launches) == launched
+
+
+def test_start_loop_removes_the_previous_clean_worktree_first(
+    monkeypatch, tmp_path: Path, make_checkout
+):
+    checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
+    loop_runtime.start_loop("widgets", platform="claude")
+    first = Path(loop_runtime._read_metadata("widgets")["worktree"])
+    _set_state("widgets", "stopped")
+
+    started, message = loop_runtime.start_loop("widgets", platform="claude")
+
+    assert started, message
+    second = Path(loop_runtime._read_metadata("widgets")["worktree"])
+    assert not first.exists()
+    assert second.is_dir()
+    assert _worktree_count(checkout) == 2
+
+
+def test_start_loop_refuses_when_the_previous_worktree_has_changes(
+    monkeypatch, tmp_path: Path, make_checkout
+):
+    checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
+    loop_runtime.start_loop("widgets", platform="claude")
+    first = Path(loop_runtime._read_metadata("widgets")["worktree"])
+    (first / "README.md").write_text("unsaved work\n", encoding="utf-8")
+    _set_state("widgets", "stopped")
+    launched = len(launches)
+
+    with pytest.raises(loop_runtime.LoopError, match=re.escape(str(first))):
+        loop_runtime.start_loop("widgets", platform="claude")
+
+    assert len(launches) == launched
+    assert first.is_dir()
+    assert loop_runtime._read_metadata("widgets")["worktree"] == str(first)
+
+
+@pytest.mark.parametrize("step", ["_write_prompt", "_write_metadata", "_systemd_run"])
+def test_start_loop_removes_its_new_worktree_when_a_later_step_raises(
+    monkeypatch, tmp_path: Path, make_checkout, step: str
+):
+    checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError(f"forced {step}")
+
+    monkeypatch.setattr(loop_runtime, step, broken)
+
+    with pytest.raises(RuntimeError, match=f"forced {step}"):
+        loop_runtime.start_loop("widgets", platform="claude")
+
+    assert list((tmp_path / "state" / "worktrees" / "widgets").iterdir()) == []
+    assert _git_out(checkout, "branch", "--list", "lupin-loop/*") == ""
+    assert _worktree_count(checkout) == 1
+
+
+def test_full_claude_slot_removes_the_new_worktree(monkeypatch, tmp_path: Path, make_checkout):
+    checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
+    loop_runtime.start_loop("widgets", platform="claude")
+    worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
+    monkeypatch.setattr(loop_runtime, "_ensure_server", lambda *args: None)
+    monkeypatch.setattr(loop_runtime, "_server_running", lambda session: True)
+    monkeypatch.setattr(loop_runtime, "_find_workspace", lambda session, metadata: None)
+    monkeypatch.setattr(loop_runtime, "_runtime_paths", lambda repo: {})
+    monkeypatch.setattr(
+        loop_runtime, "_herdr_json",
+        lambda session, *args, **kwargs: {
+            "workspace": {"id": "w1"}, "root_pane": {"workspace_id": "w1", "pane_id": "p1"},
+        },
+    )
+
+    def full(*args, **kwargs):
+        raise loop_runtime.slots.SlotFull("full")
+
+    monkeypatch.setattr(loop_runtime.slots, "hold", full)
+
+    with pytest.raises(loop_runtime.LoopError, match="slot is full"):
+        loop_runtime._monitor_loop("widgets", "claude", loop_runtime.SESSION_NAME, "prompt.md", False)
+
+    metadata = loop_runtime._read_metadata("widgets")
+    assert metadata["state"] == "failed"
+    assert "worktree" not in metadata
+    assert not worktree.exists()
+    assert _worktree_count(checkout) == 1
+
+
+def test_start_loop_branches_from_the_fetched_remote_default_branch(
+    monkeypatch, tmp_path: Path, make_checkout
+):
+    _checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
+    origin = tmp_path / "origins" / "widgets.git"
+    clone = tmp_path / "scratch" / "clone"
+    _git_as(tmp_path, "clone", "-q", str(origin), str(clone))
+    (clone / "new.txt").write_text("new\n", encoding="utf-8")
+    _git_as(clone, "add", "new.txt")
+    _git_as(clone, "commit", "-q", "-m", "newer commit on origin")
+    _git_as(clone, "push", "-q", "origin", "main")
+    remote_main = _git_out(origin, "rev-parse", "main")
+
+    started, message = loop_runtime.start_loop("widgets", platform="claude")
+
+    assert started, message
+    worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
+    assert _git_out(worktree, "rev-parse", "HEAD") == remote_main
+
+
+def test_start_loop_refuses_when_fetch_fails(monkeypatch, tmp_path: Path, make_checkout):
+    checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
+    _git_out(checkout, "remote", "set-url", "origin", str(tmp_path / "missing.git"))
+
+    with pytest.raises(loop_runtime.LoopError, match="git fetch failed"):
+        loop_runtime.start_loop("widgets", platform="claude")
+
+    assert launches == []
+    assert loop_runtime._read_metadata("widgets") is None
+    assert _worktree_count(checkout) == 1
+
+
+def test_stop_keeps_a_detached_commit_that_is_on_no_branch(
+    monkeypatch, tmp_path: Path, make_checkout
+):
+    checkout, worktree, writes = _run_with_worktree(monkeypatch, tmp_path, make_checkout)
+    _git_as(worktree, "checkout", "-q", "--detach")
+    _git_as(worktree, "commit", "-q", "--allow-empty", "-m", "agent work")
+    sha = _git_out(worktree, "rev-parse", "HEAD")
 
     result = loop_runtime.stop_loop("widgets", force=True)
 
     assert f"worktree kept at {worktree}" in result
-    assert "locked" in result
     assert worktree.is_dir()
+    assert _git_out(checkout, "cat-file", "-t", sha) == "commit"
     assert writes[-1]["worktree"] == str(worktree)
+
+
+def test_stop_keeps_a_branch_with_unmerged_commits(monkeypatch, tmp_path: Path, make_checkout):
+    checkout, worktree, _ = _run_with_worktree(monkeypatch, tmp_path, make_checkout)
+    branch = _git_out(worktree, "branch", "--show-current")
+    _git_as(worktree, "commit", "-q", "--allow-empty", "-m", "agent work")
+
+    result = loop_runtime.stop_loop("widgets", force=True)
+
+    assert not worktree.exists()
+    assert branch in _git_out(checkout, "branch", "--list")
+    assert f"branch {branch} kept" in result

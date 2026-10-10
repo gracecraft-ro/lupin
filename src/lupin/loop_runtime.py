@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -51,8 +52,10 @@ HANDOFF_GRACE_S = 600.0
 HANDOFF_TEXT = (
     "Lupin will stop this loop shortly. Run /handoff now: write an entry to the "
     ".loop/loop-state.json ledger (issue number if any, repo, branch, last known "
-    "status) and update the relevant GitHub issue. Lupin stops this loop when you "
-    "finish, or after the wait time ends."
+    "status) and update the relevant GitHub issue. Lupin keeps a copy of that "
+    "ledger when it stops. Lupin deletes other ignored files in the worktree, so "
+    "keep anything you need in the ledger or the issue. Lupin stops this loop when "
+    "you finish, or after the wait time ends."
 )
 
 def validate_orchestrator(selector: str) -> str:
@@ -611,6 +614,12 @@ def _write_prompt(repo: str, note: str | None, resume: bool) -> str:
             "You were cut off, not finished. Check for work in progress and continue it.\n\n"
             + base
         )
+    handoff = STATE_DIR / "handoffs" / f"{validate_repo(repo)}.json"
+    if handoff.is_file():
+        base = (
+            f"The last run kept its ledger at {handoff}. Read it before you start.\n\n"
+            + base
+        )
     if note:
         base += f"\n\nExtra instructions for this run:\n{note}\n"
     notes = STATE_DIR / "notes"
@@ -703,40 +712,102 @@ def _default_base(checkout: Path) -> str:
     )
 
 
-def _create_worktree(repo: str, checkout: Path) -> Path:
-    """Add a worktree for one run, on a new branch from the default branch.
+def _create_worktree(repo: str, checkout: Path) -> tuple[Path, str]:
+    """Add a worktree for one run, on a new branch from the fetched default branch.
 
-    The worktree is under the loop state directory, not under CODE_DIR.
+    Return the worktree path and the branch name. The worktree is under the
+    loop state directory, not under CODE_DIR. Raise LoopError if the fetch fails.
     """
+    _git(checkout, "fetch", "origin")
     base = _default_base(checkout)
     run_id = f"{_stamp()}-{time.time_ns() % 1000000:06d}"
+    branch = f"lupin-loop/{run_id}"
     path = STATE_DIR / "worktrees" / repo / run_id
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
-    _git(checkout, "worktree", "add", "--no-track", "-b", f"lupin-loop/{run_id}", str(path), base)
-    return path
+    _git(checkout, "worktree", "add", "--no-track", "-b", branch, str(path), base)
+    return path, branch
 
 
-def _remove_clean_worktree(repo: str, metadata: dict) -> str:
-    """Remove the run's worktree if `git status --porcelain` shows no changes.
+def _resumed_worktree(repo: str, metadata: dict | None) -> tuple[Path, str]:
+    """Return the worktree and branch that the last run recorded. Never create one."""
+    info = metadata or {}
+    recorded = info.get("worktree")
+    if not recorded:
+        raise LoopError(f"cannot resume {repo}: no worktree is recorded. Start it without --resume.")
+    path = Path(recorded)
+    if not path.is_dir():
+        raise LoopError(f"cannot resume {repo}: worktree {path} is missing. Start it without --resume.")
+    branch = _git(path, "branch", "--show-current").strip()
+    if branch != info.get("branch"):
+        raise LoopError(
+            f"cannot resume {repo}: worktree {path} is on branch {branch or 'none'}, "
+            f"not {info.get('branch')}."
+        )
+    return path, branch
 
-    Return a note for the stop message. The note is empty when the worktree is
-    gone. If the worktree has changes, or git fails, the worktree stays and the
-    note gives its path. This function never uses `--force`. It removes
-    "worktree" from `metadata` only when the worktree is gone.
+
+def _keep_handoff(repo: str, worktree: Path) -> None:
+    """Copy the run's ledger file out of the worktree before git deletes it.
+
+    git deletes ignored files with the worktree. Keep the earlier copy when this
+    worktree has no ledger file.
+    """
+    ledger = worktree / ".loop" / "loop-state.json"
+    if not ledger.is_file():
+        return
+    target = STATE_DIR / "handoffs"
+    target.mkdir(parents=True, exist_ok=True, mode=0o750)
+    shutil.copyfile(ledger, target / f"{repo}.json")
+
+
+def _remove_worktree(repo: str, metadata: dict) -> tuple[bool, str]:
+    """Remove the run's worktree, then its branch. Never use `--force`.
+
+    Return (gone, note). `gone` is False when git keeps the worktree. The note
+    names what was kept and starts with "; " so a caller can append it. Raise
+    LoopError when git fails for another reason. A branch that git will not
+    delete only adds a note. "worktree" leaves `metadata` only when the worktree
+    is gone. "branch" leaves it only when the branch is deleted.
     """
     value = metadata.get("worktree")
-    if not value:
-        return ""
-    path = Path(value)
-    if path.is_dir():
+    if value:
+        path = Path(value)
+        if path.is_dir():
+            if not _git(path, "for-each-ref", "--contains", "HEAD", "refs/heads", "refs/remotes").strip():
+                return False, f"; worktree kept at {path}: its commit is on no branch"
+            _keep_handoff(repo, path)
+            try:
+                _git(CODE_DIR / repo, "worktree", "remove", str(path))
+            except LoopError as exc:
+                try:
+                    changed = _git(path, "status", "--porcelain").strip()
+                except LoopError:
+                    changed = ""
+                if changed:
+                    return False, f"; worktree kept at {path}: it has changes"
+                raise LoopError(f"worktree kept at {path}: {exc}") from exc
+        metadata.pop("worktree", None)
+    branch = metadata.get("branch")
+    if branch:
         try:
-            if _git(path, "status", "--porcelain").strip():
-                return f"; worktree kept at {path}: it has changes"
-            _git(CODE_DIR / repo, "worktree", "remove", str(path))
-        except LoopError as exc:
-            return f"; worktree kept at {path}: {exc}"
-    metadata.pop("worktree", None)
-    return ""
+            _git(CODE_DIR / repo, "branch", "-d", branch)
+        except LoopError:
+            return True, f"; branch {branch} kept: git branch -d refused it"
+        metadata.pop("branch", None)
+    return True, ""
+
+
+def _clear_previous_worktree(repo: str, metadata: dict | None) -> str:
+    """Remove the last run's worktree before a new run starts. Return a note.
+
+    Raise LoopError if git keeps that worktree.
+    """
+    if not metadata:
+        return ""
+    gone, note = _remove_worktree(repo, metadata)
+    if not gone:
+        raise LoopError(f"cannot start {repo}{note}. Save or remove that work, then start again.")
+    return note
 
 
 def start_loop(
@@ -797,46 +868,65 @@ def start_loop(
                 model = choice["model"]
         provider, model = validate_omp_options(selected, provider, model)
         _refuse_unfinished_git_work(checkout)
-        worktree = _create_worktree(repo, checkout)
-        prompt_file = _write_prompt(repo, note, resume)
-        value = {
-            "version": 1,
-            "repo": repo,
-            "platform": selected,
-            "provider": provider,
-            "model": model,
-            "session": session,
-            "state": "starting",
-            "started_at": _now(),
-            "workspace_id": None,
-            "pane_id": None,
-            "prompt_file": prompt_file,
-            "resume": bool(resume),
-            "worktree": str(worktree),
-        }
-        _write_metadata(repo, value)
-        worker = _lupin_command(
-            "worker", "--repo", repo, "--platform", selected, "--session", session,
-            "--prompt-file", prompt_file,
-        )
         if resume:
-            worker.append("--resume")
-        password_source = _password_source()
-        worker_credentials = {"redis-password": password_source} if password_source else {}
-        rc, output = _systemd_run(
-            repo,
-            "loop",
-            worker,
-            credentials=worker_credentials,
-            claude_limits=selected == "claude",
-        )
+            worktree, branch = _resumed_worktree(repo, metadata)
+            previous_note = ""
+        else:
+            previous_note = _clear_previous_worktree(repo, metadata)
+            worktree, branch = _create_worktree(repo, checkout)
+        try:
+            prompt_file = _write_prompt(repo, note, resume)
+            value = {
+                "version": 1,
+                "repo": repo,
+                "platform": selected,
+                "provider": provider,
+                "model": model,
+                "session": session,
+                "state": "starting",
+                "started_at": _now(),
+                "workspace_id": None,
+                "pane_id": None,
+                "prompt_file": prompt_file,
+                "resume": bool(resume),
+                "worktree": str(worktree),
+                "branch": branch,
+            }
+            _write_metadata(repo, value)
+            worker = _lupin_command(
+                "worker", "--repo", repo, "--platform", selected, "--session", session,
+                "--prompt-file", prompt_file,
+            )
+            if resume:
+                worker.append("--resume")
+            password_source = _password_source()
+            worker_credentials = {"redis-password": password_source} if password_source else {}
+            rc, output = _systemd_run(
+                repo,
+                "loop",
+                worker,
+                credentials=worker_credentials,
+                claude_limits=selected == "claude",
+            )
+        except BaseException:
+            if not resume:
+                _remove_worktree(repo, {"worktree": str(worktree), "branch": branch})
+            raise
         if rc:
-            _remove_clean_worktree(repo, value)
             value["state"] = "failed"
+            removed_note = ""
+            if not resume:
+                try:
+                    _, removed_note = _remove_worktree(repo, value)
+                except LoopError as exc:
+                    removed_note = f"; {exc}"
             _write_metadata(repo, value)
             Path(prompt_file).unlink(missing_ok=True)
-            return False, output or f"could not start loop service for {repo}"
-        return True, f"started {repo} ({selected}) in Herdr session {session}; worktree {worktree}"
+            return False, (output or f"could not start loop service for {repo}") + removed_note
+        return True, (
+            f"started {repo} ({selected}) in Herdr session {session}; "
+            f"worktree {worktree}{previous_note}"
+        )
     finally:
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         lock.close()
@@ -1078,7 +1168,13 @@ def _monitor_loop(
             metadata["state"] = "failed"
             metadata["workspace_id"] = None
             metadata["pane_id"] = None
+            removed_note = ""
+            try:
+                _, removed_note = _remove_worktree(repo, metadata)
+            except LoopError as exc:
+                removed_note = f"; {exc}"
             _write_metadata(repo, metadata)
+            raise LoopError(f"{platform} slot is full{removed_note}")
         raise LoopError(f"{platform} slot is full")
     if rc:
         metadata["state"] = "needs_attention"
@@ -1251,7 +1347,7 @@ def stop_loop(repo: str, *, force: bool = False, grace: float = HANDOFF_GRACE_S)
                 raise LoopError(output or f"could not stop Lupin worker for {repo}")
         if session != SESSION_NAME and not _workspaces(session):
             _herdr_json(None, "session", "stop", session, "--json")
-        worktree_note = _remove_clean_worktree(repo, metadata)
+        _, worktree_note = _remove_worktree(repo, metadata)
         metadata["state"] = "stopped"
         metadata["stopped_at"] = _now()
         metadata["workspace_id"] = None

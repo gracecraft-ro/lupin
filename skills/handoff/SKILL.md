@@ -57,6 +57,10 @@ GitHub issue. It does not read this conversation.
      `branch`, `status`, `summary`, `highlights`, `evidence`, `decisions`,
      `next`.
 
+   Lupin copies this file when it stops the loop. Lupin then deletes the other
+   ignored files in the worktree. Put anything else you need in the ledger or
+   the issue.
+
    Say in the issue comment (step 4) that the ledger was not available. Append
    the entry to the ledger when Redis is back. The next orchestrator reads both
    places.
@@ -69,8 +73,9 @@ GitHub issue. It does not read this conversation.
    status and in the comment. The next agent believes an unqualified "done"
    and does not check it again.
 
-6. Remove the worktrees that you made in this session. Do not leave them for
-   the next agent. In Herdr, also close the tab, workspace, and worktree that
+6. Remove the git worktrees that you made in this session. Do not leave them
+   for the next agent. Do not remove the run worktree, the one you are in.
+   Lupin removes it when the loop stops. In Herdr, also close the tab, workspace, and worktree that
    you made. Close a pane with `herdr pane close <pane_id>`, and remove a
    worktree with `herdr worktree remove --workspace <workspace_id>`. Do not
    close anything that you did not make.
