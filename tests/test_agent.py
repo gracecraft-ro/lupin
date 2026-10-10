@@ -302,13 +302,13 @@ def test_stop_budget_covers_every_timeout_on_the_stop_path():
         ("session: workspace list", loop_runtime.HERDR_TIMEOUT),
         ("session: pane list fallback", loop_runtime.HERDR_TIMEOUT),
         ("session: session stop", loop_runtime.HERDR_TIMEOUT),
-        # Debrief, after the lock is released (debrief.py:262, 270, 274; claims.py:227, 234)
-        ("debrief: gh repo view", debrief.GH_TIMEOUT),
+        # Debrief, after the lock is released. See debrief.py:299 and 308-312.
+        # All gh calls share one deadline.
+        ("debrief: all gh calls (repo view and lists)", debrief.DEBRIEF_DEADLINE_S),
         ("debrief: ledger read (Redis)", REDIS_CALL_S),
+        # Claims read is one scan plus one get per key. Only one get is listed.
         ("debrief: claims scan (Redis)", REDIS_CALL_S),
         ("debrief: one failing claims get (Redis)", REDIS_CALL_S),
-        # debrief.py:138, 142, 172, 178, 194, 220 (twice)
-        ("debrief: 7 gh list calls", 7 * debrief.GH_TIMEOUT),
     ]
     budget = agent.ACTION_TIMEOUT_S["loop.stop"]
     total = sum(seconds for _, seconds in terms)

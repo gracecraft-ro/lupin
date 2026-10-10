@@ -372,8 +372,19 @@ fixed action table: `loop.stop`, `loop.run`, `loop.run-all`, `loop.peek`,
 
 `loop.stop` takes `repo` and an optional boolean `force`. Without `force`, the
 stop asks the agent for a handoff first. The agent allows `loop.stop` 1740
-seconds (29 minutes) to run. This budget covers every wait on the stop path,
-run one after another. Other actions get 120 seconds.
+seconds (29 minutes) to run. The budget covers the timed waits on the stop
+path. The waits run one after another. The budget does not cover these waits:
+
+- The repo lock in `stop_loop`. The stop takes it with `fcntl.flock` and
+  `LOCK_EX`. It has no timeout.
+- The machine lock in `_ensure_shared_server`. It also uses `LOCK_EX`. It has
+  no timeout.
+- Extra claims reads. `claims_for` runs one scan. Then it makes one Redis `GET`
+  for each claim key of the repo. The budget counts one `GET`.
+
+The debrief's gh calls share one 10-second limit (`DEBRIEF_DEADLINE_S`). A call
+that hits the limit leaves a `Not collected` note in the debrief. Other actions
+get 120 seconds.
 
 ### `cmd:<id>`
 

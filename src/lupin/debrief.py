@@ -1,4 +1,4 @@
-"""Written debrief for one loop window.
+"""Written debrief for one loop stop.
 
 A debrief is one markdown file per loop stop. Facts come from GitHub
 (`gh`). Unless the stop was forced, they also come from the ledger and
@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from datetime import datetime, timezone
 from html import escape
 from pathlib import Path
@@ -22,6 +23,7 @@ from . import claims, ledger, roadmap
 from .slots import CoordinatorUnreachable
 
 GH_TIMEOUT = 30.0
+DEBRIEF_DEADLINE_S = 10.0  # Total time for all gh calls in one debrief. Redis reads are not counted.
 LIST_LIMIT = "200"
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 FILE_RE = re.compile(r"^\d{8}-\d{6}\.md$")
@@ -44,13 +46,19 @@ class DebriefError(Exception):
     """A debrief cannot be written or read."""
 
 
-def _gh(args: list[str], cwd: str | None = None):
+class GhTimeout(DebriefError):
+    """A gh call hit its time limit."""
+
+
+def _gh(args: list[str], cwd: str | None = None, timeout: float = GH_TIMEOUT):
     try:
         proc = subprocess.run(
             ["gh", *args], cwd=cwd, capture_output=True, text=True,
-            check=False, timeout=GH_TIMEOUT,
+            check=False, timeout=timeout,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired as exc:
+        raise GhTimeout(f"gh {' '.join(args[:2])} failed: {exc}") from exc
+    except OSError as exc:
         raise DebriefError(f"gh {' '.join(args[:2])} failed: {exc}") from exc
     if proc.returncode != 0:
         raise DebriefError(
@@ -62,11 +70,34 @@ def _gh(args: list[str], cwd: str | None = None):
         raise DebriefError(f"gh {' '.join(args[:2])} sent bad JSON") from exc
 
 
-def _list(args: list[str]) -> list[dict]:
-    return _gh(args + ["--limit", LIST_LIMIT]) or []
+class _Budget:
+    """Time left for the gh calls of one debrief. Redis reads do not use it."""
+
+    def __init__(self, seconds: float):
+        self.left = seconds
+
+    def gh(self, args: list[str], cwd: str | None = None):
+        """Run gh with the time left. Raise `GhTimeout` when none is left."""
+        if self.left <= 0:
+            raise GhTimeout(f"gh {' '.join(args[:2])} not run: time limit reached")
+        started = time.monotonic()
+        try:
+            return _gh(args, cwd=cwd, timeout=min(GH_TIMEOUT, self.left))
+        finally:
+            self.left -= time.monotonic() - started
 
 
-def _cut(section: str, name: str, items: list) -> list[str]:
+def _list(budget: _Budget, args: list[str]) -> list[dict] | None:
+    """Return the items. None means the time limit cut the call."""
+    try:
+        return budget.gh(args + ["--limit", LIST_LIMIT]) or []
+    except GhTimeout:
+        return None
+
+
+def _cut(section: str, name: str, items: list | None) -> list[str]:
+    if items is None:
+        return [f"- Not collected: time limit reached. {section}: {name} list."]
     if len(items) < int(LIST_LIMIT):
         return []
     return [f"- {section}: {name} list cut at {LIST_LIMIT} items. Some items may be missing."]
@@ -119,14 +150,17 @@ def build_markdown(
     events: list[dict] | None = None,
     ledger_note: str | None = None,
     claimed: set[int] | None = None,
+    budget: _Budget | None = None,
 ) -> str:
     """Return the debrief for `full_name` over `[start, end]` as markdown.
 
     `events` is None when the ledger was not read. `claimed` is None when
-    claims were not read. A forced stop uses GitHub facts only.
+    claims were not read. A forced stop uses GitHub facts only. A section
+    whose gh call the time limit cut says so.
     """
     day = start.strftime("%Y-%m-%d")
     repo = ["--repo", full_name]
+    budget = _Budget(DEBRIEF_DEADLINE_S) if budget is None else budget
     window_events = (
         [] if forced or events is None
         else [e for e in events if _in_window(e.get("timestamp"), start, end)]
@@ -135,21 +169,21 @@ def build_markdown(
     lines.append("- Stop: forced, no handoff" if forced else "- Stop: normal")
     lines.append("")
 
-    merged_all = _list(["pr", "list", *repo, "--state", "merged",
-                        "--search", f"merged:>={day}",
-                        "--json", "number,title,mergedAt,mergeCommit"])
-    merged = [pr for pr in merged_all if _in_window(pr.get("mergedAt"), start, end)]
-    closed_all = _list(["issue", "list", *repo, "--state", "closed",
-                        "--search", f"closed:>={day}",
-                        "--json", "number,title,closedAt"])
-    closed = [issue for issue in closed_all if _in_window(issue.get("closedAt"), start, end)]
+    merged_all = _list(budget, ["pr", "list", *repo, "--state", "merged",
+                                "--search", f"merged:>={day}",
+                                "--json", "number,title,mergedAt,mergeCommit"])
+    merged = [pr for pr in merged_all or [] if _in_window(pr.get("mergedAt"), start, end)]
+    closed_all = _list(budget, ["issue", "list", *repo, "--state", "closed",
+                                "--search", f"closed:>={day}",
+                                "--json", "number,title,closedAt"])
+    closed = [issue for issue in closed_all or [] if _in_window(issue.get("closedAt"), start, end)]
     lines.append("## Shipped")
     for pr in merged:
         commit = (pr.get("mergeCommit") or {}).get("oid", "")[:7]
         lines.append(f"- PR #{pr['number']}: {pr['title']} (merged {pr['mergedAt']}, commit {commit})")
     for issue in closed:
         lines.append(f"- Issue #{issue['number']}: {issue['title']} (closed {issue['closedAt']})")
-    if not merged and not closed:
+    if not merged and not closed and merged_all is not None and closed_all is not None:
         lines.append("- None.")
     lines += _cut("Shipped", "merged PR", merged_all) + _cut("Shipped", "closed issue", closed_all)
     lines.append("")
@@ -169,39 +203,39 @@ def build_markdown(
     lines.append("")
 
     failing = []
-    open_prs = _list(["pr", "list", *repo, "--state", "open",
-                      "--json", "number,title,statusCheckRollup"])
-    for pr in open_prs:
+    open_prs = _list(budget, ["pr", "list", *repo, "--state", "open",
+                              "--json", "number,title,statusCheckRollup"])
+    for pr in open_prs or []:
         names = _failing_checks(pr)
         if names:
             failing.append((pr, names))
-    blocked = _list(["issue", "list", *repo, "--state", "open", "--label", "blocked",
-                     "--json", "number,title"])
+    blocked = _list(budget, ["issue", "list", *repo, "--state", "open", "--label", "blocked",
+                             "--json", "number,title"])
     decisions = [text for event in window_events for text in event.get("decisions", [])]
     risk = []
     for pr, names in failing:
         risk.append(f"- PR #{pr['number']}: {pr['title']} (failing: {', '.join(names)})")
-    for issue in blocked:
+    for issue in blocked or []:
         risk.append(f"- Issue #{issue['number']}: {issue['title']} (labelled blocked)")
     for text in decisions:
         risk.append(f"- Decision: {text}")
     lines.append("## Risk")
     lines.append("Derived from GitHub facts and ledger decisions. Not checked against real ledger rows.")
-    lines += risk or ["- None."]
+    lines += risk or (["- None."] if open_prs is not None and blocked is not None else [])
     lines += _cut("Risk", "open PR", open_prs) + _cut("Risk", "blocked issue", blocked)
     lines.append("")
 
-    ready = _list(["issue", "list", *repo, "--state", "open", "--label", "ready",
-                   "--json", "number,title"])
+    ready = _list(budget, ["issue", "list", *repo, "--state", "open", "--label", "ready",
+                           "--json", "number,title"])
     lines.append("## Opportunities")
     if forced:
         lines.append("Forced stop. Claims not read.")
     elif claimed is None:
         lines.append("Claims not read. Listed issues may already be claimed.")
-    unclaimed = [issue for issue in ready if not claimed or issue["number"] not in claimed]
+    unclaimed = [issue for issue in ready or [] if not claimed or issue["number"] not in claimed]
     for issue in unclaimed:
         lines.append(f"- Issue #{issue['number']}: {issue['title']}")
-    if not unclaimed:
+    if not unclaimed and ready is not None:
         lines.append("- None.")
     lines += _cut("Opportunities", "ready issue", ready)
     lines.append("")
@@ -209,6 +243,7 @@ def build_markdown(
     lines.append("## Evidence")
     seen = []
     cut = []
+    complete = True
     for kind, args in (
         ("Issue", ["issue", "list", *repo, "--state", "all",
                    "--search", f"updated:>={day}",
@@ -217,9 +252,10 @@ def build_markdown(
                 "--search", f"updated:>={day}",
                 "--json", "number,title,body,comments,updatedAt"]),
     ):
-        items = _list(args)
+        items = _list(budget, args)
         cut += _cut("Evidence", kind, items)
-        for item in items:
+        complete = complete and items is not None
+        for item in items or []:
             texts = []
             if _in_window(item.get("updatedAt"), start, end):
                 texts.append(item.get("body"))
@@ -232,7 +268,7 @@ def build_markdown(
                     seen.append(attachment)
                     url = f"https://github.com/user-attachments/assets/{attachment}"
                     lines.append(f"- {kind} #{item['number']}: ![{kind} {item['number']} image]({url})")
-    if not seen:
+    if not seen and complete:
         lines.append("- None.")
     lines += cut
     lines.append("")
@@ -249,7 +285,8 @@ def write_debrief(
 ) -> Path:
     """Write one debrief under `root/debriefs/<repo>/` and return its path.
 
-    Raises `DebriefError` or a Redis error. Nothing is written then.
+    Raises `DebriefError` or a Redis error. Nothing is written then. The gh
+    calls share one time limit. A section cut by it says so in the file.
     """
     if not REPO_RE.fullmatch(repo or ""):
         raise DebriefError(f"invalid repo name {repo!r}")
@@ -259,7 +296,8 @@ def write_debrief(
     if not checkout.is_dir():
         raise DebriefError(f"no checkout at {checkout}")
     end = datetime.now(timezone.utc)
-    view = _gh(["repo", "view", "--json", "nameWithOwner"], cwd=str(checkout))
+    budget = _Budget(DEBRIEF_DEADLINE_S)
+    view = budget.gh(["repo", "view", "--json", "nameWithOwner"], cwd=str(checkout))
     full_name = view["nameWithOwner"]
 
     events = None
@@ -269,7 +307,7 @@ def write_debrief(
         try:
             events = ledger.read_events(full_name, limit=None)
         except (CoordinatorUnreachable, redis.exceptions.RedisError, ValueError) as exc:
-            ledger_note = f"Ledger unavailable: {exc}"
+            ledger_note = f"Ledger unavailable: {exc.__cause__ or exc}"
         try:
             held = claims.claims_for([full_name])
             claimed = {
@@ -280,7 +318,7 @@ def write_debrief(
 
     text = build_markdown(
         full_name, start, end, forced=forced, events=events,
-        ledger_note=ledger_note, claimed=claimed,
+        ledger_note=ledger_note, claimed=claimed, budget=budget,
     )
     folder = root / "debriefs" / repo
     folder.mkdir(parents=True, exist_ok=True, mode=0o750)
@@ -373,8 +411,8 @@ def render_html(markdown: str) -> str:
 def read_evidence(checkout: Path, rel: str) -> tuple[bytes, str] | None:
     """Return (bytes, content type) for an image under `docs/` or `evidence/`.
 
-    Returns None when the path is absolute, has `://` or `..`, has another
-    extension, is outside those folders, or resolves outside the checkout.
+    Returns None for an absolute path, a `://` or `..` path, or another extension.
+    Also None when the path is outside those folders or resolves outside the checkout.
     """
     if not rel or rel.startswith("/") or "://" in rel or ".." in rel or "\\" in rel or "\0" in rel:
         return None

@@ -7,9 +7,11 @@ import stat
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+import redis
 
 from lupin import agent, debrief, loop_runtime
 from lupin.slots import CoordinatorUnreachable
@@ -41,7 +43,7 @@ class FakeGh:
         self.responses = responses
         self.calls: list[list[str]] = []
 
-    def __call__(self, args, cwd=None):
+    def __call__(self, args, cwd=None, timeout=None):
         self.calls.append(list(args))
         key = _key(args)
         if key not in self.responses:
@@ -206,6 +208,38 @@ def test_write_debrief_keeps_other_sections_when_ledger_is_down(tmp_path: Path, 
     assert path.parent == tmp_path / "debriefs" / "widgets"
     assert path.name.endswith(".md") and debrief.FILE_RE.fullmatch(path.name)
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+def test_ledger_note_gives_the_redis_reason(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+
+    def read_events(repo, **kwargs):
+        raise CoordinatorUnreachable(repo) from redis.exceptions.ConnectionError("Connection refused")
+
+    monkeypatch.setattr(debrief, "_gh", FakeGh(dict(RESPONSES)))
+    monkeypatch.setattr(debrief.ledger, "read_events", read_events)
+    monkeypatch.setattr(debrief.claims, "claims_for", lambda repos, **kw: {})
+
+    path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
+
+    assert "Ledger unavailable: Connection refused" in _section(path.read_text(encoding="utf-8"), "Follow-up tasks")
+
+
+def test_claims_error_still_writes_the_debrief(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    claims_for = mock.Mock(side_effect=CoordinatorUnreachable("claims_for"))
+    monkeypatch.setattr(debrief, "_gh", FakeGh(dict(RESPONSES)))
+    monkeypatch.setattr(debrief.ledger, "read_events", lambda repo, **kw: [])
+    monkeypatch.setattr(debrief.claims, "claims_for", claims_for)
+
+    path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
+
+    text = path.read_text(encoding="utf-8")
+    claims_for.assert_called_once_with([FULL])
+    assert "Claims not read. Listed issues may already be claimed." in text
+    assert "- Issue #41: Ready two claimed" in text
 
 
 def test_write_debrief_skips_issues_claimed_in_redis(tmp_path: Path, monkeypatch):
@@ -409,34 +443,87 @@ def test_stop_writes_a_debrief_after_the_stop(monkeypatch, tmp_path: Path):
 
 
 def test_stop_budget_fits_loop_stop_timeout(monkeypatch, tmp_path: Path):
-    """Handoff wait plus the debrief's gh calls must fit in loop.stop's timeout.
+    """Handoff wait plus the debrief's gh deadline must fit in loop.stop's timeout.
 
-    Each gh call in one debrief gets GH_TIMEOUT. The stop waits
-    HANDOFF_GRACE_S first. The sum must stay under ACTION_TIMEOUT_S["loop.stop"].
+    All gh calls in one debrief share DEBRIEF_DEADLINE_S. Redis reads are not
+    in this sum. test_agent.py counts them. The stop waits HANDOFF_GRACE_S first.
     """
-    gh_runs = []
-
-    def fake_run(argv, **kwargs):
-        gh_runs.append((argv, kwargs["timeout"]))
-        body = {"repo": {"nameWithOwner": FULL}}.get(argv[1], [])
-        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(body), stderr="")
+    clock = SimpleNamespace(now=0.0)
+    timeouts = _timed_gh(monkeypatch, clock, per_call=0.0)
 
     checkout = tmp_path / "widgets"
     checkout.mkdir()
-    monkeypatch.setattr(debrief.subprocess, "run", fake_run)
     monkeypatch.setattr(debrief.ledger, "read_events", lambda repo, **kw: [])
     monkeypatch.setattr(debrief.claims, "claims_for", lambda repos, **kw: {})
 
     path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
 
     assert path.is_file()
-    assert gh_runs, "the debrief made no gh calls"
-    assert {timeout for _, timeout in gh_runs} == {debrief.GH_TIMEOUT}
-    budget = loop_runtime.HANDOFF_GRACE_S + len(gh_runs) * debrief.GH_TIMEOUT
+    assert timeouts, "the debrief made no gh calls"
+    assert all(seconds <= debrief.DEBRIEF_DEADLINE_S for seconds in timeouts)
+    budget = loop_runtime.HANDOFF_GRACE_S + debrief.DEBRIEF_DEADLINE_S
     assert budget < agent.ACTION_TIMEOUT_S["loop.stop"], (
-        f"{len(gh_runs)} gh calls x {debrief.GH_TIMEOUT}s + "
+        f"gh deadline {debrief.DEBRIEF_DEADLINE_S}s + "
         f"{loop_runtime.HANDOFF_GRACE_S}s grace = {budget}s"
     )
+
+
+def _timed_gh(monkeypatch, clock, per_call: float) -> list[float]:
+    """Fake gh calls that each take `per_call` fake seconds. Returns the timeouts asked for."""
+    timeouts: list[float] = []
+
+    def fake_run(argv, *, timeout, **kwargs):
+        timeouts.append(timeout)
+        if per_call > timeout:
+            clock.now += timeout
+            raise subprocess.TimeoutExpired(argv, timeout)
+        clock.now += per_call
+        body = {"repo": {"nameWithOwner": FULL}}.get(argv[1], [])
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(body), stderr="")
+
+    monkeypatch.setattr(debrief.subprocess, "run", fake_run)
+    monkeypatch.setattr(debrief, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    return timeouts
+
+
+def test_slow_gh_stops_at_the_deadline_and_names_each_cut_section(tmp_path: Path, monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+    timeouts = _timed_gh(monkeypatch, clock, per_call=3.0)
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    monkeypatch.setattr(debrief.ledger, "read_events", lambda repo, **kw: [])
+    monkeypatch.setattr(debrief.claims, "claims_for", lambda repos, **kw: {})
+
+    path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
+
+    text = path.read_text(encoding="utf-8")
+    assert timeouts == [10.0, 7.0, 4.0, 1.0]
+    assert clock.now == debrief.DEBRIEF_DEADLINE_S
+    assert text.count("Not collected: time limit reached.") == 5
+    for section in (
+        "Risk: open PR list.", "Risk: blocked issue list.", "Opportunities: ready issue list.",
+        "Evidence: Issue list.", "Evidence: PR list.",
+    ):
+        assert f"- Not collected: time limit reached. {section}" in text
+    assert "Not collected: time limit reached. Shipped" not in text
+
+
+def test_fast_gh_gives_no_note_and_every_section(tmp_path: Path, monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+    timeouts = _timed_gh(monkeypatch, clock, per_call=0.1)
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    monkeypatch.setattr(debrief.ledger, "read_events", lambda repo, **kw: [])
+    monkeypatch.setattr(debrief.claims, "claims_for", lambda repos, **kw: {})
+
+    path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
+
+    text = path.read_text(encoding="utf-8")
+    assert len(timeouts) == 8
+    assert clock.now == pytest.approx(0.8)
+    assert "Not collected" not in text
+    for heading in ("Shipped", "Follow-up tasks", "Risk", "Opportunities", "Evidence"):
+        assert f"## {heading}\n" in text
 
 
 def _every_list_returns(count: int):
@@ -446,7 +533,7 @@ def _every_list_returns(count: int):
          "mergeCommit": None, "statusCheckRollup": []}
         for n in range(1, count + 1)
     ]
-    return mock.patch.object(debrief, "_gh", lambda args, cwd=None: list(items))
+    return mock.patch.object(debrief, "_gh", lambda args, cwd=None, timeout=None: list(items))
 
 
 def test_cut_list_is_named_in_its_section():

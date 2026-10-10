@@ -1148,7 +1148,7 @@ def stop_loop(repo: str, *, force: bool = False, grace: float = HANDOFF_GRACE_S)
 
 
 def _write_debrief(repo: str, metadata: dict, *, forced: bool) -> None:
-    """Best effort: the stop has already happened, so a failure only warns."""
+    """Write the debrief. The stop already happened, so a failure only prints a warning."""
     try:
         debrief.write_debrief(
             STATE_DIR, repo, CODE_DIR / repo, metadata.get("started_at"), forced=forced,
