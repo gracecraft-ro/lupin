@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import stat
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -487,6 +487,146 @@ def test_list_and_read_debriefs(tmp_path: Path):
                        ("widgets", "missing.md"), ("nope", "20261001-090000.md")):
         with pytest.raises(debrief.DebriefError):
             debrief.read_debrief(tmp_path, repo, name)
+
+
+NOW = datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)
+
+
+def _stub_io(monkeypatch, gh=None):
+    monkeypatch.setattr(debrief, "_gh", gh or FakeGh(dict(RESPONSES)))
+    monkeypatch.setattr(debrief.ledger, "read_events", lambda repo, **kw: [])
+    monkeypatch.setattr(debrief.claims, "claims_for", lambda repos, **kw: {})
+
+
+def _debrief_file(root: Path, repo: str, name: str, text: str = "# old\n") -> None:
+    folder = root / "debriefs" / repo
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_text(text, encoding="utf-8")
+
+
+def test_build_markdown_period_replaces_the_stop_line():
+    md = _markdown(period="6h")
+
+    assert "- Period: 6h" in md
+    assert "- Stop:" not in md
+    assert "- Stop: normal" in _markdown()
+
+
+def test_write_period_without_earlier_file_starts_one_period_back(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    _stub_io(monkeypatch)
+
+    path = debrief.write_period(tmp_path, "widgets", checkout, "6h", now=NOW)
+
+    text = path.read_text(encoding="utf-8")
+    assert path.name == "20261010-120000-6h.md"
+    assert "- From: 2026-10-10T06:00:00Z" in text
+    assert "- To: 2026-10-10T12:00:00Z" in text
+    assert "- Period: 6h" in text
+
+
+def test_stop_debriefs_do_not_set_the_period_start(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    _stub_io(monkeypatch)
+    _debrief_file(tmp_path, "widgets", "20261010-110000.md")
+
+    path = debrief.write_period(tmp_path, "widgets", checkout, "6h", now=NOW)
+
+    assert "- From: 2026-10-10T06:00:00Z" in path.read_text(encoding="utf-8")
+
+
+def test_write_period_starts_at_the_newest_period_file(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    _stub_io(monkeypatch)
+    _debrief_file(tmp_path, "widgets", "20261010-110000-6h.md")
+    _debrief_file(tmp_path, "widgets", "20261010-090000-6h.md")
+
+    path = debrief.write_period(tmp_path, "widgets", checkout, "6h", now=NOW)
+
+    assert "- From: 2026-10-10T11:00:00Z" in path.read_text(encoding="utf-8")
+
+
+def test_write_period_refuses_an_unknown_period(tmp_path: Path):
+    with pytest.raises(debrief.DebriefError):
+        debrief.write_period(tmp_path, "widgets", tmp_path, "12h", now=NOW)
+    assert not (tmp_path / "debriefs").exists()
+
+
+def test_period_due_is_true_without_a_file(tmp_path: Path):
+    assert debrief.period_due(tmp_path, "widgets", "6h", NOW) is True
+
+
+@pytest.mark.parametrize("period", list(debrief.PERIODS))
+def test_period_due_changes_at_exactly_one_period(tmp_path: Path, period: str):
+    last = datetime(2026, 10, 10, 6, 0, 0, tzinfo=timezone.utc)
+    _debrief_file(tmp_path, "widgets", f"{last:%Y%m%d-%H%M%S}-{period}.md")
+    span = debrief.PERIODS[period]
+
+    assert debrief.period_due(tmp_path, "widgets", period, last + span - timedelta(seconds=1)) is False
+    assert debrief.period_due(tmp_path, "widgets", period, last + span) is True
+
+
+def test_list_and_read_periodic_debriefs(tmp_path: Path):
+    _debrief_file(tmp_path, "widgets", "20261010-120000.md", "# stop\n")
+    _debrief_file(tmp_path, "widgets", "20261010-120000-6h.md", "# six\n")
+    _debrief_file(tmp_path, "widgets", "20261010-120000-12h.md", "# twelve\n")
+
+    listed = debrief.list_debriefs(tmp_path)
+
+    assert ("widgets", "20261010-120000-6h.md") in listed
+    assert ("widgets", "20261010-120000.md") in listed
+    assert ("widgets", "20261010-120000-12h.md") not in listed
+    assert debrief.read_debrief(tmp_path, "widgets", "20261010-120000-6h.md") == "# six\n"
+    with pytest.raises(debrief.DebriefError):
+        debrief.read_debrief(tmp_path, "widgets", "20261010-120000-12h.md")
+
+
+def test_write_due_periodic_debriefs_writes_only_what_is_due(tmp_path: Path, monkeypatch, capsys):
+    code = tmp_path / "code"
+    (code / "widgets").mkdir(parents=True)
+    (code / "broken").mkdir()
+    state = tmp_path / "state"
+    # The 6h debrief ended at 11:00, so 6h is not due at 12:00. 24h and 7d have no file.
+    _debrief_file(state, "widgets", "20261010-110000-6h.md")
+
+    class FailingForBroken(FakeGh):
+        def __call__(self, args, cwd=None, timeout=None):
+            if cwd and cwd.endswith("broken"):
+                raise debrief.DebriefError("gh repo view exited 1")
+            return super().__call__(args, cwd=cwd, timeout=timeout)
+
+    _stub_io(monkeypatch, gh=FailingForBroken(dict(RESPONSES)))
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", state)
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", code)
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {
+        "broken": "claude", "gone": "claude", "widgets": "claude",
+    })
+
+    loop_runtime.write_due_periodic_debriefs(now=NOW)
+
+    names = sorted(path.name for path in (state / "debriefs" / "widgets").iterdir())
+    assert names == ["20261010-110000-6h.md", "20261010-120000-24h.md", "20261010-120000-7d.md"]
+    err = capsys.readouterr().err
+    # The broken repo fails each period. The widgets writes still happen after it.
+    for period in debrief.PERIODS:
+        assert f"lupin agent: no {period} debrief for broken: gh repo view exited 1" in err
+    # The gone repo has no checkout, so it is skipped without a warning.
+    assert "gone" not in err
+    assert not (state / "debriefs" / "gone").exists()
+
+
+def test_periodic_check_survives_a_bad_repos_file(monkeypatch, capsys):
+    def bad_repos():
+        raise loop_runtime.LoopError("could not read repos")
+
+    monkeypatch.setattr(loop_runtime, "enabled_repos", bad_repos)
+
+    loop_runtime.write_due_periodic_debriefs(now=NOW)
+
+    assert "lupin agent: no periodic debriefs: could not read repos" in capsys.readouterr().err
 
 
 @pytest.fixture

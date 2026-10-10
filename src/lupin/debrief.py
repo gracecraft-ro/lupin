@@ -1,8 +1,9 @@
-"""Written debrief for one loop stop.
+"""Written debrief for one loop stop or one period.
 
-A debrief is one markdown file per loop stop. Facts come from GitHub
-(`gh`). Unless the stop was forced, they also come from the ledger and
-claims in Redis. Files stay on the machine that stopped the loop.
+A debrief is one markdown file. A loop stop writes one. The agent writes
+periodic debriefs (`PERIODS`) on a timer. Facts come from GitHub (`gh`).
+Unless the debrief is for a forced stop, they also come from the ledger and
+claims in Redis. Files stay on the machine that wrote them.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import re
 import subprocess
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 
@@ -26,8 +27,11 @@ GH_TIMEOUT = 30.0
 DEBRIEF_TIME_LIMIT_S = 10.0  # Time limit for all gh calls in one debrief. Redis reads do not count.
 LIST_LIMIT = "200"
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
-FILE_RE = re.compile(r"^\d{8}-\d{6}\.md$")
 STAMP_FORMAT = "%Y%m%d-%H%M%S"
+PERIODS = {"6h": timedelta(hours=6), "24h": timedelta(hours=24), "7d": timedelta(days=7)}
+_PERIOD_NAMES = "|".join(map(re.escape, PERIODS))
+# Stop files are `<stamp>.md`. Periodic files are `<stamp>-<period>.md`.
+FILE_RE = re.compile(rf"^\d{{8}}-\d{{6}}(?:-(?:{_PERIOD_NAMES}))?\.md$")
 EVIDENCE_DIRS = ("docs/", "evidence/")
 EVIDENCE_TYPES = {
     ".png": "image/png",
@@ -166,12 +170,14 @@ def build_markdown(
     ledger_note: str | None = None,
     claimed: set[int] | None = None,
     time_limit: _TimeLimit | None = None,
+    period: str | None = None,
 ) -> str:
     """Return the debrief for `full_name` over `[start, end]` as markdown.
 
     `events` is None when the ledger was not read. `claimed` is None when
     claims were not read. A forced stop uses GitHub facts only. A section
-    whose gh call failed or timed out says so.
+    whose gh call failed or timed out says so. `period` is set for a
+    periodic debrief. It replaces the Stop line.
     """
     day = start.strftime("%Y-%m-%d")
     repo = ["--repo", full_name]
@@ -184,7 +190,10 @@ def build_markdown(
         ]
     )
     lines = [f"# Debrief: {full_name}", "", "## Window", f"- From: {_iso(start)}", f"- To: {_iso(end)}"]
-    lines.append("- Stop: forced, no handoff" if forced else "- Stop: normal")
+    if period is None:
+        lines.append("- Stop: forced, no handoff" if forced else "- Stop: normal")
+    else:
+        lines.append(f"- Period: {period}")
     lines.append("")
 
     merged_all, merged_reason = _list(time_limit, ["pr", "list", *repo, "--state", "merged",
@@ -321,7 +330,25 @@ def write_debrief(
         raise DebriefError(f"loop state for {repo} has no start time")
     if not checkout.is_dir():
         raise DebriefError(f"no checkout at {checkout}")
-    end = datetime.now(timezone.utc)
+    return _write(root, repo, checkout, start, datetime.now(timezone.utc), forced=forced)
+
+
+def _write(
+    root: Path,
+    repo: str,
+    checkout: Path,
+    start: datetime,
+    end: datetime,
+    *,
+    forced: bool,
+    period: str | None = None,
+) -> Path:
+    """Build the debrief for `[start, end]` and write it. Return its path.
+
+    Raises `DebriefError` or a Redis error. Nothing is written then.
+    The gh calls share one time limit. A section whose gh call failed or
+    timed out says so in the file. `period` adds the period to the file name.
+    """
     time_limit = _TimeLimit(DEBRIEF_TIME_LIMIT_S)
     view = time_limit.gh(["repo", "view", "--json", "nameWithOwner"], cwd=str(checkout))
     full_name = view["nameWithOwner"]
@@ -346,11 +373,12 @@ def write_debrief(
 
     text = build_markdown(
         full_name, start, end, forced=forced, events=events,
-        ledger_note=ledger_note, claimed=claimed, time_limit=time_limit,
+        ledger_note=ledger_note, claimed=claimed, time_limit=time_limit, period=period,
     )
     folder = root / "debriefs" / repo
     folder.mkdir(parents=True, exist_ok=True, mode=0o750)
-    path = folder / f"{end.strftime(STAMP_FORMAT)}.md"
+    stamp = end.strftime(STAMP_FORMAT)
+    path = folder / (f"{stamp}.md" if period is None else f"{stamp}-{period}.md")
     fd, temporary = tempfile.mkstemp(prefix=".debrief.", dir=folder)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -364,6 +392,48 @@ def write_debrief(
             pass
         raise
     return path
+
+
+def last_period_end(root: Path, repo: str, period: str) -> datetime | None:
+    """Return the end time of the newest `period` debrief for `repo`.
+
+    Return None when there is no such debrief.
+    """
+    if period not in PERIODS:
+        raise DebriefError(f"unknown period {period!r}")
+    if not REPO_RE.fullmatch(repo or ""):
+        raise DebriefError(f"invalid repo name {repo!r}")
+    ends = []
+    for path in (root / "debriefs" / repo).glob(f"*-{period}.md"):
+        if FILE_RE.fullmatch(path.name) and path.is_file():
+            stamp = path.name[:-len(f"-{period}.md")]
+            ends.append(datetime.strptime(stamp, STAMP_FORMAT).replace(tzinfo=timezone.utc))
+    return max(ends, default=None)
+
+
+def period_due(root: Path, repo: str, period: str, now: datetime) -> bool:
+    """Return True when no `period` debrief exists.
+
+    Return True also when one full period has passed since the last one.
+    """
+    last = last_period_end(root, repo, period)
+    return last is None or now - last >= PERIODS[period]
+
+
+def write_period(
+    root: Path, repo: str, checkout: Path, period: str, *, now: datetime | None = None,
+) -> Path:
+    """Write the `period` debrief for `repo` and return its path.
+
+    The window starts at the last `period` debrief. With none, it starts one
+    period before `now`. The window ends at `now`.
+    """
+    end = datetime.now(timezone.utc) if now is None else now
+    last = last_period_end(root, repo, period)
+    start = end - PERIODS[period] if last is None else last
+    if not checkout.is_dir():
+        raise DebriefError(f"no checkout at {checkout}")
+    return _write(root, repo, checkout, start, end, forced=False, period=period)
 
 
 def list_debriefs(root: Path) -> list[tuple[str, str]]:

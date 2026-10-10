@@ -693,6 +693,30 @@ def test_startup_scan_ignores_running_entries_for_other_machines(redis_port, flu
     assert status["state"] == "running"
 
 
+def test_run_forever_checks_periodic_debriefs_once_per_interval(monkeypatch):
+    class Stop(Exception):
+        pass
+
+    polls = []
+    checks = []
+
+    def poll_once(machine, key, **kwargs):
+        polls.append(machine)
+        if len(polls) == 3:
+            raise Stop()
+        return []
+
+    monkeypatch.setattr(agent, "startup_scan", lambda machine, **kwargs: [])
+    monkeypatch.setattr(agent, "poll_once", poll_once)
+    monkeypatch.setattr(loop_runtime, "write_due_periodic_debriefs", lambda: checks.append(1))
+
+    with pytest.raises(Stop):
+        agent.run_forever("jesus", KEY, poll_interval=0)
+
+    assert len(polls) == 3
+    assert checks == [1]
+
+
 def test_poll_once_unreachable_redis_raises(closed_port):
     kw = {"redis_host": "127.0.0.1", "redis_port": closed_port}
     with pytest.raises(slots.CoordinatorUnreachable):

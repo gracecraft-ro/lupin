@@ -1408,6 +1408,26 @@ def _write_debrief(repo: str, metadata: dict, *, forced: bool) -> None:
         print(f"lupin loop: no debrief for {repo}: {exc}", file=sys.stderr)
 
 
+def write_due_periodic_debriefs(now: datetime | None = None) -> None:
+    """Write each periodic debrief that is due. A failure only prints a warning."""
+    now = datetime.now(timezone.utc) if now is None else now
+    try:
+        repos = enabled_repos()
+    except (LoopError, OSError) as exc:
+        print(f"lupin agent: no periodic debriefs: {exc}", file=sys.stderr)
+        return
+    for repo in repos:
+        checkout = CODE_DIR / repo
+        if not checkout.is_dir():
+            continue
+        for period in debrief.PERIODS:
+            try:
+                if debrief.period_due(STATE_DIR, repo, period, now):
+                    debrief.write_period(STATE_DIR, repo, checkout, period, now=now)
+            except Exception as exc:
+                print(f"lupin agent: no {period} debrief for {repo}: {exc}", file=sys.stderr)
+
+
 def peek_loop(repo: str, lines: int = 60) -> str:
     repo = validate_repo(repo)
     if not isinstance(lines, int) or lines < 1 or lines > 5000:

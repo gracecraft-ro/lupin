@@ -470,6 +470,10 @@ Its waits:
 The debrief client gets no host, port, or password from its caller. It connects
 to `localhost:6379` without auth. Issue #118 tracks this.
 
+Periodic debriefs run in the agent, not in the stop subprocess. They read the
+same Redis keys as stop debriefs. They add no new keys. Their file names end
+in `-6h`, `-24h`, or `-7d`.
+
 ## Lock waits
 
 Two lock waits have no time limit of their own. They are not in the budget table.

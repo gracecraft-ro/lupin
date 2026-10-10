@@ -43,12 +43,15 @@ import uuid
 
 import redis
 
-from . import commands, machines
+# Load debrief before loop_runtime. In the other order, a circular import fails.
+# roadmap reads loop_runtime.CODE_DIR before loop_runtime finishes loading.
+from . import commands, debrief, loop_runtime, machines
 from .slots import CoordinatorUnreachable
 from .slots_redis import CONNECT_TIMEOUT, DEBRIEF_TIMEOUT_S, _call_with_retry, _client, debrief_client
 
 DEFAULT_BATCH = 20  # design: "ZRANGE the oldest 20"
 DEFAULT_POLL_INTERVAL = 2.0
+PERIODIC_CHECK_S = 300.0  # Seconds between checks for due periodic debriefs.
 EXEC_TIMEOUT_S = 120.0
 # Budget for loop.stop, in seconds. The stop subprocess gets what is left
 # after the command read and the Redis calls after it. See docs/redis-schema.md.
@@ -534,6 +537,11 @@ def run_forever(
     Doesn't return under normal operation."""
     conn = dict(redis_host=redis_host, redis_port=redis_port, redis_username=redis_username, redis_password=redis_password)
     startup_scan(machine, **conn)
+    next_periodic = 0.0
     while True:
         poll_once(machine, key, batch=batch, **conn)
+        # Runs on the poll thread. A slow debrief delays the next poll.
+        if time.monotonic() >= next_periodic:
+            loop_runtime.write_due_periodic_debriefs()
+            next_periodic = time.monotonic() + PERIODIC_CHECK_S
         time.sleep(poll_interval)
