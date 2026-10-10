@@ -276,6 +276,20 @@ from `/roadmap/board`, which renders one HTML fragment per query and keeps
 the last results for `LUPIN_ROADMAP_FRAGMENT_TTL` seconds (default 30).
 `?full=1` renders the whole page in one response, with no JavaScript.
 
+The Overview page has a "Recent updates" feed (mockup `1b`). The page opens
+first. The feed loads after it, from `/updates`. The feed shows what changed in
+the last 12 hours: issues opened, issues closed, and new issue comments. The
+newest update is first. A comment that holds only images shows as a Screenshot.
+The filter chips choose one kind of update or one repo. Only GitHub attachment
+images show. They load through `/image`.
+
+The feed reads the GitHub data that the Roadmap already caches. It makes no
+other `gh` call. That data can be up to one hour old. The feed always shows a
+12-hour window, because the server does not know when you last looked. Like the
+Roadmap, the server keeps each rendered result for
+`LUPIN_ROADMAP_FRAGMENT_TTL` seconds. `/updates?full=1` shows the feed as a
+whole page, with no JavaScript.
+
 The Repos and Roadmap pages read the checkouts in `LUPIN_LOOP_CODE_DIR`
 (default `/code`) on the machine that runs `lupin serve`. A repo with no
 checkout there does not appear. The serving user must be able to read each
@@ -308,6 +322,8 @@ per-machine limit or add controls that the current code cannot support.
   slot for a `bmo:` pick before calling it final (issue #37).
 - `src/lupin/serve.py`, `src/lupin/roadmap.py` — the dashboard. Moved from
   `ghostbook.nix`'s `hosts/jesus/loopgui/` (issue #204).
+- `src/lupin/digest.py` — the Overview page's "Recent updates" feed. It
+  collects the changes in a time window and renders the feed (issue #105).
 - `src/lupin/quota.py` — the `/usage` page's quota reads, split out of
   `serve.py`.
 - `src/lupin/quota_cache.py` — `lupin quota`'s shared Redis cache: one

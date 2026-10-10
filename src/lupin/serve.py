@@ -30,7 +30,7 @@ from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
-from . import benchmark_catalog, benchmark_fetch, claims, commands, loop_runtime, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
+from . import benchmark_catalog, benchmark_fetch, claims, commands, digest, loop_runtime, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
 from . import usage_cache
 from .slots import CoordinatorUnreachable
 from .quota import (
@@ -333,6 +333,50 @@ def _roadmap_loader_script() -> str:
 })();
 """
 
+
+def _update_sources(repos: list[str], connection: dict) -> dict:
+    """The cached open and closed issues and comments of every repo, read in parallel."""
+
+    def load(repo: str) -> dict:
+        path = os.path.join(CODE_DIR, repo)
+        open_issues, open_comments, open_warnings = roadmap.cached_github(
+            repo, path, "open", connection=connection
+        )
+        closed_issues, closed_comments, closed_warnings = roadmap.cached_github(
+            repo, path, "closed", connection=connection
+        )
+        return {
+            "issues": [*open_issues, *closed_issues],
+            "comments": {**closed_comments, **open_comments},
+            "warnings": [
+                f"{repo}: {warning}"
+                for warning in dict.fromkeys([*open_warnings, *closed_warnings])
+            ],
+        }
+
+    return dict(zip(repos, _parallel(repos, load)))
+
+
+def updates_fragment(query: dict, connection: dict) -> tuple[bytes, int]:
+    """Render the Recent updates feed as a bare HTML fragment (no page)."""
+    repos = roadmap.repository_names(code_repos())
+    selected = query.get("repo", "").strip()
+    if selected and selected not in repos:
+        return render_error("unknown repository"), 404
+    kind = query.get("kind", "All")
+    if kind not in digest.FILTERS:
+        kind = "All"
+
+    def build() -> bytes:
+        sources = _update_sources(repos, connection)
+        updates = digest.collect(sources, datetime.now(timezone.utc))
+        warnings = [text for data in sources.values() for text in data["warnings"]]
+        return digest.render_updates(
+            updates, repo=selected, kind=kind, warnings=warnings
+        ).encode("utf-8")
+
+    key = (("updates", *repos), (("kind", kind), ("repo", selected)))
+    return _cached_fragment(key, build), 200
 
 
 # How long a page waits for a remote machine's answer, in seconds.
@@ -1282,7 +1326,20 @@ def render_dashboard(state: dict) -> bytes:
         )
     body.append("</table></div>")
 
-    return page("Overview", "".join(body), active="overview")
+    # ---- recent updates (issue #105) -------------------------------------
+    # The feed fills in after first paint, so this page never waits for GitHub.
+    body.append(
+        f'<div class="section-head">{icon("M6 16V11a6 6 0 0112 0v5l2 2H4zM10 21h4", 15)}'
+        f"<h2>Recent updates</h2><span class=dim>last {digest.WINDOW_HOURS} hours</span></div>"
+        "<div id='updates' data-src='/updates' data-full='/updates?full=1'>"
+        "<p class='dim'>Loading recent updates&hellip;</p></div>"
+        "<noscript><p class='dim'>Recent updates need JavaScript. "
+        "<a href='/updates?full=1'>Open them on their own page</a> instead.</p></noscript>"
+    )
+
+    return page(
+        "Overview", "".join(body), digest.UPDATES_CSS, digest.LOADER_JS, active="overview"
+    )
 
 
 def time_until_reset(reset_at_ms, now_ms=None) -> str:
@@ -2959,6 +3016,18 @@ class Handler(BaseHTTPRequestHandler):
                 else None
             )
             fragment, status = roadmap_fragment(query, self.fleet_connection, quest_state)
+            self.reply(fragment, status)
+        elif url.path == "/updates":
+            fragment, status = updates_fragment(query, self.fleet_connection)
+            if status == 200 and query.get("full") == "1":
+                fragment = page(
+                    "Recent updates",
+                    f'<header><h1>{icon("M6 16V11a6 6 0 0112 0v5l2 2H4zM10 21h4")}'
+                    "Recent updates</h1></header><div id='updates-page'>"
+                    f"{fragment.decode('utf-8')}</div>",
+                    digest.UPDATES_CSS,
+                    active="overview",
+                )
             self.reply(fragment, status)
         elif url.path == "/usage":
             self.reply(render_usage(connection=self.fleet_connection))
