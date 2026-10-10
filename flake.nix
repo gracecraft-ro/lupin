@@ -59,6 +59,25 @@
         }
       );
 
+      devShells = forEachSystem (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          default = pkgs.mkShell {
+            packages = [
+              (pkgs.python3.withPackages (pythonPackages: [
+                pythonPackages.pytest
+                pythonPackages.redis
+              ]))
+              # tests/conftest.py starts `redis-server` from PATH.
+              pkgs.redis
+            ];
+          };
+        }
+      );
+
       checks = forEachSystem (
         system:
         let
