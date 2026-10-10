@@ -379,7 +379,7 @@ subprocess only. Inside that subprocess, the waits run one after another. Their
 sum is 1317.25 seconds. The sum adds shared-only and non-shared-only waits, so
 it is an upper bound. The longest single path is 1277.25 seconds, on a
 non-shared session. The test
-`test_stop_time_limit_covers_every_timeout_on_the_stop_path` in
+`test_stop_time_limit_covers_the_listed_timeouts` in
 `tests/test_agent.py` checks this sum.
 
 These waits are not in the sum:

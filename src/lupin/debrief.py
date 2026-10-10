@@ -126,8 +126,6 @@ def _in_window(value, start: datetime, end: datetime) -> bool:
 
 def _well_formed(event: dict) -> bool:
     """Return False when a field the debrief reads has the wrong type."""
-    if not isinstance(event.get("issue", 0), int):
-        return False
     for key in ("next", "decisions"):
         texts = event.get(key, [])
         if not isinstance(texts, list) or not all(isinstance(text, str) for text in texts):
@@ -234,7 +232,7 @@ def build_markdown(
     for text in decisions:
         risk.append(f"- Decision: {text}")
     lines.append("## Risk")
-    lines.append("Derived from GitHub facts and ledger decisions. Not checked against real ledger rows.")
+    lines.append("Derived from GitHub facts and ledger decisions in the window.")
     lines += risk or (["- None."] if open_prs is not None and blocked is not None else [])
     lines += _cut("Risk", "open PR", open_prs) + _cut("Risk", "blocked issue", blocked)
     lines.append("")
@@ -300,7 +298,7 @@ def write_debrief(
     """Write one debrief under `root/debriefs/<repo>/` and return its path.
 
     Raises `DebriefError` or a Redis error. Nothing is written then. The gh
-    calls share one time limit. A section cut by it says so in the file.
+    calls share one time limit. A section that the time limit cut says so in the file.
     """
     if not REPO_RE.fullmatch(repo or ""):
         raise DebriefError(f"invalid repo name {repo!r}")

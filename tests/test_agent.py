@@ -265,10 +265,12 @@ def test_loop_stop_gets_more_time_than_other_actions(redis_port, flush_redis, mo
     assert timeouts[0] > agent.EXEC_TIMEOUT_S
 
 
-# One Redis call, worst case. slots_redis._call_with_retry tries twice. Each
-# try makes 1 + DEFAULT_RETRY_COUNT attempts. An attempt tries each localhost
-# address (::1, 127.0.0.1), with the connect limit slots_redis.CONNECT_TIMEOUT.
-# The Redis client library waits up to DEFAULT_RETRY_CAP seconds between attempts.
+# Worst case for one Redis call, in seconds.
+# The helper tries twice.
+# Each try makes one first attempt plus the retries.
+# Each attempt tries two local addresses: IPv6 and IPv4.
+# Each connect waits up to the connect timeout.
+# Between attempts, the Redis client waits up to the longest retry wait.
 REDIS_ADDRESSES = 2
 REDIS_CALL_S = 2 * (
     (1 + DEFAULT_RETRY_COUNT) * REDIS_ADDRESSES * slots_redis.CONNECT_TIMEOUT
@@ -277,7 +279,7 @@ REDIS_CALL_S = 2 * (
 POLL_S = 0.25  # loop_runtime._wait_for_server, time.sleep(0.25)
 
 
-def test_stop_time_limit_covers_every_timeout_on_the_stop_path():
+def test_stop_time_limit_covers_the_listed_timeouts():
     # Each term is one worst-case wait, in seconds, on the non-forced stop path.
     # The test cannot see a timeout that is not listed here. Add new ones here.
     terms = [
