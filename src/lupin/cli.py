@@ -54,9 +54,10 @@ Exit codes, by design (see #198's architecture plan):
      unreachable -- `bmo` falls back to the `local` backend instead (see
      `slots_redis.py`), so it does not reach this exit code. Claims have no
      local fallback at all, so `claim`/`renew-claim`/`release-claim` return
-     3 for every unreachable-Redis case. For a slot other than `bmo`,
-     `acquire` and `release` return 3 when Redis refuses a login. They also
-     return 3 when the ACL denies a command. The message names the cause.
+     3 for every unreachable-Redis case. For every slot, `acquire` and
+     `release` return 3 when Redis refuses a login. `bmo` does not fall back
+     for this. They also return 3 when the ACL denies a command. The message
+     names the cause.
   1  any other error (malformed lease id, bad JSON input, hold with neither
      --lease nor <slot>/--holder, etc.) -- also `renew-claim`/`release-claim`
      when the caller isn't the claim's current holder.

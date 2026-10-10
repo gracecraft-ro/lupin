@@ -362,3 +362,23 @@ def test_hold_prints_one_line_when_renew_is_denied_mid_run(redis_port, flush_red
     assert len(calls) == 1
     assert f"lease {lease} not renewed" in err
     assert "Traceback" not in err
+
+
+def test_hold_prints_one_line_when_renew_reports_the_lease_gone(redis_port, flush_redis, monkeypatch, capsys):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    lease = slots_redis.acquire("not-bmo", "a", max_holders=1, **kw)
+    calls = []
+
+    def gone(lease_id, **_kwargs):
+        calls.append(lease_id)
+        return False
+
+    monkeypatch.setattr(slots_redis, "renew", gone)
+    code = slots_redis.hold(["sh", "-c", "sleep 1; exit 3"], lease=lease, ttl=0.3, **kw)
+
+    err = capsys.readouterr().err
+    assert code == 3
+    assert err.count("not renewed") == 1
+    assert f"lease {lease} not renewed" in err
+    # Renewal keeps running after a False return. Redis may recover.
+    assert len(calls) > 1

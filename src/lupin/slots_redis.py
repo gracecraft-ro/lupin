@@ -428,14 +428,15 @@ def hold(
         )
 
     renew_failed = False
+    renew_lost_reported = False
 
     def renew_during_run(lease_id: str) -> bool:
         # Report the first error only. The command keeps running.
-        nonlocal renew_failed
+        nonlocal renew_failed, renew_lost_reported
         if renew_failed:
             return False
         try:
-            return renew(
+            renewed = renew(
                 lease_id,
                 ttl=ttl,
                 redis_host=redis_host,
@@ -448,6 +449,11 @@ def hold(
             renew_failed = True
             _report_lease_error("renewed", lease_id, exc)
             return False
+        # False also means an unreachable non-bmo Redis. Keep renewing. Print once.
+        if not renewed and not renew_lost_reported:
+            renew_lost_reported = True
+            print(f"lupin: lease {lease_id} not renewed. It may no longer be held.", file=sys.stderr)
+        return renewed
 
     def release_after_run(lease_id: str) -> bool:
         # A failed release does not replace the command's exit code.
