@@ -327,7 +327,7 @@ Exit code 0 means the fork branch contains `release/next`. Then continue to
 the merge rules below. Exit code 1 means it does not. Use this step only for an
 open fork PR that is approved at its current head SHA. The worker syncs
 the PR branch with `git merge fork/release/next`. A sync is not a
-merge of the pull request. If the merge has conflicts,
+merge of the pull request. If the sync has conflicts,
 report them and stop. Then it pushes the branch to the fork. Run the check
 again. If it exits 0, get a new approval at the new head (see the next
 paragraph). Then continue to the merge rules. Otherwise stop. Do not rebase.
