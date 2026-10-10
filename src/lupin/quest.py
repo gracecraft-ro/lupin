@@ -811,7 +811,7 @@ def _resolve_machine(machine: str | None, issue_numbers: list[int], connection: 
         if record is not None and record["state"] == "draining":
             raise StartMachineDraining(machine)
         return machine
-    placed = place_mod.place(str(issue_numbers[0]), connection, strict=True)
+    placed = place_mod.place(str(issue_numbers[0]), connection)
     pick = placed.get("pick")
     if not pick:
         raise QuestError("no online machine can take this quest right now.")

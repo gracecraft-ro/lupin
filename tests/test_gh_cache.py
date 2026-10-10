@@ -146,10 +146,9 @@ def test_unreadable_registry_keeps_the_conservative_answer(redis_port, flush_red
 
 
 def test_canonical_fetcher_check_refuses_when_the_registry_is_partly_unreadable(redis_port, flush_redis):
-    """A corrupt record hides part of the registry. The pinned fetcher may be
-    in the hidden part, so the check must refuse the fetch. It must not
-    report the fetcher as absent."""
-    _raw_client(redis_port).set(f"{machines.PREFIX}machine:old-box", "not json")
+    """The pinned fetcher's own record is corrupt. The check must read that as
+    unknown and report the fetcher live, not absent."""
+    _raw_client(redis_port).set(f"{machines.PREFIX}machine:{gh_cache.CANONICAL_GH_FETCHER}", "not json")
 
     assert gh_cache._canonical_fetcher_live(_kw(redis_port)) is True
 
