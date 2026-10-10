@@ -100,7 +100,9 @@ does not empty its row in the fleet snapshot. The fetch keeps that
 subscription's last verified list, marks it `live: false` with the reason,
 and the Models page shows the rows with that reason under each one.
 
-`run <repo>` starts a Lupin worker and a Herdr workspace. `run --all`
+`run <repo>` starts a Lupin worker and a Herdr workspace. The agent works
+in a new Git worktree, not in the main checkout (see "State"). `run` refuses
+to start if the main checkout has an unfinished Git operation. `run --all`
 starts every enabled repo. Add `--machine M` to use the signed fleet queue
 on another machine; `run --all --machine M` starts its enabled repos.
 Without a profile, Lupin uses the repo's configured platform. To let Lupin
@@ -184,8 +186,9 @@ need `--machine` if Lupin cannot find one machine for the repo.
 
 `stop` asks the agent to run `/handoff` before it closes anything. It waits up
 to 10 minutes for the agent to finish. Then it saves a report, closes the
-workspace, and stops the worker. If the wait ends first, `stop` continues and
-says so in its output. If Herdr cannot send the request (for example, the
+workspace, and stops the worker. Then it removes the run's worktree if the
+worktree has no changes (see "State"). If the wait ends first, `stop`
+continues and says so in its output. If Herdr cannot send the request (for example, the
 agent waits for your answer), `stop` closes nothing and exits non-zero. Use
 `--force` to stop at once without a handoff. A remote `stop` can take longer
 than `--wait`. Then it exits with code 4. Check it with `lupin cmd status <id>`.
@@ -264,12 +267,31 @@ several machines must see. Its schema is in `docs/redis-schema.md`.
 Loop state is stored under `$LUPIN_LOOP_STATE_DIR` or
 `/var/lib/delegation-loop`. Lupin stores enabled repos in `repos`, per-repo
 orchestrator profiles in `orchestrators.json`, loop metadata in
-`herdr-loops/`, run prompts in `notes/`, stop reports in `reports/`, and
-one-off schedules in `once/`. `locks/` serializes local start and stop
+`herdr-loops/`, run prompts in `notes/`, stop reports in `reports/`, run
+worktrees in `worktrees/`, and one-off schedules in `once/`. `locks/` serializes local start and stop
 actions. Herdr keeps its own session and workspace state.
 The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 The same file also holds each checkout's repo identity, so a restart does
 not pay for `gh` again.
+
+Each run has its own Git worktree in `worktrees/<repo>/` in the loop state
+directory. A worktree is a second working copy of the repo, with its own files
+and branch. This one is on a new branch, `lupin-loop/<time>`. The branch
+starts at the remote default branch: the target of `origin/HEAD`, or else
+`origin/main` or `origin/master`. The agent works in this worktree. The main
+checkout in `LUPIN_LOOP_CODE_DIR` is never the agent's working directory.
+
+`run` refuses to start when the main checkout has a merge, rebase,
+cherry-pick, or revert in progress, or has unmerged files. The error names the
+state and the path. Lupin never aborts, resets, stashes, or cleans the
+checkout. Fix the checkout by hand, then run again.
+
+`stop` removes the run's worktree only if `git status --porcelain` shows no
+changes in it. Otherwise `stop` keeps the worktree and prints its path.
+`git -C <checkout> worktree list` also shows kept worktrees. `stop` never uses
+`--force`. A clean worktree can hold files that `.gitignore` lists, such as
+`.loop/` or `HANDOFF.md`. Git deletes them with the worktree. The branch stays
+in the repo after `stop`.
 
 `/roadmap` returns the page shell at once and fills in the board or list
 from `/roadmap/board`, which renders one HTML fragment per query and keeps
