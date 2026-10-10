@@ -408,13 +408,20 @@ Every feature change goes through a pull request to the fork's `release/next`.
 Policy changes go to upstream `main` for the owner to merge. The loop policy is
 in `docs/delegation-loop.md`.
 
-1. Use `/ship`. It pushes the branch to the fork and opens a PR with
-   `Closes #N`. Pass `--base release/next` to `gh pr create`. If the push
-   fails, report the branch name and commit range. Do not merge that branch.
-   The merge rules are in the `delegation-loop` skill.
+1. Use `/ship` to push. Do not use its `--repo`. Open the PR with
+   `gh pr create --repo gracecraft-ro/<repo> --base release/next`. The PR body
+   has `Closes #N`. If the push fails, report the branch name and commit range.
+   Do not merge that branch. The merge rules are in the `delegation-loop`
+   skill.
 2. Do not merge your own work. A reviewer who is not the author runs
    `/code-review`. The orchestrator merges into `release/next` only when all
-   four conditions in the `delegation-loop` skill are true.
+   four are true:
+   1. The PR is open on the fork, `gracecraft-ro/<repo>`, with base
+      `release/next`.
+   2. A reviewer approves the current head SHA.
+   3. The fork branch contains the current `release/next`. The ancestor check
+      is in the `delegation-loop` skill.
+   4. The repo's full gate, as its `AGENTS.md` defines it, passes.
 3. At the end of a session, run `/handoff`. It runs `lupin ledger append`.
 4. Loop details for this repo: `docs/delegation-loop.md`.
 

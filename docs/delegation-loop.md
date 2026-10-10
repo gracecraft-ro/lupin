@@ -35,8 +35,8 @@ fail without triage access. Check before you write it into a report.
    git worktree add <path> -b <branch> fork/release/next
    ```
 
-3. Use `/ship`. It runs `git push -u fork <branch>` and opens the PR. Pass
-   `--base release/next` to `gh pr create`.
+3. Use `/ship` to push. Do not use its `--repo`. Open the PR with
+   `gh pr create --repo gracecraft-ro/lupin --base release/next`.
 
 On a Herdr worker, use the Herdr worktree commands:
 
@@ -72,10 +72,14 @@ repo:
    finding. It uses `/ship` on the same PR. Repeat until the reviewer
    approves.
 5. The orchestrator posts the verdict on the PR.
-6. The orchestrator merges the PR on the fork into `release/next` only when
-   the `delegation-loop` skill's four conditions are true. The gate is
-   `nix flake check` (see "Build and test" in `AGENTS.md`). Record the
-   approved SHA before you merge. Merge with
+6. The orchestrator merges into `release/next` only when all four are true:
+   1. The PR is open on the fork, `gracecraft-ro/lupin`, with base
+      `release/next`.
+   2. A reviewer approves the current head SHA.
+   3. The fork branch contains the current `release/next`. The ancestor check
+      is in the `delegation-loop` skill.
+   4. The repo's full gate, as its `AGENTS.md` defines it, passes.
+   Record the approved SHA before you merge. Merge with
    `gh pr merge <PR-number> --repo gracecraft-ro/lupin --merge
    --match-head-commit <approved-SHA>`. Do not rebase. Do not force-push.
    Before merge, the branch must contain the current `release/next`. See the

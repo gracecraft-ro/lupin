@@ -307,35 +307,37 @@ it costs more.
 If the review finds a problem, dispatch a `fix` worker with the exact finding.
 Tell it to use `/ship` and update the same PR. Review the latest PR commit.
 Repeat until the reviewer approves it.
-The orchestrator posts the verdict and findings on the PR.
+The orchestrator (the agent that dispatches and merges work) posts the verdict
+and findings on the PR.
 
 Before a branch is merged, it must contain the current `release/next`. Fetch
-the fork first. Then run this check:
+the fork first. Then run this check. `BRANCH` is the PR branch name:
 
 ```sh
 git fetch fork
-git merge-base --is-ancestor fork/release/next BRANCH
+git merge-base --is-ancestor fork/release/next fork/BRANCH
 ```
 
-Exit code 0 means the branch contains `release/next`. Then continue to the
-merge rules below. Exit code 1 means it does not. For an open, approved fork
-PR, the worker runs `git merge fork/release/next` on the PR branch. If the
+Exit code 0 means the fork branch contains `release/next`. Then continue to
+the merge rules below. Exit code 1 means it does not. For an open, approved
+fork PR, the worker runs `git merge fork/release/next` on the PR branch. If the
 merge has conflicts, report them and stop. Then it pushes the branch to the
-fork. Run the check again. Do not rebase. Any other exit code means the check
-failed. Report it and stop. Do not merge.
+fork. Run the check again. If it exits 0, continue to the merge rules.
+Otherwise stop. Do not rebase. Any other exit code from the first check means
+the check failed. Report it and stop. Do not merge.
 
-If the merge changes a file the reviewer already reviewed, the reviewer checks
-that change before the PR merge. The gate runs in every case.
+An approval binds to the head SHA. If the sync changed the head, get a new
+approval at the new head before you merge. The reviewer may limit that review
+to the files the sync changed. The gate runs in every case.
 
 The orchestrator merges a PR into `release/next` only when all four of these
 are true:
 
 - The branch has an open PR on the fork, `gracecraft-ro/<repo>`, with base
   `release/next`.
-- A reviewer approves that PR.
-- The branch contains the current `release/next`. Use the check above, which
-  tests whether the branch contains `release/next`.
-- The repo's full gate passes on the branch, as it is at merge time.
+- A reviewer approves the PR at its current head SHA.
+- The fork branch contains the current `release/next`. Use the check above.
+- The repo's full gate, as its `AGENTS.md` defines it, passes at merge time.
 
 The reviewer is a different agent from the worker. The gate command is in the
 repo's `AGENTS.md`. If the repo has no gate command, report that. Do not merge.
@@ -428,7 +430,8 @@ fix goes on the same branch.
 policy change.
 
 Upstream `main` is owner-only. The owner opens one pull request from
-`release/next` to `main` when they choose. Loops do not wait for it.
+`release/next` on `gracecraft-ro/<repo>` to `main` on
+`gracecraft-software/<repo>` when they choose. Loops do not wait for it.
 
 Continue working until the backlog is empty or every remaining item is blocked
 on an owner decision. Then run `/handoff`. State the exact next action and any
