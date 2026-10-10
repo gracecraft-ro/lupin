@@ -285,14 +285,14 @@ def _filter_candidates(
         if entry is None:
             skipped["other_provider"] += 1
             continue
+        if record["state"] == "offline":
+            skipped["offline"] += 1
+            continue
         if entry.get("pct_left") is None:
             if entry.get("note") in quota_mod.NO_KEY_NOTES:
                 skipped["no_key"] += 1
             else:
                 skipped["read_failed"] += 1
-            continue
-        if record["state"] == "offline":
-            skipped["offline"] += 1
             continue
         matched.append(record)
 

@@ -203,6 +203,13 @@ class RouteTests(unittest.TestCase):
 
         self.assertEqual(result, {"model": "opus", "effort": "high"})
 
+    def test_loads_the_real_model_tiers_json(self):
+        # No injected tiers dict -- confirms the default path actually
+        # resolves to the packaged model-tiers.json.
+        result = route.route("coding", "size-m", quota_rows=[])
+
+        self.assertEqual(result, {"model": "opencode-go/glm-5.3", "effort": "high"})
+
 
 class RoutePacingTests(unittest.TestCase):
     """Issue #36: quota is fleet-wide, so route() paces on it directly.
@@ -297,6 +304,26 @@ class RoutePacingTests(unittest.TestCase):
         result = route.route("coding", "size-m", tiers=_TIERS, quota_rows=rows)
 
         self.assertEqual(result, {"model": "opus", "effort": "high"})
+
+    def test_lean_in_under_30_minutes_to_reset_moves_up_on_the_same_provider(self):
+        # 10% used with 20 minutes to reset: under the 30-minute rule, so the
+        # pick leans in. The higher entry must be on the same provider, so
+        # sonnet (claude) is skipped and qwen3.8-max is picked.
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [{"model": "opencode-go/glm-5.3", "effort": "high"}],
+                    "tier2": [
+                        {"model": "sonnet", "effort": "high"},
+                        {"model": "opencode-go/qwen3.8-max", "effort": "high"},
+                    ],
+                }
+            }
+        }
+        rows = [self._row("opencode-go", 10, 20 * 60 * 1000)]
+        result = route.route("coding", "size-m", tiers=tiers, quota_rows=rows)
+
+        self.assertEqual(result, {"model": "opencode-go/qwen3.8-max", "effort": "high"})
 
     def test_lean_in_never_goes_past_the_top_tier(self):
         rows = [self._row("claude", 10, 1 * HOUR_MS)]

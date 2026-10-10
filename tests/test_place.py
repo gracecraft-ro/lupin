@@ -233,6 +233,35 @@ def test_place_skips_offline_machines(redis_port, flush_redis):
     assert result["skipped"]["offline"] == 1
 
 
+def test_place_counts_an_offline_machine_without_a_reading_as_offline(
+    redis_port, flush_redis, monkeypatch
+):
+    # Offline is checked before a missing reading, as on main. The machine
+    # has no key and is offline: it counts as offline, not as no_key.
+    monkeypatch.setattr(
+        place.route_mod, "route",
+        lambda *a, **kw: {"model": "opencode-go/glm-5.3", "effort": "high"},
+    )
+    _write_machine(
+        redis_port, "ghost-no-key",
+        heartbeat="2000-01-01T00:00:00Z",
+        quota={"opencode-go": {
+            "pct_left": None, "resets_at": None, "source": "test",
+            "note": quota.NO_OPENCODE_GO_KEY,
+        }},
+    )
+    _write_machine(
+        redis_port, "opencode-box",
+        quota={"opencode-go": {"pct_left": 100.0, "resets_at": None, "source": "test"}},
+    )
+
+    result = place.place("fix the retry backoff", _kw(redis_port))
+
+    assert result["pick"] == "opencode-box"
+    assert [c["name"] for c in result["candidates"]] == ["opencode-box"]
+    assert result["skipped"] == {"offline": 1, "other_provider": 0, "no_key": 0, "read_failed": 0}
+
+
 def test_place_breaks_ties_on_heartbeat_freshness(redis_port, flush_redis):
     fresh = machines._now_iso()
     stale = _old_stamp(90)  # older, but still under OFFLINE_AFTER (120s)
