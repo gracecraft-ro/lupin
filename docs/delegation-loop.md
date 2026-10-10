@@ -56,8 +56,9 @@ herdr worktree create --branch <branch> --base fork/release/next --cwd /code/lup
 
 If the `fork` remote is missing, stop and report. Do not add a remote.
 
-The worktree is a linked Git worktree, not a clone. It has no `fork` remote,
-so `/ship` must add one before it pushes.
+The worktree is a linked Git worktree, not a clone. A linked worktree shares its
+remotes with the checkout it came from. If that checkout has no `fork` remote,
+stop and report.
 
 ## Pull request and review
 
