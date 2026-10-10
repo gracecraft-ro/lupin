@@ -514,9 +514,10 @@ If a wait runs to that limit, the stop ends and the debrief is not written.
 - The claims scan counts as one request and reply. `SCAN` returns keys in pages.
   Each extra page is one more request and reply. The budget does not count the
   extra pages.
-- A server that sends data slowly can keep one reply going. Each read on the
-  stop path waits up to 1 second. Each read on `_client`, which the command
-  read uses, waits up to 2 seconds. The reply as a whole has no time limit.
+- A server that sends data slowly can keep one reply going. Each read on
+  `debrief_client` waits up to 1 second. These are the calls after the command
+  read. Each read on `_client`, which makes the command read, waits up to
+  2 seconds. The reply as a whole has no time limit.
   The budget does not bound this case.
 - Name lookup (`getaddrinfo`) is not covered by the timeouts.
 
@@ -590,8 +591,8 @@ A `running` entry that is still queued when `lupin agent` restarts is marked
 startup scan does this. It never runs the command again.
 Three cases can leave such an entry for any action:
 
-- The agent process stopped after it wrote the claim, and before the command
-  finished. A crash or a kill can cause this. The command can have run in
+- The agent process stopped after it wrote the claim, and before it wrote the
+  result. A crash or a kill can cause this. The command can have run in
   full, in part, or not at all. The startup scan does not check.
 - The claim was written, but its reply was lost. The retry or the claim read
   then failed. The command did not run. The agent exited with code 3.
