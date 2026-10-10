@@ -105,13 +105,13 @@ def test_hold_keeps_renewing_after_one_renew_error(tmp_path, monkeypatch, capsys
     real_renew = slots.renew
     calls = []
 
-    def renew_fails_once(lease, **kwargs):
+    def renew_fails_twice(lease, **kwargs):
         calls.append(lease)
-        if len(calls) == 1:
-            raise OSError("renew broke once")
+        if len(calls) in (1, 2):
+            raise OSError("renew broke")
         return real_renew(lease, **kwargs)
 
-    monkeypatch.setattr(slots, "renew", renew_fails_once)
+    monkeypatch.setattr(slots, "renew", renew_fails_twice)
     code = slots.hold(
         [sys.executable, "-c", "import time; time.sleep(0.5)"],
         slot="bmo",
@@ -121,8 +121,8 @@ def test_hold_keeps_renewing_after_one_renew_error(tmp_path, monkeypatch, capsys
         state_root=root,
     )
     assert code == 0
-    assert len(calls) >= 2, "renew was not called again after the error"
-    assert capsys.readouterr().err.count("renew broke once") == 1
+    assert len(calls) >= 3, "renew was not called again after the errors"
+    assert capsys.readouterr().err.count("renew broke") == 1
     assert slots.status(state_root=root)["bmo"]["holders"] == 0
 
 

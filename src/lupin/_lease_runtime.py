@@ -44,12 +44,16 @@ def run_with_lease(
     stop = threading.Event()
 
     def _renew_loop() -> None:
+        failing = False
         while not stop.wait(renew_interval):
             try:
                 renew(lease)
+                failing = False
             except Exception as exc:
-                # Keep renewing. The command still runs.
-                print(f"lupin: lease {lease} not renewed. {exc}", file=sys.stderr)
+                # Keep renewing. Report only the first error in a row.
+                if not failing:
+                    print(f"lupin: lease {lease} not renewed. {exc}", file=sys.stderr)
+                failing = True
 
     renewer = threading.Thread(target=_renew_loop, daemon=True)
     renewer.start()
