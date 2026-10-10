@@ -30,7 +30,7 @@ REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 STAMP_FORMAT = "%Y%m%d-%H%M%S"
 PERIODS = {"6h": timedelta(hours=6), "24h": timedelta(hours=24), "7d": timedelta(days=7)}
 _PERIOD_NAMES = "|".join(map(re.escape, PERIODS))
-# Stop files are `<stamp>.md`. Periodic files are `<stamp>-<period>.md`.
+# Stop files are `<file name time>.md`. Periodic files are `<file name time>-<period>.md`.
 FILE_RE = re.compile(rf"^\d{{8}}-\d{{6}}(?:-(?:{_PERIOD_NAMES}))?\.md$")
 EVIDENCE_DIRS = ("docs/", "evidence/")
 EVIDENCE_TYPES = {
@@ -430,12 +430,14 @@ def period_due(root: Path, repo: str, period: str, now: datetime) -> bool:
     """Return True when a `period` debrief is due.
 
     Return True also when one full period has passed since the last one.
-    Return False when a file ends within one period after `now`. Such a file
-    blocks the write until its end time has passed.
+    Return False when a period file ends within seven days after `now`.
+    Such a file blocks the write until its end time has passed.
+    A clock that stepped back can delay a write by up to seven days.
     """
     ends = _period_ends(root, repo, period)
     span = PERIODS[period]
-    if any(now < end <= now + span for end in ends):
+    horizon = max(PERIODS.values())
+    if any(now < end <= now + horizon for end in ends):
         return False
     last = last_period_end(root, repo, period, now)
     return last is None or now - last >= span

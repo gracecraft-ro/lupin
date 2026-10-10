@@ -3645,7 +3645,7 @@ def _write_debrief_file(root, repo, name, text):
     (folder / name).write_text(text, encoding="utf-8")
 
 
-def test_debrief_index_lists_newest_first_with_utc_stamps(tmp_path, monkeypatch):
+def test_debrief_index_lists_newest_first_with_utc_file_name_times(tmp_path, monkeypatch):
     monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
     _write_debrief_file(tmp_path, "widgets", "20261001-090000.md", "# old\n")
     _write_debrief_file(tmp_path, "widgets", "20261002-090000.md", "# new\n")
