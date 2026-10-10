@@ -79,9 +79,20 @@ _TIERS = {
     },
     "prose": {
         "tiers": {
-            # Mirrors the two-provider shape the real matrix needs: a
-            # quota-pacing fallback must be able to find "another provider,
-            # same tier" (claude, then opencode-go).
+            # tier2 lists opus and fable. Both run on the claude account.
+            "tier1": [{"model": "sonnet", "effort": "high"}],
+            "tier2": [
+                {"model": "opus", "effort": "high"},
+                {"model": "fable", "effort": "high"},
+            ],
+        }
+    },
+}
+
+# prose with a second account in tier2. The fallback tests inject this row.
+_PROSE_OTHER_ACCOUNT = {
+    "prose": {
+        "tiers": {
             "tier1": [{"model": "sonnet", "effort": "high"}],
             "tier2": [
                 {"model": "opus", "effort": "high"},
@@ -210,16 +221,38 @@ class RoutePacingTests(unittest.TestCase):
         }
 
     def test_blocked_provider_falls_back_to_next_tiers_other_provider(self):
-        # prose's tier2 lists opus (claude) then opencode-go/glm-5.3. Claude
-        # blocked -> falls to the opencode-go model, not a wait and not a
-        # local/bmo model (prose's tier1 has no local/bmo entry anyway, but
+        # The injected tier2 lists opus (claude) then opencode-go/glm-5.3.
+        # Claude blocked -> falls to the opencode-go model, not a wait and not
+        # a local/bmo model (prose's tier1 has no local/bmo entry anyway, but
         # this exercises the "other entry in the same tier" branch either
         # way).
         rows = [self._row("claude", 100, 10 * HOUR_MS)]
-        result = route.route("prose", "size-l", tiers=_TIERS, quota_rows=rows)
+        result = route.route("prose", "size-l", tiers=_PROSE_OTHER_ACCOUNT, quota_rows=rows)
 
         self.assertEqual(result["model"], "opencode-go/glm-5.3")
         self.assertEqual(result["downgraded_from"], {"model": "opus", "effort": "high"})
+
+    def test_fable_on_a_blocked_claude_account_is_not_a_fallback(self):
+        # fable is served by the claude account, the same account as opus.
+        # Claude blocked -> no other account to fall to. Route must report a
+        # wait on opus. It must not return fable.
+        rows = [self._row("claude", 100, 10 * HOUR_MS)]
+        tiers = {
+            "prose": {
+                "tiers": {
+                    "tier1": [{"model": "sonnet", "effort": "high"}],
+                    "tier2": [
+                        {"model": "opus", "effort": "high"},
+                        {"model": "fable", "effort": "high"},
+                    ],
+                }
+            }
+        }
+        result = route.route("prose", "size-l", tiers=tiers, quota_rows=rows)
+
+        self.assertEqual(result["model"], "opus")
+        self.assertNotIn("downgraded_from", result)
+        self.assertIsNotNone(result["wait_seconds"])
 
     def test_blocked_tier1_does_not_fall_back_to_a_tier2_on_the_same_blocked_account(self):
         # The bug this issue fixes: coding's tier1 (sonnet) and tier2 (opus)
@@ -242,7 +275,7 @@ class RoutePacingTests(unittest.TestCase):
             self._row("claude", 100, 5 * HOUR_MS),
             self._row("opencode-go", 100, 20 * MIN_MS),
         ]
-        result = route.route("prose", "size-l", tiers=_TIERS, quota_rows=rows)
+        result = route.route("prose", "size-l", tiers=_PROSE_OTHER_ACCOUNT, quota_rows=rows)
 
         # opus (claude) is blocked, falls to opencode-go/glm-5.3 -- also
         # blocked, resetting sooner than claude. The wait must reflect that

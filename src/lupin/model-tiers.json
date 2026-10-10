@@ -1,5 +1,5 @@
 {
-  "_comment": "One row per task category. Each tier is an ordered list of {model, effort}; route() uses the first entry whose account has quota left. A bmo: or local: model runs on local GPUs; when bmo is not available, route() uses tier1 instead of tier0.",
+  "_comment": "One row per task category. Each tier is an ordered list of {model, effort}. route() picks the first entry of the tier, or a same-provider entry in a higher tier when that provider has surplus quota. If the pick's account is blocked, route() tries the rest of the tier, then lower tiers, then higher tiers. bmo: and local: entries are never used as a fallback. When bmo is not available, route() skips tier0 if tier0 has a bmo: entry.",
   "coding": {
     "source": "Artificial Analysis Coding Agent Index v1.5 (retrieved 2026-10-07); prices from the 2026-10-08 fetch-models snapshot (models.dev)",
     "last_verified": "2026-10-08",
