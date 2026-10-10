@@ -2,9 +2,9 @@
 
 A debrief is one markdown file. A loop stop writes one. The agent writes
 periodic debriefs (`PERIODS`) on a timer. Facts come from GitHub (`gh`).
-A normal stop and a periodic debrief also read the ledger and issue claims in
-Redis. The ledger lists shared repository events. A claim marks an issue that
-one loop is working on. A forced stop does not. Files stay on the machine that
+The ledger lists shared repository events. A claim marks an issue that one loop
+is working on. A normal stop and a periodic debrief also read the ledger and
+issue claims in Redis. A forced stop does not. Files stay on the machine that
 wrote them.
 """
 

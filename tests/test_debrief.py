@@ -614,6 +614,13 @@ def test_eight_hour_clock_step_back_blocks_the_write(tmp_path: Path):
     assert debrief.period_due(tmp_path, "widgets", "6h", NOW) is False
 
 
+def test_period_file_ending_exactly_seven_days_out_blocks_the_write(tmp_path: Path):
+    # NOW + 7 days is the horizon edge. The block includes it.
+    _debrief_file(tmp_path, "widgets", "20261017-120000-6h.md")
+
+    assert debrief.period_due(tmp_path, "widgets", "6h", NOW) is False
+
+
 def test_future_file_name_time_writes_one_window_and_then_waits(tmp_path: Path, monkeypatch):
     checkout = tmp_path / "widgets"
     checkout.mkdir()
