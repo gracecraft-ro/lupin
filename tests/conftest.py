@@ -201,15 +201,14 @@ def make_checkout(tmp_path):
 def clean_lupin_env(monkeypatch):
     """Clear os.environ of every LUPIN_* variable for this test.
 
-    Then set LUPIN_BACKEND to local.
-
     The sandbox shell exports LUPIN_* variables. The CLI reads them as
     defaults. Without this fixture, a test can reach the shared Redis server.
 
-    The change lasts only for this test. Modules read os.environ once,
-    when Python first imports them. They keep that value. For example,
-    src/lupin/loop_runtime.py and src/lupin/serve.py.
+    The fixture clears only the keys that exist when it runs. Keys set later are not cleared.
+
+    Some modules read os.environ at import time. For example, STATE_DIR in
+    src/lupin/loop_runtime.py and _FRAGMENT_TTL in src/lupin/serve.py. This
+    fixture does not change those values.
     """
     for name in [key for key in os.environ if key.startswith("LUPIN_")]:
         monkeypatch.delenv(name)
-    monkeypatch.setenv("LUPIN_BACKEND", "local")

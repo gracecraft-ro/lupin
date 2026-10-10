@@ -1231,7 +1231,7 @@ def test_cli_quest_focus_prints_exact_copy_text(quests_fixture, monkeypatch, red
     )
 
 
-def test_cli_quest_focus_draining_machine_error(quests_fixture, monkeypatch, redis_port, flush_redis, capsys):
+def test_cli_quest_focus_draining_machine_error(quests_fixture, monkeypatch, redis_port, flush_redis, capsys, clean_lupin_env):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo"])
     monkeypatch.setattr(
         cli.machines, "machines", lambda connection: [_machine("mac-studio", state="draining")]
@@ -1251,7 +1251,7 @@ def test_cli_quest_focus_draining_machine_error(quests_fixture, monkeypatch, red
     )
 
 
-def test_cli_quest_focus_no_ready_tasks_error(monkeypatch, redis_port, flush_redis, capsys):
+def test_cli_quest_focus_no_ready_tasks_error(monkeypatch, redis_port, flush_redis, capsys, clean_lupin_env):
     blocked = _quest("billing-v2", [{"number": 480, "title": "ship billing", "done": False}])
     blocked_dag = {"repos": {"repo": [{"number": 480, "blockedBy": [{"repo": "repo", "number": 470}], "blocking": []}]}}
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo"])
