@@ -11,7 +11,7 @@ the rows a caller passes in. `route.py` is the only caller; it decides what
 to do with these facts (which tier, which fallback). This module just
 reports them.
 
-The literal rules come from issue #36 (its final two comments).
+The literal rules come from issue #36 (comment of 2026-10-07 20:31 UTC).
 The surplus test on the 30-minute lean-in comes from issue #99.
 The abstract pacing-ratio design from issue #36's earlier comment is not
 implemented here.
