@@ -1214,7 +1214,9 @@ def test_release_raises_coordinator_unreachable(quests_fixture, closed_port):
 # --------------------------------------------------------------------------
 
 
-def test_cli_quest_focus_prints_exact_copy_text(quests_fixture, monkeypatch, redis_port, flush_redis, capsys, clean_lupin_env):
+def test_cli_quest_focus_prints_exact_copy_text(
+    quests_fixture, monkeypatch, redis_port, flush_redis, capsys, clean_lupin_env
+):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo"])
     monkeypatch.setattr(
         cli.machines, "machines", lambda connection: [_machine("mac-studio", used=0, max_=4)]
@@ -1231,7 +1233,9 @@ def test_cli_quest_focus_prints_exact_copy_text(quests_fixture, monkeypatch, red
     )
 
 
-def test_cli_quest_focus_draining_machine_error(quests_fixture, monkeypatch, redis_port, flush_redis, capsys, clean_lupin_env):
+def test_cli_quest_focus_draining_machine_error(
+    quests_fixture, monkeypatch, redis_port, flush_redis, capsys, clean_lupin_env
+):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo"])
     monkeypatch.setattr(
         cli.machines, "machines", lambda connection: [_machine("mac-studio", state="draining")]

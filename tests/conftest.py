@@ -199,16 +199,11 @@ def make_checkout(tmp_path):
 
 @pytest.fixture
 def clean_lupin_env(monkeypatch):
-    """Clear os.environ of every LUPIN_* variable for this test.
+    """Delete every LUPIN_* variable from os.environ for this test.
 
-    The sandbox shell exports LUPIN_* variables. The CLI reads them as
-    defaults. Without this fixture, a test can reach the shared Redis server.
-
-    The fixture clears only the keys that exist when it runs. Keys set later are not cleared.
-
-    Some modules read os.environ at import time. For example, STATE_DIR in
-    src/lupin/loop_runtime.py and _FRAGMENT_TTL in src/lupin/serve.py. This
-    fixture does not change those values.
+    The list is built once, when this fixture runs. Variables set later stay.
+    Modules that read variables at import time keep their values, for example
+    STATE_DIR in loop_runtime.py.
     """
     for name in [key for key in os.environ if key.startswith("LUPIN_")]:
         monkeypatch.delenv(name)
