@@ -47,11 +47,13 @@ herdr worktree create --branch <branch> --base fork/release/next --cwd /code/lup
 ```
 
 A linked worktree shares its remotes with the checkout it came from. If that
-checkout has no `fork` remote, stop. Then report it. Do not add a remote.
+checkout has no `fork` remote, stop. Then report the missing remote.
+Do not add a remote.
 
 `lupin run` still starts each loop from `origin/HEAD`, which is upstream `main`.
 It does not start from `fork/release/next`. Until the owner changes `lupin run`,
-create feature worktrees with the steps above, not with `lupin run`.
+do not use it for feature work. Create feature worktrees with the Herdr
+worktree commands above, or the manual steps in rule 1.
 
 ## Pull request and review
 
@@ -61,7 +63,7 @@ repo:
 
 1. The base branch is the integration branch, `release/next`, on the fork
    (`gracecraft-ro/lupin`). A feature PR never targets upstream `main`.
-2. A worker uses `/ship` (see rule 1). If the push fails, the item stops.
+2. A worker uses `/ship` (see rule 1). If the push fails, the worker stops.
    Report the branch name and commit range. Do not review or merge the branch.
 3. The orchestrator dispatches `/code-review` for every PR,
    including docs-only changes. The reviewer is not the worker. The
@@ -70,13 +72,13 @@ repo:
    finding. It uses `/ship` on the same PR. Repeat until the reviewer
    approves.
 5. The orchestrator posts the verdict on the PR.
-6. The orchestrator merges into `release/next` only after the reviewer
-   approves and the gate passes. The gate is `nix flake check` (see "Build
-   and test" in `AGENTS.md`). Merge with
+6. The orchestrator merges the PR on the fork into `release/next` only after
+   the reviewer approves it and the gate passes. The gate is `nix flake check`
+   (see "Build and test" in `AGENTS.md`). Merge with
    `gh pr merge --repo gracecraft-ro/lupin --merge`. Do not rebase. Do not
    force-push. Before merge, the branch must contain the current `release/next`.
    See the merge check in the `delegation-loop` skill. A worker or reviewer
-   never merges. Close the issue in the same pass as the merge.
+   never merges a pull request. Close the issue in the same pass as the merge.
 
 Changes to this policy go to upstream `main` for the owner to merge. The owner
 opens that PR. Feature work goes to fork `release/next`.

@@ -33,8 +33,8 @@ git worktree add <path> -b <branch> fork/release/next
 
 Keep each worktree under `.claude/worktrees/`. Record the machine, worktree
 path, branch, and issue in the dispatch and the repository's handoff record.
-When a worker runs in a Herdr
-pane, also record the agent name, workspace ID, pane ID, tab ID, and cwd.
+When a worker runs in a Herdr pane, record its agent name, workspace ID, pane
+ID, tab ID, and cwd.
 `herdr agent list` reports all of them. See "Talk to an agent in a Herdr
 pane" below.
 
@@ -288,7 +288,7 @@ gh pr create --repo gracecraft-ro/<repo> --base release/next
 ```
 
 Do not open a feature PR against upstream `main`. If the push to the fork
-fails, the item stops. The worker reports the local branch name and commit
+fails, the worker stops. The worker reports the local branch name and commit
 range. Do not review or merge the branch.
 
 Use `lupin review-route --category CATEGORY --size SIZE --mode separate` for
@@ -318,22 +318,25 @@ git merge-base --is-ancestor fork/release/next BRANCH
 ```
 
 Exit code 0 means the branch contains `release/next`. Exit code 1 means it
-does not. Any other exit code means the check failed. In that case, the worker
-merges `fork/release/next` into the branch. Then it pushes the branch to the
-fork. Do not rebase.
+does not. In that case, the worker runs `git merge fork/release/next` on the
+branch. Then it pushes the branch to the fork. Do not rebase. Any other exit
+code means the check failed. Report it. Do not merge.
 
 If the merge of `fork/release/next` changes a file the reviewer already
 reviewed, the reviewer checks that change before the merge. The gate runs in
 every case.
 
-The orchestrator merges a branch into `release/next` only when both of these
+The orchestrator merges a PR into `release/next` only when all four of these
 are true:
 
-- A reviewer approves the branch. The reviewer is a different agent from the
-  worker. The reviewer's model tier is not lower than the worker's.
-- The repo's full gate passes on the branch, as it is at merge time. The gate
-  command is in the repo's `AGENTS.md`. If the repo has no gate command, report
-  that. Do not merge.
+- The branch has an open PR on the fork, `gracecraft-ro/<repo>`, with base
+  `release/next`.
+- A reviewer approves that PR.
+- The branch contains the current `release/next`. Use the ancestor check above.
+- The repo's full gate passes on the branch, as it is at merge time.
+
+The reviewer is a different agent from the worker. The gate command is in the
+repo's `AGENTS.md`. If the repo has no gate command, report that. Do not merge.
 
 A branch with no fork PR is not merged.
 
