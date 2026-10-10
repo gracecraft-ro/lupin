@@ -70,9 +70,11 @@ class BlockedTests(unittest.TestCase):
 
 
 class LeanInTests(unittest.TestCase):
-    """Lean-in rule (decision 2): <30m to reset with a surplus, OR <50% used
-    AND <24h to reset, on the provider's longest window with real data.
-    A surplus means used% is below the elapsed% of that window."""
+    """Lean-in rule (decision 2), on the provider's longest window with real data.
+
+    Two cases: under 30m to reset with a surplus, or under 50% used and under 24h to reset.
+    A surplus means used % is below the elapsed % of that window.
+    """
 
     def test_under_30_minutes_to_reset_leans_in(self):
         # 80% used, 29m left on 5h: about 90% elapsed, so a surplus.
