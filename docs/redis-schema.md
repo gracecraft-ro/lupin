@@ -583,8 +583,10 @@ so a compromised host can't forge a command for a different one.
 
 Claimed with `SET ... NX`. The first writer wins a race between two pollers
 on the same id. The poller that made the claim then overwrites it with the
-final result. `state` is one of `queued` (no `cmdres` yet — the `cmd:<id>` key
-is the only record), `running`, `ok`, `failed`, `rejected`, `expired`.
+final result.
+
+`state` is one of `queued`, `running`, `ok`, `failed`, `rejected`, `expired`.
+A `queued` entry has no `cmdres` yet. Only its `cmd:<id>` key exists.
 
 A `running` entry has a `claim` field. It holds a new token for each claim
 attempt. If `SET ... NX` returns nil, the poller reads the entry again. The

@@ -582,6 +582,7 @@ def test_stamp_at_now_counts_as_the_last_write(tmp_path: Path):
     _debrief_file(tmp_path, "widgets", "20261010-120000-6h.md")
 
     # At NOW the result is False with or without a block. One period later it is True.
+    assert debrief.period_due(tmp_path, "widgets", "6h", NOW) is False
     assert debrief.period_due(tmp_path, "widgets", "6h", NOW + timedelta(hours=6)) is True
 
 
@@ -606,7 +607,7 @@ def test_clock_stepped_back_does_not_write_an_overlapping_window(tmp_path: Path,
     assert names == ["20261010-000000-6h.md", "20261010-120000-6h.md"]
 
 
-def test_eight_hour_clock_step_back_does_not_overlap(tmp_path: Path):
+def test_eight_hour_clock_step_back_blocks_the_write(tmp_path: Path):
     _debrief_file(tmp_path, "widgets", "20261010-060000-6h.md")
     _debrief_file(tmp_path, "widgets", "20261010-200000-6h.md")
 

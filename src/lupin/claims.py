@@ -222,9 +222,10 @@ def claims_for(
     every currently-claimed issue in `repos` (each an `"<owner>/<repo>"`
     string, no issue number).
 
-    The integration point future `roadmap` (#10) and `quest` (#11) commands
-    import to find out which of their issues are off-limits -- pass the
-    repos you already know about, get back the claimed subset. Raises
+    This is the integration point that future `roadmap` (#10) and `quest`
+    (#11) commands import. They use it to find out which of their issues are
+    off-limits. Pass the repos you already know about. The function returns
+    the claimed subset. Raises
     `CoordinatorUnreachable` if Redis cannot be reached. There is no local
     fallback for claims. Callers must handle `CoordinatorUnreachable`.
     Start no new issue. Do not disturb anything
