@@ -11,9 +11,10 @@ the rows a caller passes in. `route.py` is the only caller; it decides what
 to do with these facts (which tier, which fallback). This module just
 reports them.
 
-These are Grace's own literal rules from issue #36 (the final two comments),
-not the abstract pacing-ratio design from the comment before them -- that
-design was rejected as too abstract and is not implemented here.
+The literal rules come from issue #36 (its final two comments).
+The surplus test on the 30-minute lean-in comes from issue #99.
+The abstract pacing-ratio design from issue #36's earlier comment is not
+implemented here.
 
 Boundary convention, used consistently below: every "less than" check is
 strict (`<`), every "at or above" check is `>=`. An exact boundary value
@@ -92,6 +93,10 @@ def lean_in(rows: list[dict], provider: str, now_ms: float) -> bool:
     Looks only at the provider's longest window with real data. Blocked
     always wins: a blocked provider never leans in, even if that same
     window would otherwise qualify.
+
+    A surplus means used_pct is below the elapsed percent of the longest
+    window. The 30-minute clause needs a surplus. The 24-hour clause
+    needs used_pct under 50 and does not check for a surplus.
     """
     if blocked(rows, provider, now_ms):
         return False

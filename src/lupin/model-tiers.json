@@ -142,6 +142,10 @@
         {
           "model": "opus",
           "effort": "high"
+        },
+        {
+          "model": "fable",
+          "effort": "high"
         }
       ]
     },
