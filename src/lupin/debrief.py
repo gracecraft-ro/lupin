@@ -397,12 +397,8 @@ def _write(
     return path
 
 
-def last_period_end(root: Path, repo: str, period: str, now: datetime | None = None) -> datetime | None:
-    """Return the end time of the newest `period` debrief for `repo`.
-
-    Skip files that end after `now`. Their clock ran ahead. Return None when
-    there is no such debrief.
-    """
+def _period_ends(root: Path, repo: str, period: str) -> list[datetime]:
+    """Return the end time of each `period` debrief for `repo`."""
     if period not in PERIODS:
         raise DebriefError(f"unknown period {period!r}")
     if not REPO_RE.fullmatch(repo or ""):
@@ -415,6 +411,16 @@ def last_period_end(root: Path, repo: str, period: str, now: datetime | None = N
                 ends.append(datetime.strptime(stamp, STAMP_FORMAT).replace(tzinfo=timezone.utc))
             except ValueError:
                 pass  # Not a real date, such as month 13. Skip the file.
+    return ends
+
+
+def last_period_end(root: Path, repo: str, period: str, now: datetime | None = None) -> datetime | None:
+    """Return the end time of the newest `period` debrief for `repo`.
+
+    Skip files that end after `now`. A clock that stepped back can leave such files.
+    Return None when there is no such debrief.
+    """
+    ends = _period_ends(root, repo, period)
     if now is not None:
         ends = [end for end in ends if end <= now]
     return max(ends, default=None)
@@ -424,10 +430,15 @@ def period_due(root: Path, repo: str, period: str, now: datetime) -> bool:
     """Return True when a `period` debrief is due.
 
     Return True also when one full period has passed since the last one.
-    A file that ends after `now` does not count.
+    Return False when a file ends within one period after `now`. Such a file
+    blocks the write until its end time has passed.
     """
+    ends = _period_ends(root, repo, period)
+    span = PERIODS[period]
+    if any(now < end <= now + span for end in ends):
+        return False
     last = last_period_end(root, repo, period, now)
-    return last is None or now - last >= PERIODS[period]
+    return last is None or now - last >= span
 
 
 def write_period(

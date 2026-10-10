@@ -226,8 +226,8 @@ def claims_for(
     import to find out which of their issues are off-limits -- pass the
     repos you already know about, get back the claimed subset. Raises
     `CoordinatorUnreachable` if Redis cannot be reached. There is no local
-    fallback for claims. Treat that failure the same way `lupin claim`
-    exit 3 is treated elsewhere. Start no new issue. Do not disturb anything
+    fallback for claims. Callers must handle `CoordinatorUnreachable`.
+    Start no new issue. Do not disturb anything
     already in progress. Pass `client` to use a ready client, as the debrief
     path does. Without it, a client is made from the connection arguments.
     """
