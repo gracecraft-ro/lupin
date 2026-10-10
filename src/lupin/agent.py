@@ -44,7 +44,7 @@ import redis
 
 from . import commands, machines
 from .slots import CoordinatorUnreachable
-from .slots_redis import DEBRIEF_TIMEOUT_S, _call_with_retry, _client, debrief_client
+from .slots_redis import CONNECT_TIMEOUT, DEBRIEF_TIMEOUT_S, _call_with_retry, _client, debrief_client
 
 DEFAULT_BATCH = 20  # design: "ZRANGE the oldest 20"
 DEFAULT_POLL_INTERVAL = 2.0
@@ -53,16 +53,30 @@ EXEC_TIMEOUT_S = 120.0
 # the stop subprocess and the Redis calls made on that path. See docs/redis-schema.md.
 ACTION_TIMEOUT_S = {"loop.stop": 1740.0}
 REDIS_ADDRESSES = 2  # IPv6 and IPv4 for localhost
-# Worst case for one debrief Redis call, in seconds. _call_with_retry makes
-# two attempts. Each attempt waits for one connect per address, then one read.
-# Each wait is up to DEBRIEF_TIMEOUT_S.
-DEBRIEF_CALL_WORST_S = 2 * (REDIS_ADDRESSES + 1) * DEBRIEF_TIMEOUT_S
-# Agent Redis calls on the loop.stop path: read command, claim result,
-# write result, dequeue, audit line. They use debrief_client.
-AGENT_REDIS_CALLS_ON_STOP = 5
-# Cap on the stop subprocess. The agent's Redis calls use the rest of the limit.
+# Redis round trips for one command on a new connection: HELLO 3, CLIENT
+# MAINT_NOTIFICATIONS ON, CLIENT SETINFO LIB-NAME, CLIENT SETINFO LIB-VER,
+# then the command. Test test_command_takes_five_round_trips checks this.
+REDIS_ROUND_TRIPS = 5
+ATTEMPTS_PER_CALL = 2  # _call_with_retry makes two attempts
+# Worst case for one debrief_client call, in seconds. Each attempt waits
+# for one connect per address, then for each round trip. Each wait is up to DEBRIEF_TIMEOUT_S.
+DEBRIEF_CALL_WORST_S = ATTEMPTS_PER_CALL * (REDIS_ADDRESSES + REDIS_ROUND_TRIPS) * DEBRIEF_TIMEOUT_S
+# Worst case for the command read, in seconds. The read uses _client, with
+# redis-py's default of 10 retries and a backoff of up to 1 s between tries.
+# Each try waits for one connect per address and for each round trip. Each
+# wait is up to CONNECT_TIMEOUT.
+DEFAULT_CLIENT_RETRIES = 10
+DEFAULT_CLIENT_BACKOFF_CAP_S = 1.0
+COMMAND_READ_WORST_S = ATTEMPTS_PER_CALL * (
+    (DEFAULT_CLIENT_RETRIES + 1) * (REDIS_ADDRESSES + REDIS_ROUND_TRIPS) * CONNECT_TIMEOUT
+    + DEFAULT_CLIENT_RETRIES * DEFAULT_CLIENT_BACKOFF_CAP_S
+)
+# Agent Redis calls on the loop.stop path after the read: claim, write
+# result, dequeue, audit line. They use debrief_client.
+AGENT_REDIS_CALLS_ON_STOP = 4
+# Cap on the stop subprocess. The read and the agent's Redis calls use the rest of the limit.
 SUBPROCESS_TIMEOUT_S = {
-    "loop.stop": ACTION_TIMEOUT_S["loop.stop"] - AGENT_REDIS_CALLS_ON_STOP * DEBRIEF_CALL_WORST_S,
+    "loop.stop": ACTION_TIMEOUT_S["loop.stop"] - COMMAND_READ_WORST_S - AGENT_REDIS_CALLS_ON_STOP * DEBRIEF_CALL_WORST_S,
 }
 OUTPUT_CAP = 8192  # 8 KiB, combined stdout+stderr -- design's "last 8 KiB combined"
 
@@ -334,7 +348,10 @@ def _mark_expired(client, machine: str, cmd_id: str) -> dict:
     return {"id": cmd_id, "state": "expired"}
 
 
-def _process_one(client, machine: str, key: str, cmd_id: str) -> dict:
+def _process_one(client, stop_client, machine: str, key: str, cmd_id: str) -> dict:
+    # The read uses `client` for every action, because the action is
+    # not known until the command is read. loop.stop has a time limit, so
+    # its later Redis calls use `stop_client`, which is bounded.
     raw = _call_with_retry(lambda: client.get(commands.cmd_key(cmd_id)))
     if raw is None:
         # Gone from Redis already (its own retention TTL, or evicted under
@@ -342,6 +359,8 @@ def _process_one(client, machine: str, key: str, cmd_id: str) -> dict:
         return _mark_expired(client, machine, cmd_id)
     cmd = json.loads(raw)
     action = cmd.get("action")
+    if action == "loop.stop":
+        client = stop_client
 
     if not commands.verify(cmd, key):
         return _reject(client, machine, cmd_id, action, "bad signature")
@@ -473,10 +492,9 @@ def poll_once(
         _call_with_retry(lambda: client.zremrangebyscore(qkey, "-inf", cutoff_ms))
 
         pending = _call_with_retry(lambda: client.zrange(qkey, 0, batch - 1))
-        # Command handling uses the debrief client, so its Redis calls fit the stop budget.
-        command_client = debrief_client(redis_host, redis_port, redis_username, redis_password)
+        stop_client = debrief_client(redis_host, redis_port, redis_username, redis_password)
         for cmd_id in pending:
-            touched.append(_process_one(command_client, machine, key, cmd_id))
+            touched.append(_process_one(client, stop_client, machine, key, cmd_id))
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(machine) from exc
     return touched

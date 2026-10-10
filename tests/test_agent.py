@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import socket
 import threading
 import time
@@ -266,13 +267,10 @@ def test_loop_stop_gets_more_time_than_other_actions(redis_port, flush_redis, mo
     assert timeouts[0] > agent.EXEC_TIMEOUT_S
 
 
-# Worst case for one debrief Redis call, in seconds. It is
+# Worst case for one debrief_client call, in seconds. It is
 # agent.DEBRIEF_CALL_WORST_S. docs/redis-schema.md has the derivation.
 DEBRIEF_CALL_S = agent.DEBRIEF_CALL_WORST_S
 POLL_S = 0.25  # loop_runtime._wait_for_server, time.sleep(0.25)
-# Redis calls the agent makes on the loop.stop path, outside the subprocess:
-# read command, claim result, write result, dequeue, audit line.
-AGENT_REDIS_CALLS_ON_STOP = 5
 
 
 def test_stop_subprocess_cap_leaves_room_for_agent_redis_calls(redis_port, flush_redis, monkeypatch):
@@ -289,10 +287,11 @@ def test_stop_subprocess_cap_leaves_room_for_agent_redis_calls(redis_port, flush
     agent.poll_once("jesus", KEY, **kw)
 
     time_limit = agent.ACTION_TIMEOUT_S["loop.stop"]
-    worst = timeouts[0] + AGENT_REDIS_CALLS_ON_STOP * DEBRIEF_CALL_S
+    agent_s = agent.COMMAND_READ_WORST_S + agent.AGENT_REDIS_CALLS_ON_STOP * DEBRIEF_CALL_S
+    worst = timeouts[0] + agent_s
     assert worst <= time_limit, (
-        f"subprocess {timeouts[0]:g}s + {AGENT_REDIS_CALLS_ON_STOP} agent Redis calls "
-        f"at {DEBRIEF_CALL_S:g}s = {worst:g}s; time limit is {time_limit:g}s"
+        f"subprocess {timeouts[0]:g}s + agent Redis calls {agent_s:g}s = {worst:g}s; "
+        f"time limit is {time_limit:g}s"
     )
 
 
@@ -330,15 +329,16 @@ def test_stop_time_limit_covers_the_listed_timeouts():
         ("debrief: claims scan (Redis)", DEBRIEF_CALL_S),
         ("debrief: claims read (Redis)", DEBRIEF_CALL_S),
     ]
+    # The command read uses _client. The four calls after it use debrief_client.
     agent_terms = [
-        ("agent: read command", DEBRIEF_CALL_S),
         ("agent: write claim", DEBRIEF_CALL_S),
         ("agent: write result", DEBRIEF_CALL_S),
         ("agent: dequeue", DEBRIEF_CALL_S),
         ("agent: audit line", DEBRIEF_CALL_S),
     ]
+    assert len(agent_terms) == agent.AGENT_REDIS_CALLS_ON_STOP
+    agent_s = agent.COMMAND_READ_WORST_S + sum(seconds for _, seconds in agent_terms)
     subprocess_s = sum(seconds for _, seconds in subprocess_terms)
-    agent_s = sum(seconds for _, seconds in agent_terms)
     total = subprocess_s + agent_s
     time_limit = agent.ACTION_TIMEOUT_S["loop.stop"]
     assert total <= time_limit, (
@@ -378,6 +378,88 @@ def test_debrief_client_has_short_timeouts_and_no_redis_retry():
     assert kwargs["socket_connect_timeout"] == slots_redis.DEBRIEF_TIMEOUT_S
     # No redis-py retry. _call_with_retry gives the one retry.
     assert client.get_retry().get_retries() == 0
+
+
+def test_command_takes_five_round_trips(redis_port):
+    # A new connection sends the handshake, then the command. The relay
+    # counts each command on the wire. agent.REDIS_ROUND_TRIPS sets the
+    # worst-case bound. A redis-py change that adds a handshake command fails
+    # this test. (INFO commandstats misses one handshake command, so it is not used.)
+    commands_seen: list[bytes] = []
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(10)
+    threading.Thread(target=_relay, args=(listener, redis_port, 0.0, commands_seen), daemon=True).start()
+    try:
+        client = slots_redis.debrief_client("127.0.0.1", listener.getsockname()[1])
+        client.get("lupin-test:round-trips")
+    finally:
+        listener.close()
+    assert len(commands_seen) == agent.REDIS_ROUND_TRIPS
+
+
+def test_default_client_retries_match_the_read_bound():
+    # agent.COMMAND_READ_WORST_S assumes redis-py's default retry count.
+    assert slots_redis._client("127.0.0.1", 1).get_retry().get_retries() == agent.DEFAULT_CLIENT_RETRIES
+
+
+def _forward(src, dst, delay_s, commands_seen=None):
+    with contextlib.suppress(OSError):
+        while data := src.recv(65536):
+            if commands_seen is not None:
+                commands_seen.extend(re.findall(rb"\*\d+\r\n", data))  # one array header per command
+            time.sleep(delay_s)
+            dst.sendall(data)
+
+
+def _relay(listener, upstream_port, reply_delay_s, commands_seen=None):
+    # Forwards each connection to the server. Each reply waits reply_delay_s first.
+    while True:
+        try:
+            front, _ = listener.accept()
+        except OSError:
+            return  # the listener was closed
+        back = socket.create_connection(("127.0.0.1", upstream_port))
+        threading.Thread(target=_forward, args=(front, back, 0.0, commands_seen), daemon=True).start()
+        threading.Thread(target=_forward, args=(back, front, reply_delay_s), daemon=True).start()
+
+
+def test_non_stop_command_survives_a_reply_slower_than_the_stop_bound(redis_port, flush_redis, monkeypatch):
+    # 1.2 s per reply: over the 1 s bound on the loop.stop calls, under the
+    # 2 s bound on the other calls. A loop.peek must still run.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(10)
+    threading.Thread(target=_relay, args=(listener, redis_port, 1.2), daemon=True).start()
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    cmd_id = commands.enqueue("jesus", "loop.peek", {"repo": "lupin", "lines": "20"}, key=KEY, **ACTOR_KW, **kw)
+    monkeypatch.setattr(agent.subprocess, "run", lambda argv, **_kwargs: SimpleNamespace(returncode=0, stdout="ok", stderr=""))
+    try:
+        touched = agent.poll_once("jesus", KEY, redis_host="127.0.0.1", redis_port=listener.getsockname()[1])
+    finally:
+        listener.close()
+    assert touched == [{"id": cmd_id, "state": "ok"}]
+
+
+def test_stop_result_write_failure_leaves_the_claim_until_restart(redis_port, flush_redis, monkeypatch):
+    # Known limit: the stop ran, but its result write failed. The result stays
+    # "running" until the next start marks it failed as orphaned.
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    cmd_id = commands.enqueue("jesus", "loop.stop", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)
+    monkeypatch.setattr(agent.subprocess, "run", lambda argv, **_kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""))
+    real_write = agent._write_result
+
+    def failing_write(*_args, **_kwargs):
+        raise redis_lib.exceptions.ConnectionError("write failed")
+
+    monkeypatch.setattr(agent, "_write_result", failing_write)
+    with pytest.raises(slots.CoordinatorUnreachable):
+        agent.poll_once("jesus", KEY, **kw)
+    monkeypatch.setattr(agent, "_write_result", real_write)
+
+    assert commands.get_status(cmd_id, **kw)["state"] == "running"
+    assert agent.startup_scan("jesus", **kw) == [cmd_id]
+    assert commands.get_status(cmd_id, **kw)["state"] == "failed"
 
 
 def _hold_connections(server, held):

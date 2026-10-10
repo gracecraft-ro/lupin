@@ -375,67 +375,88 @@ stop asks the agent for a handoff first.
 
 The agent gives `loop.stop` a time limit of 1740 seconds (29 minutes). This is
 `ACTION_TIMEOUT_S["loop.stop"]` in `agent.py`. The limit covers the whole stop
-path. The path has two parts:
+path. The path has three parts:
 
+- The command read. The agent reads the command with `_client`. The read
+  happens before the action is known, so it uses `_client` for all actions.
+- Four Redis calls after the read. They claim the command, write the result,
+  remove the command from the queue, and write the audit line. They use
+  `debrief_client`.
 - The stop subprocess. The agent ends it when its limit runs out. The limit is
   `SUBPROCESS_TIMEOUT_S["loop.stop"]`.
-- Five Redis calls made by the agent, outside the subprocess. They read the
-  command, write the claim, write the result, remove the command from the queue,
-  and write the audit line.
 
-The subprocess limit is the whole limit minus the time for the five Redis calls:
+The subprocess limit is the whole limit minus the worst case for the other two
+parts:
 
-    SUBPROCESS_TIMEOUT_S = 1740 - 5 x 6 = 1710 seconds
+    COMMAND_READ_WORST_S = 328 seconds
+    SUBPROCESS_TIMEOUT_S = 1740 - 328 - 4 x 14 = 1356 seconds
 
 Other actions get `EXEC_TIMEOUT_S`, which is 120 seconds.
 
-## Debrief Redis client
+## Redis clients
 
-`slots_redis.debrief_client` makes a Redis client with short timeouts. It is
-used for three things:
-
-- The five agent Redis calls on the stop path.
-- The three Redis calls in the debrief, inside the stop subprocess.
-- Command handling in `poll_once`, for every action. It is not only `loop.stop`.
+`slots_redis.debrief_client` makes a Redis client with short timeouts. The stop
+path uses it for the four calls after the read. The debrief uses it for its
+three Redis calls.
 
 The client has these settings:
 
 - Each connect waits up to 1 second. This is `DEBRIEF_TIMEOUT_S`.
 - Each read waits up to 1 second.
 - redis-py does not retry (`retries=0`).
-- `_call_with_retry` makes one retry. That is two attempts in all.
+- `_call_with_retry` makes two attempts in all.
 
-The default client (`_client`) does not change. Its timeout is 2 seconds, and
-redis-py retries. Other callers use it, including slots, claims, and ledger
-writes. The poll's prune and pending reads use it too. These calls are outside
-the stop budget.
+`_client` is the default client. Its timeout is 2 seconds. redis-py retries a
+failed command 10 times, with a backoff of up to 1 second between tries. The
+command read uses `_client`. So do the other callers, such as slots, claims, and
+the ledger.
 
-## One debrief Redis call
+## One debrief_client call
 
-The worst case for one debrief Redis call is 6 seconds. This is
-`DEBRIEF_CALL_WORST_S` in `agent.py`:
+The worst case is 14 seconds. This is `DEBRIEF_CALL_WORST_S` in `agent.py`:
 
-    2 x (2 + 1) x 1 = 6
+    2 x (2 + 5) x 1 = 14
 
 - Two attempts (`_call_with_retry`).
-- Each attempt has up to two connect waits (IPv6 and IPv4) and one read wait.
+- Each attempt opens a new connection. It waits for one connect per address.
+  `localhost` has two addresses, IPv6 and IPv4.
+- Each attempt then makes five round trips: `HELLO 3`, `CLIENT
+  MAINT_NOTIFICATIONS ON`, `CLIENT SETINFO LIB-NAME`, `CLIENT SETINFO LIB-VER`,
+  and the command. `test_command_takes_five_round_trips` counts them on the wire.
 - Each wait is up to 1 second.
 
-This is an upper bound. The measured cases below took less.
+## The command read
 
-Measured 2026-10-10 on this machine, with a probe script that is not in the repo:
+The worst case is 328 seconds. This is `COMMAND_READ_WORST_S` in `agent.py`:
+
+    2 x (11 x (2 + 5) x 2 + 10 x 1) = 328
+
+- Two attempts (`_call_with_retry`).
+- Each attempt makes 11 tries. That is one try, then 10 redis-py retries.
+- Each try waits for one connect per address, then for five round trips. Each
+  wait is up to 2 seconds.
+- Each retry waits up to 1 second before its try.
+
+This is an upper bound. In the measurement below, one stalled read took 51.94
+seconds.
+
+## Measured waits
+
+Measured 2026-10-10 with a probe script that is not in the repo. Each case calls
+`_call_with_retry` on `debrief_client`, unless the row says `_client`.
 
 | Case | Seconds | Result |
 | --- | --- | --- |
-| Healthy localhost, cold connect and PING, 20 calls | 0.0007 to 0.0015 | ok |
-| Read stall: accepts, never replies | 2.00 | TimeoutError |
-| Reply stall: answers `CLIENT SETINFO`, never answers `GET` | 2.00 | TimeoutError |
-| Connect stall, host `::1` only (accept queue full) | 2.00 | TimeoutError |
-| Connect stall, host `localhost` (IPv6 and IPv4) | 4.01 | TimeoutError |
-| Configured Redis host over the tailnet, cold connect and PING, 10 calls | 0.018 to 0.027 | ok |
+| Stall at the first reply | 2.003 | TimeoutError |
+| Four replies at 0.999 s each, then a stall | 9.999 | TimeoutError |
+| Every reply at 0.999 s, no stall | 4.998 | ok, five commands sent |
+| Connect stall, host `127.0.0.1` only | 2.002 | TimeoutError |
+| Connect stall, host `localhost` (`::1`, then `127.0.0.1`) | 4.005 | TimeoutError |
+| Worst combined: `::1` connect stall, then four slow replies, then a stall | 12.002 | TimeoutError |
+| `_client`, stall at the first reply | 51.94 | TimeoutError, 22 connections |
 
-The tailnet row is one machine on one day. A cold tunnel after an idle period
-is not measured. A connect that takes longer than 1 second fails.
+The worst measured `debrief_client` call took 12.002 seconds. Its bound is 14
+seconds. The measured `_client` call took 51.94 seconds. Its bound is 328 seconds.
 
 ## Debrief in the subprocess
 
@@ -445,7 +466,7 @@ Its waits:
 - One `gh` time limit of 10 seconds for all `gh` calls together
   (`DEBRIEF_TIME_LIMIT_S`). A call that hits the limit leaves a `Not collected`
   note in the debrief.
-- Three Redis calls, each up to 6 seconds:
+- Three Redis calls, each up to 14 seconds (`DEBRIEF_CALL_WORST_S`):
   - A ledger read (one `XRANGE`).
   - A claims scan (`SCAN`). See known limits.
   - A claims read. This is one batch of `GET` commands, sent together, with one
@@ -453,7 +474,7 @@ Its waits:
     so that claim would vanish. A `GET` batch raises the error.
 
 The debrief client is made with no connection arguments. It connects to
-`localhost:6379` without auth. The HEAD code did the same.
+`localhost:6379` without auth.
 
 ## Lock waits
 
@@ -468,10 +489,21 @@ If a wait runs to that limit, the stop ends and the debrief is not written.
 
 ## Known limits
 
+- The budget starts when the stop action starts. The prune read, the pending-list
+  read, and earlier commands in the same poll run before that. The budget does
+  not count them.
+- A reply that takes more than 1 second makes a `debrief_client` call fail. A
+  stop fails at its claim, before the subprocess starts. The command stays
+  queued, and `lupin agent` exits with code 3. Non-stop actions use `_client`,
+  which allows 2 seconds per reply. They are not affected by this limit.
+  `test_non_stop_command_survives_a_reply_slower_than_the_stop_bound` checks this.
+- If the stop runs, but its result write fails, the result stays `running`. The
+  next start marks it `failed`, with the reason `orphaned`.
+  `test_stop_result_write_failure_leaves_the_claim_until_restart` checks this.
 - The claims scan counts as one request and reply. `SCAN` returns keys in pages.
   A keyspace of 2005 claim keys took 192 `SCAN` requests at the default COUNT of
-  10 (measured 2026-10-10). The budget does not count the extra pages. The fix
-  does not change the scan.
+  10 (measured 2026-10-10, with the claim key pattern in `claims.py`). The budget
+  does not count the extra pages.
 - A slow server that keeps sending data is not a stall. Each read can wait up to
   1 second, but the total is not limited. The budget does not bound this case.
 - Name lookup (`getaddrinfo`) is not covered by the timeouts.
@@ -482,12 +514,12 @@ Worst case, in seconds. The terms are in `tests/test_agent.py`.
 
 | Part | Terms | Seconds |
 | --- | --- | --- |
-| Subprocess, listed | loop_runtime waits 983.25; gh 10; three debrief Redis calls 3 x 6 | 1011.25 |
-| Subprocess limit | 1740 - 5 x 6 | 1710.00 |
-| Agent Redis calls | five calls at 6 | 30.00 |
-| Whole stop path, listed | 1011.25 + 30 | 1041.25 |
+| Subprocess, listed | loop_runtime waits 983.25; gh 10; three debrief Redis calls 3 x 14 | 1035.25 |
+| Subprocess limit | 1740 - 328 - 4 x 14 | 1356.00 |
+| Agent Redis calls | command read 328; four calls at 14 | 384.00 |
+| Whole stop path, listed | 1035.25 + 384 | 1419.25 |
 | Whole stop path, limit | `ACTION_TIMEOUT_S["loop.stop"]` | 1740.00 |
-| Margin | 1740 - 1041.25 | 698.75 |
+| Margin | 1740 - 1419.25 | 320.75 |
 
 `test_stop_time_limit_covers_the_listed_timeouts` checks the listed total against
 the whole limit. `test_stop_subprocess_cap_leaves_room_for_agent_redis_calls`
