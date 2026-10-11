@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import re
+import shutil
 import stat
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -930,3 +933,79 @@ def test_list_under_the_limit_gives_no_note():
         md = debrief.build_markdown(FULL, START, END, events=[], claimed=set())
 
     assert "cut at" not in md
+
+
+# Screenshot tests. The browser is off unless a test turns it on.
+GH_STUB = """#!/bin/sh
+# Stub gh for the screenshot tests. Prints fixed JSON.
+case "$*" in
+  "repo view"*) echo '{"nameWithOwner": "acme/widgets"}' ;;
+  *"--state merged"*) echo '[{"number": 11, "title": "Shipped feature", "mergedAt": "2026-10-10T09:00:00Z", "mergeCommit": {"oid": "bbbbbbb2222"}}]' ;;
+  *"--state closed"*) echo '[{"number": 5, "title": "Closed in window", "closedAt": "2026-10-10T10:00:00Z"}]' ;;
+  *) echo '[]' ;;
+esac
+"""
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+SHOT_FILES = ("debrief-list.png", "debrief.png")
+
+
+@pytest.fixture(autouse=True)
+def no_browser(monkeypatch):
+    monkeypatch.setattr(debrief, "SHOT_BROWSER", "lupin-no-such-browser")
+
+
+def _periodic_env(tmp_path: Path, monkeypatch, redis_port) -> tuple[Path, Path]:
+    """Put a stub gh on PATH and one checkout in place. Return (state, code)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text(GH_STUB, encoding="utf-8")
+    gh.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    # The dashboard runs as a subprocess. It must find lupin on its import path.
+    monkeypatch.setenv("PYTHONPATH", str(Path(debrief.__file__).resolve().parents[1]))
+    monkeypatch.setattr(debrief.slots_redis, "debrief_client", _debrief_client_on(redis_port))
+    code = tmp_path / "code"
+    (code / "widgets").mkdir(parents=True)
+    state = tmp_path / "state"
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", state)
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", code)
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "claude"})
+    return state, code
+
+
+@pytest.mark.skipif(shutil.which("chromium") is None, reason="needs chromium on PATH")
+def test_periodic_debriefs_save_screenshots_and_link_them(tmp_path: Path, monkeypatch, redis_port):
+    state, _code = _periodic_env(tmp_path, monkeypatch, redis_port)
+    monkeypatch.setattr(debrief, "SHOT_BROWSER", "chromium")
+
+    loop_runtime.write_due_periodic_debriefs(now=NOW)
+
+    for period in debrief.PERIODS:
+        stem = f"20261010-120000-{period}"
+        md = state / "debriefs" / "widgets" / f"{stem}.md"
+        text = md.read_text(encoding="utf-8")
+        assert "## Screenshots" in text
+        for file in SHOT_FILES:
+            link = f"{stem}-screenshots/{file}"
+            assert f"]({link})" in text
+            png = md.parent / link
+            assert png.is_file() and png.stat().st_size > 0
+            assert png.read_bytes().startswith(PNG_SIGNATURE)
+        for link in re.findall(r"\]\(([^)]+)\)", text):
+            assert (md.parent / link).is_file()
+
+
+def test_missing_browser_still_writes_the_periodic_debrief(tmp_path: Path, monkeypatch, redis_port):
+    state, code = _periodic_env(tmp_path, monkeypatch, redis_port)
+    monkeypatch.setattr(debrief, "SHOT_BROWSER", "lupin-no-such-browser")
+
+    path = debrief.write_period(state, "widgets", code / "widgets", "6h", now=NOW)
+
+    text = path.read_text(encoding="utf-8")
+    assert "Shipped feature" in text
+    reason = "browser command 'lupin-no-such-browser' not found on PATH"
+    assert f"- Not captured: Debrief list (debrief-list.png). Reason: {reason}." in text
+    assert f"- Not captured: Debrief page (debrief.png). Reason: {reason}." in text
+    assert "![" not in text
+    assert list(path.with_name("20261010-120000-6h-screenshots").glob("*.png")) == []

@@ -5,7 +5,8 @@ periodic debriefs (`PERIODS`) on a timer. Facts come from GitHub (`gh`).
 The ledger lists shared repository events. A claim marks an issue that one loop
 is working on. A normal stop and a periodic debrief also read the ledger and
 issue claims in Redis. A forced stop does not. Files stay on the machine that
-wrote them.
+wrote them. A periodic debrief also gets screenshots of its dashboard pages.
+A stop debrief does not.
 """
 
 from __future__ import annotations
@@ -13,12 +14,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import socket
 import subprocess
+import sys
 import tempfile
 import time
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
+from urllib.parse import urlencode
 
 import redis
 
@@ -46,6 +52,17 @@ MAX_EVIDENCE_BYTES = 10 * 1024 * 1024
 FAILING_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "STARTUP_FAILURE"}
 FAILING_STATES = {"FAILURE", "ERROR"}
 CSS = ".debrief img{max-width:100%;height:auto}"
+SHOT_BROWSER = "chromium"  # Headless browser command. It must be on PATH.
+SHOT_WINDOW = "1200,1000"
+SHOT_TIMEOUT_S = 60.0
+SHOT_SERVER_WAIT_S = 10.0
+# (file name, alt text, caption, dashboard path). `{query}` is the debrief's query string.
+SHOTS = (
+    ("debrief-list.png", "Debrief list",
+     "The list of debriefs on the dashboard. Newest first.", "/debrief"),
+    ("debrief.png", "Debrief page",
+     "One periodic debrief, as the dashboard shows it.", "/debrief?{query}"),
+)
 
 
 class DebriefError(Exception):
@@ -351,7 +368,7 @@ def _write(
     Raises `DebriefError` or a Redis error. Nothing is written then.
     The gh calls share one time limit. If a section's gh call fails or
     times out, the file marks that section as not collected. `period` adds the
-    period to the file name.
+    period to the file name. A periodic file also gets screenshots.
     """
     time_limit = _TimeLimit(DEBRIEF_TIME_LIMIT_S)
     view = time_limit.gh(["repo", "view", "--json", "nameWithOwner"], cwd=str(checkout))
@@ -384,7 +401,16 @@ def _write(
     folder.mkdir(parents=True, exist_ok=True, mode=0o750)
     stamp = end.strftime(STAMP_FORMAT)
     path = folder / (f"{stamp}.md" if period is None else f"{stamp}-{period}.md")
-    fd, temporary = tempfile.mkstemp(prefix=".debrief.", dir=folder)
+    _store(path, text)
+    if period is not None:
+        # The screenshots show the debrief page. That page must exist first.
+        _store(path, text + _screenshots(root, repo, path))
+    return path
+
+
+def _store(path: Path, text: str) -> None:
+    """Write `text` to `path` in one step."""
+    fd, temporary = tempfile.mkstemp(prefix=".debrief.", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
@@ -396,7 +422,90 @@ def _write(
         except FileNotFoundError:
             pass
         raise
-    return path
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _serve(root: Path, port: int) -> subprocess.Popen:
+    """Start the dashboard on `port`, reading debriefs from `root`. Return once it answers."""
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "lupin.serve", "--port", str(port)],
+        env={**os.environ, "LUPIN_LOOP_STATE_DIR": str(root)},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + SHOT_SERVER_WAIT_S
+    while proc.poll() is None and time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=1):
+                return proc
+        except OSError:
+            time.sleep(0.2)
+    proc.kill()
+    proc.wait()
+    raise DebriefError("dashboard server did not start")
+
+
+def _shot(url: str, target: Path) -> str | None:
+    """Save a screenshot of `url` at `target`. Return None, or the reason it failed."""
+    argv = [
+        SHOT_BROWSER, "--headless", "--disable-gpu", "--hide-scrollbars",
+        f"--window-size={SHOT_WINDOW}", f"--screenshot={target}", url,
+    ]
+    try:
+        proc = subprocess.run(argv, capture_output=True, check=False, timeout=SHOT_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return "browser timed out"
+    except OSError as exc:
+        return f"browser did not run ({exc.strerror})"
+    if proc.returncode or not target.is_file() or target.stat().st_size == 0:
+        return f"browser exited {proc.returncode} without a screenshot"
+    return None
+
+
+def _capture(root: Path, repo: str, name: str, folder: Path) -> dict[str, str]:
+    """Save the dashboard screenshots in `folder`. Return {file name: reason} for each one missing."""
+    if shutil.which(SHOT_BROWSER) is None:
+        return {file: f"browser command {SHOT_BROWSER!r} not found on PATH" for file, *_ in SHOTS}
+    folder.mkdir(parents=True, exist_ok=True, mode=0o750)
+    port = _free_port()
+    try:
+        server = _serve(root, port)
+    except (DebriefError, OSError) as exc:
+        return {file: str(exc) for file, *_ in SHOTS}
+    query = urlencode({"repo": repo, "file": name})
+    missing = {}
+    try:
+        for file, _alt, _caption, path in SHOTS:
+            reason = _shot(f"http://127.0.0.1:{port}{path.format(query=query)}", folder / file)
+            if reason:
+                missing[file] = reason
+    finally:
+        server.kill()
+        server.wait()
+    return missing
+
+
+def _screenshots(root: Path, repo: str, path: Path) -> str:
+    """Save the screenshots for the periodic debrief at `path`. Return its markdown section.
+
+    A screenshot that is not saved is named in the section, with its reason.
+    """
+    stem = path.stem
+    try:
+        missing = _capture(root, repo, path.name, path.parent / f"{stem}-screenshots")
+    except OSError as exc:
+        missing = {file: f"could not save files ({exc})" for file, *_ in SHOTS}
+    lines = ["", "## Screenshots"]
+    for file, alt, caption, _path in SHOTS:
+        if file in missing:
+            lines.append(f"- Not captured: {alt} ({file}). Reason: {missing[file]}.")
+        else:
+            lines += ["", f"![{alt}]({stem}-screenshots/{file})", "", caption]
+    return "\n".join(lines) + "\n"
 
 
 def _period_ends(root: Path, repo: str, period: str) -> list[datetime]:

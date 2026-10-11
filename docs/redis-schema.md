@@ -477,6 +477,9 @@ debriefs. They add no new keys. Their file names end in `-6h`, `-24h`, or
 `-7d`. They have no time budget entry. The "Budget result" section and the
 "Lock waits" section cover stop debriefs only. They connect to `localhost:6379`
 without auth, as stop debriefs do (issue #118).
+Each one also saves two screenshots in a folder named `<file name>-screenshots/`.
+A screenshot uses a headless browser and starts a dashboard on a free port. It
+has no time budget entry. A failed screenshot does not stop the debrief.
 
 ## Lock waits
 
