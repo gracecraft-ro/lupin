@@ -1090,3 +1090,86 @@ def test_poll_once_writes_cmdlog_entries_for_terminal_outcomes(redis_port, flush
     assert len(after) == 2  # enqueue + terminal outcome
     assert after[1][1]["id"] == cmd_id
     assert after[1][1]["state"] == "ok"
+
+
+class _FlakyZremClient:
+    """Wraps a real Redis client. The first ZREM raises. Later calls pass through."""
+
+    def __init__(self, client, exc):
+        self._client = client
+        self._exc = exc
+        self.injected = 0
+
+    def zrem(self, name, *values):
+        if self.injected == 0:
+            self.injected += 1
+            raise self._exc
+        return self._client.zrem(name, *values)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+def _flaky_zrem(monkeypatch, redis_port):
+    flaky = _FlakyZremClient(
+        agent._client("127.0.0.1", redis_port, None, None),
+        redis_lib.exceptions.ConnectionError("injected ZREM failure"),
+    )
+    monkeypatch.setattr(agent, "_client", lambda *args, **kwargs: flaky)
+    return flaky
+
+
+def test_zrem_error_after_stop_is_retried_and_result_and_audit_kept(redis_port, flush_redis, monkeypatch):
+    """ZREM after a stop run fails once. The retry works.
+    The result key and the audit line are still written.
+    """
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    cmd_id = commands.enqueue("jesus", "loop.stop", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)
+
+    fake = _fake_run(returncode=0)
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+    flaky = _flaky_zrem(monkeypatch, redis_port)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert flaky.injected == 1
+    assert fake.calls == [["lupin", "loop", "local-action", "stop", "lupin"]]
+    assert touched == [{"id": cmd_id, "state": "ok"}]
+    status = commands.get_status(cmd_id, **kw)
+    assert status["state"] == "ok"
+    assert status["exit_code"] == 0
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    assert raw.zrange("lupin:v1:cmdq:jesus", 0, -1) == []
+    audit = [f for _, f in raw.xrange("lupin:v1:cmdlog") if f.get("id") == cmd_id and "state" in f]
+    assert [f["state"] for f in audit] == ["ok"]
+
+
+def test_zrem_error_on_expiry_is_retried_and_command_never_runs(redis_port, flush_redis, monkeypatch):
+    """ZREM on the expiry path fails once. The retry works.
+    The command is marked expired, never runs, and the audit line is written.
+    """
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    now = time.time()
+    fields = {
+        "v": 1, "id": "expired2", "target": "jesus", "action": "loop.stop",
+        "params": {"repo": "lupin"}, "actor": "grace", "issuer": "test-host",
+        "issued_at": now - 200, "expires_at": now - 80,  # 80s past expiry, beyond the 30s skew
+    }
+    cmd = {**fields, "sig": commands.sign(fields, KEY)}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set("lupin:v1:cmd:expired2", json.dumps(cmd), px=3600000)
+    raw.zadd("lupin:v1:cmdq:jesus", {"expired2": commands.now_ms()})
+
+    fake = _fake_run()
+    monkeypatch.setattr(agent.subprocess, "run", fake)
+    flaky = _flaky_zrem(monkeypatch, redis_port)
+
+    touched = agent.poll_once("jesus", KEY, **kw)
+
+    assert flaky.injected == 1
+    assert fake.calls == []
+    assert touched == [{"id": "expired2", "state": "expired"}]
+    assert commands.get_status("expired2", **kw)["state"] == "expired"
+    assert raw.zrange("lupin:v1:cmdq:jesus", 0, -1) == []
+    audit = [f for _, f in raw.xrange("lupin:v1:cmdlog") if f.get("id") == "expired2" and "state" in f]
+    assert [f["state"] for f in audit] == ["expired"]
