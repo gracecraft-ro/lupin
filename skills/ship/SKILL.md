@@ -73,7 +73,8 @@ repository or artifact-store location.
 
 ## Commit and open the pull request
 
-Commit the change. If the commit fails, report the error and stop.
+Commit the change. If the commit fails, report the error. Then go to "Report and
+release" below.
 
 Workers never push to `origin`, `main`, or `release/next`. Push the feature
 branch to the fork. Open the PR on the fork. Then request review.
@@ -93,13 +94,19 @@ branch to the fork. Open the PR on the fork. Then request review.
      --json number --jq '.[0].number // empty'
    ```
 
+   If the lookup exits non-zero, report the error. Then go to "Report and
+   release" below. Do not create a PR.
+
    If the output is not empty, skip the create step. Use that number as
    `<PR_NUMBER>`. If it is empty, run:
 
    ```sh
    gh pr create --repo gracecraft-ro/<repo> --base release/next \
-     --head <branch> --title "..." --body "..."
+     --head <branch> --title "..." --body "Closes #<issue>. ..."
    ```
+
+   The orchestrator closes the issue by hand, because a merge into
+   `release/next` does not close it.
 
    Never use an upstream `--repo` in this flow. If it fails, report the error.
    Then go to "Report and release" below.
@@ -110,7 +117,8 @@ branch to the fork. Open the PR on the fork. Then request review.
      --body "Review requested. Head: <sha>."
    ```
 
-   If it fails, report the PR number and stop.
+   If it fails, report the error and the PR number. Then go to "Report and
+   release" below.
 
    `<PR_NUMBER>` is the number at the end of the PR URL that `gh pr create`
    prints. If step 3 skipped `gh pr create`, use the number from the lookup in
