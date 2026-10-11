@@ -62,7 +62,7 @@ GitHub CLI 2.99.0 and newer supports `gh issue comment --attach`. Check
 an attachment. Attach evidence to the PR conversation:
 
 ```sh
-gh issue comment <PR_NUMBER> --repo OWNER/REPO \
+gh issue comment <PR_NUMBER> --repo gracecraft-ro/<repo> \
   --attach evidence/123/contact-sheet.png \
   --body-file report.md
 ```
@@ -73,28 +73,60 @@ repository or artifact-store location.
 
 ## Commit and open the pull request
 
-Commit the change. If direct push is allowed, push the branch and open or update
-its PR. Link the issue with `Closes #123`.
+Commit the change. If the commit fails, report the error. Then go to "Report and
+release" below.
 
-If direct push is denied, check the repository's fork policy. Use an existing
-fork or create one if the repository permits it. Make sure a `fork` remote
-points to that fork. If it is missing, add it:
+Workers never push to `origin`, `main`, or `release/next`. Push the feature
+branch to the fork. Open the PR on the fork. Then request review.
 
-```sh
-git remote add fork https://github.com/FORK_OWNER/REPO.git
-```
+1. Run `git remote get-url fork` (the fork is the GitHub copy you push to). It
+   must print `https://github.com/gracecraft-ro/<repo>.git`. If it does not, stop
+   and report. Never run `git remote add`.
+2. Push only the feature branch. Find it with `git branch --show-current`.
+   If the branch is empty, detached (no branch name), `main`, or `release/next`,
+   stop. Report it.
+   Then run `git push -u fork <branch>`. Never push any other ref.
+3. Open the PR on the fork. Set `<repo>` to the repo name in the fork URL
+   from step 1. Look for an open PR on the branch first. Run:
 
-Then push the branch and open a PR to the upstream repo:
+   ```sh
+   gh pr list --repo gracecraft-ro/<repo> --head <branch> --state open \
+     --json number --jq '.[0].number // empty'
+   ```
 
-```sh
-git push -u fork <branch>
-gh pr create --repo OWNER/REPO --base <base> \
-  --head FORK_OWNER:<branch> --title "..." --body "Closes #123"
-```
+   If the lookup exits non-zero, report the error. Then go to "Report and
+   release" below. Do not create a PR.
 
-This `--head` form works for a user-owned fork. If the fork belongs to an
-organization, check `gh pr create --help`; this CLI does not support an
-organization name in `--head`.
+   If the output is not empty, skip the create step. Use that number as
+   `<PR_NUMBER>`. If it exits 0 and is empty, run:
+
+   ```sh
+   gh pr create --repo gracecraft-ro/<repo> --base release/next \
+     --head <branch> --title "..." --body "Closes #<issue>. ..."
+   ```
+
+   The orchestrator closes the issue by hand, because a merge into
+   `release/next` does not close it.
+
+   Never use an upstream `--repo` in this flow. If it fails, report the error.
+   Then go to "Report and release" below.
+4. Request review with one comment on the PR. Run:
+
+   ```sh
+   gh pr comment <PR_NUMBER> --repo gracecraft-ro/<repo> \
+     --body "Review requested. Head: <sha>."
+   ```
+
+   If it fails, report the error and the PR number. Then go to "Report and
+   release" below.
+
+   `<PR_NUMBER>` is the number at the end of the PR URL that `gh pr create`
+   prints. If step 3 skipped `gh pr create`, use the number from the lookup in
+   step 3. `<sha>` is the output of `git rev-parse HEAD`. Then go to "Report and
+   release" below. Do not merge. Do not wait for approval. The orchestrator
+   dispatches a reviewer.
+5. If the push or PR creation fails, report the branch name and the commit
+   range. Then go to "Report and release" below.
 
 If the repo does not allow fork PRs, keep the local branch and report its name
 and commit range. A local commit is not a pull request and is not shipped.
@@ -111,5 +143,6 @@ Post a short report to the issue. Include:
 
 Keep the issue open while the PR waits for review or merge. Do not say it is
 shipped until the orchestrator approves and merges it. If you own the Lupin
-claim, release it when your work ends, remove the `claimed` label, and comment
-with the PR number or stop reason. The orchestrator owns the final merge.
+claim (a lock on the issue), release it when your work ends. Remove the
+`claimed` label. Then comment with the PR number or stop reason. If the label
+edit fails, report it and stop. The orchestrator owns the final merge.
