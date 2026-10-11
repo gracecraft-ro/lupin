@@ -154,8 +154,8 @@ Give each worker a short brief with:
 - Machine, absolute worktree path, and branch.
 - Required tests and smoke checks.
 
-Tell implementation workers to follow `AGENTS.md` item 1 for the push and PR
-steps. Do not repeat the `/ship` implementation checklist.
+Tell implementation workers to follow `AGENTS.md`, rule 1 under "Pull requests,
+review, and handoff". Do not repeat the `/ship` implementation checklist.
 
 When an issue makes a major change to a web app's user interface or key user
 journey, and a preview is ready, dispatch a separate QA task with
@@ -293,6 +293,9 @@ Do not open a feature PR against upstream `main`. If the push to the fork
 fails, the worker stops. The worker reports the local branch name and commit
 range. Do not review or merge the branch.
 
+Do not use the commit and PR section of `/ship`. It can push to `origin` and
+open an upstream PR. After the PR opens, report its number to the orchestrator.
+
 Use `lupin review-route --category CATEGORY --size SIZE --mode separate` for
 a reviewer recommendation. Compare it with the issue's implementation route
 and the worker's model tier.
@@ -322,17 +325,15 @@ git fetch fork
 git merge-base --is-ancestor fork/release/next fork/BRANCH
 ```
 
-Exit code 0 means the fork branch contains `release/next`. Then continue to
-the merge rules below. Exit code 1 means it does not. Use this step only for an
-open fork PR that is approved at its current head SHA. The worker syncs
-the PR branch with `git merge fork/release/next`. A sync is not a
-merge of the pull request. If the sync has conflicts,
-report them and stop. If it has no conflicts,
-push the branch to the fork. Run the check
-again. If it exits 0, get a new approval at the new head (see the next
-paragraph). Then continue to the merge rules. Otherwise stop. Do not rebase.
-Any other exit code from the first check means the check failed. Report it and
-stop. Do not merge.
+Exit code 0 means the fork branch contains `release/next`. Then continue to the
+merge rules below. Exit code 1 means it does not. Use this step only for an open
+fork PR that is approved at its current head SHA. The worker syncs the PR branch
+with `git merge fork/release/next`. A sync is not a merge of the pull request.
+If the sync has conflicts, report them and stop. If it has no conflicts, push
+the branch to the fork. Run the check again. If it exits 0, get a new approval
+at the new head (see the next paragraph). Then continue to the merge rules.
+Otherwise stop. Do not rebase. Any other exit code from the first check means
+the check failed. Report it and stop. Do not merge.
 
 An approval binds to the head SHA. If the sync changed the head, get a new
 approval at the new head before you merge. The reviewer may limit that review

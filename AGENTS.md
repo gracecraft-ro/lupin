@@ -411,14 +411,11 @@ Policy changes go to upstream `main` for the owner to merge. The loop policy is
 in `docs/delegation-loop.md`.
 
 1. Push with `git push fork <branch>`. Never push to `origin`, `main`, or
-   `release/next`. Never run `git remote add`. Open the PR with
-   `gh pr create --repo gracecraft-ro/<repo> --base release/next`.
-
-   The PR body has `Closes #N`. The merge into `release/next` does not close
-   the issue. Close it by hand in the same pass. If the push fails, report the
-   branch name and commit range. Do not merge that branch. The merge rules are
-   in the `delegation-loop` skill. Then report the PR number to the
-   orchestrator. The orchestrator dispatches `/code-review`.
+   `release/next`. Never run `git remote add`. Do not use `/ship`. It pushes to
+   `origin` when direct push is allowed, and it can add a remote. Open the PR
+   with `gh pr create --repo gracecraft-ro/<repo> --base release/next`. If the
+   PR opens, report its number to the orchestrator. The orchestrator dispatches
+   `/code-review`.
 2. Do not merge your own work. A reviewer who is not the author runs
    `/code-review`. The orchestrator (the agent that dispatches and merges
    work) merges into `release/next` only when all four are true:
