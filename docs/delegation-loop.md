@@ -77,9 +77,10 @@ repo:
    (`gracecraft-ro/lupin`). A feature PR never targets upstream `main`.
 2. A worker uses these `/ship` sections. They are "Check the issue and
    checkout", "Implement and verify", "Save and attach evidence", and "Report
-   and release". It does not use its commit and PR section. It follows rule 1
-   for the push and the PR. If the push fails, report the branch name and commit
-   range. Do not merge that branch.
+   and release". That section does not push or merge. It does not use its
+   commit and PR section. It follows rule 1 for the push and the PR.
+   If the push fails, report the branch name and commit range. Do not merge
+   that branch.
 3. The orchestrator (the agent that dispatches and merges work) dispatches
    `/code-review` for every PR, including docs-only changes. The reviewer is
    not the worker. The reviewer's model tier is not lower than the worker's.
@@ -103,7 +104,7 @@ repo:
    `delegation-loop` skill. A worker or reviewer never merges a pull request.
    The PR body has `Closes #N`. The merge into `release/next` does not close
    the issue. The orchestrator (the agent that dispatches and merges work)
-   closes it manually, in the same work session.
+   closes it manually right after the merge into `release/next`.
 
 Changes to this policy go to upstream `main`, which the owner merges. Feature
 work goes to fork `release/next`.

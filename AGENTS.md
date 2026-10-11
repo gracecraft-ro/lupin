@@ -423,10 +423,10 @@ in `docs/delegation-loop.md`.
 
    The PR body has `Closes #N`. The merge into `release/next` does not close
    the issue. The orchestrator (the agent that dispatches and merges work)
-   closes it manually, in the same work session. If the push fails, report the
-   branch name and commit range. Do not merge that branch. If the PR opens,
-   report its number to the orchestrator. The orchestrator dispatches
-   `/code-review`.
+   closes it manually right after the merge into `release/next`.
+   If the push fails, report the branch name and commit range. Do not merge
+   that branch. If the PR opens, report its number to the orchestrator. The
+   orchestrator dispatches `/code-review`.
 2. Do not merge your own work. A reviewer who is not the author runs
    `/code-review`. The orchestrator (the agent that dispatches and merges
    work) merges into `release/next` only when all four are true:
