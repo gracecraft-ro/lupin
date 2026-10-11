@@ -98,7 +98,7 @@ branch to the fork. Open the PR on the fork. Then request review.
    release" below. Do not create a PR.
 
    If the output is not empty, skip the create step. Use that number as
-   `<PR_NUMBER>`. If it is empty, run:
+   `<PR_NUMBER>`. If it exits 0 and is empty, run:
 
    ```sh
    gh pr create --repo gracecraft-ro/<repo> --base release/next \
