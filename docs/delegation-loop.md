@@ -36,11 +36,12 @@ fail without triage access. Check before you write it into a report.
    ```
 
 3. Push with `git push fork <branch>`. Never push to `origin`, `main`, or
-   `release/next`. Never run `git remote add`. Do not use `/ship`. It pushes to
-   `origin` when direct push is allowed, and it can add a remote. Open the PR
-   with `gh pr create --repo gracecraft-ro/<repo> --base release/next`. If the
-   PR opens, report its number to the orchestrator. The orchestrator dispatches
-   `/code-review`.
+   `release/next`. Never run `git remote add`. Do not use the commit and PR
+   section of `/ship`. It pushes to `origin` when direct push is allowed, and it
+   can add a remote. Open the PR with
+   `gh pr create --repo gracecraft-ro/<repo> --base release/next`. If the PR
+   opens, report its number to the orchestrator (the agent that dispatches and
+   merges work). The orchestrator dispatches `/code-review`.
 
 On a Herdr worker, use the Herdr worktree commands:
 
