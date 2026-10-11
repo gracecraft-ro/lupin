@@ -28,16 +28,18 @@ fail without triage access. Check before you write it into a report.
    git fetch fork
    ```
 
-2. Create a worktree for your branch. When you create the worktree by hand,
-   keep its path under `.claude/worktrees/`. Run:
+2. Create a worktree for your branch. Keep its path under `.claude/worktrees/`.
+   Run:
 
    ```bash
    git worktree add <path> -b <branch> fork/release/next
    ```
 
-3. Push the branch to the fork with `git push fork <branch>`. Never push to
-   `origin`. Do not add a remote. Use `/ship`'s push and PR steps. Push only
-   to the fork. Never push to `origin`. Never run `git remote add`.
+3. Push with `git push fork <branch>`. Never push to `origin`, `main`, or
+   `release/next`. Never run `git remote add`. Open the PR with
+   `gh pr create --repo gracecraft-ro/<repo> --base release/next`. Then report
+   the PR number to the orchestrator. The orchestrator dispatches
+   `/code-review`.
 
 On a Herdr worker, use the Herdr worktree commands:
 
@@ -65,8 +67,8 @@ repo:
 
 1. The base branch is the integration branch, `release/next`, on the fork
    (`gracecraft-ro/lupin`). A feature PR never targets upstream `main`.
-2. A worker follows rule 1 to push and open the PR. A worker uses `/ship`
-   for the work, the push, the PR, and the report. If the push fails, the
+2. A worker uses `/ship` for the work and the report. It follows rule 1 for
+   the push and the PR. If the push fails, the
    worker stops. Report the branch name and commit range. Do not review or
    merge the branch.
 3. The orchestrator (the agent that dispatches and merges work) dispatches

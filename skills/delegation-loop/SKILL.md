@@ -31,9 +31,8 @@ git fetch fork
 git worktree add <path> -b <branch> fork/release/next
 ```
 
-When you create the worktree by hand, keep each worktree under
-`.claude/worktrees/`. Record the machine, worktree path, branch, and issue in
-the dispatch and the repository's handoff record.
+Keep each worktree under `.claude/worktrees/`. Record the machine, worktree
+path, branch, and issue in the dispatch and the repository's handoff record.
 When a worker runs in a Herdr pane, record its agent name, workspace ID, pane
 ID, tab ID, and cwd.
 `herdr agent list` reports all of them. See "Talk to an agent in a Herdr
@@ -155,8 +154,8 @@ Give each worker a short brief with:
 - Machine, absolute worktree path, and branch.
 - Required tests and smoke checks.
 
-Tell implementation workers to use `/ship` for the push and PR steps.
-Do not repeat the `/ship` implementation checklist.
+Tell implementation workers to follow `AGENTS.md` item 1 for the push and PR
+steps. Do not repeat the `/ship` implementation checklist.
 
 When an issue makes a major change to a web app's user interface or key user
 journey, and a preview is ready, dispatch a separate QA task with
