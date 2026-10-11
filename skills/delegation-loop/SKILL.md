@@ -16,10 +16,25 @@ Read the root `AGENTS.md` first. If `docs/delegation-loop.md` exists, read
 it; Lupin can run without it. Follow the repo's branch, worktree, test, and
 release rules. Read the latest issue comments.
 
+Upstream repos (`gracecraft-software/<repo>`) are read-only for loops. A loop
+does not push to upstream. It does not merge into upstream.
+
+Each repo has one integration branch on the fork (`gracecraft-ro/<repo>`),
+named `release/next`. It starts from the upstream default branch. The fork
+default branch is not used for work.
+
 Use an isolated worktree for each worker. Do not let parallel workers edit the
-same checkout. Record the machine, worktree path, branch, and issue in the
-dispatch and the repository's handoff record. When a worker runs in a Herdr
-pane, also record the agent name, workspace ID, pane ID, tab ID, and cwd.
+same checkout. Each worker creates its worktree from the integration branch:
+
+```sh
+git fetch fork
+git worktree add <path> -b <branch> fork/release/next
+```
+
+Keep each worktree under `.claude/worktrees/`. Record the machine, worktree
+path, branch, and issue in the dispatch and the repository's handoff record.
+When a worker runs in a Herdr pane, record its agent name, workspace ID, pane
+ID, tab ID, and cwd.
 `herdr agent list` reports all of them. See "Talk to an agent in a Herdr
 pane" below.
 
@@ -139,8 +154,8 @@ Give each worker a short brief with:
 - Machine, absolute worktree path, and branch.
 - Required tests and smoke checks.
 
-Tell implementation workers to use `/ship`. Do not repeat its implementation
-checklist.
+Tell implementation workers to follow the push and PR steps in AGENTS.md
+item 1. Do not repeat the `/ship` implementation checklist.
 
 When an issue makes a major change to a web app's user interface or key user
 journey, and a preview is ready, dispatch a separate QA task with
@@ -154,7 +169,8 @@ worker, use the Herdr worktree commands:
 
 ```sh
 herdr worktree list --cwd "$PWD"
-herdr worktree create --branch BRANCH --base REF --cwd "$PWD"
+git fetch fork
+herdr worktree create --branch BRANCH --base fork/release/next --cwd "$PWD"
 herdr worktree open --path PATH --cwd "$PWD"
 ```
 
@@ -264,12 +280,18 @@ Dispatch `/code-review` for every pull request, including docs-only changes.
 Review the current PR diff, not only the issue or a worker's report. Re-fetch
 the latest PR comments and reviews before merge.
 
-A worker opens the PR with `/ship`. `/ship` tries a direct push first, then a
-push to a fork. If neither works, the worker reports the local branch name and
-commit range. Treat that branch as the PR. The reviewer reviews
-`git diff BASE...BRANCH`. The orchestrator posts the verdict as a comment on
-the issue, because there is no PR to post on. Merge the branch locally only
-after approval.
+A worker pushes only to the fork, with `git push fork <branch>`. It does not
+push to upstream. The PR base is `release/next` on the fork:
+
+<!-- markdownlint-disable MD013 -->
+```sh
+gh pr create --repo gracecraft-ro/<repo> --base release/next --title "<title>" --body "Closes #N"
+```
+<!-- markdownlint-enable MD013 -->
+
+Do not open a feature PR against upstream `main`. If the push to the fork
+fails, the worker stops. The worker reports the local branch name and commit
+range. Do not review or merge the branch.
 
 Use `lupin review-route --category CATEGORY --size SIZE --mode separate` for
 a reviewer recommendation. Compare it with the issue's implementation route
@@ -285,12 +307,95 @@ Never dispatch Fable without the user's approval. Use Opus sparingly because
 it costs more.
 
 If the review finds a problem, dispatch a `fix` worker with the exact finding.
-Tell it to use `/ship` and update the same PR. Review the latest PR commit.
-Repeat until the reviewer approves it.
-The orchestrator posts the verdict and findings on the PR (or on the issue for a branch).
+Tell it to push with `git push fork <branch>`, as in AGENTS.md item 1, and
+update the same PR. Review the latest PR commit.
+Repeat until the reviewer approves the current head SHA. The head SHA is the
+newest commit ID on the branch.
+The orchestrator (the agent that dispatches and merges work) posts the verdict
+and findings on the PR.
 
-After approval and required checks pass, the orchestrator merges locally using
-the repo's merge rules. The reviewer and worker do not merge their own PR.
+Before a branch is merged, it must contain the current `release/next`. Fetch
+the fork first. Then run this check. `BRANCH` is the PR branch name:
+
+```sh
+git fetch fork
+git merge-base --is-ancestor fork/release/next fork/BRANCH
+```
+
+Exit code 0 means the fork branch contains `release/next`. Then continue to
+the merge rules below. Exit code 1 means it does not. For an open fork PR
+approved at its current head SHA, the worker runs `git merge fork/release/next`
+on the PR branch. If the merge has conflicts, report them and stop. Then it
+pushes the branch to the fork. Run the check again. If it exits 0, continue to
+the merge rules. Otherwise stop. Do not rebase. Any other exit code from the
+first check means the check failed. Report it and stop. Do not merge.
+
+An approval binds to the head SHA. If the sync changed the head, get a new
+approval at the new head before you merge. The reviewer may limit that review
+to the files the sync changed. The gate runs in every case.
+
+The orchestrator merges into `release/next` only when all four are true:
+
+- The PR is open on the fork, `gracecraft-ro/<repo>`, with base `release/next`.
+- A reviewer approves the current head SHA.
+- The fork branch contains the current `release/next`. The ancestor check
+  asks git whether one branch contains another. The check is in the
+  `delegation-loop` skill.
+- The repo's full gate, as its `AGENTS.md` defines it, passes.
+
+The reviewer is a different agent from the worker. The gate command is in the
+repo's `AGENTS.md`. If the repo has no gate command, report that. Do not merge.
+
+A branch with no fork PR is not merged.
+
+When all four conditions above are true, merge the PR with this command. No
+owner sign-off is needed. The reviewer approval above is still required.
+Record the approved SHA before you merge. The command creates a merge commit:
+
+```sh
+gh pr merge <PR-number> --repo gracecraft-ro/<repo> --merge \
+  --match-head-commit <approved-SHA>
+```
+
+Do not rebase. Do not force-push. A worker or reviewer never merges a pull
+request.
+
+### Preview server
+
+Each repo runs one preview server. It serves the repo's `release/next` only.
+Do not run a server for a feature branch.
+
+1. Create the preview worktree once. From the repo root, run:
+
+   ```sh
+   git fetch fork
+   git worktree add --detach .claude/worktrees/preview fork/release/next
+   ```
+
+2. After each merge into `release/next`, the orchestrator updates the preview.
+   From the repo root, run:
+
+   ```sh
+   git -C .claude/worktrees/preview fetch fork
+   git -C .claude/worktrees/preview checkout --detach fork/release/next
+   ```
+
+   Then it restarts the server.
+3. Bind the server to `127.0.0.1` or to the Tailscale IP address. Tailscale
+   is a private network that links your own machines. Never bind to `0.0.0.0`.
+4. Set `LUPIN_LOOP_STATE_DIR` to a scratch path. Do not point the preview at
+   the real fleet Redis unless the test needs it.
+5. Keep the server running in a Herdr pane or with `systemd-run --user`. The
+   `systemd-run` command starts a command as a background service. The server
+   must keep running after an agent session ends.
+6. The repo's `AGENTS.md` has a "Preview server" section. It names the start
+   command, the port, and the machine. It gives the tunnel command,
+   `ssh -N -L PORT:127.0.0.1:PORT MACHINE`, and the local URL,
+   `http://localhost:PORT`. The port must be free on that machine. Check with
+   `ss -ltn`. The `ss` command lists listening ports. If the repo has no
+   runnable app, that section says `Preview server: none` and gives the reason.
+7. A PR does not need a tunnel command. The PR body says whether the change is
+   visible only after the merge.
 
 ## Monitor and finish
 
@@ -299,6 +404,11 @@ a Herdr worker, `herdr --session lupin-loops agent list` shows each loop's
 state, workspace, and pane in one call. Read the final diff and run the
 repo's required gate and a smoke check. A worker's success report is not
 proof. Re-read issue and PR comments before closure.
+
+After the merge and the preview restart, check that the preview port answers.
+Run `curl -fsS -o /dev/null http://127.0.0.1:PORT/` on the preview machine. Use
+the Tailscale IP address instead if the server binds to one. Exit code 0
+means the port answers. Report the result in the handoff.
 
 Append dispatch and handoff events to the shared Redis ledger:
 
@@ -316,6 +426,18 @@ Use `.loop/loop-state.json` only when a ledger command exits 3. The
 `handoff` skill gives the format. At the start of a session, read the ledger
 and that file.
 
-Keep working while requested, unblocked work remains. Hand off when the
-backlog is done, work is dispatched up to capacity, or the rest is blocked.
-State the exact next action and any missing owner input.
+A worker's task ends when its issue is merged into `release/next`. A task also
+ends when it is blocked on an owner decision. A pull request that waits for
+review is not blocked. The orchestrator dispatches the review and any fix. The
+fix goes on the same branch.
+
+"Blocked" means an owner decision is needed. An example is a model-routing
+policy change.
+
+Upstream `main` is owner-only. The owner opens one pull request from
+`release/next` on `gracecraft-ro/<repo>` to `main` on
+`gracecraft-software/<repo>` when they choose. Loops do not wait for it.
+
+Continue working until the backlog is empty or every remaining item is blocked
+on an owner decision. Then run `/handoff`. State the exact next action and any
+missing owner input.
