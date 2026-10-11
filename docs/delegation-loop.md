@@ -38,10 +38,16 @@ fail without triage access. Check before you write it into a report.
 3. Push with `git push fork <branch>`. Never push to `origin`, `main`, or
    `release/next`. Never run `git remote add`. Do not use the commit and PR
    section of `/ship`. It pushes to `origin` when direct push is allowed, and it
-   can add a remote. Open the PR with
-   `gh pr create --repo gracecraft-ro/<repo> --base release/next`. If the PR
-   opens, report its number to the orchestrator (the agent that dispatches and
-   merges work). The orchestrator dispatches `/code-review`.
+   can add a remote. Open the PR on the fork:
+
+   <!-- markdownlint-disable MD013 -->
+   ```sh
+   gh pr create --repo gracecraft-ro/<repo> --base release/next --title "<title>" --body "Closes #N"
+   ```
+   <!-- markdownlint-enable MD013 -->
+
+   If the PR opens, report its number to the orchestrator (the agent that
+   dispatches and merges work). The orchestrator dispatches `/code-review`.
 
 On a Herdr worker, use the Herdr worktree commands:
 
@@ -69,10 +75,11 @@ repo:
 
 1. The base branch is the integration branch, `release/next`, on the fork
    (`gracecraft-ro/lupin`). A feature PR never targets upstream `main`.
-2. A worker uses the work and report steps of `/ship`. It does not use its
-   commit and PR section. It follows rule 1 for the push and the PR. If the push
-   fails, the worker stops. Report the branch name and commit range. Do not
-   review or merge the branch.
+2. A worker uses these `/ship` sections. They are "Check the issue and
+   checkout", "Implement and verify", "Save and attach evidence", and "Report
+   and release". It does not use its commit and PR section. It follows rule 1
+   for the push and the PR. If the push fails, report the branch name and commit
+   range. Do not merge that branch.
 3. The orchestrator (the agent that dispatches and merges work) dispatches
    `/code-review` for every PR, including docs-only changes. The reviewer is
    not the worker. The reviewer's model tier is not lower than the worker's.
@@ -95,7 +102,8 @@ repo:
    See the paragraph that starts "Before a branch is merged" in the
    `delegation-loop` skill. A worker or reviewer never merges a pull request.
    The PR body has `Closes #N`. The merge into `release/next` does not close
-   the issue. Close it by hand in the same pass.
+   the issue. The orchestrator (the agent that dispatches and merges work)
+   closes it manually, in the same work session.
 
 Changes to this policy go to upstream `main`, which the owner merges. Feature
 work goes to fork `release/next`.

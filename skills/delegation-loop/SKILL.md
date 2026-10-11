@@ -290,8 +290,8 @@ gh pr create --repo gracecraft-ro/<repo> --base release/next --title "<title>" -
 <!-- markdownlint-enable MD013 -->
 
 The PR body has `Closes #N`. The merge into `release/next` does not close the
-issue. The orchestrator (the agent that dispatches and merges work) closes it by
-hand in the same pass.
+issue. The orchestrator (the agent that dispatches and merges work) closes it
+manually, in the same work session.
 
 Do not open a feature PR against upstream `main`. If the push to the fork
 fails, the worker stops. The worker reports the local branch name and commit
