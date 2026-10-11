@@ -45,7 +45,7 @@ Follow the repository's `AGENTS.md`, issue workflow, and release rules.
   4. Is an installed dependency enough? Use it. Never add a dependency for a few lines.
   5. Can it be one line? Write one line.
   6. Otherwise, write the minimum code that works.
-- Be lazy about the solution, never about the change. Finish every part the task needs.
+- Keep the solution small. Do not leave out any part the task needs.
 - Do not add an abstraction, wrapper, option, config, or "for later" code that nobody asked for.
 - Write a comment only for the why behind the code. Keep it to one line.
 - Add or update a regression test for a behavior change.

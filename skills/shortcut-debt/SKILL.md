@@ -36,8 +36,8 @@ Add other comment prefixes if your stack uses them. The grep also matches
 
 If the user names a different marker word, grep for that word instead.
 
-Each hit is one ledger row. The comment prefix keeps prose that only mentions
-the marker out of the ledger. Skip a hit that is not a deferral, such as a note
+Each hit is one ledger row. The comment prefix excludes prose that only
+mentions the marker. Skip a hit that is not a deferral, such as a note
 about a keyboard shortcut.
 
 ## Output
@@ -49,8 +49,8 @@ One row per marker, grouped by file:
 Take the limit and the upgrade trigger from the comment. To add an
 owner to a row, run `git blame -L<line>,<line> <file>`.
 
-Tag any marker that names no upgrade trigger with `no-trigger`. These markers
-decay without anyone noticing.
+Tag any marker that names no upgrade trigger with `no-trigger`. Such markers
+are easy to forget.
 
 End with `<N> markers, <M> with no trigger.` If nothing is found, write
 `No shortcut debt. Clean ledger.`

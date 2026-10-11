@@ -25,28 +25,30 @@ package. This skill reports only. It changes no code.
 - Trace the main flows from start to end: where data comes in, what is stored,
   and what goes out. Read these paths fully: user input, money, auth, data
   writes, background jobs, and anything shared between processes.
-- For a big repo, go deep where a mistake costs the most. Do not read file by
-  file. Say which parts you did not read.
+- For a big repo, read in full the parts where a mistake costs the most. Do not
+  read every file in turn. Say which parts you did not read.
 
 ## Look for
 
 1. **Bug:** wrong result, crash, or missed edge case (empty, zero, last item,
    rounding, time zone). Also look for callers that disagree with what a
    function returns, and for one rule applied two different ways.
-2. **Risk:** security holes (injection, weak randomness, secrets in code,
-   missing checks on user input). Also check for data loss, such as swallowed
-   errors and writes in the wrong order. Also check for a group of writes that
-   must all succeed or all fail, but does not.
+2. **Risk:** security holes, such as injection (user text runs as a command)
+   and weak randomness (values an attacker can guess). Also look for secrets in
+   code and missing checks on user input. Also check for data loss, such as
+   errors that are caught and ignored, and writes in the wrong order. Also check
+   for a group of writes that must all succeed or all fail, but does not.
 3. **Scale:** fine for one user, wrong for many. Look for two requests that check
    a value, then write it, at the same time. Also look for work that every
    process repeats, and lists or memory that only grow. Also look for one query
    per item and for work that grows with the square of the input size. Also look
-   for per-process state that must be shared.
+   for per-process state (data held in one program's memory) that must be shared.
 4. **Missing test:** risky logic (a branch, parser, money, security, data
-   writes) with no test that fails when it breaks. One good test is enough. Do
-   not chase coverage.
-5. **Speed:** big slowdowns are findings. Small wins, such as work repeated in a
-   hot loop, are suggestions.
+   writes) with no test that fails when it breaks. One good test is enough. Do not
+   add tests only to raise coverage. Coverage means the share of code that the
+   tests run.
+5. **Speed:** big slowdowns are findings. Small gains, such as work repeated in a
+   hot loop (a loop that runs many times), are suggestions.
 6. **Lean:** code that should not exist or should be smaller.
    - delete: dead code, unused options, flags and config, speculative features
    - reuse: two helpers that do the same thing. Keep one and name its path.
@@ -72,7 +74,7 @@ package. This skill reports only. It changes no code.
   skill defines the marker.
 - Propose the smallest fix that works. Prefer fixes that delete code. Do not add
   layers, frameworks, or config that the problem does not need.
-- Do not report style taste, opinions, or vague worries.
+- Do not report style preferences, opinions, or vague worries.
 
 ## Report
 
