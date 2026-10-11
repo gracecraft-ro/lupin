@@ -36,15 +36,8 @@ fail without triage access. Check before you write it into a report.
    ```
 
 3. Push the branch to the fork with `git push fork <branch>`. Never push to
-   `origin`. Do not add a remote. Do not run `/ship`'s push, remote, or PR
-   steps. It pushes to `origin` when direct push is allowed, and it can add a
-   remote. Open the PR on the fork:
-
-   <!-- markdownlint-disable MD013 -->
-   ```sh
-   gh pr create --repo gracecraft-ro/lupin --base release/next --title "<title>" --body "Closes #N"
-   ```
-   <!-- markdownlint-enable MD013 -->
+   `origin`. Do not add a remote. Use `/ship`'s push and PR steps. Push only
+   to the fork. Never push to `origin`. Never run `git remote add`.
 
 On a Herdr worker, use the Herdr worktree commands:
 
@@ -72,9 +65,10 @@ repo:
 
 1. The base branch is the integration branch, `release/next`, on the fork
    (`gracecraft-ro/lupin`). A feature PR never targets upstream `main`.
-2. A worker follows rule 1 to push and open the PR. It can use `/ship` for
-   the work and the report. If the push fails, the worker stops.
-   Report the branch name and commit range. Do not review or merge the branch.
+2. A worker follows rule 1 to push and open the PR. A worker uses `/ship`
+   for the work, the push, the PR, and the report. If the push fails, the
+   worker stops. Report the branch name and commit range. Do not review or
+   merge the branch.
 3. The orchestrator (the agent that dispatches and merges work) dispatches
    `/code-review` for every PR, including docs-only changes. The reviewer is
    not the worker. The reviewer's model tier is not lower than the worker's.

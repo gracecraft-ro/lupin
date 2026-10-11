@@ -411,15 +411,8 @@ Policy changes go to upstream `main` for the owner to merge. The loop policy is
 in `docs/delegation-loop.md`.
 
 1. Push the branch to the fork with `git push fork <branch>`. Never push to
-   `origin`. Do not add a remote. Do not run `/ship`'s push, remote, or PR
-   steps. It pushes to `origin` when direct push is allowed, and it can add a
-   remote. Open the PR on the fork:
-
-   <!-- markdownlint-disable MD013 -->
-   ```sh
-   gh pr create --repo gracecraft-ro/<repo> --base release/next --title "<title>" --body "Closes #N"
-   ```
-   <!-- markdownlint-enable MD013 -->
+   `origin`. Do not add a remote. Use `/ship`'s push and PR steps. Push only
+   to the fork. Never push to `origin`. Never run `git remote add`.
 
    The PR body has `Closes #N`. The merge into `release/next` does not close
    the issue. Close it by hand in the same pass. If the push fails, report the
@@ -462,7 +455,7 @@ sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
   listening ports.
 - Machine: not set yet. The owner names it.
 - Owner tunnel command: `ssh -N -L 8789:127.0.0.1:8789 MACHINE`. A tunnel
-  forwards a port on the machine to your computer.
+  forwards a port on your computer to the machine.
 - Local URL: `http://localhost:8789`.
 - Keep it running: a Herdr pane, or `systemd-run --user`. The `systemd-run`
   command starts a command as a background service.
