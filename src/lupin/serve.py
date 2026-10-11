@@ -3028,6 +3028,8 @@ class Handler(BaseHTTPRequestHandler):
             self.do_image(query)
         elif url.path == "/debrief":
             self.do_debrief(query)
+        elif url.path == "/debrief/shot":
+            self.do_debrief_shot(query)
         elif url.path == "/evidence":
             self.do_evidence(query)
         elif url.path == "/healthz":
@@ -3078,10 +3080,31 @@ class Handler(BaseHTTPRequestHandler):
                 f"Debrief {repo}",
                 "<header><h1>Debrief</h1><span class=sp></span>"
                 "<a href='/debrief'>all debriefs</a></header>"
-                f"<div class=card><div class=debrief>{debrief.render_html(markdown)}</div></div>",
+                f"<div class=card><div class=debrief>{debrief.render_html(markdown, repo)}</div></div>",
                 debrief.CSS,
             )
         )
+
+    def do_debrief_shot(self, query: dict) -> None:
+        found = debrief.read_screenshot(
+            Path(STATE_DIR), (query.get("repo") or "").strip(), query.get("path") or "",
+        )
+        if found is None:
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        data, content_type = found
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "private, max-age=300")
+        self.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(data)
 
     def do_evidence(self, query: dict) -> None:
         repo = (query.get("repo") or "").strip()

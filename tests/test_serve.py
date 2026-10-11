@@ -17,6 +17,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from importlib import resources
 from unittest import mock
+from urllib.parse import quote
 
 import pytest
 import redis as redis_lib
@@ -3752,6 +3753,49 @@ def test_evidence_route_refuses_with_404_over_http(tmp_path, monkeypatch, query)
     ):
         with pytest.raises(urllib.error.HTTPError) as refused:
             urllib.request.urlopen(f"http://127.0.0.1:{port}/evidence?{query}", timeout=15)
+
+    assert refused.value.code == 404
+
+
+DEBRIEF_SHOT_REL = "20261010-120000-6h-screenshots/debrief.png"
+
+
+def test_debrief_shot_route_serves_a_screenshot_over_http(tmp_path, monkeypatch):
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    shots = tmp_path / "debriefs" / "widgets" / "20261010-120000-6h-screenshots"
+    shots.mkdir(parents=True)
+    (shots / "debrief.png").write_bytes(b"\x89PNG-test")
+
+    with _live_dashboard({}) as port:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/debrief/shot?repo=widgets&path={quote(DEBRIEF_SHOT_REL, safe='')}",
+            timeout=15,
+        ) as resp:
+            assert resp.status == 200
+            assert resp.headers["Content-Type"] == "image/png"
+            assert resp.headers["Content-Security-Policy"] == "default-src 'none'; sandbox"
+            assert resp.read() == b"\x89PNG-test"
+
+
+@pytest.mark.parametrize("rel", [
+    "20261010-120000-6h-screenshots/../../../secret.png",
+    "../../secret.png",
+    "/etc/passwd.png",
+    "20261010-120000-6h-screenshots/missing.png",
+])
+def test_debrief_shot_route_refuses_with_404_over_http(tmp_path, monkeypatch, rel):
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    shots = tmp_path / "debriefs" / "widgets" / "20261010-120000-6h-screenshots"
+    shots.mkdir(parents=True)
+    (shots / "debrief.png").write_bytes(b"\x89PNG-test")
+    (tmp_path / "secret.png").write_bytes(b"\x89PNG-secret")
+
+    with _live_dashboard({}) as port:
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/debrief/shot?repo=widgets&path={quote(rel, safe='')}",
+                timeout=15,
+            )
 
     assert refused.value.code == 404
 

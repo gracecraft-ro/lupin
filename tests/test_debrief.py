@@ -6,8 +6,10 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -459,7 +461,7 @@ def test_render_html_escapes_text_and_keeps_only_attachment_images():
         "- Issue #8: ![bad](https://example.com/x.png)",
     ])
 
-    html = debrief.render_html(markdown)
+    html = debrief.render_html(markdown, "widgets")
 
     assert html.startswith("<h1>Debrief: acme/widgets</h1>")
     assert "<script>" not in html
@@ -659,6 +661,20 @@ def test_list_and_read_periodic_debriefs(tmp_path: Path):
     assert debrief.read_debrief(tmp_path, "widgets", "20261010-120000-6h.md") == "# six\n"
     with pytest.raises(debrief.DebriefError):
         debrief.read_debrief(tmp_path, "widgets", "20261010-120000-12h.md")
+
+
+def test_list_sorts_one_time_stamp_by_period_length_then_stop_file(tmp_path: Path):
+    for name in ("20261010-120000-6h.md", "20261010-120000-24h.md", "20261010-120000-7d.md",
+                 "20261010-120000.md", "20261010-110000-7d.md"):
+        _debrief_file(tmp_path, "widgets", name)
+
+    assert [name for _repo, name in debrief.list_debriefs(tmp_path)] == [
+        "20261010-120000-7d.md",
+        "20261010-120000-24h.md",
+        "20261010-120000-6h.md",
+        "20261010-120000.md",
+        "20261010-110000-7d.md",
+    ]
 
 
 def test_write_due_periodic_debriefs_writes_only_what_is_due(tmp_path: Path, monkeypatch, capsys):
@@ -1009,3 +1025,164 @@ def test_missing_browser_still_writes_the_periodic_debrief(tmp_path: Path, monke
     assert f"- Not captured: Debrief page (debrief.png). Reason: {reason}." in text
     assert "![" not in text
     assert list(path.with_name("20261010-120000-6h-screenshots").glob("*.png")) == []
+
+
+FAKE_BROWSER = "lupin-fake-browser"
+STEM = "20261010-120000-6h"
+# Writes the --screenshot file, as chromium does.
+FAKE_SHOT_OK = (
+    'for arg in "$@"; do case "$arg" in --screenshot=*) '
+    'printf x > "${arg#--screenshot=}" ;; esac; done\n'
+)
+
+
+def _running(pid: int) -> bool:
+    """True when `pid` is alive. A zombie is not running."""
+    state = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False,
+    ).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+@pytest.fixture
+def fake_browser(tmp_path: Path, monkeypatch):
+    """Put a fake browser first on PATH. Return a function that writes its script."""
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    # The dashboard runs as a subprocess. It must find lupin on its import path.
+    monkeypatch.setenv("PYTHONPATH", str(Path(debrief.__file__).resolve().parents[1]))
+    monkeypatch.setattr(debrief, "SHOT_BROWSER", FAKE_BROWSER)
+
+    def install(body: str) -> Path:
+        script = bin_dir / FAKE_BROWSER
+        script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
+        script.chmod(0o755)
+        return script
+
+    return install
+
+
+def test_page_that_is_not_200_is_not_captured(tmp_path: Path, fake_browser):
+    fake_browser(FAKE_SHOT_OK)
+    folder = tmp_path / "shots"
+
+    # No debrief file exists, so /debrief?repo=...&file=... answers 404.
+    missing = debrief._capture(tmp_path, "widgets", f"{STEM}.md", folder)
+
+    assert missing == {"debrief.png": "dashboard returned HTTP 404"}
+    assert (folder / "debrief-list.png").is_file()
+    assert not (folder / "debrief.png").exists()
+
+
+def test_browser_exit_1_is_recorded_as_not_captured(tmp_path: Path, fake_browser):
+    fake_browser("exit 1\n")
+    _debrief_file(tmp_path, "widgets", f"{STEM}.md")
+
+    missing = debrief._capture(tmp_path, "widgets", f"{STEM}.md", tmp_path / "shots")
+
+    reason = "browser exited 1 without a screenshot"
+    assert missing == {"debrief-list.png": reason, "debrief.png": reason}
+
+
+def test_browser_timeout_is_recorded_as_not_captured(tmp_path: Path, fake_browser, monkeypatch):
+    fake_browser("exec sleep 60\n")
+    monkeypatch.setattr(debrief, "SHOT_TIMEOUT_S", 1.0)
+    target = tmp_path / "shot.png"
+
+    started = time.monotonic()
+    reason = debrief._shot("http://127.0.0.1:1/", target)
+
+    assert reason == "browser timed out"
+    assert time.monotonic() - started < 30
+    assert not target.exists()
+
+
+def test_failed_dashboard_start_marks_every_shot_not_captured(tmp_path: Path, fake_browser, monkeypatch):
+    fake_browser(FAKE_SHOT_OK)
+    _debrief_file(tmp_path, "widgets", f"{STEM}.md")
+
+    def no_server(root, port):
+        raise debrief.DebriefError("dashboard server did not start")
+
+    monkeypatch.setattr(debrief, "_serve", no_server)
+    folder = tmp_path / "shots"
+
+    missing = debrief._capture(tmp_path, "widgets", f"{STEM}.md", folder)
+
+    reason = "dashboard server did not start"
+    assert missing == {"debrief-list.png": reason, "debrief.png": reason}
+    assert not folder.exists() or list(folder.glob("*.png")) == []
+
+
+def test_browser_timeout_kills_the_whole_process_group(tmp_path: Path, fake_browser, monkeypatch):
+    pid_file = tmp_path / "child.pid"
+    # The child holds no pipe. Only a group kill stops it.
+    fake_browser(
+        f'sleep 120 </dev/null >/dev/null 2>&1 &\necho $! > "{pid_file}"\nwait\n'
+    )
+    monkeypatch.setattr(debrief, "SHOT_TIMEOUT_S", 1.0)
+
+    reason = debrief._shot("http://127.0.0.1:1/", tmp_path / "shot.png")
+
+    child = int(pid_file.read_text(encoding="utf-8"))
+    try:
+        assert reason == "browser timed out"
+        assert not _running(child)
+    finally:
+        if _running(child):
+            os.kill(child, signal.SIGKILL)
+
+
+def test_read_screenshot_serves_pngs_inside_the_repo_debrief_folder(tmp_path: Path):
+    shots = tmp_path / "debriefs" / "widgets" / f"{STEM}-screenshots"
+    shots.mkdir(parents=True)
+    (shots / "debrief.png").write_bytes(b"png-bytes")
+
+    found = debrief.read_screenshot(tmp_path, "widgets", f"{STEM}-screenshots/debrief.png")
+
+    assert found == (b"png-bytes", "image/png")
+
+
+@pytest.mark.parametrize("rel", [
+    "../secret.png",
+    f"{STEM}-screenshots/../../secret.png",
+    "/etc/passwd.png",
+    f"{STEM}-screenshots\\debrief.png",
+    f"{STEM}-screenshots/debrief.svg",
+    f"{STEM}-screenshots/missing.png",
+    "",
+])
+def test_read_screenshot_refuses(tmp_path: Path, rel: str):
+    shots = tmp_path / "debriefs" / "widgets" / f"{STEM}-screenshots"
+    shots.mkdir(parents=True)
+    (shots / "debrief.png").write_bytes(b"png-bytes")
+    (tmp_path / "debriefs" / "secret.png").write_bytes(b"secret")
+
+    assert debrief.read_screenshot(tmp_path, "widgets", rel) is None
+
+
+def test_read_screenshot_refuses_symlinks_out_of_the_debrief_folder(tmp_path: Path):
+    shots = tmp_path / "debriefs" / "widgets" / f"{STEM}-screenshots"
+    shots.mkdir(parents=True)
+    (tmp_path / "secret.png").write_bytes(b"secret")
+    (shots / "link.png").symlink_to(tmp_path / "secret.png")
+
+    assert debrief.read_screenshot(tmp_path, "widgets", f"{STEM}-screenshots/link.png") is None
+
+
+def test_render_html_maps_local_screenshots_to_the_shot_route():
+    markdown = "\n".join([
+        "## Screenshots",
+        f"![Debrief page]({STEM}-screenshots/debrief.png)",
+        "![Escape](../secret.png)",
+    ])
+
+    html = debrief.render_html(markdown, "widgets")
+
+    assert (
+        f"<img src='/debrief/shot?repo=widgets&amp;path={STEM}-screenshots%2Fdebrief.png' "
+        "alt='Debrief page' loading=lazy>"
+    ) in html
+    assert "![Escape](../secret.png)" in html
+    assert html.count("<img") == 1

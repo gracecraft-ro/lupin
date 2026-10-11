@@ -15,11 +15,13 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from html import escape
@@ -40,6 +42,12 @@ PERIODS = {"6h": timedelta(hours=6), "24h": timedelta(hours=24), "7d": timedelta
 _PERIOD_NAMES = "|".join(map(re.escape, PERIODS))
 # Stop files are `<file name time>.md`. Periodic files are `<file name time>-<period>.md`.
 FILE_RE = re.compile(rf"^\d{{8}}-\d{{6}}(?:-(?:{_PERIOD_NAMES}))?\.md$")
+# Screenshot links in a periodic debrief. `_screenshots` writes this shape only.
+SHOT_PATH_RE = re.compile(
+    rf"\d{{8}}-\d{{6}}(?:-(?:{_PERIOD_NAMES}))?-screenshots/[A-Za-z0-9_-]+\.png"
+)
+# Image link: a GitHub attachment URL or a screenshot path. Group 2 is the target.
+IMAGE_LINK_RE = re.compile(rf"!\[([^\]]*)\]\((https://[^)\s]+|{SHOT_PATH_RE.pattern})\)")
 EVIDENCE_DIRS = ("docs/", "evidence/")
 EVIDENCE_TYPES = {
     ".png": "image/png",
@@ -456,14 +464,34 @@ def _shot(url: str, target: Path) -> str | None:
         f"--window-size={SHOT_WINDOW}", f"--screenshot={target}", url,
     ]
     try:
-        proc = subprocess.run(argv, capture_output=True, check=False, timeout=SHOT_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        return "browser timed out"
+        # A new session gives the browser its own process group.
+        proc = subprocess.Popen(
+            argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
     except OSError as exc:
         return f"browser did not run ({exc.strerror})"
-    if proc.returncode or not target.is_file() or target.stat().st_size == 0:
-        return f"browser exited {proc.returncode} without a screenshot"
+    try:
+        code = proc.wait(timeout=SHOT_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        # Kill the browser's child processes too.
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        return "browser timed out"
+    if code or not target.is_file() or target.stat().st_size == 0:
+        return f"browser exited {code} without a screenshot"
     return None
+
+
+def _page_error(url: str) -> str | None:
+    """Return None when `url` answers 200. Otherwise return the reason."""
+    try:
+        with urllib.request.urlopen(url, timeout=SHOT_SERVER_WAIT_S) as resp:
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+    except OSError as exc:
+        return f"dashboard did not answer ({exc})"
+    return None if status == 200 else f"dashboard returned HTTP {status}"
 
 
 def _capture(root: Path, repo: str, name: str, folder: Path) -> dict[str, str]:
@@ -480,7 +508,9 @@ def _capture(root: Path, repo: str, name: str, folder: Path) -> dict[str, str]:
     missing = {}
     try:
         for file, _alt, _caption, path in SHOTS:
-            reason = _shot(f"http://127.0.0.1:{port}{path.format(query=query)}", folder / file)
+            url = f"http://127.0.0.1:{port}{path.format(query=query)}"
+            # A page that is not 200 gives no screenshot of the debrief.
+            reason = _page_error(url) or _shot(url, folder / file)
             if reason:
                 missing[file] = reason
     finally:
@@ -570,6 +600,16 @@ def write_period(
     return _write(root, repo, checkout, start, end, forced=False, period=period)
 
 
+def _newest_first(item: tuple[str, str]) -> tuple[datetime, timedelta, str]:
+    """Sort key: file name time, then period length. A stop file has no period, so it counts as zero."""
+    repo, name = item
+    try:
+        when = datetime.strptime(name[:15], STAMP_FORMAT).replace(tzinfo=timezone.utc)
+    except ValueError:
+        when = datetime.min.replace(tzinfo=timezone.utc)  # Not a real date. Sort it last.
+    return when, PERIODS.get(name[16:-3], timedelta(0)), repo
+
+
 def list_debriefs(root: Path) -> list[tuple[str, str]]:
     """Return (repo, file name) for each debrief, newest first."""
     base = root / "debriefs"
@@ -582,7 +622,7 @@ def list_debriefs(root: Path) -> list[tuple[str, str]]:
         for path in folder.iterdir():
             if FILE_RE.fullmatch(path.name) and path.is_file():
                 found.append((folder.name, path.name))
-    return sorted(found, key=lambda item: (item[1], item[0]), reverse=True)
+    return sorted(found, key=_newest_first, reverse=True)
 
 
 def read_debrief(root: Path, repo: str, name: str) -> str:
@@ -595,15 +635,23 @@ def read_debrief(root: Path, repo: str, name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _inline(text: str) -> str:
+def _image_src(target: str, repo: str) -> str | None:
+    """Return the `src` for an image link. None when the link is not served."""
+    if target.startswith("https://"):
+        attachment = roadmap.github_attachment_id(target)
+        return f"/image?id={attachment}" if attachment else None
+    return "/debrief/shot?" + escape(urlencode({"repo": repo, "path": target}), quote=True)
+
+
+def _inline(text: str, repo: str) -> str:
     parts = []
     position = 0
-    for match in roadmap.IMAGE.finditer(text):
+    for match in IMAGE_LINK_RE.finditer(text):
         parts.append(escape(text[position:match.start()]))
-        attachment = roadmap.github_attachment_id(match.group(2))
-        if attachment:
+        src = _image_src(match.group(2), repo)
+        if src:
             alt = escape(match.group(1), quote=True)
-            parts.append(f"<img src='/image?id={attachment}' alt='{alt}' loading=lazy>")
+            parts.append(f"<img src='{src}' alt='{alt}' loading=lazy>")
         else:
             parts.append(escape(match.group(0)))
         position = match.end()
@@ -611,11 +659,12 @@ def _inline(text: str) -> str:
     return "".join(parts)
 
 
-def render_html(markdown: str) -> str:
+def render_html(markdown: str, repo: str) -> str:
     """Render the debrief markdown subset as HTML.
 
-    Headings, bullets, paragraphs and GitHub attachment images only. All
-    other text is escaped. Links show as text.
+    Headings, bullets, paragraphs and images only. Images are GitHub
+    attachments or this repo's screenshots. All other text is escaped.
+    Links show as text.
     """
     out = []
     in_list = False
@@ -624,20 +673,40 @@ def render_html(markdown: str) -> str:
             if not in_list:
                 out.append("<ul>")
                 in_list = True
-            out.append(f"<li>{_inline(line[2:])}</li>")
+            out.append(f"<li>{_inline(line[2:], repo)}</li>")
             continue
         if in_list:
             out.append("</ul>")
             in_list = False
         if line.startswith("# "):
-            out.append(f"<h1>{_inline(line[2:])}</h1>")
+            out.append(f"<h1>{_inline(line[2:], repo)}</h1>")
         elif line.startswith("## "):
-            out.append(f"<h2>{_inline(line[3:])}</h2>")
+            out.append(f"<h2>{_inline(line[3:], repo)}</h2>")
         elif line.strip():
-            out.append(f"<p>{_inline(line)}</p>")
+            out.append(f"<p>{_inline(line, repo)}</p>")
     if in_list:
         out.append("</ul>")
     return "".join(out)
+
+
+def read_screenshot(root: Path, repo: str, rel: str) -> tuple[bytes, str] | None:
+    """Return (bytes, content type) for a screenshot of `repo`'s debriefs.
+
+    `rel` must match `SHOT_PATH_RE`. Return None when it does not match,
+    when the file is absent, or when it resolves outside the repo's folder.
+    """
+    if not REPO_RE.fullmatch(repo or "") or not SHOT_PATH_RE.fullmatch(rel or ""):
+        return None
+    folder = (root / "debriefs" / repo).resolve()
+    try:
+        target = (folder / rel).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not target.is_relative_to(folder) or not target.is_file():
+        return None
+    if target.stat().st_size > MAX_EVIDENCE_BYTES:
+        return None
+    return target.read_bytes(), "image/png"
 
 
 def read_evidence(checkout: Path, rel: str) -> tuple[bytes, str] | None:
