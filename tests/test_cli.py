@@ -173,7 +173,7 @@ def test_fleet_run_acl_denial_exits_three_and_names_the_acl(
     monkeypatch.setenv("LUPIN_CMD_SIGNING_KEYS_DIR", str(key_dir))
     monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
     monkeypatch.setattr(machines, "hostname", lambda: "pihome")
-    monkeypatch.setattr(machines, "machines", lambda connection: records)
+    monkeypatch.setattr(machines, "machines", lambda connection, **kwargs: records)
     monkeypatch.setattr(cli, "_fleet_connection", lambda args: connection)
 
     assert cli.main(["fleet-run"]) == 3
