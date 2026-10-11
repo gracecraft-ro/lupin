@@ -52,6 +52,7 @@ Follow the repository's `AGENTS.md`, issue workflow, and release rules.
 - Run the repo's documented gate. Then run the changed feature and observe
   the result. A passing build or test alone does not prove it works.
 - Read the final diff. Check issue and PR comments again before reporting.
+- List every place your change must reach (callers, tests, fixtures, config, exports) before you edit.
 - For a bug fix, grep every caller first. Fix the root cause once, in the
   shared code.
 - When you move code, keep its error handling and validation.

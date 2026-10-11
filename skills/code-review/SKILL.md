@@ -86,10 +86,10 @@ src/file.py:L42: 🔴 bug: this path accepts an empty token. Reject it before us
 
 Use these labels when they help:
 
-- `🔴 bug` — broken behavior or a security problem.
-- `🟡 risk` — fragile behavior that can fail in a real case.
-- `🔵 nit` — optional style or naming change.
-- `❓ q` — a question that blocks a clear decision.
+- `🔴 bug`: broken behavior or a security problem.
+- `🟡 risk`: fragile behavior that can fail in a real case.
+- `🔵 nit`: optional style or naming change.
+- `❓ q`: a question that blocks a clear decision.
 
 Map the lenses to these labels. Use `🔴 bug` for the `bug` lens, a security hole,
 or data loss. Use `🟡 risk` for the `scale`, `missing test`, and `speed` lenses.
@@ -103,14 +103,14 @@ paragraph only when a security or design issue needs more context.
 Return one result for each PR:
 
 ```text
-PR 123 — APPROVED
+PR 123: APPROVED
 No blocking findings.
 ```
 
 or:
 
 ```text
-PR 123 — CHANGES REQUESTED
+PR 123: CHANGES REQUESTED
 - src/file.py:L42: 🔴 bug: ... Fix ...
 ```
 
