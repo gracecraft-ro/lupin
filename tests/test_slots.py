@@ -100,6 +100,32 @@ def test_hold_releases_on_nonzero_exit(tmp_path):
     assert slots.status(state_root=root)["bmo"]["holders"] == 0
 
 
+def test_hold_keeps_renewing_after_one_renew_error(tmp_path, monkeypatch, capsys):
+    root = str(tmp_path)
+    real_renew = slots.renew
+    calls = []
+
+    def renew_fails_once(lease, **kwargs):
+        calls.append(lease)
+        if len(calls) == 1:
+            raise OSError("renew broke")
+        return real_renew(lease, **kwargs)
+
+    monkeypatch.setattr(slots, "renew", renew_fails_once)
+    code = slots.hold(
+        [sys.executable, "-c", "import time; time.sleep(1.0)"],
+        slot="bmo",
+        holder="a",
+        max_holders=1,
+        ttl=0.3,
+        state_root=root,
+    )
+    assert code == 0
+    assert len(calls) >= 3, "renew was not called again after the error"
+    assert capsys.readouterr().err.count("renew broke") == 1
+    assert slots.status(state_root=root)["bmo"]["holders"] == 0
+
+
 def test_hold_keeps_renewing_after_repeated_renew_errors(tmp_path, monkeypatch, capsys):
     root = str(tmp_path)
     real_renew = slots.renew
@@ -113,7 +139,7 @@ def test_hold_keeps_renewing_after_repeated_renew_errors(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(slots, "renew", renew_fails_twice)
     code = slots.hold(
-        [sys.executable, "-c", "import time; time.sleep(0.5)"],
+        [sys.executable, "-c", "import time; time.sleep(1.0)"],
         slot="bmo",
         holder="a",
         max_holders=1,
@@ -139,7 +165,7 @@ def test_hold_reports_a_new_failure_after_a_success(tmp_path, monkeypatch, capsy
 
     monkeypatch.setattr(slots, "renew", renew_fails_first_and_third)
     code = slots.hold(
-        [sys.executable, "-c", "import time; time.sleep(0.5)"],
+        [sys.executable, "-c", "import time; time.sleep(1.0)"],
         slot="bmo",
         holder="a",
         max_holders=1,
