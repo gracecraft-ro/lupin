@@ -38,21 +38,30 @@ Follow the repository's `AGENTS.md`, issue workflow, and release rules.
 
 - Inspect the relevant code and tests before editing.
 - Make the smallest change that meets the acceptance checks.
+- Take the first option that fully works, in this order:
+  1. Does it need to exist? Skip features and options that nobody asked for.
+  2. Does the codebase already have it? Reuse it.
+  3. Does the standard library or the platform have it? Use it.
+  4. Is an installed dependency enough? Use it. Never add a dependency for a few lines.
+  5. Can it be one line? Write one line.
+  6. Otherwise, write the minimum code that works.
+- Be lazy about the solution, never about the change. Finish every part the task needs.
+- Do not add an abstraction, wrapper, option, config, or "for later" code that nobody asked for.
+- Write a comment only for the why behind the code. Keep it to one line.
 - Add or update a regression test for a behavior change.
 - Run the repo's documented gate. Then run the changed feature and observe
   the result. A passing build or test alone does not prove it works.
 - Read the final diff. Check issue and PR comments again before reporting.
-- Before you edit, list each caller, test, fixture, config value, and export
-  that the change must reach.
 - For a bug fix, grep every caller first. Fix the root cause once, in the
   shared code.
 - When you move code, keep its error handling and validation.
 - New non-trivial logic (a branch, a loop, a parser, money, or security) gets one
   small test or an assert. Trivial changes need none.
-- A shortcut gets a comment: `shortcut: <limit>, <upgrade trigger>`.
-- Never cut validation at trust boundaries, data-loss handling, security, or
-  accessibility.
-- The final report says what you skipped and what you did not check.
+- A shortcut with a known limit gets a comment: `shortcut: <limit>, <upgrade trigger>`.
+- Never cut validation at points where outside data enters the system,
+  data-loss handling, security, or accessibility.
+- The final report says what you skipped, what you did not check, and any risk
+  the user must know.
 
 For a visual change, open the real surface and capture before and after.
 Report if you could not view it.

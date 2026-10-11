@@ -3,14 +3,15 @@
 This project includes text adapted from ponytail, by DietrichGebert.
 
 - Source: https://github.com/dietrichgebert/ponytail
+- Source commit: 9b58c1f
 - License: MIT License. The full text follows.
 
-Adapted files:
+Adapted files, each with its source file:
 
-- `skills/code-review/SKILL.md`: review lenses and check-before-report rules.
-- `skills/repo-audit/SKILL.md`: whole-repo audit method.
-- `skills/shortcut-debt/SKILL.md`: shortcut ledger method.
-- `skills/ship/SKILL.md`: lazy-change bullets in "Implement and verify".
+- `skills/code-review/SKILL.md` from `skills/ponytail-review/SKILL.md`: review checks and check-before-report rules.
+- `skills/repo-audit/SKILL.md` from `skills/ponytail-audit/SKILL.md`: whole-repo audit method.
+- `skills/shortcut-debt/SKILL.md` from `skills/ponytail-debt/SKILL.md`: shortcut ledger method.
+- `skills/ship/SKILL.md` from `skills/ponytail/SKILL.md` (bullets): lazy-change bullets in "Implement and verify".
 
 MIT License
 

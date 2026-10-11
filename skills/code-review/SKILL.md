@@ -27,24 +27,30 @@ Do not replace a PR review with a review of an unsubmitted branch.
 ## Check the change
 
 - Check the diff against the issue's acceptance checks and repo rules.
-- Check each change through these six lenses:
+- Find the expected load first. Judge `scale` against it.
+- Check each change through six lenses. A lens is one kind of check:
   - `bug`: wrong result, crash, or missed edge case. Edge cases include empty
     input, zero, the last item, rounding, and time zones. Grep every caller of a
     changed function.
   - `risk`: security hole, unsafe access, or data loss. Data loss includes a
-    swallowed error, writes in the wrong order, and a missing transaction.
-  - `scale`: fine for one user, wrong for many. Look for check-then-write races,
-    repeated work, lists that only grow, and one query per item.
+    swallowed error and writes in the wrong order. It also includes a group of
+    writes that must all succeed or all fail, but does not.
+  - `scale`: fine for one user, wrong for many. Look for two requests that check
+    a value, then write it, at the same time. Also look for repeated work, lists
+    that only grow, and one query per item.
   - `missing test`: risky new logic has no test that fails when it breaks.
     Risky logic includes a branch, a parser, money, security, a data write, or
-    a bug fix.
+    a bug fix. Aim for one good test, not coverage.
   - `speed`: a big slowdown is a finding. A small win is a suggestion.
-  - `lean`: code that should not exist or should be smaller. Look for:
+  - `lean`: code that should not exist or should be smaller. Label a lean finding
+    `🟡 risk` unless it is a shorter form. Look for:
     - dead code
-    - a helper the repo already has
+    - a helper the repo already has. Reuse: name the path of the existing helper.
     - a dependency for a few lines
     - an abstraction with one implementation
     - near-copies that must change together
+    - split: one function that does several unrelated jobs. Split by job, not
+      by line count.
     - excess code. Agents often rebuild helpers, write tests that check nothing
       useful, or add too many tests. When you fix behavior, update existing
       tests instead of adding new ones. If a PR is bloated, propose changes that
@@ -65,6 +71,10 @@ Do not replace a PR review with a review of an unsubmitted branch.
   empty, or that the code is unused. Use grep to find callers.
 - Propose the smallest fix that works. Prefer fixes that delete code. Do not
   add layers, frameworks, or config that the problem does not need.
+- No style taste. Do not write vague advice, such as "consider this."
+- A shortcut marked `shortcut:` (or older `ponytail:`) that names its limit is a
+  decision, not a finding. Report it only if the expected load already crosses
+  that limit.
 
 ## Report findings
 
@@ -83,7 +93,9 @@ Use these labels when they help:
 
 Map the lenses to these labels. Use `🔴 bug` for the `bug` lens, a security hole,
 or data loss. Use `🟡 risk` for the `scale`, `missing test`, and `speed` lenses.
-Use `🔵 nit` for a small speed win and for the `lean` lens.
+Use `🟡 risk` for a lean finding that adds or keeps code. Examples: excess code,
+a duplicate helper, a one-implementation abstraction, or a dead function. Use
+`🔵 nit` for a small speed win and for a shorter form.
 
 Do not repeat what the code does. Name the problem and the fix. Use a short
 paragraph only when a security or design issue needs more context.
@@ -101,6 +113,8 @@ or:
 PR 123 — CHANGES REQUESTED
 - src/file.py:L42: 🔴 bug: ... Fix ...
 ```
+
+`🔴 bug` blocks. `🟡 risk` blocks when it breaks at the expected load. `🔵 nit` never blocks.
 
 Use `APPROVED` only when no blocking finding remains. List optional nits as
 non-blocking. The orchestrator posts the verdict and findings on the PR,

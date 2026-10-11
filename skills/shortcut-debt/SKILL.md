@@ -44,9 +44,9 @@ about a keyboard shortcut.
 
 One row per marker, grouped by file:
 
-`<file>:<line>, <what was simplified>. ceiling: <the limit named>. upgrade: <the trigger to revisit>.`
+`<file>:<line>, <what was simplified>. limit: <the limit named>. upgrade: <the trigger to revisit>.`
 
-Take the ceiling (the limit) and the upgrade trigger from the comment. To add an
+Take the limit and the upgrade trigger from the comment. To add an
 owner to a row, run `git blame -L<line>,<line> <file>`.
 
 Tag any marker that names no upgrade trigger with `no-trigger`. These markers
