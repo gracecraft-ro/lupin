@@ -204,7 +204,9 @@ def clean_lupin_env(monkeypatch):
     The sandbox shell exports LUPIN_* variables. Without this fixture, a test can reach the shared Redis server.
 
     Every LUPIN_* variable is deleted, then LUPIN_BACKEND is set to local.
-    Tests that need Redis set their own values after this fixture runs.
+    Tests that need Redis pass the host and port as CLI flags.
+    Some tests in tests/test_cli.py set LUPIN_CMD_SIGNING_KEY and
+    LUPIN_CMD_SIGNING_KEYS_DIR after this fixture runs.
 
     The list is built once, when this fixture runs. Variables set later stay.
     Modules that read variables at import time keep their values, for example
