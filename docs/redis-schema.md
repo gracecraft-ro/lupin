@@ -601,8 +601,9 @@ claim belongs to this attempt when `claim` matches its token and `state` is
 ```
 
 A `running` entry that is still queued when `lupin agent` restarts is marked
-`failed`. Its reason is `orphaned: still running when the agent restarted`. The
-startup scan does this. It never runs the command again.
+`failed`. Its reason is `orphaned: the agent restarted before the command
+finished. The command may not have started.` The startup scan does this. It
+never runs the command again.
 Three cases can leave such an entry for any action:
 
 - The agent process stopped after it wrote the claim, and before it wrote the
