@@ -90,7 +90,7 @@ branch to the fork. Open the PR on the fork. Then request review.
 
    ```sh
    gh pr list --repo gracecraft-ro/<repo> --head <branch> --state open \
-     --json number --jq '.[0].number'
+     --json number --jq '.[0].number // empty'
    ```
 
    If the output is not empty, skip the create step. Use that number as
