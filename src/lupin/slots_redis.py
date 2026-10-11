@@ -94,6 +94,11 @@ FLEET_USER_SETTING = "--redis-username, LUPIN_REDIS_USERNAME, or the lupin join 
 
 CONNECT_TIMEOUT = 2.0
 
+# Keys per SCAN call. Each call is one round trip to Redis.
+# Redis default is 10. Measured with 100,000 keys on a local Redis
+# (issue #122): default 0.35 s, 1000 0.08 s.
+SCAN_COUNT = 1000
+
 # KEYS[1] = slot:<name>, ARGV[1] = holder, ARGV[2] = now_ms, ARGV[3] = ttl_ms,
 # ARGV[4] = max holders. Returns 1 (added or renewed) or 0 (busy).
 _ACQUIRE_SCRIPT = """
@@ -401,7 +406,9 @@ def status(
     try:
         now = _now_ms()
         result: dict[str, dict] = {}
-        max_keys = _call_with_retry(lambda: list(client.scan_iter(match=f"{PREFIX}slot:*:max")))
+        max_keys = _call_with_retry(
+            lambda: list(client.scan_iter(match=f"{PREFIX}slot:*:max", count=SCAN_COUNT))
+        )
         for max_key in max_keys:
             slot = max_key[len(f"{PREFIX}slot:") : -len(":max")]
             members = client.zrange(f"{PREFIX}slot:{slot}", 0, -1, withscores=True)

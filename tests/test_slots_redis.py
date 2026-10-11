@@ -15,7 +15,7 @@ import time
 import pytest
 import redis as redis_lib
 
-from lupin import cli, slots, slots_redis
+from lupin import claims, cli, machines, reconcile, slots, slots_redis, usage_cache
 
 
 def test_acquire_respects_max_third_call_is_full(redis_port, flush_redis):
@@ -444,3 +444,32 @@ def test_hold_prints_one_line_when_renew_reports_the_lease_gone(redis_port, flus
     assert f"lease {lease} not renewed" in err
     # Renewal keeps running after a False return. Redis may recover.
     assert len(calls) > 1
+
+
+class _ScanRecorder:
+    """Fake Redis client with an empty keyspace. Records each `count`."""
+
+    def __init__(self):
+        self.counts = []
+
+    def scan_iter(self, match=None, count=None):
+        self.counts.append(count)
+        return iter([])
+
+
+def test_every_scan_iter_passes_a_count(monkeypatch):
+    """Issue #122. Each SCAN call sets COUNT. Redis default is 10 keys per call."""
+    fake = _ScanRecorder()
+    monkeypatch.setattr(slots_redis, "_client", lambda *args, **kwargs: fake)
+    monkeypatch.setattr(claims, "_client", lambda *args, **kwargs: fake)
+
+    usage_cache.read_snapshot()
+    machines.machines({})
+    slots_redis.status()
+    claims.claims_for(["owner/repo"])
+    reconcile._scan_claims(fake)
+    reconcile._scan_focuses(fake)
+    reconcile._scan_started_quests(fake)
+
+    assert len(fake.counts) == 7
+    assert all(isinstance(c, int) and c > 0 for c in fake.counts), fake.counts
