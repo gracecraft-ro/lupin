@@ -137,18 +137,21 @@ def read_events(
     `limit` defaults to 10 and must be positive. Pass `None` to read the full
     stream. An empty stream returns an empty list. Raises
     `CoordinatorUnreachable` when Redis cannot be reached.
-    An entry is skipped when `_decode` raises KeyError, ValueError, or
-    RecursionError. The entry ID and the exception type go to stderr for each
-    skipped entry. A skipped entry still counts toward `limit`.
-    A field that is not valid UTF-8 makes redis-py raise UnicodeDecodeError
-    before `_decode` runs. read_events does not catch it, so the read fails.
+    An entry is skipped when one of its fields is not valid UTF-8, or when
+    `_decode` raises KeyError, ValueError, or RecursionError. The entry ID and
+    the exception type go to stderr for each skipped entry. A skipped entry
+    still counts toward `limit`.
     """
     key = _stream_key(repo)
     if limit is not None and (
         not isinstance(limit, int) or isinstance(limit, bool) or limit < 1
     ):
         raise ValueError("limit must be a positive integer")
-    client = _client(redis_host, redis_port, redis_username, redis_password)
+    # Raw bytes: decode per entry, so one bad entry cannot fail the whole read.
+    client = _client(
+        redis_host, redis_port, redis_username, redis_password,
+        decode_responses=False,
+    )
     try:
         if limit is None:
             entries = _call_with_retry(lambda: client.xrange(key))
@@ -159,8 +162,13 @@ def read_events(
     if limit is not None:
         entries = reversed(entries)
     records = []
-    for stream_id, fields in entries:
+    for raw_id, raw_fields in entries:
+        stream_id = raw_id.decode("utf-8")
         try:
+            fields = {
+                name.decode("utf-8"): value.decode("utf-8")
+                for name, value in raw_fields.items()
+            }
             records.append(_decode(stream_id, fields))
         except (KeyError, ValueError, RecursionError) as exc:
             print(

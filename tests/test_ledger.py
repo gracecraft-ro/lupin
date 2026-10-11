@@ -177,8 +177,8 @@ def test_read_counts_bad_entry_toward_limit(connection, capsys):
     assert capsys.readouterr().err.count(bad_id) == 1
 
 
-def test_read_raises_on_non_utf8_field(connection):
-    ledger._client(**connection).xadd(
+def test_read_skips_non_utf8_entry_and_reports_it_once(connection, capsys):
+    bad_id = ledger._client(**connection).xadd(
         ledger._stream_key("acme/repo"),
         {
             "ts": "2026-10-10T00:00:00Z",
@@ -187,9 +187,14 @@ def test_read_raises_on_non_utf8_field(connection):
             "summary": b"\xff\xfe",
         },
     )
+    good = ledger.append_event("acme/repo", {"event": "work", "issue": 2}, **connection)
 
-    with pytest.raises(UnicodeDecodeError):
-        ledger.read_events("acme/repo", **connection)
+    events = ledger.read_events("acme/repo", **connection)
+
+    err = capsys.readouterr().err
+    assert events == [good]
+    assert err.count(bad_id) == 1
+    assert "UnicodeDecodeError:" in err
 
 
 def test_append_and_read_report_unavailable_coordinator(closed_port):
