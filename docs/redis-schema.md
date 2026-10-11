@@ -418,8 +418,9 @@ is the only record), `running`, `ok`, `failed`, `rejected`, `expired`.
 ```
 
 A `running` entry still present when `lupin agent` restarts means the
-previous process crashed mid-command — the startup scan marks it `failed`
-rather than silently re-running it. `output` is the last 8 KiB of combined
+previous process stopped before the command finished. The command may not
+have started. The startup scan marks it `failed` with a `reason` that says
+so. It does not re-run the command. `output` is the last 8 KiB of combined
 stdout+stderr; `rejected`/`failed`-without-a-run carry a `reason` string
 instead.
 

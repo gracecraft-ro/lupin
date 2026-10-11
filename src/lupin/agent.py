@@ -407,9 +407,10 @@ def startup_scan(
     redis_password: str | None = None,
 ) -> list[str]:
     """Run once before polling starts. A command this host claimed (its own
-    `cmdres` still says `running`) but never finished means the previous
-    process crashed mid-run -- mark it `failed` rather than silently
-    re-running it on restart. Returns the ids it marked failed.
+    `cmdres` still says `running`) but never finished. The previous process
+    stopped first, so the command may not have started. Mark it `failed`
+    rather than silently re-running it on restart. Returns the ids it
+    marked failed.
     """
     client = _client(redis_host, redis_port, redis_username, redis_password)
     try:
@@ -423,7 +424,10 @@ def startup_scan(
             if result.get("state") != "running" or result.get("host") != machine:
                 continue
             result["state"] = "failed"
-            result["reason"] = "orphaned: still running when the agent restarted"
+            result["reason"] = (
+                "orphaned: the agent restarted before the command finished. "
+                "The command may not have started."
+            )
             result["finished_at"] = time.time()
             _write_result(client, cmd_id, result, overwrite=True)
             _call_with_retry(lambda c=cmd_id: client.zrem(commands.queue_key(machine), c))
