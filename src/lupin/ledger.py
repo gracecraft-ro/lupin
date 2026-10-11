@@ -137,17 +137,19 @@ def read_events(
     `limit` defaults to 10 and must be positive. Pass `None` to read the full
     stream. An empty stream returns an empty list. Raises
     `CoordinatorUnreachable` when Redis cannot be reached.
-    An entry is skipped when one of its fields is not valid UTF-8, or when
-    `_decode` raises KeyError, ValueError, or RecursionError. The entry ID and
-    the exception type go to stderr for each skipped entry. A skipped entry
-    still counts toward `limit`.
+    An entry is skipped when one of its fields is not valid UTF-8. An entry is
+    also skipped when `_decode` raises KeyError, ValueError, or RecursionError.
+    The entry ID and the exception type go to stderr for each skipped entry. A
+    skipped entry still counts toward `limit`.
     """
     key = _stream_key(repo)
     if limit is not None and (
         not isinstance(limit, int) or isinstance(limit, bool) or limit < 1
     ):
         raise ValueError("limit must be a positive integer")
-    # Raw bytes: decode per entry, so one bad entry cannot fail the whole read.
+    # Raw bytes. An entry whose fields fail to decode is skipped.
+    # Stream IDs decode outside that check, so a bad ID raises.
+    # Redis stream IDs are ASCII, so that raise should not occur.
     client = _client(
         redis_host, redis_port, redis_username, redis_password,
         decode_responses=False,

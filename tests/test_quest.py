@@ -249,7 +249,12 @@ def test_status_marks_done_and_ready_tasks():
 # --------------------------------------------------------------------------
 
 
-def test_cli_quest_lists_quests_with_real_redis_focus(redis_port, flush_redis, capsys, monkeypatch, clean_lupin_env):
+def test_cli_quest_lists_quests_with_real_redis_focus(redis_port, flush_redis, capsys, monkeypatch):
+    # This sandbox sets LUPIN_REDIS_USERNAME (and _HOST/_PORT) to point at a
+    # real Redis with ACL auth -- clear them so the CLI's env-var defaults
+    # don't try to AUTH against this test's plain local redis-server.
+    for name in ("LUPIN_REDIS_HOST", "LUPIN_REDIS_PORT", "LUPIN_REDIS_USERNAME", "LUPIN_REDIS_PASSWORD"):
+        monkeypatch.delenv(name, raising=False)
     client = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
     client.set("lupin:v1:focus:session-rewrite", json.dumps({"machine": "mac-studio"}))
     fake_quests = [
@@ -329,6 +334,22 @@ def test_cli_quest_status_unknown_id_errors(monkeypatch, capsys):
 # --------------------------------------------------------------------------
 # quest start / stop (issue #13)
 # --------------------------------------------------------------------------
+
+
+_AMBIENT_ENV_VARS = (
+    "LUPIN_REDIS_HOST", "LUPIN_REDIS_PORT", "LUPIN_REDIS_USERNAME",
+    "LUPIN_REDIS_PASSWORD", "LUPIN_FLEET_CONFIG", "LUPIN_BACKEND",
+)
+
+
+@pytest.fixture
+def clean_fleet_env(monkeypatch):
+    """This sandbox's shell sets `$LUPIN_REDIS_*` for the real shared fleet
+    Redis -- clear them so the CLI's env-var defaults don't leak into these
+    tests' throwaway `redis-server` fixture.
+    """
+    for name in _AMBIENT_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
 
 
 def _issue_json(number, state="OPEN"):
@@ -728,7 +749,7 @@ def test_cli_quest_start_needs_an_issue(capsys):
 
 
 def test_cli_quest_start_prints_error_and_exit_2_when_claimed(
-    redis_port, flush_redis, clean_lupin_env, capsys, monkeypatch
+    redis_port, flush_redis, clean_fleet_env, capsys, monkeypatch
 ):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo-a"])
     monkeypatch.setattr(
@@ -748,7 +769,7 @@ def test_cli_quest_start_prints_error_and_exit_2_when_claimed(
 
 
 def test_cli_quest_start_prints_error_and_exit_1_when_closed(
-    redis_port, flush_redis, clean_lupin_env, capsys, monkeypatch
+    redis_port, flush_redis, clean_fleet_env, capsys, monkeypatch
 ):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo-a"])
     monkeypatch.setattr(
@@ -767,7 +788,7 @@ def test_cli_quest_start_prints_error_and_exit_1_when_closed(
 
 
 def test_cli_quest_start_prints_error_for_missing_issue(
-    redis_port, flush_redis, clean_lupin_env, capsys, monkeypatch
+    redis_port, flush_redis, clean_fleet_env, capsys, monkeypatch
 ):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo-a"])
     monkeypatch.setattr(cli.quest_mod, "_locate_issue", _fake_locate({}))
@@ -783,7 +804,7 @@ def test_cli_quest_start_prints_error_for_missing_issue(
 
 
 def test_cli_quest_start_prints_error_for_blocker_outside_quest(
-    redis_port, flush_redis, clean_lupin_env, capsys, monkeypatch
+    redis_port, flush_redis, clean_fleet_env, capsys, monkeypatch
 ):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo-a"])
     monkeypatch.setattr(
@@ -810,7 +831,7 @@ def test_cli_quest_start_prints_error_for_blocker_outside_quest(
 
 
 def test_cli_quest_start_prints_error_for_draining_machine(
-    redis_port, flush_redis, clean_lupin_env, capsys, monkeypatch
+    redis_port, flush_redis, clean_fleet_env, capsys, monkeypatch
 ):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo-a"])
     monkeypatch.setattr(
@@ -831,7 +852,7 @@ def test_cli_quest_start_prints_error_for_draining_machine(
 
 
 def test_cli_quest_start_success_prints_rendered_line(
-    redis_port, flush_redis, clean_lupin_env, capsys, monkeypatch
+    redis_port, flush_redis, clean_fleet_env, capsys, monkeypatch
 ):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo-a"])
     monkeypatch.setattr(
@@ -851,7 +872,7 @@ def test_cli_quest_start_success_prints_rendered_line(
 
 
 def test_cli_quest_start_prints_waits_on_line_for_in_quest_blocker(
-    redis_port, flush_redis, clean_lupin_env, capsys, monkeypatch
+    redis_port, flush_redis, clean_fleet_env, capsys, monkeypatch
 ):
     # Same shape as the copy doc's `quest start` example: #25 is blocked by
     # #23, both in the quest, so the success output gets a second line.
@@ -886,7 +907,7 @@ def test_cli_quest_start_prints_waits_on_line_for_in_quest_blocker(
     )
 
 
-def test_cli_quest_start_coordinator_unreachable_exits_3(closed_port, clean_lupin_env, capsys, monkeypatch):
+def test_cli_quest_start_coordinator_unreachable_exits_3(closed_port, clean_fleet_env, capsys, monkeypatch):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo-a"])
     monkeypatch.setattr(
         cli.quest_mod, "_locate_issue",
@@ -903,7 +924,7 @@ def test_cli_quest_start_coordinator_unreachable_exits_3(closed_port, clean_lupi
     assert "cannot reach the redis coordinator" in captured.err
 
 
-def test_cli_quest_stop_success(redis_port, flush_redis, clean_lupin_env, capsys, monkeypatch):
+def test_cli_quest_stop_success(redis_port, flush_redis, clean_fleet_env, capsys, monkeypatch):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo-a"])
     monkeypatch.setattr(
         cli.quest_mod, "_locate_issue",
@@ -921,7 +942,7 @@ def test_cli_quest_stop_success(redis_port, flush_redis, clean_lupin_env, capsys
     assert captured.out.strip() == "quest q1 stopped · #23 released to the queue, branch kept"
 
 
-def test_cli_quest_stop_unknown_id_errors(redis_port, flush_redis, clean_lupin_env, capsys):
+def test_cli_quest_stop_unknown_id_errors(redis_port, flush_redis, clean_fleet_env, capsys):
     code = cli.main([
         "quest", "stop", "nope",
         "--redis-host", "127.0.0.1", "--redis-port", str(redis_port),
@@ -1214,9 +1235,7 @@ def test_release_raises_coordinator_unreachable(quests_fixture, closed_port):
 # --------------------------------------------------------------------------
 
 
-def test_cli_quest_focus_prints_exact_copy_text(
-    quests_fixture, monkeypatch, redis_port, flush_redis, capsys, clean_lupin_env
-):
+def test_cli_quest_focus_prints_exact_copy_text(quests_fixture, monkeypatch, redis_port, flush_redis, capsys):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo"])
     monkeypatch.setattr(
         cli.machines, "machines", lambda connection: [_machine("mac-studio", used=0, max_=4)]
@@ -1233,9 +1252,7 @@ def test_cli_quest_focus_prints_exact_copy_text(
     )
 
 
-def test_cli_quest_focus_draining_machine_error(
-    quests_fixture, monkeypatch, redis_port, flush_redis, capsys, clean_lupin_env
-):
+def test_cli_quest_focus_draining_machine_error(quests_fixture, monkeypatch, redis_port, flush_redis, capsys):
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo"])
     monkeypatch.setattr(
         cli.machines, "machines", lambda connection: [_machine("mac-studio", state="draining")]
@@ -1255,7 +1272,7 @@ def test_cli_quest_focus_draining_machine_error(
     )
 
 
-def test_cli_quest_focus_no_ready_tasks_error(monkeypatch, redis_port, flush_redis, capsys, clean_lupin_env):
+def test_cli_quest_focus_no_ready_tasks_error(monkeypatch, redis_port, flush_redis, capsys):
     blocked = _quest("billing-v2", [{"number": 480, "title": "ship billing", "done": False}])
     blocked_dag = {"repos": {"repo": [{"number": 480, "blockedBy": [{"repo": "repo", "number": 470}], "blocking": []}]}}
     monkeypatch.setattr(cli.serve, "enabled_repos", lambda: ["repo"])
@@ -1273,7 +1290,7 @@ def test_cli_quest_focus_no_ready_tasks_error(monkeypatch, redis_port, flush_red
     )
 
 
-def test_cli_quest_release_prints_exact_copy_text(quests_fixture, redis_port, flush_redis, capsys, clean_lupin_env):
+def test_cli_quest_release_prints_exact_copy_text(quests_fixture, redis_port, flush_redis, capsys):
     quest.write_focus("session-rewrite", "mac-studio", pinned=False, **_kw(redis_port))
 
     code = cli.main(
@@ -1285,7 +1302,7 @@ def test_cli_quest_release_prints_exact_copy_text(quests_fixture, redis_port, fl
     assert captured.out.strip() == "released session-rewrite · mac-studio returns to normal routing"
 
 
-def test_cli_quest_release_no_focus_error(quests_fixture, redis_port, flush_redis, capsys, clean_lupin_env):
+def test_cli_quest_release_no_focus_error(quests_fixture, redis_port, flush_redis, capsys):
     code = cli.main(
         ["quest", "release", "session-rewrite", "--redis-host", "127.0.0.1", "--redis-port", str(redis_port)]
     )
