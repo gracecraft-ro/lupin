@@ -142,14 +142,10 @@
         {
           "model": "opus",
           "effort": "high"
-        },
-        {
-          "model": "fable",
-          "effort": "high"
         }
       ]
     },
-    "note": "No tier0: these public creative-writing leaderboards do not score a model currently routed by this repo, so tier0 quality is unknown."
+    "note": "No tier0: these public creative-writing leaderboards do not score a model currently routed by this repo, so tier0 quality is unknown. Fable is not listed. A route must not pick it without the user's approval (issue #114)."
   },
   "cad-spatial": {
     "source": "P3D-Bench (arxiv 2606.11152)",
