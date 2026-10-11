@@ -51,8 +51,8 @@ herdr worktree create --branch <branch> --base fork/release/next --cwd /code/lup
 ```
 
 A linked worktree shares its remotes with the checkout it came from. If that
-checkout has no `fork` remote, stop. Then report the missing remote.
-Do not add a remote.
+checkout has no `fork` remote, stop. Then report the missing remote to the
+orchestrator. Do not add a remote.
 
 `lupin run` still starts each loop from `origin/HEAD`, which is upstream `main`.
 `origin/HEAD` is the default branch on `origin`. `lupin run` does not start from
@@ -68,9 +68,10 @@ repo:
 
 1. The base branch is the integration branch, `release/next`, on the fork
    (`gracecraft-ro/lupin`). A feature PR never targets upstream `main`.
-2. A worker uses `/ship` for the work and the report. It follows rule 1 for the
-   push and the PR. If the push fails, the worker stops. Report the branch name
-   and commit range. Do not review or merge the branch.
+2. A worker uses the work and report steps of `/ship`. It does not use its
+   commit and PR section. It follows rule 1 for the push and the PR. If the push
+   fails, the worker stops. Report the branch name and commit range. Do not
+   review or merge the branch.
 3. The orchestrator (the agent that dispatches and merges work) dispatches
    `/code-review` for every PR, including docs-only changes. The reviewer is
    not the worker. The reviewer's model tier is not lower than the worker's.

@@ -289,6 +289,10 @@ gh pr create --repo gracecraft-ro/<repo> --base release/next --title "<title>" -
 ```
 <!-- markdownlint-enable MD013 -->
 
+The PR body has `Closes #N`. The merge into `release/next` does not close the
+issue. The orchestrator (the agent that dispatches and merges work) closes it by
+hand in the same pass.
+
 Do not open a feature PR against upstream `main`. If the push to the fork
 fails, the worker stops. The worker reports the local branch name and commit
 range. Do not review or merge the branch.
@@ -310,12 +314,10 @@ Never dispatch Fable without the user's approval. Use Opus sparingly because
 it costs more.
 
 If the review finds a problem, dispatch a `fix` worker with the exact finding.
-Tell it to push with `git push fork <branch>` and
-update the same PR. Review the latest PR commit.
-Repeat until the reviewer approves the current head SHA. The head SHA is the
-newest commit ID on the branch.
-The orchestrator (the agent that dispatches and merges work) posts the verdict
-and findings on the PR.
+Tell it to push with `git push fork <branch>` and update the same PR. Review
+the latest PR commit. Repeat until the reviewer approves the current head SHA.
+The head SHA is the newest commit ID on the branch. The orchestrator (the agent
+that dispatches and merges work) posts the verdict and findings on the PR.
 
 Before a branch is merged, it must contain the current `release/next`. Fetch
 the fork first. Then run this check. `BRANCH` is the PR branch name:
@@ -355,8 +357,7 @@ repo's `AGENTS.md`. If the repo has no gate command, report that. Do not merge.
 A branch with no fork PR is not merged.
 
 When all four conditions above are true, merge the PR with this command. No
-owner sign-off is needed. An approval at the current head SHA is still
-required.
+owner sign-off is needed. An approval at the current head SHA is still required.
 Record the approved SHA before you merge. The command creates a merge commit:
 
 ```sh
