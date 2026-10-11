@@ -2,6 +2,7 @@ import importlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -1372,6 +1373,62 @@ def test_roadmap_shows_empty_ledger_on_unavailable_coordinator(
         "Repository ledger is unavailable" in warning
         for warning in model["warnings"]
     )
+
+
+_REAL_RUN = subprocess.run
+
+
+def _run_except_gh(argv, *args, **kwargs):
+    # git may run for real. gh must never run in a missing checkout.
+    if argv[0] == "gh":
+        raise AssertionError("gh ran in a missing checkout")
+    return _REAL_RUN(argv, *args, **kwargs)
+
+
+class CheckoutPathTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+
+    def test_missing_checkout_is_named_and_gh_is_not_run(self):
+        missing = str(self.root / "gone")
+        with mock.patch.object(subprocess, "run", side_effect=_run_except_gh):
+            data, error = roadmap._run_json(["gh", "repo", "view"], missing)
+
+        self.assertIsNone(data)
+        self.assertEqual(error, f"checkout directory not found: {missing}")
+
+    def test_missing_program_is_reported_as_not_installed(self):
+        with mock.patch.object(subprocess, "run", side_effect=FileNotFoundError):
+            data, error = roadmap._run_json(["gh", "repo", "view"], str(self.root))
+
+        self.assertIsNone(data)
+        self.assertEqual(error, "gh is not installed")
+
+    def test_load_github_warning_names_missing_checkout(self):
+        missing = str(self.root / "gone")
+        with mock.patch.object(subprocess, "run", side_effect=_run_except_gh):
+            _issues, _comments, warnings = roadmap.load_github(missing)
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn(missing, warnings[0])
+        self.assertNotIn("is not installed", warnings[0])
+
+    def test_code_dir_follows_loop_code_dir_env(self):
+        code_dir = str(self.root / "code")
+        src = str(Path(roadmap.__file__).resolve().parents[1])
+        env = {**os.environ, "LUPIN_LOOP_CODE_DIR": code_dir, "PYTHONPATH": src}
+        result = subprocess.run(
+            [sys.executable, "-c", "from lupin import roadmap; print(roadmap.CODE_DIR)"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), code_dir)
 
 
 if __name__ == "__main__":

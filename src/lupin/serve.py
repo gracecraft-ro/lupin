@@ -30,6 +30,8 @@ from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
+import redis
+
 from . import benchmark_catalog, benchmark_fetch, claims, commands, loop_runtime, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
 from . import usage_cache
 from .slots import CoordinatorUnreachable
@@ -1576,7 +1578,7 @@ def model_tiers() -> list[dict]:
     return rows
 
 
-_ALIAS_PREFIX = re.compile(r"^(bmo|local):")
+_ALIAS_PREFIX = re.compile(r"^(?:bmo|local):|^(?:opencode-go|openai)/")
 
 
 def load_model_snapshot(connection: dict | None = None) -> dict | None:
@@ -1617,7 +1619,7 @@ def snapshot_models(snapshot: dict | None) -> list[dict]:
 
 def match_live_model(alias: str, models: list[dict]) -> dict | None:
     """Match a model-tiers.json alias (short hand names like "sonnet" or
-    "bmo:qwen3.8-flash-next") to a snapshot model (full API IDs like
+    "opencode-go/glm-5.3") to a snapshot model (full API IDs like
     "claude-sonnet-4-5-..."). It is not a 1:1 lookup, so this is a
     heuristic, not a resolver:
 
@@ -1625,6 +1627,10 @@ def match_live_model(alias: str, models: list[dict]) -> dict | None:
       two are never found -- `model_fetch` only covers the claude,
       opencode-go, and codex subscriptions, not bmo's or a local model
       server's own catalog. Those aliases always report "no live data".
+    - An "opencode-go/" or "openai/" prefix is stripped too, because the
+      snapshot's own `subscription` field already says which service a
+      model id belongs to -- the tier file repeats it in the alias, and
+      the badge would otherwise never match.
     - What remains is looked up as a case-insensitive substring of a
       snapshot model's id or display name, first match wins. Good enough
       to flag "known reachable today" without pretending to be a precise
@@ -3204,8 +3210,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self._repo_exists(repo) or max_value is None or max_value < 1:
             self.reply(render_error("bad slot-max request"), 400)
             return
+        slot = _repo_slot_name(repo)
         try:
-            slots_redis.set_max(_repo_slot_name(repo), max_value, **self.fleet_connection)
+            slots_redis.set_max(slot, max_value, **self.fleet_connection)
+        except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
+            self.reply(render_error(slots_redis.refusal_message(exc, f"slot {slot!r}", fleet=True)), 502)
+            return
         except CoordinatorUnreachable:
             self.reply(render_error("cannot reach the machine registry"), 502)
             return
@@ -3248,10 +3258,10 @@ class Handler(BaseHTTPRequestHandler):
         `refresh_snapshot`'s single-fetcher lock (`benchmark_fetch.py`'s
         docstring), so if another machine is mid-fetch this click just
         reports whatever is cached instead of starting a second, paying
-        dispatch. `refresh_snapshot` already turns every failure (timed
-        out, bad output, Redis unreachable) into a `live: False` result
-        rather than raising, so the broad except below is only a
-        last-resort guard, same reasoning as `do_model_tiers_refresh`'s.
+        dispatch. `refresh_snapshot` turns most failures (timed out, bad
+        output, Redis unreachable) into a `live: False` result. A refused
+        login or an ACL denial raises instead, and the first except below
+        names it. The broad except is a last-resort guard.
         """
         try:
             data = benchmark_fetch.refresh_snapshot(force=True, **self.fleet_connection)
@@ -3259,6 +3269,8 @@ class Handler(BaseHTTPRequestHandler):
                 sent = f"pulled today's benchmark scores ({len(data.get('scores', []))} models)"
             else:
                 sent = f"benchmark pull did not complete: {data.get('stale_reason', 'unknown reason')}"
+        except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
+            sent = slots_redis.refusal_message(exc, "the benchmark refresh", fleet=True)
         except Exception as exc:  # best-effort by design, see docstring above
             sent = f"pull failed: {exc}"
         self.redirect(f"/model-tiers?sent={quote(sent, safe='')}")
@@ -3663,44 +3675,47 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("request body must be utf-8"), 400)
             return
 
-        if url.path == "/quest/start":
-            self.do_quest_start(form)
-        elif url.path == "/quest/stop":
-            self.do_quest_stop(form)
-        elif url.path == "/machines/slot-max":
-            self.do_set_slot_max(form)
-        elif url.path == "/loops/close":
-            self.do_loops_close(form)
-        elif url.path == "/loops/send":
-            self.do_loops_send(form)
-        elif url.path == "/loops/state":
-            self.do_loops_state(form)
-        elif url.path == "/loops/start":
-            self.do_loops_start(form)
-        elif url.path == "/schedule/timer":
-            self.do_schedule_timer(form)
-        elif url.path == "/schedule/run":
-            self.do_schedule_run(form)
-        elif url.path == "/repos/enable":
-            self.do_repos_enable(form)
-        elif url.path == "/repos/add":
-            self.do_repos_add(form)
-        elif url.path == "/repos/generate-docs":
-            self.do_repos_generate_docs(form)
-        elif url.path == "/repos/remove":
-            self.do_repos_remove(form)
-        elif url.path == "/repos/doc/save":
-            self.do_repos_doc_save(form)
-        elif url.path == "/repos/slot-max":
-            self.do_repos_slot_max(form)
-        elif url.path == "/repos/schedule":
-            self.do_repos_schedule(form)
-        elif url.path == "/model-tiers/refresh":
-            self.do_model_tiers_refresh(form)
-        elif url.path == "/model-tiers/refresh-benchmarks":
-            self.do_model_tiers_refresh_benchmarks(form)
-        else:
-            self.reply(render_error("no such page"), 404)
+        try:
+            if url.path == "/quest/start":
+                self.do_quest_start(form)
+            elif url.path == "/quest/stop":
+                self.do_quest_stop(form)
+            elif url.path == "/machines/slot-max":
+                self.do_set_slot_max(form)
+            elif url.path == "/loops/close":
+                self.do_loops_close(form)
+            elif url.path == "/loops/send":
+                self.do_loops_send(form)
+            elif url.path == "/loops/state":
+                self.do_loops_state(form)
+            elif url.path == "/loops/start":
+                self.do_loops_start(form)
+            elif url.path == "/schedule/timer":
+                self.do_schedule_timer(form)
+            elif url.path == "/schedule/run":
+                self.do_schedule_run(form)
+            elif url.path == "/repos/enable":
+                self.do_repos_enable(form)
+            elif url.path == "/repos/add":
+                self.do_repos_add(form)
+            elif url.path == "/repos/generate-docs":
+                self.do_repos_generate_docs(form)
+            elif url.path == "/repos/remove":
+                self.do_repos_remove(form)
+            elif url.path == "/repos/doc/save":
+                self.do_repos_doc_save(form)
+            elif url.path == "/repos/slot-max":
+                self.do_repos_slot_max(form)
+            elif url.path == "/repos/schedule":
+                self.do_repos_schedule(form)
+            elif url.path == "/model-tiers/refresh":
+                self.do_model_tiers_refresh(form)
+            elif url.path == "/model-tiers/refresh-benchmarks":
+                self.do_model_tiers_refresh_benchmarks(form)
+            else:
+                self.reply(render_error("no such page"), 404)
+        except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
+            self.reply(render_error(slots_redis.refusal_message(exc, f"POST {url.path}", fleet=True)), 502)
 
     def do_quest_start(self, form: dict) -> None:
         repo = form.get("repo", [""])[0].strip()
@@ -3756,6 +3771,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             slots_redis.set_max(slot, max_value, **self.fleet_connection)
+        except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
+            self.reply(render_error(slots_redis.refusal_message(exc, f"slot {slot!r}", fleet=True)), 502)
+            return
         except machines.CoordinatorUnreachable:
             self.reply(render_error("cannot reach the machine registry"), 502)
             return

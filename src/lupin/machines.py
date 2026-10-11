@@ -260,9 +260,12 @@ def _run(op):
     `CoordinatorUnreachable` -- the schema's fallback table has no fallback
     for the fleet keys (unlike the `bmo` slot), so there is nothing to fall
     back to, just one exception `cli.py` already knows how to report.
+    A login that Redis refuses raises `CoordinatorAuthFailed`, a subclass of `CoordinatorUnreachable`.
     """
     try:
         return slots_redis._call_with_retry(op)
+    except redis.exceptions.AuthenticationError as exc:
+        raise slots_redis._auth_failed(exc) from exc
     except _REDIS_ERRORS as exc:
         raise CoordinatorUnreachable("machine registry") from exc
 

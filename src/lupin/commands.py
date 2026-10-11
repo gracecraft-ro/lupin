@@ -52,7 +52,7 @@ from pathlib import Path
 import redis
 
 from .slots import CoordinatorUnreachable
-from .slots_redis import _call_with_retry, _client
+from .slots_redis import _auth_failed, _call_with_retry, _client
 
 PREFIX = "lupin:v1:"
 
@@ -237,6 +237,8 @@ def enqueue(
                 cmd_id,
             )
         )
+    except redis.exceptions.AuthenticationError as exc:
+        raise _auth_failed(exc) from exc
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(target) from exc
     if not result:

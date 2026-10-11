@@ -17,8 +17,9 @@ from urllib.parse import quote, urlsplit
 from . import classify
 from . import gh_cache
 from . import ledger as ledger_store
+from . import loop_runtime
 
-CODE_DIR = "/code"
+CODE_DIR = str(loop_runtime.CODE_DIR)
 GITHUB_CACHE_SECONDS = 60 * 60
 GRAPHQL = """query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){issues(first:100,after:$cursor,states:OPEN,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number comments(last:20){nodes{body createdAt url author{login}}}} pageInfo{hasNextPage endCursor}}}}"""
 IMAGE = re.compile(r"!\[([^\]]*)\]\((https://[^)\s]+)\)")
@@ -179,6 +180,9 @@ _load_cache()
 
 
 def _run_json(argv: list[str], cwd: str, timeout: int = 60):
+    # Check cwd first. A missing cwd also raises FileNotFoundError.
+    if not os.path.isdir(cwd):
+        return None, f"checkout directory not found: {cwd}"
     try:
         result = subprocess.run(
             argv,

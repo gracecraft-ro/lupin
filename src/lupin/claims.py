@@ -26,6 +26,8 @@ orchestrator starts no new issue"), so every function here raises
 `CoordinatorUnreachable` (imported from `slots.py`, same exception every
 other backend failure uses) when Redis can't be reached -- there is no
 `local` backend to fall back to, unlike the `bmo` slot.
+A refused login raises `CoordinatorAuthFailed`. A denied command raises
+`NoPermissionError` as-is.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ import time
 import redis
 
 from .slots import CoordinatorUnreachable
-from .slots_redis import _call_with_retry, _client
+from .slots_redis import _auth_failed, _call_with_retry, _client
 
 PREFIX = "lupin:v1:"
 DEFAULT_TTL = 600.0  # 10 minutes, per docs/redis-schema.md
@@ -147,6 +149,8 @@ def claim(
         )
         if not result:
             current = _call_with_retry(lambda: client.get(_key(target)))
+    except redis.exceptions.AuthenticationError as exc:
+        raise _auth_failed(exc) from exc
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(target) from exc
     if not result:
@@ -174,6 +178,8 @@ def renew_claim(
         result = _call_with_retry(
             lambda: client.eval(_RENEW_SCRIPT, 1, _key(target), holder, value, int(ttl * 1000))
         )
+    except redis.exceptions.AuthenticationError as exc:
+        raise _auth_failed(exc) from exc
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(target) from exc
     return bool(result)
@@ -196,6 +202,8 @@ def release_claim(
     client = _client(redis_host, redis_port, redis_username, redis_password)
     try:
         result = _call_with_retry(lambda: client.eval(_RELEASE_SCRIPT, 1, _key(target), holder))
+    except redis.exceptions.AuthenticationError as exc:
+        raise _auth_failed(exc) from exc
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(target) from exc
     return bool(result)
@@ -283,5 +291,7 @@ def claims_for(
                 claim["ttl"] = ttl_ms / 1000 if ttl_ms >= 0 else None
             result[target] = claim
         return result
+    except redis.exceptions.AuthenticationError as exc:
+        raise _auth_failed(exc) from exc
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable("claims_for") from exc

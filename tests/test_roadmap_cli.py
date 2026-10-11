@@ -439,6 +439,38 @@ class JsonOutputTests(unittest.TestCase):
         self.assertEqual(payload["cycles"], [])
 
 
+def _empty_model(repos, **_kwargs):
+    return {"repos": {repo: [] for repo in repos}, "cycles": [], "warnings": []}
+
+
+class RepoArgTests(unittest.TestCase):
+    def test_owner_repo_uses_the_short_checkout_name(self):
+        with tempfile.TemporaryDirectory() as code_dir:
+            os.mkdir(os.path.join(code_dir, "bodysmith"))
+            with mock.patch.object(
+                roadmap_cli, "build_roadmap", side_effect=_empty_model
+            ) as build:
+                text, code = roadmap_cli.run(
+                    "acme/bodysmith", 10, "ready", False, False, False,
+                    code_dir=code_dir, claims_lookup=lambda repos: {},
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(build.call_args.args[0], ["bodysmith"])
+
+    def test_owner_repo_without_checkout_exits_with_error(self):
+        with tempfile.TemporaryDirectory() as code_dir:
+            with mock.patch.object(roadmap_cli, "build_roadmap") as build:
+                text, code = roadmap_cli.run(
+                    "acme/bodysmith", 10, "ready", False, False, False,
+                    code_dir=code_dir, claims_lookup=lambda repos: {},
+                )
+
+        self.assertEqual(code, 2)
+        self.assertIn("short name", text)
+        build.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
 

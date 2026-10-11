@@ -12,12 +12,13 @@ which always register *this* process's own hostname), the same approach
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 
 import pytest
 import redis as redis_lib
 
-from lupin import cli, machines, place
+from lupin import cli, machines, place, quota
 
 
 _AMBIENT_ENV_VARS = (
@@ -87,10 +88,16 @@ _CLAUDE_QUOTA = {"claude": {"pct_left": 62.0, "resets_at": 1_800_000_000_000, "s
 def test_provider_for_model_maps_claude_models():
     assert place.provider_for_model("sonnet") == "claude"
     assert place.provider_for_model("opus") == "claude"
+    # fable runs in Claude Code: the 2026-10-08 fetch-models snapshot lists
+    # claude-fable-5-1 under the claude subscription, and the coding index
+    # labels it "Claude Code | Fable 5.1". Mapping it to opencode-go gated
+    # the fleet's most expensive model on the wrong account's quota.
+    assert place.provider_for_model("fable") == "claude"
 
 
-def test_provider_for_model_maps_fable_to_opencode_go():
-    assert place.provider_for_model("fable") == "opencode-go"
+def test_provider_for_model_maps_subscription_prefixed_models():
+    assert place.provider_for_model("opencode-go/glm-5.3") == "opencode-go"
+    assert place.provider_for_model("openai/gpt-6-luna") == "openai"
 
 
 def test_provider_for_model_maps_bmo_and_local_prefixes():
@@ -238,6 +245,35 @@ def test_place_skips_offline_machines(redis_port, flush_redis):
     assert result["skipped"]["offline"] == 1
 
 
+def test_place_counts_an_offline_machine_without_a_reading_as_offline(
+    redis_port, flush_redis, monkeypatch
+):
+    # Offline is checked before a missing reading, as on main. The machine
+    # has no key and is offline: it counts as offline, not as no_key.
+    monkeypatch.setattr(
+        place.route_mod, "route",
+        lambda *a, **kw: {"model": "opencode-go/glm-5.3", "effort": "high"},
+    )
+    _write_machine(
+        redis_port, "ghost-no-key",
+        heartbeat="2000-01-01T00:00:00Z",
+        quota={"opencode-go": {
+            "pct_left": None, "resets_at": None, "source": "test",
+            "note": quota.NO_OPENCODE_GO_KEY,
+        }},
+    )
+    _write_machine(
+        redis_port, "opencode-box",
+        quota={"opencode-go": {"pct_left": 100.0, "resets_at": None, "source": "test"}},
+    )
+
+    result = place.place("fix the retry backoff", _kw(redis_port))
+
+    assert result["pick"] == "opencode-box"
+    assert [c["name"] for c in result["candidates"]] == ["opencode-box"]
+    assert result["skipped"] == {"offline": 1, "other_provider": 0, "no_key": 0, "read_failed": 0}
+
+
 def test_place_breaks_ties_on_heartbeat_freshness(redis_port, flush_redis):
     fresh = machines._now_iso()
     stale = _old_stamp(90)  # older, but still under OFFLINE_AFTER (120s)
@@ -306,7 +342,7 @@ def test_place_reports_a_wait_without_filtering_machines(redis_port, flush_redis
     assert result["downgraded_from"] is None
     assert result["wait_seconds"] == 295.0
     assert result["candidates"] == []
-    assert result["skipped"] == {"offline": 0, "other_provider": 0}
+    assert result["skipped"] == {"offline": 0, "other_provider": 0, "no_key": 0, "read_failed": 0}
 
 
 def test_place_reports_routes_downgrade_and_ranks_the_new_provider(redis_port, flush_redis, monkeypatch):
@@ -342,7 +378,93 @@ def test_place_normal_pick_has_no_wait_or_downgrade_fields(redis_port, flush_red
     assert result["pick"] == "mac-studio"
     assert result["wait_seconds"] is None
     assert result["downgraded_from"] is None
-    assert result["skipped"] == {"offline": 0, "other_provider": 0}
+    assert result["skipped"] == {"offline": 0, "other_provider": 0, "no_key": 0, "read_failed": 0}
+
+
+def test_place_skips_a_machine_that_cannot_read_the_providers_quota(
+    redis_port, flush_redis, monkeypatch
+):
+    """`quota.snapshot()` writes an entry for every provider on every
+    heartbeat, so "has an entry" proves nothing -- every machine has all
+    four. A reading with a real percentage is what proves the machine has
+    that provider's credentials, so an entry with none is skipped: sending
+    an opencode-go model to a machine without the key cannot work.
+    """
+    monkeypatch.setattr(
+        place.route_mod, "route",
+        lambda *a, **kw: {"model": "opencode-go/glm-5.3", "effort": "high"},
+    )
+    _write_machine(
+        redis_port, "no-opencode-key",
+        quota={"opencode-go": {
+            "pct_left": None, "resets_at": None, "source": "test",
+            "note": quota.NO_OPENCODE_GO_KEY,
+        }},
+    )
+    _write_machine(
+        redis_port, "opencode-box",
+        quota={"opencode-go": {"pct_left": 100.0, "resets_at": None, "source": "test"}},
+    )
+
+    result = place.place("fix the retry backoff", _kw(redis_port))
+
+    assert result["model"] == "opencode-go/glm-5.3"
+    assert result["provider"] == "opencode-go"
+    assert result["pick"] == "opencode-box"
+    assert [c["name"] for c in result["candidates"]] == ["opencode-box"]
+    assert result["skipped"] == {"offline": 0, "other_provider": 0, "no_key": 1, "read_failed": 0}
+
+
+def test_place_counts_a_read_failure_apart_from_a_missing_key(
+    redis_port, flush_redis, monkeypatch
+):
+    monkeypatch.setattr(
+        place.route_mod, "route",
+        lambda *a, **kw: {"model": "opencode-go/glm-5.3", "effort": "high"},
+    )
+    _write_machine(
+        redis_port, "flaky",
+        quota={"opencode-go": {
+            "pct_left": None, "resets_at": None, "source": "test",
+            "note": "quota unavailable (URLError)",
+        }},
+    )
+
+    result = place.place("fix the retry backoff", _kw(redis_port))
+
+    assert result["provider"] == "opencode-go"
+    assert result["pick"] is None
+    assert result["skipped"] == {"offline": 0, "other_provider": 0, "no_key": 0, "read_failed": 1}
+
+
+def test_place_size_m_coding_with_readable_quota_picks_glm_on_that_machine(
+    redis_port, flush_redis, monkeypatch
+):
+    # Issue #99 check 1, offline substitute for the live `place` run.
+    # Real route(). Live quota is patched to two accounts with low use.
+    # Expects glm-5.3 high, placed on the machine that reads opencode-go quota.
+    reset_ms = time.time() * 1000 + 2 * 24 * 60 * 60 * 1000
+    monkeypatch.setattr(place.classify_mod, "classify", lambda *a, **kw: ("coding", "size-m"))
+    monkeypatch.setattr(
+        place.route_mod.quota_mod, "quota_usage",
+        lambda: [
+            {"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS,
+             "used_pct": 10, "resets_at": reset_ms},
+            {"provider": "opencode-go", "duration": quota.QuotaDuration.FIVE_HOURS,
+             "used_pct": 10, "resets_at": reset_ms},
+        ],
+    )
+    _write_machine(
+        redis_port, "opencode-box",
+        quota={"opencode-go": {"pct_left": 90.0, "resets_at": None, "source": "test"}},
+    )
+
+    result = place.place("fix the retry backoff", _kw(redis_port))
+
+    assert result["model"] == "opencode-go/glm-5.3"
+    assert result["effort"] == "high"
+    assert result["provider"] == "opencode-go"
+    assert result["pick"] == "opencode-box"
 
 
 def test_place_raises_coordinator_unreachable(closed_port):
@@ -398,6 +520,42 @@ def test_cli_place_explain_lists_candidates_and_skip_footer(
     assert "pick" in captured.out
     assert "1 machine(s) skipped" in captured.out
     assert "different provider" in captured.out
+
+
+def test_cli_place_explain_names_no_key_and_read_failed_apart(
+    redis_port, flush_redis, tmp_path, capsys, clean_fleet_env, monkeypatch
+):
+    monkeypatch.setattr(
+        place.route_mod, "route",
+        lambda *a, **kw: {"model": "sonnet", "effort": "high"},
+    )
+    _write_machine(redis_port, "mac-studio", quota=_CLAUDE_QUOTA)
+    _write_machine(
+        redis_port, "keyless",
+        quota={"claude": {
+            "pct_left": None, "resets_at": None, "source": "test",
+            "note": quota.NO_CLAUDE_CREDENTIALS,
+        }},
+    )
+    _write_machine(
+        redis_port, "flaky",
+        quota={"claude": {
+            "pct_left": None, "resets_at": None, "source": "test",
+            "note": "quota unavailable (URLError)",
+        }},
+    )
+    common = [
+        "--redis-host", "127.0.0.1", "--redis-port", str(redis_port),
+        "--config-path", str(tmp_path / "fleet.json"),
+    ]
+
+    code = cli.main(["place", "retry backoff", "--explain", *common])
+    captured = capsys.readouterr()
+
+    assert code == 0
+    assert "2 machine(s) skipped" in captured.out
+    assert "1 have no credentials for claude" in captured.out
+    assert "1 cannot read claude quota" in captured.out
 
 
 def test_cli_place_json_output(redis_port, flush_redis, tmp_path, capsys, clean_fleet_env):

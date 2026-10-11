@@ -592,6 +592,17 @@ def run(
     claim then raises. A caller that passes its own lookup, with a
     `skipped` list, can skip a corrupt claim.
     """
+    if repo and "/" in repo:
+        # Checkouts use the short name under code_dir, not owner/name.
+        short_name = repo.rsplit("/", 1)[1]
+        path = os.path.join(code_dir, short_name)
+        if not short_name or not os.path.isdir(path):
+            return (
+                f"No checkout at {path}. Use the short name "
+                "(the checkout directory name) with --repo.",
+                2,
+            )
+        repo = short_name
     fleet_warnings: list[str] = []
     if repo:
         repos = [repo]

@@ -13,7 +13,7 @@ import time
 import pytest
 import redis as redis_lib
 
-from lupin import cli, claims, machines, quest, reconcile
+from lupin import cli, claims, machines, quest, reconcile, slots_redis
 
 
 def _kw(redis_port):
@@ -62,6 +62,18 @@ def _write_claim(redis_port, target, session, *, age_seconds):
     client = _client(redis_port)
     value = json.dumps({"host": "mac-studio", "session": session, "since": time.time() - age_seconds})
     client.set(f"{claims.PREFIX}claim:{target}", value, px=600_000)
+
+
+def test_reconcile_run_passes_a_refusal_and_a_denial_through_by_type(auth_redis_port):
+    anonymous = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port)
+    with pytest.raises(slots_redis.CoordinatorAuthFailed):
+        reconcile._run(lambda: anonymous.ping())
+
+    def denied():
+        raise redis_lib.exceptions.NoPermissionError("User x has no permissions to run the 'scan' command.")
+
+    with pytest.raises(redis_lib.exceptions.NoPermissionError):
+        reconcile._run(denied)
 
 
 def test_release_lost_claims_leaves_a_fresh_claim_alone(redis_port, flush_redis):
