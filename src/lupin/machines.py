@@ -373,7 +373,7 @@ def machines(connection: dict) -> list[dict]:
     now = time.time()
 
     def op():
-        keys = list(client.scan_iter(match=f"{PREFIX}machine:*"))
+        keys = list(client.scan_iter(match=f"{PREFIX}machine:*", count=slots_redis.SCAN_COUNT))
         result = []
         for key in keys:
             name = key[len(f"{PREFIX}machine:") :]
