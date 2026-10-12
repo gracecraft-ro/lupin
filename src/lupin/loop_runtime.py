@@ -1129,27 +1129,26 @@ def _launch_agent(
     rc, output = _run(argv, timeout=310.0, env=_herdr_env())
     if rc:
         try:
-            adopted = _adopt_working_agent(session, pane, name, output)
+            kept = _keep_agent_after_timeout(session, pane, name, output)
         except LoopError as exc:
             raise HerdrError(f"{output}; could not keep the agent: {exc}") from exc
-        if not adopted:
+        if not kept:
             raise HerdrError(output or "Herdr could not start the agent")
     return _wait_agent(session, workspace_id)
 
 
-def _adopt_working_agent(session: str, pane: str, name: str, output: str) -> bool:
-    """Give a busy agent its name back when `agent start` times out.
+def _keep_agent_after_timeout(session: str, pane: str, name: str, output: str) -> bool:
+    """Give a started agent its name back when `agent start` times out.
 
-    Herdr waits 5 minutes at most for the agent to be ready. An agent that
-    starts on its prompt can still be working then. Herdr drops its name, and
-    `_agent_for_workspace` needs it. Any other error or state is a failed start.
+    Herdr waits 5 minutes at most for the agent to be ready, then drops its
+    name, and `_agent_for_workspace` needs it. An agent in the pane is alive,
+    so watch it. Any other error, or no agent in the pane, is a failed start.
     """
     try:
         code = json.loads(output)["error"]["code"]
     except (ValueError, KeyError, TypeError):
         return False
-    agent = next((row for row in _agents(session) if row.get("pane_id") == pane), None)
-    if code != "timeout" or agent is None or agent.get("agent_status") != "working":
+    if code != "timeout" or not any(row.get("pane_id") == pane for row in _agents(session)):
         return False
     _herdr(session, "agent", "rename", pane, name)
     return True

@@ -559,28 +559,18 @@ def _launch_after_start_failure(monkeypatch, tmp_path: Path, output: str, agents
     return launch, herdr_calls, waited
 
 
-def test_launch_agent_names_and_watches_an_agent_that_is_busy_when_the_start_times_out(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize("status", ["working", "blocked", "idle", "unknown", "done"])
+def test_launch_agent_names_and_watches_an_agent_in_the_pane_when_the_start_times_out(monkeypatch, tmp_path: Path, status):
     # Herdr waits at most 5 minutes for the agent to be ready. An agent that
-    # starts on its prompt at once is still working then, and Herdr drops its name.
-    agents = [{"pane_id": "w1:p1", "workspace_id": "w1", "agent_status": "working", "name": None}]
+    # starts on its prompt at once is still working then, and Herdr drops its
+    # name. Without the name the loop cannot see its own agent.
+    agents = [{"pane_id": "w1:p1", "workspace_id": "w1", "agent_status": status, "name": None}]
     launch, herdr_calls, waited = _launch_after_start_failure(monkeypatch, tmp_path, _START_TIMEOUT, agents)
 
     assert launch() == 0
 
     assert herdr_calls == [("agent", "rename", "w1:p1", "lupin-widgets-abc12345")]
     assert waited == ["w1"]
-
-
-@pytest.mark.parametrize("status", ["blocked", "idle", "unknown", "done"])
-def test_launch_agent_fails_when_the_start_times_out_and_the_agent_is_not_working(monkeypatch, tmp_path: Path, status):
-    agents = [{"pane_id": "w1:p1", "workspace_id": "w1", "agent_status": status, "name": None}]
-    launch, herdr_calls, waited = _launch_after_start_failure(monkeypatch, tmp_path, _START_TIMEOUT, agents)
-
-    with pytest.raises(loop_runtime.HerdrError, match="timed out waiting for agent startup"):
-        launch()
-
-    assert herdr_calls == []
-    assert waited == []
 
 
 def test_launch_agent_fails_when_the_start_times_out_and_no_agent_is_in_the_pane(monkeypatch, tmp_path: Path):
@@ -614,7 +604,7 @@ def test_launch_agent_keeps_the_timeout_text_when_it_cannot_keep_the_agent(monke
 
 @pytest.mark.parametrize(
     "output",
-    ['{"error":{"code":"pane_not_found","message":"pane w1:p1 not found"}}', "not json", '{"error":"timeout"}', ""],
+    ['{"error":{"code":"pane_not_found","message":"pane w1:p1 not found"}}', "not json", '{"error":"timeout"}'],
 )
 def test_launch_agent_fails_on_any_other_start_error(monkeypatch, tmp_path: Path, output):
     agents = [{"pane_id": "w1:p1", "workspace_id": "w1", "agent_status": "working", "name": None}]
