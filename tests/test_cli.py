@@ -810,3 +810,11 @@ def test_pause_all_severity_beats_first_non_zero_wins():
         code_b = cli.main(["pause", "--all"])
 
     assert code_a == code_b == 1
+
+
+def test_route_unknown_category_is_a_usage_error_not_a_traceback(capsys):
+    assert cli.main(["route", "code", "size-m"]) == 2
+    err = capsys.readouterr().err
+    assert "Traceback" not in err
+    assert "unknown category 'code'" in err
+    assert "coding" in err

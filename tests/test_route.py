@@ -104,6 +104,10 @@ _PROSE_OTHER_ACCOUNT = {
 
 
 class RouteTests(unittest.TestCase):
+    def test_unknown_category_raises_naming_the_valid_ones(self):
+        with self.assertRaisesRegex(ValueError, "unknown category 'code'.*coding"):
+            route.route("code", "size-m", tiers=_TIERS, quota_rows=[])
+
     def test_small_coding_issue_gets_tier0_bmo(self):
         result = route.route("coding", "size-xs", tiers=_TIERS, quota_rows=[])
 

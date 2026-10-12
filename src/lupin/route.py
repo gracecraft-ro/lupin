@@ -227,6 +227,9 @@ def route(
     `_apply_pacing` for what a real `quota_rows` list does to the pick.
     """
     all_tiers = tiers if tiers is not None else _load_tiers()
+    if category not in all_tiers:
+        valid = ", ".join(sorted(all_tiers))
+        raise ValueError(f"unknown category {category!r}; valid: {valid}")
     row = all_tiers[category]["tiers"]
 
     tier = _resolve_tier(row, _SIZE_TO_TIER.get(size, "tier1"))

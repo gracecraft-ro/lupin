@@ -690,12 +690,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_route(args: argparse.Namespace) -> int:
-    result = route_mod.route(
-        args.category,
-        args.size,
-        bmo_available=args.bmo_available,
-        primary_effort=args.primary_effort,
-    )
+    try:
+        result = route_mod.route(
+            args.category,
+            args.size,
+            bmo_available=args.bmo_available,
+            primary_effort=args.primary_effort,
+        )
+    except ValueError as err:
+        print(f"lupin route: {err}", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(result))
     else:
