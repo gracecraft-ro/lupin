@@ -1,0 +1,45 @@
+# Runs `nix flake check` on each pull request to main or release/next.
+# `nix flake check` checks only the system it runs on.
+# The matrix runs it on each target system.
+name: CI
+
+on:
+  pull_request:
+    branches: [main, release/next]
+
+permissions:
+  contents: read
+
+jobs:
+  flake-check:
+    name: nix flake check (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 64-bit Intel or AMD Linux. `ubuntu-latest` is x64.
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          # Apple Silicon Mac. `macos-latest` is macOS 26 Arm64.
+          # Source: actions/runner-images README.
+          - system: aarch64-darwin
+            runner: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Install Nix. Flakes need an extra setting.
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # Fail the job if the runner has the wrong system.
+      # Otherwise the check passes and skips the target system.
+      - name: Check system
+        run: test "$(nix eval --raw --impure --expr builtins.currentSystem)" = "${{ matrix.system }}"
+
+      - name: nix flake check
+        run: nix flake check
