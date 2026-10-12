@@ -58,7 +58,9 @@ lupin resume [--machine M | --all] [--json]
 ```
 
 `route` and `classify` print a plain result by default (`model effort`, or
-`category size`). Add `--json` for a JSON object instead.
+`category size`). Add `--json` for a JSON object instead. If the
+category or size is not known, `route` and `review-route` print one line to
+stderr. The line lists the valid values. The exit code is 2.
 
 `ledger append` stores events in Redis. It records the time and host. Repeat
 digest options to add more than one item. Repeat `--child` for each split

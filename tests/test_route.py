@@ -104,6 +104,18 @@ _PROSE_OTHER_ACCOUNT = {
 
 
 class RouteTests(unittest.TestCase):
+    def test_unknown_category_raises_naming_the_valid_ones(self):
+        with self.assertRaisesRegex(ValueError, "unknown category 'code'.*coding"):
+            route.route("code", "size-m", tiers=_TIERS, quota_rows=[])
+
+        # The packaged model-tiers.json has a "_comment" note key. It is not a category.
+        with self.assertRaisesRegex(ValueError, "unknown category '_comment'") as caught:
+            route.route("_comment", "size-m", quota_rows=[])
+        self.assertNotIn("valid: _comment", str(caught.exception))
+
+        with self.assertRaisesRegex(route.RouteInputError, "unknown size 'm'.*size-m"):
+            route.route("coding", "m", tiers=_TIERS, quota_rows=[])
+
     def test_small_coding_issue_gets_tier0_bmo(self):
         result = route.route("coding", "size-xs", tiers=_TIERS, quota_rows=[])
 
