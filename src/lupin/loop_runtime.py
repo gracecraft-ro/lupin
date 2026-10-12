@@ -1127,9 +1127,29 @@ def _launch_agent(
             argv.extend(["--model", model])
     argv.append(prompt)
     rc, output = _run(argv, timeout=310.0, env=_herdr_env())
-    if rc:
+    if rc and not _adopt_working_agent(session, pane, name, output):
         raise HerdrError(output or "Herdr could not start the agent")
     return _wait_agent(session, workspace_id)
+
+
+def _adopt_working_agent(session: str, pane: str, name: str, output: str) -> bool:
+    """Keep an agent that is busy when `agent start` times out.
+
+    `agent start` waits at most 5 minutes for the agent to be ready for input.
+    An agent that starts on its prompt at once can still be working then.
+    Herdr drops the agent's name on a timeout, and `_agent_for_workspace`
+    needs that name. Give it back. Any other error, or any other state, is a
+    failed start.
+    """
+    try:
+        code = json.loads(output)["error"]["code"]
+    except (ValueError, KeyError, TypeError):
+        return False
+    agent = next((row for row in _agents(session) if row.get("pane_id") == pane), None)
+    if code != "timeout" or agent is None or agent.get("agent_status") != "working":
+        return False
+    _herdr(session, "agent", "rename", pane, name)
+    return True
 
 
 def _wait_existing_agent(session: str, workspace_id: str) -> int:

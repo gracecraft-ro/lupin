@@ -537,6 +537,77 @@ def test_launch_agent_omp_does_not_skip_permissions(monkeypatch, tmp_path: Path)
     assert "--dangerously-skip-permissions" not in calls[0]
 
 
+_START_TIMEOUT = '{"error":{"code":"timeout","message":"timed out waiting for agent startup"},"id":"cli:agent:start"}'
+
+
+def _launch_after_start_failure(monkeypatch, tmp_path: Path, output: str, agents: list[dict]):
+    prompt_file = tmp_path / "prompt"
+    prompt_file.write_text("work the backlog\n", encoding="utf-8")
+    workspace = {"id": "w1", "root_pane": {"pane_id": "w1:p1", "workspace_id": "w1"}}
+    herdr_calls = []
+    waited = []
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: (2, output))
+    monkeypatch.setattr(loop_runtime, "_agents", lambda session: agents)
+    monkeypatch.setattr(loop_runtime, "_herdr", lambda session, *args, **kwargs: herdr_calls.append(args) or "")
+    monkeypatch.setattr(loop_runtime, "_wait_agent", lambda session, workspace_id: waited.append(workspace_id) or 0)
+
+    def launch():
+        return loop_runtime._launch_agent(
+            "lupin-loops", "claude", workspace, str(prompt_file), resume=False, name="lupin-widgets-abc12345",
+        )
+
+    return launch, herdr_calls, waited
+
+
+def test_launch_agent_names_and_watches_an_agent_that_is_busy_when_the_start_times_out(monkeypatch, tmp_path: Path):
+    # Herdr waits at most 5 minutes for the agent to be ready. An agent that
+    # starts on its prompt at once is still working then, and Herdr drops its name.
+    agents = [{"pane_id": "w1:p1", "workspace_id": "w1", "agent_status": "working", "name": None}]
+    launch, herdr_calls, waited = _launch_after_start_failure(monkeypatch, tmp_path, _START_TIMEOUT, agents)
+
+    assert launch() == 0
+
+    assert herdr_calls == [("agent", "rename", "w1:p1", "lupin-widgets-abc12345")]
+    assert waited == ["w1"]
+
+
+@pytest.mark.parametrize("status", ["blocked", "idle", "unknown", "done"])
+def test_launch_agent_fails_when_the_start_times_out_and_the_agent_is_not_working(monkeypatch, tmp_path: Path, status):
+    agents = [{"pane_id": "w1:p1", "workspace_id": "w1", "agent_status": status, "name": None}]
+    launch, herdr_calls, waited = _launch_after_start_failure(monkeypatch, tmp_path, _START_TIMEOUT, agents)
+
+    with pytest.raises(loop_runtime.HerdrError, match="timed out waiting for agent startup"):
+        launch()
+
+    assert herdr_calls == []
+    assert waited == []
+
+
+def test_launch_agent_fails_when_the_start_times_out_and_no_agent_is_in_the_pane(monkeypatch, tmp_path: Path):
+    other = [{"pane_id": "w2:p1", "workspace_id": "w2", "agent_status": "working", "name": None}]
+    launch, herdr_calls, waited = _launch_after_start_failure(monkeypatch, tmp_path, _START_TIMEOUT, other)
+
+    with pytest.raises(loop_runtime.HerdrError):
+        launch()
+
+    assert herdr_calls == []
+
+
+@pytest.mark.parametrize(
+    "output",
+    ['{"error":{"code":"pane_not_found","message":"pane w1:p1 not found"}}', "not json", '{"error":"timeout"}', ""],
+)
+def test_launch_agent_fails_on_any_other_start_error(monkeypatch, tmp_path: Path, output):
+    agents = [{"pane_id": "w1:p1", "workspace_id": "w1", "agent_status": "working", "name": None}]
+    launch, herdr_calls, waited = _launch_after_start_failure(monkeypatch, tmp_path, output, agents)
+
+    with pytest.raises(loop_runtime.HerdrError):
+        launch()
+
+    assert herdr_calls == []
+    assert waited == []
+
+
 @pytest.mark.parametrize(
     "platform, provider, model",
     [
