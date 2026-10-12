@@ -62,10 +62,15 @@ lupin resume [--machine M | --all] [--json]
 
 `ledger append` stores events in Redis. It records the time and host. Repeat
 digest options to add more than one item. Repeat `--child` for each split
-issue. `ledger read --json` returns the latest 10 events, oldest first.
-Use `--limit N` to choose another positive count. Both commands exit 3 if
-Redis is unavailable. The roadmap shows no ledger annotations and a warning.
-It ignores `.loop/loop-state.json`.
+issue. `ledger read --json` returns up to the latest 10 events, oldest first.
+Use `--limit N` to choose another positive count. `_decode` in
+`src/lupin/ledger.py` turns one entry's ID and decoded fields into a dict.
+`read_events` decodes each entry on its own. It skips an entry when a
+field is not valid UTF-8. It also skips an entry when `_decode` raises
+KeyError, ValueError, or RecursionError. It reports each skipped entry on
+stderr. A skipped entry still counts toward the limit. Both commands exit 3
+if Redis is unavailable. When Redis is unavailable, the roadmap shows no
+ledger annotations and a warning. It ignores `.loop/loop-state.json`.
 
 `review-route --prefetch` fetches issue/PR text up front -- body, comments,
 and (for a PR) reviews and a diff stat (changed files, additions/deletions,
@@ -290,8 +295,9 @@ not pay for `gh` again.
 Each run has its own Git worktree in `worktrees/<repo>/` in the loop state
 directory. A worktree is a second working copy of the repo, with its own files
 and branch. This one is on a new branch, `lupin-loop/<time>`. `run` runs
-`git fetch origin` first. The branch starts at the fetched remote default
-branch: the target of `origin/HEAD`, or else `origin/main` or `origin/master`.
+`git fetch origin` first. The branch starts at `origin/release/next` when the
+remote has it. Otherwise it starts at the remote default branch: the target of
+`origin/HEAD`, or else `origin/main` or `origin/master`.
 If the fetch fails, `run` refuses to start. The agent works in this worktree.
 The main checkout in `LUPIN_LOOP_CODE_DIR` is never the agent's working
 directory.
@@ -397,43 +403,64 @@ per-machine limit or add controls that the current code cannot support.
 
 ## Build and test
 
+Full gate (the repo's gate, used by the merge rules):
+
 ```
 nix flake check                                    # build + test, all systems
 nix shell nixpkgs#python3Packages.pytest -c pytest -v
 ```
 
+`nix develop <dir> -c <command>` runs `<command>` in the current directory. It
+does not run in `<dir>`. A relative test path then picks up files from the
+directory you are in. Run `cd <checkout>` first. To test a reviewed commit, run
+`git archive <sha> | tar -x -C <empty-dir>`, then run the tests from `<empty-dir>`.
+
+## Commands in docs and skills
+
+Commands in this file and in the skills must work for any user of this tool.
+Use `OWNER/REPO` for the repo, `origin` for the upstream remote, and `<checkout>`
+for a path. Do not write a real owner name or machine path into a command. Prose
+may name this repo.
+
 ## Pull requests, review, and handoff
 
-Every feature change goes through a pull request to the fork's `release/next`.
-Policy changes go to upstream `main` for the owner to merge. The loop policy is
-in `docs/delegation-loop.md`.
+Every feature change goes through a pull request to upstream `release/next`.
+Upstream is the `origin` remote. The owner merges `release/next` into `main`
+when they choose. Policy changes go to upstream `main` for the owner to merge.
+The loop policy is in `docs/delegation-loop.md`.
 
-1. Push the branch to the fork with `git push fork <branch>`. Never push to
-   `origin`. Do not add a remote. Do not use `/ship`. It pushes to `origin`
-   when direct push is allowed, and it can add a remote. Open the PR on the
-   fork:
+1. Push the branch with `git push -u origin <branch>`. If your token cannot push
+   to upstream, push to the existing fork with `git push -u fork <branch>`.
+   Never push `main` or `release/next`. Do not create a new fork. You may use
+   `/ship`. Check that it does not push `main` or `release/next`. Open the PR on
+   upstream. From a fork branch, add `--head FORK_OWNER:<branch>`:
 
    <!-- markdownlint-disable MD013 -->
    ```sh
-   gh pr create --repo gracecraft-ro/<repo> --base release/next --title "<title>" --body "Closes #N"
+   gh pr create --repo OWNER/REPO --base release/next --title "<title>" --body "Closes #N"
    ```
    <!-- markdownlint-enable MD013 -->
 
    The PR body has `Closes #N`. The merge into `release/next` does not close
-   the issue. Close it by hand in the same pass. If the push fails, report the
-   branch name and commit range. Do not merge that branch. The merge rules are
-   in the `delegation-loop` skill.
+   the issue. The orchestrator (the agent that dispatches and merges work)
+   closes it manually right after the merge into `release/next`.
+   If the push fails, report the branch name and commit range. Do not merge
+   that branch. If the PR opens, report its number to the orchestrator. The
+   orchestrator dispatches `/code-review`.
 2. Do not merge your own work. A reviewer who is not the author runs
    `/code-review`. The orchestrator (the agent that dispatches and merges
    work) merges into `release/next` only when all four are true:
-   1. The PR is open on the fork, `gracecraft-ro/<repo>`, with base
-      `release/next`.
+   1. The PR is open on upstream, `OWNER/REPO`, with base `release/next`.
    2. A reviewer approves the current head SHA. The head SHA is the newest
       commit ID on the branch.
-   3. The fork branch contains the current `release/next`. The ancestor check
+   3. The PR branch contains the current `release/next`. The ancestor check
       asks git whether one branch contains another. The check is in the
       `delegation-loop` skill.
    4. The repo's full gate, as its `AGENTS.md` defines it, passes.
+
+   A worker or reviewer never merges a pull request.
+   On every orchestrator cycle, merge each approved PR that passes these gates.
+   See "Continuous merge of approved PRs" in the `delegation-loop` skill.
 3. At the end of a session, run `/handoff`. It runs `lupin ledger append`.
 4. Loop details for this repo: `docs/delegation-loop.md`.
 
@@ -457,11 +484,13 @@ sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
 - Port: `8789`. Check it is free with `ss -ltn` first. The `ss` command lists
   listening ports.
 - Machine: not set yet. The owner names it.
-- Owner tunnel command: `ssh -N -L 8789:127.0.0.1:8789 MACHINE`.
+- Owner tunnel command: `ssh -N -L 8789:127.0.0.1:8789 MACHINE`. A tunnel
+  forwards a port on your computer to the machine.
 - Local URL: `http://localhost:8789`.
 - Keep it running: a Herdr pane, or `systemd-run --user`. The `systemd-run`
   command starts a command as a background service.
-- Never bind to `0.0.0.0`. This is a security rule.
+- To bind means to choose the address a server listens on. Never bind to
+  `0.0.0.0`. This is a security rule.
 - Do not set `LUPIN_REDIS_HOST` to the fleet Redis unless the test needs it.
 - Do not use the start, stop, or run controls on this dashboard. New runs use
   the `lupin-loops` session. Older loops may use an old session until they

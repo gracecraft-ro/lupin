@@ -209,16 +209,6 @@ def release_claim(
     return bool(result)
 
 
-def _get_with_ttl(client, key: str) -> tuple[str | None, int]:
-    """The value and the milliseconds left, read in one Redis round trip so
-    the two always describe the same claim.
-    """
-    pipe = client.pipeline()
-    pipe.get(key)
-    pipe.pttl(key)
-    return tuple(pipe.execute())
-
-
 def _claim_object(raw: str) -> dict | None:
     """The claim, or None if `raw` is not a JSON object."""
     try:
@@ -235,6 +225,7 @@ def claims_for(
     redis_port: int | None = None,
     redis_username: str | None = None,
     redis_password: str | None = None,
+    client: "redis.Redis | None" = None,
     with_ttl: bool = False,
     skipped: list[str] | None = None,
     strict: bool = False,
@@ -243,40 +234,58 @@ def claims_for(
     every currently-claimed issue in `repos` (each an `"<owner>/<repo>"`
     string, no issue number).
 
+    Pass `client` to use a ready client, as the debrief path does. Without
+    it, a client is made from the connection arguments.
+
     With `with_ttl=True`, each value also has `"ttl"`: the seconds Redis
     still holds the claim. It is `None` if the key has no expiry.
 
-    `strict=True` raises for a claim that is not a JSON object. Acting
-    callers use it. A malformed claim raises `json.JSONDecodeError`, which
-    is a `ValueError`.
+    `strict=True` raises `ValueError` for a claim that is not a JSON object.
+    Acting callers use it. `strict=False` (the default) leaves such a claim
+    out. Its `claim:<target>` label is added to `skipped` when `skipped` is
+    a list.
 
-    `strict=False` (the default) leaves such a claim out. Its
-    `claim:<target>` label is added to `skipped` when `skipped` is a list.
-
-    The integration point future `roadmap` (#10) and `quest` (#11) commands
-    import to find out which of their issues are off-limits -- pass the
-    repos you already know about, get back the claimed subset. Raises
-    `CoordinatorUnreachable` if Redis can't be reached; there's no local
-    fallback for claims, so a caller should treat that failure the same way
-    `lupin claim` exiting 3 is treated elsewhere: start no new issue, but
-    don't disturb anything already in progress.
+    This is the integration point that future `roadmap` (#10) and `quest`
+    (#11) commands import. They use it to find out which of their issues are
+    off-limits. Pass the repos you already know about. The function returns
+    the claimed subset. Raises `CoordinatorUnreachable` if Redis cannot be
+    reached. There is no local fallback for claims. Callers must handle
+    `CoordinatorUnreachable`. Start no new issue. Do not disturb anything
+    already in progress.
     """
-    client = _client(redis_host, redis_port, redis_username, redis_password)
+    if client is None:
+        client = _client(redis_host, redis_port, redis_username, redis_password)
     prefix = f"{PREFIX}claim:"
     try:
         keys = _call_with_retry(lambda: list(client.scan_iter(match=f"{prefix}*")))
-        result: dict[str, dict] = {}
+        wanted = []
         for key in keys:
             target = key[len(prefix) :]
             owner_repo, _sep, _number = target.rpartition("#")
-            if owner_repo not in repos:
-                continue
-            if with_ttl:
-                raw, ttl_ms = _call_with_retry(lambda k=key: _get_with_ttl(client, k))
-            else:
-                raw = _call_with_retry(lambda k=key: client.get(k))
+            if owner_repo in repos:
+                wanted.append(key)
+        result: dict[str, dict] = {}
+        if not wanted:
+            return result
+        # One batch for all keys. GET, not MGET: a key of the wrong type
+        # raises an error, where MGET returns None. With `with_ttl`, each key
+        # also gets a PTTL. MULTI/EXEC makes each GET and PTTL read one
+        # moment. Build the batch inside the retry: execute() clears it.
+        def read_claims():
+            pipe = client.pipeline()
+            for key in wanted:
+                pipe.get(key)
+                if with_ttl:
+                    pipe.pttl(key)
+            return pipe.execute(raise_on_error=True)
+
+        replies = _call_with_retry(read_claims)
+        per_key = 2 if with_ttl else 1
+        for i, key in enumerate(wanted):
+            raw = replies[i * per_key]
             if raw is None:
-                continue
+                continue  # expired between the scan and the read
+            target = key[len(prefix) :]
             if strict:
                 claim = json.loads(raw)
                 if not isinstance(claim, dict):
@@ -288,6 +297,7 @@ def claims_for(
                         skipped.append(f"claim:{target}")
                     continue
             if with_ttl:
+                ttl_ms = replies[i * per_key + 1]
                 claim["ttl"] = ttl_ms / 1000 if ttl_ms >= 0 else None
             result[target] = claim
         return result

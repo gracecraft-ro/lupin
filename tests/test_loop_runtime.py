@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1131,6 +1133,14 @@ def test_default_base_uses_origin_main_when_origin_head_is_not_set(tmp_path: Pat
     assert loop_runtime._default_base(checkout) == "origin/main"
 
 
+def test_default_base_prefers_release_next_when_the_remote_has_it(tmp_path: Path, make_checkout):
+    checkout = make_checkout(tmp_path / "code" / "widgets")
+    _git_out(checkout, "push", "origin", "main:refs/heads/release/next")
+    _git_out(checkout, "fetch", "origin")
+
+    assert loop_runtime._default_base(checkout) == "origin/release/next"
+
+
 def test_default_base_refuses_when_the_checkout_has_no_remote_branch(tmp_path: Path, make_checkout):
     checkout = make_checkout(tmp_path / "code" / "widgets")
     _git_out(checkout, "remote", "remove", "origin")
@@ -1554,3 +1564,21 @@ def test_stop_keeps_a_branch_with_unmerged_commits(monkeypatch, tmp_path: Path, 
     assert not worktree.exists()
     assert branch in _git_out(checkout, "branch", "--list")
     assert f"branch {branch} kept" in result
+
+
+@pytest.mark.parametrize(
+    "module",
+    ["lupin.loop_runtime", "lupin.agent", "lupin.roadmap", "lupin.debrief", "lupin.cli", "lupin.serve"],
+)
+def test_module_imports_in_a_fresh_process(module: str):
+    # A new process imports this module first. Shared test imports hide cycles.
+    src = Path(__file__).resolve().parents[1] / "src"
+    env = {key: value for key, value in os.environ.items() if not key.startswith("LUPIN_")}
+    env["PYTHONPATH"] = str(src)
+
+    result = subprocess.run(
+        [sys.executable, "-c", f"import {module}"],
+        env=env, capture_output=True, text=True, timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr

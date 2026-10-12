@@ -444,3 +444,26 @@ def test_hold_prints_one_line_when_renew_reports_the_lease_gone(redis_port, flus
     assert f"lease {lease} not renewed" in err
     # Renewal keeps running after a False return. Redis may recover.
     assert len(calls) > 1
+
+
+def test_hold_keeps_renewing_after_one_unexpected_renew_error(redis_port, flush_redis, monkeypatch, capsys):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    lease = slots_redis.acquire("not-bmo", "a", max_holders=1, **kw)
+    real_renew = slots_redis.renew
+    calls = []
+
+    def renew_fails_once(lease_id, **kwargs):
+        calls.append(lease_id)
+        if len(calls) == 1:
+            raise ValueError("unexpected renew error")
+        return real_renew(lease_id, **kwargs)
+
+    monkeypatch.setattr(slots_redis, "renew", renew_fails_once)
+    code = slots_redis.hold(["sh", "-c", "sleep 1"], lease=lease, ttl=0.3, **kw)
+
+    err = capsys.readouterr().err
+    assert code == 0
+    assert len(calls) >= 3, "renew was not called again after the error"
+    assert err.count("not renewed") == 1
+    assert "unexpected renew error" in err
+    assert slots_redis.status(**kw)["not-bmo"]["holders"] == 0
