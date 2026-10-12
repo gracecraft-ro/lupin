@@ -7,7 +7,7 @@ dependency API itself -- it only reads `roadmap.py`'s output
 (`claims_for`) and turns them into the `ready`/`blocked`/`dag` text a model
 or a person reads.
 
-Judgment calls, since the design doc (`lupin-ctl-copy.md` section 5) gives
+Judgment calls, since the design doc (`docs/lupin-ctl-copy.md` section 5) gives
 one illustrative example, not a full algorithm:
 
 - An issue is "blocked" only by an *open* blocker in a repo this command

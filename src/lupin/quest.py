@@ -432,7 +432,7 @@ def focus(
 
     Raises `QuestNotFound`, `NoReadyTasks`, `MachineNotFound`,
     `MachineDraining`, `NoMachineAvailable`, or `CoordinatorUnreachable` --
-    `cli.py` turns each into the copy doc's exact text (lupin-ctl-copy.md
+    `cli.py` turns each into the copy doc's exact text (docs/lupin-ctl-copy.md
     section 5).
     """
     quests, _warnings = load_quests(repos, code_dir=code_dir, connection=connection)
