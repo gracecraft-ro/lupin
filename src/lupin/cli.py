@@ -179,7 +179,7 @@ def _slot_common_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _acquire_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("slot")
+    parser.add_argument("slot", help="slot name to acquire")
     parser.add_argument("--holder", required=True)
     parser.add_argument("--wait", type=float, default=0.0, help="seconds to poll before giving up")
     parser.add_argument(
@@ -190,7 +190,7 @@ def _acquire_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _hold_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("slot", nargs="?", default=None)
+    parser.add_argument("slot", nargs="?", default=None, help="slot name when not reusing --lease")
     parser.add_argument("--holder", default=None)
     parser.add_argument("--lease", default=None, help="reuse a lease an earlier `acquire` returned")
     parser.add_argument("--wait", type=float, default=0.0)
@@ -417,12 +417,12 @@ def _cmd_group_args(parser: argparse.ArgumentParser) -> None:
     _redis_conn_args(send)
 
     status = sub.add_parser("status", help="look up one command's result")
-    status.add_argument("id")
+    status.add_argument("id", help="command id returned by `cmd send`")
     status.add_argument("--json", action="store_true")
     _redis_conn_args(status)
 
     queue = sub.add_parser("queue", help="list a machine's pending commands")
-    queue.add_argument("machine")
+    queue.add_argument("machine", help="machine whose pending commands to list")
     queue.add_argument("--json", action="store_true")
     _redis_conn_args(queue)
 
@@ -448,7 +448,7 @@ def _wait_arg(parser: argparse.ArgumentParser) -> None:
 
 
 def _stop_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("repo")
+    parser.add_argument("repo", help="repository whose loop to stop")
     parser.add_argument("--machine", default=None, help="skip resolving which machine runs repo's loop")
     parser.add_argument(
         "--force", action="store_true",
@@ -461,8 +461,8 @@ def _stop_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _peek_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("repo")
-    parser.add_argument("lines", nargs="?", type=int, default=60)
+    parser.add_argument("repo", help="repository whose loop output to show")
+    parser.add_argument("lines", nargs="?", type=int, default=60, help="number of pane lines (default: 60)")
     parser.add_argument("--machine", default=None, help="skip resolving which machine runs repo's loop")
     parser.add_argument("--json", action="store_true")
     _wait_arg(parser)
@@ -471,7 +471,7 @@ def _peek_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _attach_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("repo")
+    parser.add_argument("repo", help="repository whose loop to attach to")
     parser.add_argument("--machine", default=None, help="skip resolving which machine runs repo's loop")
     parser.add_argument("--print", dest="print_only", action="store_true", help="print the argv, don't exec it")
     _fleet_connection_args(parser)
@@ -500,13 +500,13 @@ def _schedule_args(parser: argparse.ArgumentParser) -> None:
     _schedule_common_args(sub.add_parser("show", help="print the current cadence (default)"))
 
     first = sub.add_parser("first", help="set an anchored cadence: first <when> every <interval>")
-    first.add_argument("when")
-    first.add_argument("every_literal", metavar="every")
-    first.add_argument("interval")
+    first.add_argument("when", help="delay before the first run, such as +2h5m")
+    first.add_argument("every_literal", metavar="every", help="the literal keyword `every`")
+    first.add_argument("interval", help="repeat interval, such as 5h15m")
     _schedule_common_args(first)
 
     cal = sub.add_parser("cal", help='set a clock-aligned cadence: cal "<expr>"')
-    cal.add_argument("expr")
+    cal.add_argument("expr", help="calendar expression for the run cadence")
     _schedule_common_args(cal)
 
     _schedule_common_args(parser)
@@ -557,7 +557,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _cmd_group_args(sub.add_parser("cmd", help="send, check, or list cross-machine commands"))
     _agent_args(sub.add_parser("agent", help="run the command-queue poll loop for this machine"))
     run_parser = sub.add_parser("run", help="start one loop or all enabled loops")
-    run_parser.add_argument("repo", nargs="?")
+    run_parser.add_argument("repo", nargs="?", help="repository to run (omit with --all)")
     run_parser.add_argument("--all", action="store_true")
     run_parser.add_argument("--platform", choices=("claude", "omp"))
     run_parser.add_argument("--provider", choices=("openai", "opencode-go"))
@@ -573,8 +573,8 @@ def _build_parser() -> argparse.ArgumentParser:
     fleet_run_parser.add_argument("--json", action="store_true")
     _fleet_connection_args(fleet_run_parser)
     once_parser = sub.add_parser("once", help="start now or schedule a one-off loop run")
-    once_parser.add_argument("when")
-    once_parser.add_argument("repos", nargs="*")
+    once_parser.add_argument("when", help="when to start or schedule the run")
+    once_parser.add_argument("repos", nargs="*", help="repositories to run (default: enabled repos)")
     once_parser.add_argument("--platform", choices=("claude", "omp"))
     once_parser.add_argument("--provider", choices=("openai", "opencode-go"))
     once_parser.add_argument("--model")
@@ -582,7 +582,7 @@ def _build_parser() -> argparse.ArgumentParser:
     once_parser.add_argument("--resume", action="store_true")
     once_parser.add_argument("--json", action="store_true")
     enable_parser = sub.add_parser("enable", help="add a repo to the loop schedule")
-    enable_parser.add_argument("repo")
+    enable_parser.add_argument("repo", help="repository to add to the loop schedule")
     enable_parser.add_argument("--platform", choices=("claude", "omp"), default="claude")
     enable_parser.add_argument(
         "--orchestrator",
@@ -595,16 +595,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="remove this repo's orchestrator profile",
     )
     disable_parser = sub.add_parser("disable", help="remove a repo from the loop schedule")
-    disable_parser.add_argument("repo")
+    disable_parser.add_argument("repo", help="repository to remove from the loop schedule")
     loops_parser = sub.add_parser("loops", help="show Herdr loop state")
-    loops_parser.add_argument("repo", nargs="?")
+    loops_parser.add_argument("repo", nargs="?", help="repository to inspect (default: all loops)")
     loops_parser.add_argument("--machine")
     loops_parser.add_argument("--json", action="store_true")
     _wait_arg(loops_parser)
     _signing_key_arg(loops_parser)
     _fleet_connection_args(loops_parser)
     loop_parser = sub.add_parser("loop", help=argparse.SUPPRESS)
-    loop_parser.add_argument("loop_args", nargs=argparse.REMAINDER)
+    loop_parser.add_argument("loop_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
     _stop_args(sub.add_parser("stop", help="stop a repo's loop, on whichever machine runs it"))
     _peek_args(sub.add_parser("peek", help="show recent pane output for a repo's loop"))
     _attach_args(sub.add_parser("attach", help="attach a terminal to a repo's loop session"))
