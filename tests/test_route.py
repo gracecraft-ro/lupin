@@ -108,6 +108,11 @@ class RouteTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unknown category 'code'.*coding"):
             route.route("code", "size-m", tiers=_TIERS, quota_rows=[])
 
+        # The packaged model-tiers.json has a "_comment" note key. It is not a category.
+        with self.assertRaisesRegex(ValueError, "unknown category '_comment'") as caught:
+            route.route("_comment", "size-m", quota_rows=[])
+        self.assertNotIn("valid: _comment", str(caught.exception))
+
     def test_small_coding_issue_gets_tier0_bmo(self):
         result = route.route("coding", "size-xs", tiers=_TIERS, quota_rows=[])
 

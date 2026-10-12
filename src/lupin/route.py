@@ -227,9 +227,10 @@ def route(
     `_apply_pacing` for what a real `quota_rows` list does to the pick.
     """
     all_tiers = tiers if tiers is not None else _load_tiers()
-    if category not in all_tiers:
-        valid = ", ".join(sorted(all_tiers))
-        raise ValueError(f"unknown category {category!r}; valid: {valid}")
+    # Keys that start with "_" (like "_comment") are notes, not categories.
+    valid = sorted(key for key in all_tiers if not key.startswith("_"))
+    if category not in valid:
+        raise ValueError(f"unknown category {category!r}; valid: {', '.join(valid)}")
     row = all_tiers[category]["tiers"]
 
     tier = _resolve_tier(row, _SIZE_TO_TIER.get(size, "tier1"))
