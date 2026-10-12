@@ -18,6 +18,27 @@ def local_host(monkeypatch):
     yield "h"
 
 
+def test_root_help_uses_user_facing_description(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli._build_parser().parse_args(["--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "ghostbook" not in help_text
+    assert "issue #" not in help_text
+    assert "7-day usage totals" not in help_text
+
+
+def test_route_help_describes_positional_arguments(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli._build_parser().parse_args(["route", "--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "task category, such as coding or translation" in help_text
+    assert "task size label, such as size-s or size-m" in help_text
+
+
 def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     monkeypatch, tmp_path, capsys, make_checkout
 ):

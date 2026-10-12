@@ -1,83 +1,8 @@
-"""The `lupin` command-line entry point: one executable, subcommands.
+"""The `lupin` command-line entry point.
 
-`route` and `classify` are the model-routing calls, moved out of
-ghostbook.nix in issue #203. `fetch-models` fetches a daily snapshot of
-which model IDs each subscription can call today and what they cost
-(issue #16; see `model_fetch.py`). `fetch-benchmarks` fetches (or reads the
-fleet-shared cache of) a daily benchmark/quality score per model, via
-sharded free-model `omp` agent calls, not a local file (issue #17's
-reopen; see `benchmark_fetch.py`). `quota` publishes provider quota and
-this machine's `7-day usage totals to shared Redis for the dashboard.
-`acquire`/`hold`/`release`/`status` are the
-slot-lease commands (issue #205 for the `local` backend, #210 for
-`redis`). `ledger` appends and reads shared repository events in Redis
-(see `ledger.py`). `claim`/`renew-claim`/`release-claim` mark a GitHub issue
-as one loop's own, so two loops never work the same task (issue #6; Redis only,
-no `--backend` choice -- see `claims.py`). `review-route` picks which lock a
-routed model needs (issue #185), `roadmap` prints prioritized open tasks
-from `roadmap.py`'s data plus claims (issue #10), and `serve` runs the
-read-only dashboard (issue #204). `join`/`heartbeat`/`drain`/`undrain`/
-`machines` are the fleet machine registry (issue #7); see `machines.py` for
-the Redis record they read and write. `place` picks which registered
-machine should run a task already routed to a model (issue #9; see
-`place.py`). `quest` lists quests (GitHub issues labeled `quest`) and their
-progress (issue #11, read-only); `quest focus`/`quest release` pin a quest
-to a machine (issue #12); `start`/`stop` claim and release a quest's issues
-(issue #13). `reconcile` applies the automatic release rules -- a claim
-with no heartbeat, a quest focus that is done/closed/idle/down, a started
-quest that is done/down (issue #14; see `reconcile.py`). `cmd` sends,
-checks, or lists signed cross-machine commands; `agent` is the
-long-running process that polls its own queue and runs them through a
-fixed action table (issue #28, implementing #27's design; see
-`run` starts a loop, `once` starts or schedules one, and `enable`/`disable`
-edit the local repo list. `loops` reads Herdr's agent state. `stop`/`peek`/
-`schedule`/`pause`/`resume` can target any fleet machine. Local actions run
-through Lupin. Remote actions use the signed Redis queue and `agent.py`.
-`attach` is direct: it runs the Herdr terminal here or connects to the
-remote Herdr server over SSH. It never uses the queue. `loops.py` owns the
-shared local-or-remote dispatch.
-
-Slot commands use `--backend local|redis`, or `LUPIN_BACKEND` if the flag is
-not set. A host can set the default once in its systemd environment.
-
-Exit codes, by design (see #198's architecture plan):
-  0  done
-  2  busy/full (acquire, hold) -- skip and try again later, or a usage error
-     from argparse itself (its own default for a bad flag; both meanings are
-     "this invocation didn't produce a result", so sharing the code is fine).
-     `place` reuses this code too: no online machine runs the routed
-     provider right now, which is the same "try again later" shape.
-  3  cannot reach the coordinator, and this slot has no local fallback. The
-     `local` backend's coordinator is the filesystem, which it always
-     reaches once the state root is writable, so it never returns 3. The
-     `redis` backend returns 3 for any slot other than `bmo` when Redis is
-     unreachable -- `bmo` falls back to the `local` backend instead (see
-     `slots_redis.py`), so it does not reach this exit code. Claims have no
-     local fallback at all, so `claim`/`renew-claim`/`release-claim` return
-     3 for every unreachable-Redis case. For every slot, `acquire` and
-     `release` return 3 when Redis refuses a login. `bmo` does not fall back
-     for this. They also return 3 when the ACL denies a command. The message
-     names the cause.
-  1  any other error (malformed lease id, bad JSON input, hold with neither
-     --lease nor <slot>/--holder, etc.) -- also `renew-claim`/`release-claim`
-     when the caller isn't the claim's current holder.
-
-`claim` returns 2 when another holder already has the issue -- same "busy,
-skip and try again later" meaning as a full slot. `quest start` reuses the
-same two codes for its own validation failures: 2 for "claimed by another
-loop" or "target machine draining" (both "try again later"), 1 for
-anything else (closed, missing, or blocked by an issue outside the quest).
-
-`stop`/`peek`/`schedule`/`pause`/`resume` (issue #2 phase A) add two more
-exit codes. Both apply only to a remote target, sent through the signed
-command queue:
-  4  sent, but the result is unknown. The command was queued, but no
-     final state (`ok`/`failed`/`rejected`/`expired`) arrived within
-     `--wait` seconds. It may still be running -- check
-     `lupin cmd status <id>` later.
-  5  the repo's loop matched zero machines, or more than one, in the
-     fleet registry's `loops` field (`stop`/`peek` only, and only when
-     `--machine` isn't given). Pass `--machine` instead of guessing.
+Lupin provides task classification and model routing, quota and fleet
+coordination, loop management, and read-only status commands. Use a
+subcommand's own `--help` output for its arguments and examples.
 """
 
 from __future__ import annotations
@@ -128,8 +53,8 @@ DEFAULT_RESULT_WAIT_S = 20.0  # how long stop/peek/schedule/pause/resume
 
 
 def _route_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("category")
-    parser.add_argument("size")
+    parser.add_argument("category", help="task category, such as coding or translation")
+    parser.add_argument("size", help="task size label, such as size-s or size-m")
     parser.add_argument(
         "--no-bmo",
         dest="bmo_available",
