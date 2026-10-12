@@ -6,7 +6,7 @@ machines seeing different snapshots of the same repo at the same moment.
 
 Grace's correction on the first design: the fetcher is not "whichever
 machine wins a lock race" -- it is one named machine, pinned by hostname.
-`CANONICAL_GH_FETCHER` is that name. Every other machine reads the cache
+`LUPIN_GH_CANONICAL_FETCHER` holds that name. Every other machine reads the cache
 while that fetcher is alive; on a miss it returns an honest "no data yet"
 error instead of calling `gh` itself. When the pinned fetcher is not
 maintaining the cache (draining, offline, or never joined), the pin has no
@@ -18,21 +18,22 @@ fetcher. The `slots_redis` lock below serializes fetchers; with more than
 one machine able to fetch, that lock is what keeps the "one snapshot" part
 of the design true.
 
-Risk, stated rather than papered over: `CANONICAL_GH_FETCHER` is compared
-against `machines.hostname()` (`socket.gethostname()`) with a plain `==`.
+Risk, stated rather than papered over: the setting is compared against
+`machines.hostname()` (`socket.gethostname()`) with a plain `==`.
 If that machine's hostname is ever reported differently -- a FQDN
-(`pihome.local`) instead of the short name, or changed by whoever reimages
-it -- this check silently stops matching and pihome's own reads stop
-fetching. The registry check in `_canonical_fetcher_live` no longer lets
+(`host.local`) instead of the short name, or changed by whoever reimages
+it -- this check silently stops matching and the pinned machine's own reads
+stop fetching. The registry check in `_canonical_fetcher_live` no longer lets
 that take the rest of the fleet down with it: the registry is keyed by the
-name `join` wrote, so a hostname mismatch leaves pihome looking absent,
-which is the same signal as "not maintaining the cache", and the other
-machines fetch live instead of showing nothing.
+name `join` wrote, so a hostname mismatch leaves the pinned machine looking
+absent, which is the same signal as "not maintaining the cache", and the
+other machines fetch live instead of showing nothing.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from typing import Any, Callable
 
@@ -41,7 +42,6 @@ import redis
 from . import machines, slots_redis
 
 PREFIX = slots_redis.PREFIX
-CANONICAL_GH_FETCHER = "pihome"
 
 # A few minutes: short enough that `place`/`quest` aren't deciding off data
 # that's badly stale, long enough that a burst of lookups across machines
@@ -59,6 +59,15 @@ LOCK_WAIT = 2.0
 LOCK_TTL = 120.0
 
 _REDIS_ERRORS = (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)
+
+
+def canonical_fetcher() -> str | None:
+    """The hostname of the machine that runs `gh` for the fleet.
+
+    Read from `LUPIN_GH_CANONICAL_FETCHER` on each call. Returns None when
+    the variable is unset or empty. Then no machine is pinned.
+    """
+    return os.environ.get("LUPIN_GH_CANONICAL_FETCHER") or None
 
 
 def _resolve(connection: dict | None) -> dict:
@@ -88,25 +97,27 @@ def _client(connection: dict):
 
 
 def _canonical_fetcher_live(connection: dict) -> bool:
-    """Is `CANONICAL_GH_FETCHER` maintaining the shared cache right now?
+    """Is the canonical fetcher maintaining the shared cache right now?
 
-    Read from the fleet registry, not assumed. A pinned host that is
-    draining, offline, or never joined leaves the cache cold forever --
-    which is exactly what happened here: pihome was drained and jesus,
-    the machine running `lupin serve`, refused every `gh` read. This is
-    the cold-cache case the module docstring names as a risk ("the fetch
-    path goes cold fleet-wide ... it would show up as every caller's cache
-    staying empty"); this check is what detects it.
+    Read from the fleet registry, not assumed. With no canonical fetcher
+    set, nobody maintains the cache, so this returns False. A pinned host
+    that is draining, offline, or never joined leaves the cache cold
+    forever. This is the cold-cache case the module docstring names as a
+    risk ("the fetch path goes cold fleet-wide ... it would show up as every
+    caller's cache staying empty"); this check is what detects it.
 
     Returns True when the registry cannot be read: an unreadable registry
     is not evidence the fetcher is gone, and the conservative answer keeps
     the original behaviour rather than starting a fetch it cannot justify.
     """
+    pinned = canonical_fetcher()
+    if pinned is None:
+        return False
     try:
         records = {record["name"]: record for record in machines.machines(connection)}
     except Exception:
         return True
-    record = records.get(CANONICAL_GH_FETCHER)
+    record = records.get(pinned)
     return bool(record) and record.get("state") == "online"
 
 
@@ -193,7 +204,7 @@ def cached_gh_json(
     connection: dict | None = None,
 ) -> tuple[Any, str | None]:
     """Return `fetch_fn()`'s result, either from the shared cache or from a
-    live `gh` call. `CANONICAL_GH_FETCHER` always fetches on a miss. Every
+    live `gh` call. The canonical fetcher always fetches on a miss. Every
     other machine reads the cache while that fetcher is alive; when it is
     not (draining, offline, or never joined -- see `_canonical_fetcher_live`),
     this machine fetches too, and publishes, so the fleet still gets one
@@ -215,18 +226,20 @@ def cached_gh_json(
     if hit:
         return cached, None
 
+    pinned = canonical_fetcher()
     hostname = machines.hostname()
-    canonical = hostname == CANONICAL_GH_FETCHER
+    canonical = hostname == pinned
     if not canonical:
         if not redis_ok:
+            unpinned = "the canonical fetcher (LUPIN_GH_CANONICAL_FETCHER is unset)"
             return None, (
                 f"the GitHub data cache is unreachable and this machine ({hostname}) "
-                f"is not {CANONICAL_GH_FETCHER}, so it cannot fetch directly"
+                f"is not {pinned or unpinned}, so it cannot fetch directly"
             )
         if _canonical_fetcher_live(connection):
             return None, (
                 f"no cached GitHub data yet for {cache_key} ({owner}/{name}); "
-                f"only {CANONICAL_GH_FETCHER} fetches live data"
+                f"only {pinned} fetches live data"
             )
         # Nobody is maintaining the cache, so fall through and fetch here.
 
@@ -273,4 +286,4 @@ def _write_cache(client, key: str, data: Any) -> None:
             lambda: client.set(key, json.dumps({"data": data}), ex=CACHE_TTL)
         )
     except _REDIS_ERRORS:
-        pass  # best effort -- CANONICAL_GH_FETCHER still has the live answer
+        pass  # best effort -- the canonical fetcher still has the live answer

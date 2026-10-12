@@ -250,6 +250,7 @@ def test_schedule_once_keeps_omp_provider_and_model(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
     monkeypatch.setattr(loop_runtime, "_event_time", lambda when: ("2h", True))
     monkeypatch.setattr(loop_runtime, "_run", lambda *args, **kwargs: (0, ""))
+    monkeypatch.setenv("LUPIN_LOOP_USER", "loops")
 
     assert loop_runtime.schedule_once(
         "+2h", ["widgets"], platform="omp", provider="openai", model="openai/gpt-5.2"
@@ -261,6 +262,48 @@ def test_schedule_once_keeps_omp_provider_and_model(monkeypatch, tmp_path: Path)
         "omp", "openai", "openai/gpt-5.2"
     )
 
+
+
+def test_loop_user_prefers_lupin_loop_user(monkeypatch):
+    monkeypatch.setenv("LUPIN_LOOP_USER", "loops")
+    monkeypatch.setenv("USER", "grace")
+
+    assert loop_runtime._loop_user() == "loops"
+
+
+def test_loop_user_falls_back_to_user(monkeypatch):
+    monkeypatch.delenv("LUPIN_LOOP_USER", raising=False)
+    monkeypatch.setenv("USER", "grace")
+
+    assert loop_runtime._loop_user() == "grace"
+
+
+def test_missing_loop_user_is_a_clear_error(monkeypatch):
+    monkeypatch.delenv("LUPIN_LOOP_USER", raising=False)
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.setattr(loop_runtime, "_run", lambda *args, **kwargs: pytest.fail("systemd ran"))
+
+    with pytest.raises(loop_runtime.LoopError, match="set LUPIN_LOOP_USER or USER"):
+        loop_runtime._systemd_run("widgets", "loop", ["lupin", "loop", "worker"])
+
+
+def test_schedule_once_without_a_loop_user_writes_no_schedule(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "_event_time", lambda when: ("2h", True))
+    monkeypatch.setattr(loop_runtime, "_run", lambda *args, **kwargs: pytest.fail("systemd ran"))
+    monkeypatch.delenv("LUPIN_LOOP_USER", raising=False)
+    monkeypatch.delenv("USER", raising=False)
+
+    with pytest.raises(loop_runtime.LoopError, match="set LUPIN_LOOP_USER or USER"):
+        loop_runtime.schedule_once("+2h", ["widgets"])
+
+    assert not (tmp_path / "once").exists()
+
+
+def test_service_environment_forwards_the_canonical_fetcher(monkeypatch):
+    monkeypatch.setenv("LUPIN_GH_CANONICAL_FETCHER", "fetcher-host")
+
+    assert "--setenv=LUPIN_GH_CANONICAL_FETCHER=fetcher-host" in loop_runtime._service_environment()
 
 
 def test_once_fire_continues_after_one_repo_quota_error(monkeypatch, tmp_path, capsys):

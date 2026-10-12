@@ -305,7 +305,7 @@ def _read_comments(
     """Return (comments, error): recent comments per open issue, paginated.
 
     Goes through `gh_cache.cached_gh_json` (issue #35) -- only
-    `gh_cache.CANONICAL_GH_FETCHER` runs the loop below on a cache miss.
+    the canonical fetcher (`LUPIN_GH_CANONICAL_FETCHER`) runs the loop below on a cache miss.
     """
 
     def _fetch():
@@ -804,7 +804,7 @@ def load_github(repo_path: str, state: str = "open", *, connection: dict | None 
             cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).date().isoformat()
             issue_args.extend(["--search", f"closed:>={cutoff}"])
             max_issues = 100
-        # gh_cache.cached_gh_json (issue #35): only CANONICAL_GH_FETCHER runs
+        # gh_cache.cached_gh_json (issue #35): only the canonical fetcher runs
         # this `gh issue list` call on a cache miss.
         issues, error = gh_cache.cached_gh_json(
             owner, name, f"issues:{state}",
@@ -877,7 +877,7 @@ def _read_dependencies(repo_path: str, owner: str, name: str, *, connection: dic
     travels with the link, so a target in another repo is still usable.
 
     Goes through `gh_cache.cached_gh_json` (issue #35) -- only
-    `gh_cache.CANONICAL_GH_FETCHER` runs the loop below on a cache miss.
+    the canonical fetcher (`LUPIN_GH_CANONICAL_FETCHER`) runs the loop below on a cache miss.
     """
 
     def _fetch():

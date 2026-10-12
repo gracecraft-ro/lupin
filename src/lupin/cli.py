@@ -310,14 +310,14 @@ def _redis_conn_args(parser: argparse.ArgumentParser) -> None:
 
 def _claim_args(parser: argparse.ArgumentParser) -> None:
     """Shared by `claim` and `renew-claim` -- both take a TTL."""
-    parser.add_argument("target", help="OWNER/REPO#N, e.g. gracecraft/lupin#6")
+    parser.add_argument("target", help="OWNER/REPO#N")
     parser.add_argument("--holder", required=True)
     parser.add_argument("--ttl", type=float, default=claims.DEFAULT_TTL, help="claim TTL in seconds")
     _redis_conn_args(parser)
 
 
 def _release_claim_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("target", help="OWNER/REPO#N, e.g. gracecraft/lupin#6")
+    parser.add_argument("target", help="OWNER/REPO#N")
     parser.add_argument("--holder", required=True)
     _redis_conn_args(parser)
 

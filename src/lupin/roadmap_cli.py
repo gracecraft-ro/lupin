@@ -69,7 +69,7 @@ def _issue_state(
     broken link and doesn't exist at all).
 
     Goes through `gh_cache.cached_gh_json` (issue #35) -- only
-    `gh_cache.CANONICAL_GH_FETCHER` runs `gh issue view` on a cache miss.
+    the canonical fetcher (`LUPIN_GH_CANONICAL_FETCHER`) runs `gh issue view` on a cache miss.
     `owner`/`name` are the blocker's repo identity, already known by
     `build_roadmap`'s caller -- passed in rather than re-looked-up here.
     """

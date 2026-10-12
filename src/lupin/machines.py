@@ -211,7 +211,7 @@ def _write_record(
     totals -- `quota` only keeps one summarized row per provider, which is
     enough for `place`'s scoring but not for the `/usage` page's richer
     tables. Reported here, by whichever host actually has the provider
-    logins, so a reader (pihome, which has none) never needs its own.
+    logins, so a reader with no logins never needs its own.
     `actions` is read live from `agent.py`'s own `ACTIONS` table (imported
     here, not at module load, to avoid a top-level import cycle -- `agent.py`
     imports this module to check `draining` state). This way the list can

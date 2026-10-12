@@ -201,7 +201,7 @@ def _delegation_doc_template(repo: str) -> str:
 
 
 def code_repos() -> list[dict]:
-    """Every directory under /code, with whether it can run a loop."""
+    """Every directory under CODE_DIR, with whether it can run a loop."""
     out = []
     enabled = set(enabled_repos())
     try:
@@ -2183,14 +2183,17 @@ def _render_add_panel(tab: str, repos: list[dict]) -> str:
     if rows:
         picker = "".join(rows)
     elif local_repos:
-        picker = "<p class=dim>Every repo under /code is already on the schedule.</p>"
+        picker = f"<p class=dim>Every repo under {esc(CODE_DIR)} is already on the schedule.</p>"
     elif repos:
-        picker = "<p class=dim>No local repos under /code. Fleet repos are listed below.</p>"
+        picker = (
+            f"<p class=dim>No local repos under {esc(CODE_DIR)}. "
+            "Fleet repos are listed below.</p>"
+        )
     else:
-        picker = "<p class=dim>No repos found under /code.</p>"
+        picker = f"<p class=dim>No repos found under {esc(CODE_DIR)}.</p>"
     body = (
         f"{clone}"
-        f"<div style='font-size:12px;color:var(--ink3);margin:14px 0 6px'>Or pick a directory in /code</div>"
+        f"<div style='font-size:12px;color:var(--ink3);margin:14px 0 6px'>Or pick a directory in {esc(CODE_DIR)}</div>"
         f"{picker}"
     )
     return f"<div class=card>{tabs}{body}</div>"
@@ -2247,7 +2250,7 @@ def _render_remove_panel(repo: str) -> str:
         "<form method=post action=/repos/remove class=row>"
         f"<div><b>Remove {esc(repo)} from the schedule?</b>"
         "<div class=dim>Stops scheduled and one-off runs. A live session keeps "
-        "running. Files in /code are untouched. Type the repo name to confirm.</div></div>"
+        f"running. Files in {esc(CODE_DIR)} are untouched. Type the repo name to confirm.</div></div>"
         f"<input type=hidden name=repo value='{esc(repo)}'>"
         f"<input type=text name=confirm placeholder='{esc(repo)}' required>"
         "<button type=submit>Remove repo</button>"

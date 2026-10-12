@@ -125,7 +125,7 @@ def _read_quests(repo_path: str, owner: str, name: str, *, connection: dict | No
     roadmap._read_dependencies.
 
     Goes through `gh_cache.cached_gh_json` (issue #35) -- only
-    `gh_cache.CANONICAL_GH_FETCHER` runs the loop below on a cache miss.
+    the canonical fetcher (`LUPIN_GH_CANONICAL_FETCHER`) runs the loop below on a cache miss.
     """
 
     def _fetch():
@@ -692,7 +692,7 @@ def _locate_issue(
     `None` if no enabled repo has it.
 
     The lookup itself goes through `gh_cache.cached_gh_json` (issue #35),
-    same as `roadmap_cli._issue_state` -- only `CANONICAL_GH_FETCHER` runs
+    same as `roadmap_cli._issue_state` -- only the canonical fetcher runs
     `gh issue view` on a cache miss.
     """
     for repo in repos:
