@@ -1093,7 +1093,7 @@ def test_poll_once_writes_cmdlog_entries_for_terminal_outcomes(redis_port, flush
 
 
 class _FlakyZremClient:
-    """Wraps a real Redis client. The first ZREM raises. Later calls pass through."""
+    """Wrap a real Redis client. The first ZREM fails."""
 
     def __init__(self, client, exc):
         self._client = client
@@ -1112,17 +1112,15 @@ class _FlakyZremClient:
 
 def _flaky_zrem(monkeypatch, redis_port):
     flaky = _FlakyZremClient(
-        agent._client("127.0.0.1", redis_port, None, None),
+        agent.debrief_client("127.0.0.1", redis_port),
         redis_lib.exceptions.ConnectionError("injected ZREM failure"),
     )
-    monkeypatch.setattr(agent, "_client", lambda *args, **kwargs: flaky)
+    monkeypatch.setattr(agent, "debrief_client", lambda *args, **kwargs: flaky)
     return flaky
 
 
 def test_zrem_error_after_stop_is_retried_and_result_and_audit_kept(redis_port, flush_redis, monkeypatch):
-    """ZREM after a stop run fails once. The retry works.
-    The result key and the audit line are still written.
-    """
+    """A failed stop ZREM retries. Check the result and audit entry."""
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     cmd_id = commands.enqueue("jesus", "loop.stop", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)
 
@@ -1145,15 +1143,13 @@ def test_zrem_error_after_stop_is_retried_and_result_and_audit_kept(redis_port, 
 
 
 def test_zrem_error_on_expiry_is_retried_and_command_never_runs(redis_port, flush_redis, monkeypatch):
-    """ZREM on the expiry path fails once. The retry works.
-    The command is marked expired, never runs, and the audit line is written.
-    """
+    """A failed expiry ZREM retries. Check its state and audit entry."""
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     now = time.time()
     fields = {
         "v": 1, "id": "expired2", "target": "jesus", "action": "loop.stop",
         "params": {"repo": "lupin"}, "actor": "grace", "issuer": "test-host",
-        "issued_at": now - 200, "expires_at": now - 80,  # 80s past expiry, beyond the 30s skew
+        "issued_at": now - 200, "expires_at": now - 80,  # 80s past expiry; limit is 30s
     }
     cmd = {**fields, "sig": commands.sign(fields, KEY)}
     raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
