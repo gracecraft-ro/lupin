@@ -133,15 +133,9 @@ def select_orchestrator(
         if not isinstance(rows, list):
             continue
         rows = [row for row in rows if isinstance(row, dict)]
-        usable = [
-            row for row in rows
-            if row.get("provider") == provider
-            and isinstance(row.get("used_pct"), (int, float))
-            and isinstance(row.get("resets_at"), (int, float))
-        ]
-        if not usable or pace.blocked(rows, provider, now_ms):
+        headroom = pace.headroom(rows, provider, now_ms)
+        if headroom is None:
             continue
-        headroom = min(100 - row["used_pct"] for row in usable)
         choices.append((headroom, -index, {
             "platform": platform,
             "provider": provider if platform == "omp" else None,

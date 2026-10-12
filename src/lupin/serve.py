@@ -1353,6 +1353,12 @@ def quota_status(row: dict, now_ms=None) -> tuple[str, str]:
     return "On pace", ""
 
 
+def quota_row_name(row: dict) -> str:
+    """The provider, plus the account when the provider has more than one."""
+    account = row.get("account")
+    return f"{row['provider']} ({account})" if account else row["provider"]
+
+
 def render_quota_summary(rows: list[dict], now_ms: int) -> str:
     measured = [row for row in rows if quota_progress_pct(row) is not None]
     ahead = [row for row in measured if quota_status(row, now_ms)[1] == "ahead"]
@@ -1363,18 +1369,18 @@ def render_quota_summary(rows: list[dict], now_ms: int) -> str:
     ]
     next_reset = min(resets, key=lambda row: row["resets_at"], default=None)
     attention = (
-        ", ".join(f"{row['provider']} {quota_duration_label(row)}" for row in ahead)
+        ", ".join(f"{quota_row_name(row)} {quota_duration_label(row)}" for row in ahead)
         if ahead else "None"
     )
     most_value = (
-        f"{most_used['provider']} · {quota_duration_label(most_used)}"
+        f"{quota_row_name(most_used)} · {quota_duration_label(most_used)}"
         if most_used else "Not available"
     )
     most_note = (
         f"{quota_progress_pct(most_used):.0f}% used" if most_used else "No quota data"
     )
     next_value = (
-        f"{next_reset['provider']} · {quota_duration_label(next_reset)}"
+        f"{quota_row_name(next_reset)} · {quota_duration_label(next_reset)}"
         if next_reset else "Not available"
     )
     next_note = (
@@ -1411,6 +1417,7 @@ def render_quota_row(row: dict, now_ms: int) -> str:
         else f"<div class=quota-meter-elapsed style='left:{elapsed:.1f}%' "
         "title='time elapsed in window'></div>"
     )
+    account_html = f"<div class=dim>{esc(row['account'])}</div>" if row.get("account") else ""
     aria_label = "quota usage unavailable"
     if used is not None and elapsed is not None:
         aria_label = f"{used:.0f}% used, {elapsed:.0f}% of window elapsed"
@@ -1421,6 +1428,7 @@ def render_quota_row(row: dict, now_ms: int) -> str:
         f"data-resets-at-ms='{esc(reset_timestamp)}'>"
         "<div><div class=quota-window>"
         f"{esc(quota_duration_label(row))}</div>"
+        f"{account_html}"
         f"<div class='quota-status {status_class}'>{esc(status)}</div></div>"
         "<div>"
         f"<div class=quota-values><span><strong>{available_text}</strong> available</span>"

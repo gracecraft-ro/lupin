@@ -1,6 +1,7 @@
-"""Shared cache for quota data (issue #38): one fleet-wide account per
+"""Shared cache for quota data (issue #38): one fleet-wide reading per
 provider (Claude, opencode-go, OpenAI/Codex -- see issue #36), not a
-per-machine fact. `quota.quota_usage()` already reads whichever provider
+per-machine fact. A provider can have more than one login. Each row then
+has an `account` label (see `quota.py`). `quota.quota_usage()` already reads whichever provider
 this machine has credentials for; this module adds the fleet-shared
 publish step so `lupin serve` (pinned to a machine with no credentials,
 see issue #35) and `lupin quota` on any other machine see the same real
