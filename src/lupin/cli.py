@@ -697,7 +697,7 @@ def _cmd_route(args: argparse.Namespace) -> int:
             bmo_available=args.bmo_available,
             primary_effort=args.primary_effort,
         )
-    except ValueError as err:
+    except route_mod.RouteInputError as err:
         print(f"lupin route: {err}", file=sys.stderr)
         return 2
     if args.json:

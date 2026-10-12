@@ -113,6 +113,10 @@ class RouteTests(unittest.TestCase):
             route.route("_comment", "size-m", quota_rows=[])
         self.assertNotIn("valid: _comment", str(caught.exception))
 
+    def test_unknown_size_raises_naming_the_valid_ones(self):
+        with self.assertRaisesRegex(route.RouteInputError, "unknown size 'm'.*size-m"):
+            route.route("coding", "m", tiers=_TIERS, quota_rows=[])
+
     def test_small_coding_issue_gets_tier0_bmo(self):
         result = route.route("coding", "size-xs", tiers=_TIERS, quota_rows=[])
 

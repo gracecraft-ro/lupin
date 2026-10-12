@@ -51,6 +51,11 @@ _SIZE_TO_TIER = {
 
 _TIER_ORDER = ("tier0", "tier1", "tier2")
 
+
+class RouteInputError(ValueError):
+    """`route()` got a category or size it does not know."""
+
+
 # route()'s models, mapped to the quota-tracked provider that serves them.
 # Moved here from place.py (issue #36) -- quota pacing is route()'s concern
 # now, so it needs this mapping too. place.py still exposes the same name
@@ -230,10 +235,12 @@ def route(
     # Keys that start with "_" (like "_comment") are notes, not categories.
     valid = sorted(key for key in all_tiers if not key.startswith("_"))
     if category not in valid:
-        raise ValueError(f"unknown category {category!r}; valid: {', '.join(valid)}")
+        raise RouteInputError(f"unknown category {category!r}; valid: {', '.join(valid)}")
+    if size not in _SIZE_TO_TIER:
+        raise RouteInputError(f"unknown size {size!r}; valid: {', '.join(_SIZE_TO_TIER)}")
     row = all_tiers[category]["tiers"]
 
-    tier = _resolve_tier(row, _SIZE_TO_TIER.get(size, "tier1"))
+    tier = _resolve_tier(row, _SIZE_TO_TIER[size])
     if (
         tier == "tier0"
         and not bmo_available

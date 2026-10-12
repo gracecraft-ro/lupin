@@ -812,9 +812,19 @@ def test_pause_all_severity_beats_first_non_zero_wins():
     assert code_a == code_b == 1
 
 
-def test_route_unknown_category_is_a_usage_error_not_a_traceback(capsys):
+def test_route_unknown_category_or_size_is_a_usage_error_not_a_traceback(capsys):
     assert cli.main(["route", "code", "size-m"]) == 2
     err = capsys.readouterr().err
-    assert "Traceback" not in err
     assert "unknown category 'code'" in err
     assert "coding" in err
+
+    assert cli.main(["route", "coding", "m"]) == 2
+    err = capsys.readouterr().err
+    assert "unknown size 'm'" in err
+    assert "size-m" in err
+
+
+def test_route_does_not_hide_a_value_error_from_inside_route():
+    with mock.patch.object(cli.route_mod, "route", side_effect=ValueError("bad tiers file")):
+        with pytest.raises(ValueError, match="bad tiers file"):
+            cli.main(["route", "coding", "size-m"])
