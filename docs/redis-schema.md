@@ -301,10 +301,10 @@ miss it reports "no data yet" instead.
 
 ### `quota-snapshot`
 
-Backs `lupin quota` and `serve.py`'s `/usage` page (issue #38). Quota is
-one shared account per provider (Claude, opencode-go, OpenAI/Codex — issue
-#36), so one real reading per provider is the fleet's answer, not
-something to merge across machines.
+Backs `lupin quota` and `serve.py`'s `/usage` page (issue #38). Every
+machine sees the same accounts (Claude, opencode-go, OpenAI/Codex — issue
+#36), so one real reading per provider is the fleet's answer. Do not merge
+readings from different machines.
 
 ```json
 {
@@ -326,7 +326,12 @@ own, so each carries its own `fetched_at`/`fetched_by`. `rows` is
 `quota.quota_usage()`'s own row shape for that provider (one row per
 window: 5 hours, 7 days, 30 days), kept whole rather than collapsed to one
 number, so a reader can show duration, percent left, and time to reset —
-not just one of them. A provider's `duration` is written as the plain
+not just one of them. When a provider has more than one login, each row
+has an `account` label: the plan name (`free`, `plus`), or the plan name
+and six hex characters when two logins have the same plan. A provider with
+one login has no `account` key. The label never holds an email or an
+account ID. One machine writes the whole entry, so that machine must have
+every login for the provider. A provider's `duration` is written as the plain
 string `quota.QuotaDuration`'s own value serializes to (`"PT5H"` etc.);
 `quota_cache.py` converts it back to the real enum on read.
 

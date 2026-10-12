@@ -7,11 +7,14 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from lupin import loop_runtime
+from lupin.quota import QuotaDuration
 
 
 def test_systemd_run_uses_nixos_sudo_wrapper_when_not_on_path(monkeypatch, tmp_path):
@@ -1767,3 +1770,53 @@ def test_module_imports_in_a_fresh_process(module: str):
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def _quota_entry(rows):
+    return {"rows": rows, "fetched_at": datetime.now(timezone.utc).isoformat(), "fetched_by": "h"}
+
+
+def _quota_row(provider, used_pct, resets_in_ms, duration, now, account=None):
+    row = {
+        "provider": provider,
+        "duration": duration,
+        "used_pct": used_pct,
+        "resets_at": now * 1000 + resets_in_ms,
+    }
+    if account:
+        row["account"] = account
+    return row
+
+
+_HOUR_MS = 60 * 60 * 1000
+
+
+def test_select_orchestrator_uses_the_account_with_quota_left():
+    now = time.time()
+    snapshot = {
+        "openai": _quota_entry([
+            _quota_row("openai", 100, 20 * 24 * _HOUR_MS, QuotaDuration.MONTHLY, now, "free"),
+            _quota_row("openai", 10, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now, "plus"),
+        ]),
+        "claude": _quota_entry([_quota_row("claude", 50, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now)]),
+    }
+
+    choice = loop_runtime.select_orchestrator(["claude", "openai/gpt-5"], snapshot, now=now)
+
+    # The free account is used up. Headroom is the paid account's 90%, not 0%.
+    assert choice == {"platform": "omp", "provider": "openai", "model": "openai/gpt-5"}
+
+
+def test_select_orchestrator_skips_a_provider_when_every_account_is_blocked():
+    now = time.time()
+    snapshot = {
+        "openai": _quota_entry([
+            _quota_row("openai", 100, 20 * 24 * _HOUR_MS, QuotaDuration.MONTHLY, now, "free"),
+            _quota_row("openai", 100, 4 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now, "plus"),
+        ]),
+        "claude": _quota_entry([_quota_row("claude", 90, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now)]),
+    }
+
+    choice = loop_runtime.select_orchestrator(["openai/gpt-5", "claude"], snapshot, now=now)
+
+    assert choice["platform"] == "claude"

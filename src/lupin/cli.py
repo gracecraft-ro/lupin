@@ -806,7 +806,8 @@ def _cmd_quota(args: argparse.Namespace) -> int:
             label = duration.label if isinstance(duration, quota.QuotaDuration) else str(duration)
             left = max(0.0, 100 - row["used_pct"])
             resets = serve.time_until_reset(row.get("resets_at"))
-            print(f"{provider:<12} {label:<9} {left:.0f}% left   resets in {resets:<8} (fetched {age} via {fetched_by})")
+            name = f"{provider}/{row['account']}" if row.get("account") else provider
+            print(f"{name:<12} {label:<9} {left:.0f}% left   resets in {resets:<8} (fetched {age} via {fetched_by})")
     return 0
 
 

@@ -139,7 +139,9 @@ Profiles are local to each worker. Set them on each worker that can start the
 repo. At loop start, Lupin uses quota data from the shared cache. The data
 must be less than five minutes old and include usable quota for a candidate.
 Lupin skips blocked providers, then picks the candidate with the most quota
-headroom across its known windows. Profile order breaks ties. If no candidate
+headroom across its known windows. For a provider with more than one login,
+headroom is that of the best login that is not blocked. Profile order breaks
+ties. If no candidate
 has fresh, usable quota, Lupin refuses to start the loop.
 
 Explicit `--platform`, `--provider`, or `--model` options select a fixed
@@ -267,6 +269,15 @@ each machine's local 7-day token and cost totals, stored in separate
 per-machine Redis snapshots. The page adds totals by provider and marks a
 snapshot stale after five minutes. Each snapshot expires after 24 hours.
 Systemd runs `lupin quota` every five minutes on Jesus and Ralpha.
+
+A provider can have more than one login, for example a free and a paid
+OpenAI account. `omp usage` reports each login. Lupin labels each row with
+the plan name (`free`, `plus`). The `/usage` page and `lupin quota` show
+the label. Lupin never shows an email or account ID. `omp` chooses the
+login for each session. So a provider is blocked only when all of its
+logins are blocked. The most quota left is the best open login. A machine
+that publishes a provider replaces the whole entry for that provider, so
+each machine that publishes it needs every login for it.
 
 ## How a slot's limit (`max`) works
 

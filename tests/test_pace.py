@@ -197,5 +197,94 @@ class EarliestResetTests(unittest.TestCase):
         self.assertIsNone(pace.earliest_reset(rows, ["claude"], 0))
 
 
+def _acct(account, *args, **kwargs):
+    return {**_row(*args, **kwargs), "account": account}
+
+
+class AccountTests(unittest.TestCase):
+    """A provider can have more than one account. `omp` picks the account,
+    so only an all-accounts-blocked provider is blocked."""
+
+    def test_one_blocked_account_does_not_block_the_provider(self):
+        rows = [
+            _acct("free", "openai", 100, 20 * 24 * HOUR_MS, duration=QuotaDuration.MONTHLY),
+            _acct("plus", "openai", 1, 2 * HOUR_MS),
+        ]
+        self.assertFalse(pace.blocked(rows, "openai", 0))
+
+    def test_provider_is_blocked_when_every_account_is_blocked(self):
+        rows = [
+            _acct("free", "openai", 100, 20 * 24 * HOUR_MS, duration=QuotaDuration.MONTHLY),
+            _acct("plus", "openai", 100, 4 * HOUR_MS),
+        ]
+        self.assertTrue(pace.blocked(rows, "openai", 0))
+
+    def test_a_blocked_window_still_blocks_its_own_account(self):
+        # plus is fine on 5 hours but used up on 7 days, so plus is blocked.
+        rows = [
+            _acct("plus", "openai", 1, 2 * HOUR_MS),
+            _acct("plus", "openai", 100, 50 * HOUR_MS, duration=QuotaDuration.WEEKLY),
+        ]
+        self.assertTrue(pace.blocked(rows, "openai", 0))
+
+    def test_an_account_with_no_usable_rows_is_not_counted(self):
+        rows = [
+            _acct("free", "openai", 100, 4 * HOUR_MS),
+            {"provider": "openai", "account": "plus", "note": "no usage"},
+        ]
+        self.assertTrue(pace.blocked(rows, "openai", 0))
+
+    def test_lean_in_ignores_a_blocked_accounts_longer_window(self):
+        rows = [
+            _acct("free", "openai", 100, 20 * 24 * HOUR_MS, duration=QuotaDuration.MONTHLY),
+            _acct("plus", "openai", 10, 20 * MIN_MS),
+        ]
+        self.assertTrue(pace.lean_in(rows, "openai", 0))
+
+    def test_lean_in_needs_every_open_account_to_qualify(self):
+        rows = [
+            _acct("a", "openai", 10, 20 * MIN_MS),  # surplus, resets soon
+            _acct("b", "openai", 80, 4 * HOUR_MS),  # no surplus
+        ]
+        self.assertFalse(pace.lean_in(rows, "openai", 0))
+
+    def test_lean_in_is_false_when_every_account_is_blocked(self):
+        rows = [
+            _acct("a", "openai", 100, 20 * MIN_MS),
+            _acct("b", "openai", 100, 20 * MIN_MS),
+        ]
+        self.assertFalse(pace.lean_in(rows, "openai", 0))
+
+
+class HeadroomTests(unittest.TestCase):
+    def test_one_account_uses_its_most_used_window(self):
+        rows = [
+            _row("claude", 30, 4 * HOUR_MS),
+            _row("claude", 60, 50 * HOUR_MS, duration=QuotaDuration.WEEKLY),
+        ]
+        self.assertEqual(pace.headroom(rows, "claude", 0), 40)
+
+    def test_best_open_account_wins(self):
+        rows = [
+            _acct("a", "openai", 70, 4 * HOUR_MS),
+            _acct("b", "openai", 20, 4 * HOUR_MS),
+        ]
+        self.assertEqual(pace.headroom(rows, "openai", 0), 80)
+
+    def test_a_blocked_account_never_sets_the_headroom(self):
+        rows = [
+            _acct("free", "openai", 100, 20 * 24 * HOUR_MS, duration=QuotaDuration.MONTHLY),
+            _acct("plus", "openai", 10, 4 * HOUR_MS),
+        ]
+        self.assertEqual(pace.headroom(rows, "openai", 0), 90)
+
+    def test_none_when_blocked_or_when_there_is_no_data(self):
+        self.assertIsNone(pace.headroom([_row("claude", 100, 4 * HOUR_MS)], "claude", 0))
+        self.assertIsNone(pace.headroom([], "claude", 0))
+        self.assertIsNone(pace.headroom(
+            [{"provider": "claude", "note": "no key"}], "claude", 0,
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ from unittest import mock
 import pytest
 import redis as redis_lib
 
-from lupin import agent, benchmark_fetch, cli, commands, loop_runtime, loops, machines, slots
+from lupin import agent, benchmark_fetch, cli, commands, loop_runtime, loops, machines, quota, slots
 
 
 @pytest.fixture(autouse=True)
@@ -810,6 +810,31 @@ def test_pause_all_severity_beats_first_non_zero_wins():
         code_b = cli.main(["pause", "--all"])
 
     assert code_a == code_b == 1
+
+
+def test_quota_prints_the_account_beside_the_provider(monkeypatch, capsys):
+    rows = [
+        {"provider": "openai", "account": "free", "duration": quota.QuotaDuration.MONTHLY,
+         "used_pct": 100, "resets_at": None},
+        {"provider": "openai", "account": "plus", "duration": quota.QuotaDuration.FIVE_HOURS,
+         "used_pct": 1, "resets_at": None},
+        {"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 40, "resets_at": None},
+    ]
+    merged = {
+        provider: {"rows": [r for r in rows if r["provider"] == provider],
+                   "fetched_at": None, "fetched_by": "h"}
+        for provider in ("openai", "claude")
+    }
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: {})
+    monkeypatch.setattr(cli.quota_cache, "refresh_snapshot", lambda **connection: merged)
+    monkeypatch.setattr(cli.usage_cache, "refresh_snapshot", lambda **connection: {})
+
+    assert cli.main(["quota"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert any(line.startswith("openai/free") and "0% left" in line for line in lines)
+    assert any(line.startswith("openai/plus") and "99% left" in line for line in lines)
+    assert any(line.startswith("claude ") and "60% left" in line for line in lines)
 
 
 def test_route_unknown_category_or_size_is_a_usage_error_not_a_traceback(capsys):

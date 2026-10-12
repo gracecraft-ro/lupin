@@ -254,6 +254,33 @@ class QuotaRenderingTests(unittest.TestCase):
         self.assertIn("via jesus", page)
         self.assertIn("stale", page)
 
+    def test_usage_page_names_the_account_of_each_row(self):
+        reset_at_ms = 1_790_547_474_348
+        rows = [
+            {"provider": "openai", "account": "free", "duration": serve.QuotaDuration.MONTHLY,
+             "used_pct": 100.0, "resets_at": reset_at_ms, "generated_at": "2026-01-01 00:00:00"},
+            {"provider": "openai", "account": "plus", "duration": serve.QuotaDuration.FIVE_HOURS,
+             "used_pct": 1.0, "resets_at": reset_at_ms, "generated_at": "2026-01-01 00:00:00"},
+        ]
+        snapshot = {"openai": {
+            "rows": rows, "fetched_at": "2026-01-01T00:00:00+00:00", "fetched_by": "jesus",
+        }}
+        with (
+            mock.patch.object(quota_cache, "read_snapshot", return_value=snapshot),
+            mock.patch.object(usage_cache, "read_snapshot", return_value={}),
+        ):
+            page = serve.render_usage().decode()
+
+        self.assertIn("<div class=dim>free</div>", page)
+        self.assertIn("<div class=dim>plus</div>", page)
+        # The summary names the account too: free is the most used row.
+        self.assertIn("openai (free)", page)
+
+    def test_usage_page_has_no_account_line_for_one_account(self):
+        row = {"provider": "claude", "duration": serve.QuotaDuration.FIVE_HOURS,
+               "used_pct": 40.0, "resets_at": 1_790_547_474_348}
+        self.assertNotIn("class=dim>", serve.render_quota_row(row, 0))
+
     def test_quota_note_and_error_rows_render_as_dim_text(self):
         omp_snapshot = {
             "omp": {

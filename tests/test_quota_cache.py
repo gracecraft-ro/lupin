@@ -124,6 +124,24 @@ def test_refresh_publishes_real_rows_only(redis_port, flush_redis):
     assert slots_redis.status(**_kw(redis_port))["quota-fetch/claude"]["holders"] == 0
 
 
+def test_account_labels_survive_publish_and_read(redis_port, flush_redis):
+    rows = [
+        {"provider": "openai", "account": "free", "duration": quota.QuotaDuration.MONTHLY,
+         "used_pct": 100, "resets_at": 2},
+        {"provider": "openai", "account": "plus", "duration": quota.QuotaDuration.FIVE_HOURS,
+         "used_pct": 1, "resets_at": 1},
+    ]
+    with mock.patch.object(quota, "quota_usage", return_value=rows):
+        quota_cache.refresh_snapshot(**_kw(redis_port))
+
+    read_back = quota_cache.read_snapshot(**_kw(redis_port))["openai"]["rows"]
+
+    assert [(row["account"], row["duration"]) for row in read_back] == [
+        ("free", quota.QuotaDuration.MONTHLY),
+        ("plus", quota.QuotaDuration.FIVE_HOURS),
+    ]
+
+
 def test_refresh_does_not_republish_a_fresh_provider(redis_port, flush_redis):
     existing = {
         "claude": {
