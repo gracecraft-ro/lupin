@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -1564,6 +1565,67 @@ def test_stop_keeps_a_branch_with_unmerged_commits(monkeypatch, tmp_path: Path, 
     assert not worktree.exists()
     assert branch in _git_out(checkout, "branch", "--list")
     assert f"branch {branch} kept" in result
+
+
+def test_main_dispatches_monitor(monkeypatch):
+    # `worker` runs `lupin loop monitor`. An action with no branch in `main`
+    # falls through to `return 1` and prints nothing.
+    calls = []
+    monkeypatch.setattr(loop_runtime, "monitor", lambda *args: calls.append(args) or 0)
+
+    rc = loop_runtime.main([
+        "monitor", "--repo", "widgets", "--platform", "claude",
+        "--session", "lupin-loops", "--prompt-file", "prompt.md", "--resume",
+    ])
+
+    assert rc == 0
+    assert calls == [("widgets", "claude", "lupin-loops", "prompt.md", True)]
+
+
+def test_main_says_so_when_an_action_has_no_handler(monkeypatch, capsys):
+    parsed = argparse.Namespace(action="bogus")
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", lambda self, argv=None: parsed)
+
+    rc = loop_runtime.main(["bogus"])
+
+    assert rc == 1
+    assert "no handler for action bogus" in capsys.readouterr().err
+
+
+def _setup_worker(monkeypatch, tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    code_dir = tmp_path / "code"
+    (code_dir / "widgets").mkdir(parents=True)
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", state_dir)
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", state_dir / "herdr-loops")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
+    monkeypatch.setattr(loop_runtime, "_redis_kwargs", lambda: {})
+
+
+def test_worker_marks_the_loop_failed_when_the_monitor_dies_before_a_workspace(monkeypatch, tmp_path: Path):
+    _setup_worker(monkeypatch, tmp_path)
+    monkeypatch.setattr(loop_runtime.slots_redis, "hold", lambda *args, **kwargs: 1)
+
+    rc = loop_runtime.worker("widgets", "claude", loop_runtime.SESSION_NAME, "prompt.md")
+
+    assert rc == 1
+    assert loop_runtime._read_metadata("widgets")["state"] == "failed"
+
+
+def test_worker_keeps_the_state_the_monitor_wrote(monkeypatch, tmp_path: Path):
+    _setup_worker(monkeypatch, tmp_path)
+
+    def hold(*args, **kwargs):
+        metadata = loop_runtime._read_metadata("widgets")
+        loop_runtime._write_metadata("widgets", {**metadata, "state": "needs_attention"})
+        return 1
+
+    monkeypatch.setattr(loop_runtime.slots_redis, "hold", hold)
+
+    rc = loop_runtime.worker("widgets", "claude", loop_runtime.SESSION_NAME, "prompt.md")
+
+    assert rc == 1
+    assert loop_runtime._read_metadata("widgets")["state"] == "needs_attention"
 
 
 @pytest.mark.parametrize(

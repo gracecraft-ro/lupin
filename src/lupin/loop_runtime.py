@@ -1261,7 +1261,7 @@ def worker(
     if resume:
         command.append("--resume")
     try:
-        return slots_redis.hold(
+        rc = slots_redis.hold(
             command, slot=f"loop-{repo}", holder=unit_name(repo), wait=0.0,
             ttl=LEASE_TTL, max_holders=1, **kwargs,
         )
@@ -1269,6 +1269,15 @@ def worker(
         metadata["state"] = "needs_attention"
         _write_metadata(repo, metadata)
         raise LoopError(f"fleet loop slot is full for {repo}")
+    if rc:
+        # The monitor records a workspace as soon as it has one. `starting` here
+        # means it died first. No later step ends that state, and `run` refuses
+        # a repo that stays in it.
+        latest = _read_metadata(repo)
+        if latest and latest.get("state") == "starting":
+            latest["state"] = "failed"
+            _write_metadata(repo, latest)
+    return rc
 
 
 def monitor(repo: str, platform: str, session: str, prompt_file: str, resume: bool) -> int:
@@ -1861,6 +1870,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.action == "herdr-server":
             return herdr_server(args.session)
+        if args.action == "monitor":
+            return monitor(args.repo, args.platform, args.session, args.prompt_file, args.resume)
         if args.action == "launch-agent":
             return launch_agent(
                 args.repo,
@@ -1904,4 +1915,5 @@ def main(argv: list[str] | None = None) -> int:
     except (IndexError, ValueError) as exc:
         print(f"lupin loop: invalid arguments: {exc}", file=sys.stderr)
         return 2
+    print(f"lupin loop: no handler for action {args.action}", file=sys.stderr)
     return 1
