@@ -815,11 +815,13 @@ def test_pause_all_severity_beats_first_non_zero_wins():
 def test_route_unknown_category_or_size_is_a_usage_error_not_a_traceback(capsys):
     assert cli.main(["route", "code", "size-m"]) == 2
     err = capsys.readouterr().err
+    assert len(err.splitlines()) == 1
     assert "unknown category 'code'" in err
     assert "coding" in err
 
     assert cli.main(["route", "coding", "m"]) == 2
     err = capsys.readouterr().err
+    assert len(err.splitlines()) == 1
     assert "unknown size 'm'" in err
     assert "size-m" in err
 

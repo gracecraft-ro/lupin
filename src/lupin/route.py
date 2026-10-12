@@ -230,6 +230,8 @@ def route(
     anything" (every pre-#36 test does this, to keep testing this
     function's tier/bmo logic undisturbed by live quota). See
     `_apply_pacing` for what a real `quota_rows` list does to the pick.
+
+    Raises `RouteInputError` for a category or size it does not know.
     """
     all_tiers = tiers if tiers is not None else _load_tiers()
     # Keys that start with "_" (like "_comment") are notes, not categories.

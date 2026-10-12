@@ -74,6 +74,7 @@ class MainCliTests(unittest.TestCase):
         with contextlib.redirect_stderr(err):
             rc = review_dispatch.main(["--category", "code", "--size", "size-m"])
         self.assertEqual(rc, 2)
+        self.assertEqual(len(err.getvalue().splitlines()), 1)
         self.assertIn("unknown category 'code'", err.getvalue())
 
     def test_issue_json_is_classified_first(self):
