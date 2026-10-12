@@ -13,6 +13,25 @@ This repo is `gracecraft-software/lupin`. The owner clones it to
 A loop agent does not edit the main checkout in `/code/lupin`. Each run gets
 its own Git worktree in the loop state directory. See "State" in `AGENTS.md`.
 
+## Lupin commands for a pass
+
+The `delegation-loop` skill gives the full steps. The short list:
+
+| Job | Command |
+| --- | --- |
+| Read the latest events | `lupin ledger read OWNER/REPO --json` |
+| Rank open issues | `lupin roadmap --repo lupin --stage all --json` |
+| Show dependencies | `lupin roadmap --repo lupin --dag` |
+| Select a model and a machine | `lupin place N --explain` |
+| Show provider quota | `lupin quota` |
+| Claim an issue | `lupin claim OWNER/REPO#N --holder SESSION` |
+| Claim related issues together | `lupin quest start --issue N --issue M` |
+| See machines and loops | `lupin machines`, `lupin loops`, `lupin peek lupin` |
+| Write a handoff | `/handoff`. It runs `lupin ledger append`. |
+
+`lupin roadmap --repo` reads the checkout in `LUPIN_LOOP_CODE_DIR` (default
+`/code`). Give the folder name of the checkout.
+
 ## Rule 1: push the branch, open the PR upstream
 
 The PR goes to upstream `OWNER/REPO`, against `release/next`. A worker pushes its
