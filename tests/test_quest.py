@@ -1017,7 +1017,7 @@ def test_ready_tasks_excludes_a_task_blocked_from_outside_the_quest():
     # #470 is not one of billing-v2's own tasks -- `_blockers_within_quest`
     # (quest status's per-task label) would drop this link and call #480
     # "ready". `ready_tasks` must not: it has no state for #470, so it
-    # treats #480 as still blocked, same as `lupin-ctl-copy.md`'s own
+    # treats #480 as still blocked, same as `docs/lupin-ctl-copy.md`'s own
     # "#470 is blocking" example.
     quest_data = _quest("billing-v2", [{"number": 480, "title": "ship billing", "done": False}])
     dag = {"repos": {"repo": [{"number": 480, "blockedBy": [{"repo": "repo", "number": 470}], "blocking": []}]}}

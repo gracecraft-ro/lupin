@@ -1,5 +1,5 @@
 """`lupin reconcile` (issue #14, the last ticket in #2's fleet-CLI split):
-apply the release rules in `lupin-ctl-copy.md` section 4, one shot per
+apply the release rules in `docs/lupin-ctl-copy.md` section 4, one shot per
 call. Something else (a timer, a cron job) calls this on a schedule; this
 module does not loop or sleep itself.
 
@@ -53,7 +53,7 @@ dropped):
 
 - `stale` (claims) and `stalled` (quest focus): both need an activity
   signal this project does not compute yet.
-- "Kept" lines (`lupin-ctl-copy.md`'s "focus is kept when..." list):
+- "Kept" lines (`docs/lupin-ctl-copy.md`'s "focus is kept when..." list):
   reconcile only prints a line when it changes something. Explaining why a
   focus was left alone needs the same missing activity/stall signals, so
   it is not shipped either.
@@ -80,7 +80,7 @@ from .roadmap import CODE_DIR
 
 CoordinatorUnreachable = slots_redis.CoordinatorUnreachable
 
-IDLE_AFTER = 1800.0  # 30 minutes, lupin-ctl-copy.md section 4 ("idle")
+IDLE_AFTER = 1800.0  # 30 minutes, docs/lupin-ctl-copy.md section 4 ("idle")
 
 _REDIS_ERRORS = (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)
 
