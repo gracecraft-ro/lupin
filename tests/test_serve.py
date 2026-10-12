@@ -3108,7 +3108,7 @@ class GatherReposTests(unittest.TestCase):
         assert "Enable on jesus" in page
         assert "action=/repos/enable" in page
         assert "action=/loops/start" not in page
-        assert "No local repos under /code" in page
+        assert f"No local repos under {serve.CODE_DIR}" in page
 
     def test_enabled_remote_repo_has_start_control(self):
         machine = {
@@ -3267,14 +3267,14 @@ class RepoRenderTests(unittest.TestCase):
     def test_add_panel_says_no_repos_found_when_code_repos_is_empty(self):
         """No local repos and no fleet report means there is nothing to add."""
         page = serve.render_repos(self._data(repos=[]), add="existing").decode()
-        self.assertIn("No repos found under /code", page)
+        self.assertIn(f"No repos found under {serve.CODE_DIR}", page)
         self.assertNotIn("already on the schedule", page)
 
     def test_add_panel_says_every_repo_already_enabled_when_none_are_left_to_add(self):
         repos = [{"repo": "widgets", "state": "enabled", "loopable": True,
                    "running": False, "machine": "pihome", "max": 2}]
         page = serve.render_repos(self._data(repos=repos), add="existing").decode()
-        self.assertIn("Every repo under /code is already on the schedule", page)
+        self.assertIn(f"Every repo under {serve.CODE_DIR} is already on the schedule", page)
         self.assertNotIn("No repos found", page)
 
     def test_doc_panel_view_mode_shows_the_text(self):
@@ -3798,6 +3798,25 @@ def test_debrief_shot_route_refuses_with_404_over_http(tmp_path, monkeypatch, re
             )
 
     assert refused.value.code == 404
+
+
+def test_add_panel_names_the_real_code_dir(monkeypatch):
+    monkeypatch.setattr(serve, "CODE_DIR", "/srv/checkouts")
+
+    panel = serve._render_add_panel("existing", [])
+
+    assert "No repos found under /srv/checkouts." in panel
+    assert "Or pick a directory in /srv/checkouts" in panel
+    assert "/code" not in panel
+
+
+def test_remove_panel_names_the_real_code_dir(monkeypatch):
+    monkeypatch.setattr(serve, "CODE_DIR", "/srv/checkouts")
+
+    panel = serve._render_remove_panel("widgets")
+
+    assert "Files in /srv/checkouts are untouched." in panel
+    assert "/code" not in panel
 
 
 if __name__ == "__main__":

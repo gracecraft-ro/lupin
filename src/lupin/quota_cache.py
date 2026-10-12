@@ -10,7 +10,7 @@ Modeled on `gh_cache.py` (#35) and `benchmark_fetch.py` (#17), adapted:
 
 - **5-minute cadence, not daily.** `CACHE_TTL` below.
 - **No fixed canonical hostname.** `gh_cache.py` pins one named machine
-  (`CANONICAL_GH_FETCHER`) because Grace corrected away from a lock-race
+  (set by `LUPIN_GH_CANONICAL_FETCHER`) because Grace corrected away from a lock-race
   model for GH specifically -- one machine is always known to hold the
   right `gh` login. Quota credentials for different providers can live on
   different machines, and which machine has which is not known in
@@ -203,7 +203,7 @@ def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connec
             # but this machine's own reading is still real. Surface it to
             # this machine's own caller rather than hiding it over a
             # cache-layer outage, same principle `gh_cache.py`'s
-            # `CANONICAL_GH_FETCHER` path uses ("still the authority even
+            # canonical-fetcher path uses ("still the authority even
             # when it can't publish for anyone else").
             updated[provider] = {"rows": rows, "fetched_at": _now_iso(), "fetched_by": hostname}
             continue

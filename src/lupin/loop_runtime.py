@@ -529,10 +529,18 @@ def _credential_properties(values: dict[str, str]) -> list[str]:
     return [f"--property=LoadCredential={name}:{source}" for name, source in values.items()]
 
 
+def _loop_user() -> str:
+    user = os.environ.get("LUPIN_LOOP_USER") or os.environ.get("USER")
+    if not user:
+        raise LoopError("no loop user: set LUPIN_LOOP_USER or USER")
+    return user
+
+
 def _service_environment() -> list[str]:
     names = (
         "HOME", "LUPIN_BACKEND", "LUPIN_REDIS_HOST", "LUPIN_REDIS_PORT",
         "LUPIN_REDIS_USERNAME", "LUPIN_STATE_ROOT", "LUPIN_EXECUTABLE", "LUPIN_HERDR_BIN",
+        "LUPIN_GH_CANONICAL_FETCHER",
         "LUPIN_LOOP_STATE_DIR", "LUPIN_LOOP_CODE_DIR", "LUPIN_LOOP_USER", "LUPIN_LOOP_GROUP",
         "LUPIN_LOOP_DEFAULT_REPOS", "LUPIN_LOOP_CLAUDE_MAX_CONCURRENT",
         "LUPIN_LOOP_CREDENTIALS_FILE", "LUPIN_LOOP_REDIS_PASSWORD_FILE",
@@ -559,7 +567,7 @@ def _systemd_run(
     credentials: dict[str, str] | None = None,
     claude_limits: bool = False,
 ) -> tuple[int, str]:
-    user = os.environ.get("LUPIN_LOOP_USER", os.environ.get("USER", "ghosta"))
+    user = _loop_user()
     group = os.environ.get("LUPIN_LOOP_GROUP", "users")
     unit = unit_name(repo, kind) if repo else f"lupin-{kind}-machine"
     argv = _sudo_argv(
@@ -1666,6 +1674,7 @@ def schedule_once(
     if not repos:
         raise LoopError("at least one repo is required for a one-off run")
     when_value, relative = _event_time(when)
+    user = _loop_user()
     identifier = hashlib.sha256(f"{time.time_ns()}:{os.getpid()}:{repos}".encode()).hexdigest()[:16]
     entry = {
         "id": identifier,
@@ -1685,7 +1694,6 @@ def schedule_once(
     os.chmod(path, 0o640)
     unit = f"lupin-once-{identifier}"
     command = _lupin_command("once-fire", "--id", identifier)
-    user = os.environ.get("LUPIN_LOOP_USER", os.environ.get("USER", "ghosta"))
     group = os.environ.get("LUPIN_LOOP_GROUP", "users")
     argv = _sudo_argv(
         "systemd-run", f"--unit={unit}", "--collect",

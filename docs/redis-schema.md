@@ -261,14 +261,14 @@ A machine that finds the slot already held just reads whatever is in
 
 Backs `place`/`quest`/`roadmap`'s read-only `gh` lookups (issue #35):
 issue state, issue body/labels, quest-labeled issues, dependency links.
-Written by `pihome` (the fixed value of `gh_cache.CANONICAL_GH_FETCHER`
-— a hard pin to one named machine, not a race any machine could win).
+Written by the machine named in `LUPIN_GH_CANONICAL_FETCHER`
+(a hard pin to one named machine, not a race any machine could win).
 Every other machine reads it while that fetcher is alive. When the pinned
 machine is not maintaining the cache — draining, offline, or never joined
 — a machine that needs the data fetches it and publishes through the same
 `gh-fetch/<owner>/<repo>` slot, so the first machine to win still answers
 for the fleet and no two machines fetch the same repo at once.
-Read by every machine, `pihome` included.
+Read by every machine, the pinned machine included.
 The roadmap uses the dashboard's Redis connection for this cache.
 
 ```json
@@ -294,9 +294,9 @@ different queries that must not share one cache entry: `issues:<state>`
 Guarded by the existing `slot:<name>` shape above, as
 `slot:gh-fetch/<owner>/<repo>` (max 1 holder, `/` not `:` -- a colon in the
 slot name breaks `release`/`renew`'s lease-id parsing, which splits on the
-first colon) — this only stops `pihome` from running the same fetch twice
-if two `lupin` invocations there race each other. A non-`pihome` machine
-never takes this lock and never calls `gh` for these lookups at all; on a
+first colon) — this only stops the pinned machine from running the same fetch
+twice if two `lupin` invocations there race each other. A machine that is
+not pinned never takes this lock and never calls `gh` for these lookups at all; on a
 miss it reports "no data yet" instead.
 
 ### `quota-snapshot`
@@ -330,7 +330,7 @@ not just one of them. A provider's `duration` is written as the plain
 string `quota.QuotaDuration`'s own value serializes to (`"PT5H"` etc.);
 `quota_cache.py` converts it back to the real enum on read.
 
-Unlike `gh-cache`'s fixed `pihome` pin, there is no fixed canonical
+Unlike `gh-cache`'s pin, there is no fixed canonical
 machine here: credentials for different providers can live on different
 machines, unknown in advance. Instead, whichever machine's own local
 `quota.quota_usage()` call actually returns a real `used_pct` for a
@@ -676,7 +676,7 @@ Connect timeout 2s, 1 retry, then:
 | Host-scope slot | No change — these never use Redis. |
 | Command queue | `lupin cmd send`/`lupin agent` exit 3. No local fallback, same as claims — a command only means anything if the target machine can see it. |
 | Benchmark snapshot | `lupin fetch-benchmarks` reports `live: false` with a `stale_reason` (exit 0, same convention as `model_fetch.py`'s own failure cases — see `cli.py`'s exit-code table, "any other error" doesn't fit this, it's a data-availability fact, not a usage error). No local fallback — a fleet-shared cache has nothing meaningful to fall back to on one machine, and a failed run leaves the last cached scores on the key untouched rather than erasing them. |
-| GitHub data cache | `pihome` calls `gh` directly anyway (it just can't publish for other machines). Every other machine reports "no data yet" instead of calling `gh` itself — no direct-call fallback here, unlike the resources above. |
+| GitHub data cache | The pinned machine calls `gh` directly anyway (it just can't publish for other machines). Every other machine reports "no data yet" instead of calling `gh` itself — no direct-call fallback here, unlike the resources above. |
 | Quota snapshot | A machine with real provider credentials still returns its own live reading (it just can't publish for other machines). A machine with no credentials for a provider has nothing to fall back to and reports "no data cached yet" for it. |
 
 After an outage ends, a holder tries to renew its lease. If the lease

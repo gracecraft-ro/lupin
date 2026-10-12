@@ -206,7 +206,7 @@ def test_refresh_unreachable_redis_does_not_crash_and_returns_local_rows(closed_
     # the lock attempt also raises CoordinatorUnreachable -- but this
     # machine's own real reading is still surfaced to its own caller
     # rather than disappearing over a cache-layer outage (same principle
-    # gh_cache.py's CANONICAL_GH_FETCHER path uses).
+    # gh_cache.py's canonical-fetcher path uses).
     rows = [{"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 10, "resets_at": 1}]
     with mock.patch.object(quota, "quota_usage", return_value=rows):
         result = quota_cache.refresh_snapshot(redis_host="127.0.0.1", redis_port=closed_port)

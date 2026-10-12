@@ -294,6 +294,13 @@ The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 The same file also holds each checkout's repo identity, so a restart does
 not pay for `gh` again.
 
+`gh_cache.py` shares read-only `gh` results across the fleet through Redis.
+`LUPIN_GH_CANONICAL_FETCHER` names the one machine that runs `gh` on a cache
+miss. Set it to that machine's hostname on every machine that reads the cache.
+The named machine also fetches when Redis is down. When the variable is unset,
+no machine is pinned. Each machine then fetches on a miss, but only while Redis
+is reachable.
+
 Each run has its own Git worktree in `worktrees/<repo>/` in the loop state
 directory. A worktree is a second working copy of the repo, with its own files
 and branch. This one is on a new branch, `lupin-loop/<time>`. `run` runs
