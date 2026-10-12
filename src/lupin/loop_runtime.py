@@ -699,7 +699,15 @@ def _refuse_unfinished_git_work(checkout: Path) -> None:
 
 
 def _default_base(checkout: Path) -> str:
-    """Return the remote branch that a run starts from, for example `origin/main`."""
+    """Return the remote branch that a run starts from, for example `origin/main`.
+
+    Use `origin/release/next` when the remote has it.
+    """
+    try:
+        _git(checkout, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/release/next")
+        return "origin/release/next"
+    except LoopError:
+        pass
     try:
         base = _git(checkout, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").strip()
     except LoopError:

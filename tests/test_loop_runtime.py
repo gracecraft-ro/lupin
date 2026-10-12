@@ -1131,6 +1131,14 @@ def test_default_base_uses_origin_main_when_origin_head_is_not_set(tmp_path: Pat
     assert loop_runtime._default_base(checkout) == "origin/main"
 
 
+def test_default_base_prefers_release_next_when_the_remote_has_it(tmp_path: Path, make_checkout):
+    checkout = make_checkout(tmp_path / "code" / "widgets")
+    _git_out(checkout, "push", "origin", "main:refs/heads/release/next")
+    _git_out(checkout, "fetch", "origin")
+
+    assert loop_runtime._default_base(checkout) == "origin/release/next"
+
+
 def test_default_base_refuses_when_the_checkout_has_no_remote_branch(tmp_path: Path, make_checkout):
     checkout = make_checkout(tmp_path / "code" / "widgets")
     _git_out(checkout, "remote", "remove", "origin")

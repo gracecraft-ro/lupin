@@ -290,8 +290,9 @@ not pay for `gh` again.
 Each run has its own Git worktree in `worktrees/<repo>/` in the loop state
 directory. A worktree is a second working copy of the repo, with its own files
 and branch. This one is on a new branch, `lupin-loop/<time>`. `run` runs
-`git fetch origin` first. The branch starts at the fetched remote default
-branch: the target of `origin/HEAD`, or else `origin/main` or `origin/master`.
+`git fetch origin` first. The branch starts at `origin/release/next` when the
+remote has it. Otherwise it starts at the remote default branch: the target of
+`origin/HEAD`, or else `origin/main` or `origin/master`.
 If the fetch fails, `run` refuses to start. The agent works in this worktree.
 The main checkout in `LUPIN_LOOP_CODE_DIR` is never the agent's working
 directory.
@@ -404,18 +405,20 @@ nix shell nixpkgs#python3Packages.pytest -c pytest -v
 
 ## Pull requests, review, and handoff
 
-Every feature change goes through a pull request to the fork's `release/next`.
-Policy changes go to upstream `main` for the owner to merge. The loop policy is
-in `docs/delegation-loop.md`.
+Every feature change goes through a pull request to upstream `release/next`.
+Upstream is the `origin` remote. The owner merges `release/next` into `main`
+when they choose. Policy changes go to upstream `main` for the owner to merge.
+The loop policy is in `docs/delegation-loop.md`.
 
-1. Push the branch to the fork with `git push fork <branch>`. Never push to
-   `origin`. Do not add a remote. Do not use `/ship`. It pushes to `origin`
-   when direct push is allowed, and it can add a remote. Open the PR on the
-   fork:
+1. Push the branch with `git push -u origin <branch>`. If your token cannot push
+   to upstream, push to the existing fork with `git push -u fork <branch>`.
+   Never push `main` or `release/next`. Do not create a new fork. You may use
+   `/ship`. Check that it does not push `main` or `release/next`. Open the PR on
+   upstream. From a fork branch, add `--head FORK_OWNER:<branch>`:
 
    <!-- markdownlint-disable MD013 -->
    ```sh
-   gh pr create --repo gracecraft-ro/<repo> --base release/next --title "<title>" --body "Closes #N"
+   gh pr create --repo OWNER/REPO --base release/next --title "<title>" --body "Closes #N"
    ```
    <!-- markdownlint-enable MD013 -->
 
@@ -426,14 +429,16 @@ in `docs/delegation-loop.md`.
 2. Do not merge your own work. A reviewer who is not the author runs
    `/code-review`. The orchestrator (the agent that dispatches and merges
    work) merges into `release/next` only when all four are true:
-   1. The PR is open on the fork, `gracecraft-ro/<repo>`, with base
-      `release/next`.
+   1. The PR is open on upstream, `OWNER/REPO`, with base `release/next`.
    2. A reviewer approves the current head SHA. The head SHA is the newest
       commit ID on the branch.
-   3. The fork branch contains the current `release/next`. The ancestor check
+   3. The PR branch contains the current `release/next`. The ancestor check
       asks git whether one branch contains another. The check is in the
       `delegation-loop` skill.
    4. The repo's full gate, as its `AGENTS.md` defines it, passes.
+
+   On every orchestrator cycle, merge each approved PR that passes these gates.
+   See "Continuous merge of approved PRs" in the `delegation-loop` skill.
 3. At the end of a session, run `/handoff`. It runs `lupin ledger append`.
 4. Loop details for this repo: `docs/delegation-loop.md`.
 
