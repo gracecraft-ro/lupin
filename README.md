@@ -182,9 +182,9 @@ shared Redis when you run the tests.
 
 ## Contributing
 
-Open pull requests against the `release/next` branch. Do not open them
-against `main`. The owner merges `release/next` into `main`. A reviewer who
-did not write the change must approve it. `AGENTS.md` gives the full rules.
+Open pull requests against the `main` branch. The owner merges approved pull
+requests into `main`. A reviewer who did not write the change must approve it.
+`AGENTS.md` gives the full rules.
 
 ## Known limits
 

@@ -18,15 +18,15 @@ release rules. Read the latest issue comments.
 
 A loop pushes its branch to upstream, the `origin` remote (`OWNER/REPO`). If
 upstream denies the push, it pushes to the existing fork, the `fork` remote. It
-opens the PR on upstream, against `release/next`. Never create a new fork. Never
+opens the PR on upstream, against `main`. Never create a new fork. Never
 open a PR or an issue on a fork.
 
 Use an isolated worktree for each worker. Do not let parallel workers edit the
-same checkout. Each worker creates its worktree from upstream `release/next`:
+same checkout. Each worker creates its worktree from upstream `main`:
 
 ```sh
 git fetch origin
-git worktree add <path> -b <branch> origin/release/next
+git worktree add <path> -b <branch> origin/main
 ```
 
 Keep each worktree under `.claude/worktrees/`. Record the machine, worktree
@@ -168,7 +168,7 @@ worker, use the Herdr worktree commands:
 ```sh
 herdr worktree list --cwd "$PWD"
 git fetch origin
-herdr worktree create --branch BRANCH --base origin/release/next --cwd "$PWD"
+herdr worktree create --branch BRANCH --base origin/main --cwd "$PWD"
 herdr worktree open --path PATH --cwd "$PWD"
 ```
 
@@ -280,17 +280,16 @@ the latest PR comments and reviews before merge.
 
 A worker pushes only its own branch, with `git push -u origin <branch>`. If its
 token cannot push upstream, it pushes to the fork with `git push -u fork <branch>`.
-It never pushes `main` or `release/next`. The PR base is `release/next` on upstream:
+It never pushes `main`. The PR base is `main` on upstream:
 
 <!-- markdownlint-disable MD013 -->
 ```sh
-gh pr create --repo OWNER/REPO --base release/next --title "<title>" --body "Closes #N"
+gh pr create --repo OWNER/REPO --base main --title "<title>" --body "Closes #N"
 ```
 <!-- markdownlint-enable MD013 -->
 
-The PR body has `Closes #N`. The merge into `release/next` does not close the
-issue. The orchestrator (the agent that dispatches and merges work)
-closes it manually right after the merge into `release/next`.
+The PR body has `Closes #N`. GitHub closes the issue when the PR merges into
+the default branch, `main`.
 
 Never open a PR or an issue on a fork. The PR always lives upstream. From a fork
 branch, add `--head FORK_OWNER:<branch>`. If neither push works, the worker
@@ -320,7 +319,7 @@ newest commit ID on the branch.
 The orchestrator (the agent that dispatches and merges work) posts the verdict
 and findings on the PR.
 
-Before a branch is merged, it must contain the current `release/next`. Fetch
+Before a branch is merged, it must contain the current `main`. Fetch
 `origin` and the remote that holds the PR branch. Then run this check.
 `REMOTE` is `origin` or `fork`, the remote that holds the PR branch. `BRANCH`
 is the PR branch name:
@@ -328,12 +327,12 @@ is the PR branch name:
 ```sh
 git fetch origin
 git fetch REMOTE
-git merge-base --is-ancestor origin/release/next REMOTE/BRANCH
+git merge-base --is-ancestor origin/main REMOTE/BRANCH
 ```
 
-Exit code 0 means the PR branch contains `release/next`. Then continue to the
+Exit code 0 means the PR branch contains `main`. Then continue to the
 merge rules below. Exit code 1 means it does not. For an open PR approved at its
-current head SHA, the worker runs `git merge origin/release/next` on the PR
+current head SHA, the worker runs `git merge origin/main` on the PR
 branch. If the merge has conflicts, report them and stop. If it has none, push
 the branch to the remote that holds it. Run the check again. If it exits 0,
 continue to the merge rules. A sync is not a merge of the pull request.
@@ -345,11 +344,11 @@ approval at the new head before you merge. The reviewer may limit that review
 to the files the sync changed. The gate (the set of checks that `AGENTS.md`
 defines) runs in every case.
 
-The orchestrator merges into `release/next` only when all four are true:
+The orchestrator merges into `main` only when all four are true:
 
-- The PR is open on upstream, `OWNER/REPO`, with base `release/next`.
+- The PR is open on upstream, `OWNER/REPO`, with base `main`.
 - A reviewer approves the current head SHA.
-- The PR branch contains the current `release/next`. The ancestor check asks git
+- The PR branch contains the current `main`. The ancestor check asks git
   whether one branch contains another. The check is in the `delegation-loop`
   skill.
 - The repo's full gate, as its `AGENTS.md` defines it, passes.
@@ -373,13 +372,13 @@ request.
 
 ### Continuous merge of approved PRs
 
-On every orchestrator cycle, merge each approved PR into `release/next`. Do this
+On every orchestrator cycle, merge each approved PR into `main`. Do this
 until no approved PR is left.
 
-1. List the open PRs that target `release/next`:
+1. List the open PRs that target `main`:
 
    ```sh
-   gh pr list --repo OWNER/REPO --base release/next --state open \
+   gh pr list --repo OWNER/REPO --base main --state open \
      --json number,headRefOid
    ```
 
@@ -397,14 +396,14 @@ until no approved PR is left.
    four merge gates above. If all four pass, merge with the command in "Review
    and merge each pull request".
 4. Merge one PR at a time. List the PRs again after each merge, because
-   `release/next` moved. If a merge fails or the head changed, stop for that PR
+   `main` moved. If a merge fails or the head changed, stop for that PR
    and report it. Do not retry in the same cycle.
 
-The owner merges `release/next` into `main`. Loops do not do that merge.
+The owner can also merge an approved PR. List the PRs again after any merge.
 
 ### Preview server
 
-Each repo runs one preview server. It serves upstream `release/next` only. Do
+Each repo runs one preview server. It serves upstream `main` only. Do
 not run a server for a feature branch.
 
 1. Create the preview worktree once. Detached means the worktree follows a
@@ -412,15 +411,15 @@ not run a server for a feature branch.
 
    ```sh
    git fetch origin
-   git worktree add --detach .claude/worktrees/preview origin/release/next
+   git worktree add --detach .claude/worktrees/preview origin/main
    ```
 
-2. After each merge into `release/next`, the orchestrator updates the preview.
+2. After each merge into `main`, the orchestrator updates the preview.
    From the repo root, run:
 
    ```sh
    git -C .claude/worktrees/preview fetch origin
-   git -C .claude/worktrees/preview checkout --detach origin/release/next
+   git -C .claude/worktrees/preview checkout --detach origin/main
    ```
 
    Then it restarts the server.
@@ -470,7 +469,7 @@ Use `.loop/loop-state.json` only when a ledger command exits 3. The
 `handoff` skill gives the format. At the start of a session, read the ledger
 and that file.
 
-A worker's task ends when its issue is merged into `release/next`. A task also
+A worker's task ends when its issue is merged into `main`. A task also
 ends when it is blocked on an owner decision. A pull request that waits for
 review is not blocked. The orchestrator dispatches the review and any fix. The
 fix goes on the same branch.
@@ -478,9 +477,7 @@ fix goes on the same branch.
 "Blocked" means an owner decision is needed. An example is a model-routing
 policy change.
 
-Upstream `main` is owner-only. The owner opens one pull request from
-`release/next` to `main` when they choose. Loops do not wait for it. Policy
-changes to this skill also go to upstream `main` as a pull request, which the
+Policy changes to this skill go to upstream `main` as a pull request, which the
 owner merges.
 
 Continue working until the backlog is empty or every remaining item is blocked
