@@ -164,9 +164,12 @@ screenshots, follow it. Otherwise follow this section.
    `gh pr view --json number,url --jq '.number, .url'`. The URL is
    `https://github.com/<owner>/<repo>/pull/<number>`. Use that `<owner>/<repo>`.
    Do not use the fork name unless the PR is on the fork.
-2. Write the comment in `evidence/<issue-number>/report.md`. Show before and
-   after. For a new screen with no before, show the new screen. Say what the
-   reader should look at. Use the same path in the body and in `--attach`:
+2. Open each file. Look for a secret, a token, a private address, and personal
+   data. A public repo shows the image to everyone. If you find one, crop the
+   image or capture it again. Then write the comment in
+   `evidence/<issue-number>/report.md`. Show before and after. For a new
+   screen with no before, show the new screen. Say what the reader should look
+   at. Use the same path in the body and in `--attach`:
 
    ```md
    Before: ![before](./evidence/123/before.png)
@@ -202,9 +205,7 @@ loop, so the orchestrator copies the files first.
 
 GitHub CLI 2.99.0 and newer has `--attach`. Run `gh --version` if the option is
 missing. Upgrade, or report that you cannot attach. Do not skip it silently.
-Attach only a screenshot you opened and checked. Look for a secret, a token, a
-private address, and personal data. A public repo shows the image to everyone.
-If you find one, crop the image or capture it again.
+Attach only a screenshot you opened and checked.
 
 If you could not capture a screenshot, post a PR comment that says so and why.
 Say so in your report too. The orchestrator then treats the PR as blocked.

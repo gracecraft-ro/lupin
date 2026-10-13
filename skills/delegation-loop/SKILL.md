@@ -16,8 +16,9 @@ Read the root `AGENTS.md` first. If `docs/delegation-loop.md` exists, read
 it; Lupin can run without it. Follow the repo's branch, worktree, test, and
 release rules. Read the latest issue comments.
 
-A loop pushes its branch to upstream, the `origin` remote (`OWNER/REPO`). It
-opens the PR there, against `release/next`. Do not create or use a fork. Do not
+A loop pushes its branch to upstream, the `origin` remote (`OWNER/REPO`). If
+upstream denies the push, it pushes to the existing fork, the `fork` remote. It
+opens the PR on upstream, against `release/next`. Never create a new fork. Never
 open a PR or an issue on a fork.
 
 Use an isolated worktree for each worker. Do not let parallel workers edit the
@@ -310,10 +311,11 @@ cannot upload reports the path of each file and its machine. Copy the files
 before you run `lupin stop`, because stop deletes the worktree and `evidence/`
 with it. To copy from another machine, run `mkdir -p ./evidence/<issue-number>`.
 Then run `scp <target>:<absolute path> ./evidence/<issue-number>/`. Take
-`<target>` from `~/.config/lupin/ssh-targets`. Then attach the files yourself,
-with your own token. Write your own `report.md` in the same folder. Use the
-command in "Attach screenshots to the PR" in the `ship` skill. Do not dispatch
-the reviewer on a visual PR with no screenshots.
+`<target>` from `~/.config/lupin/ssh-targets`. Open each file and check it, as
+in step 2 of "Attach screenshots to the PR" in the `ship` skill. Then attach the
+files yourself, with your own token. Write your own `report.md` in the same
+folder. Use the command in "Attach screenshots to the PR" in the `ship` skill.
+Do not dispatch the reviewer on a visual PR with no screenshots.
 
 If the worker says it could not capture a screenshot, the PR is blocked on an
 owner decision. Report the PR number and the reason in the handoff. Ask the
