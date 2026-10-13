@@ -91,8 +91,9 @@ git push <remote> HEAD:<branch>
 ```
 
 A sync worker or a fix worker uses these commands, not the other worktree and
-push commands in this skill. A detached worktree does not touch a local branch
-that has commits the remote lacks.
+push commands in this skill. On a Herdr worker it also opens the worktree in
+Herdr, as "Dispatch work" says. A detached worktree does not touch a local
+branch that has commits the remote lacks.
 
 A PR is blocked on an owner decision when one of these is true:
 
@@ -247,8 +248,8 @@ and keep its browser data separate from implementation work. Ask for evidence,
 prioritized tickets, and a list of untested items. Do not ask the test agent to
 fix findings.
 Use the runner's worktree isolation feature when it has one. Otherwise, create
-a separate worktree and verify the worker's working directory. On a Herdr
-worker, use the Herdr worktree commands. A worker that opens a new branch runs:
+a separate worktree and verify the worker's working directory. A worker on a
+Herdr host that opens a new branch uses the Herdr worktree commands:
 
 ```sh
 herdr worktree list --cwd "$PWD"
