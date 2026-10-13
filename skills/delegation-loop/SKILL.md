@@ -431,11 +431,11 @@ merge rules below. Exit code 1 means it does not. For an open PR approved at its
 current head SHA, the worker runs `git merge origin/release/next` on the PR
 branch. If the merge has conflicts, report them and stop. The orchestrator then
 dispatches a fix worker. It runs the same merge, resolves the conflicts, commits
-the result, and pushes. If the merge has no conflicts, push it with the last
-command of that block. Run the check again. If it exits 0, continue to the merge
-rules. A sync is not a merge of the pull request. Otherwise stop. Do not
-rebase. Any other exit code from the first check means the check failed. Report
-it and stop. Do not merge.
+the result, and pushes. If the merge has no conflicts, push it. Use
+`git push <remote> HEAD:<branch>`. Run the check again. If it exits 0, continue
+to the merge rules. A sync is not a merge of the pull request. Otherwise stop.
+Do not rebase. Any other exit code from the first check means the check failed.
+Report it and stop. Do not merge.
 
 An approval binds to the head SHA. If the sync changed the head, get a new
 approval at the new head before you merge. The reviewer may limit that review
