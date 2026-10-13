@@ -29,7 +29,7 @@ git fetch origin
 git worktree add <path> -b <branch> origin/release/next
 ```
 
-On a Herdr host, make the worktree as "Dispatch work" says instead.
+On a Herdr worker, make the worktree as "Dispatch work" says instead.
 
 Keep each worktree under `.claude/worktrees/`. Record the machine, worktree
 path, branch, and issue in the dispatch and the repository's handoff record.
@@ -83,10 +83,11 @@ that the loop did not open.
 
 A sync worker or a fix worker starts from the PR branch. Give it the remote and
 the branch name. The remote is `origin` or `fork`, the one that holds the PR
-branch. The first two commands below make its worktree. The third pushes its
-commits:
+branch. The first three commands below make its worktree. The last one pushes
+its commits:
 
 ```sh
+git fetch origin
 git fetch <remote> <branch>
 git worktree add --detach <path> <remote>/<branch>
 git push <remote> HEAD:<branch>
@@ -251,7 +252,7 @@ prioritized tickets, and a list of untested items. Do not ask the test agent to
 fix findings.
 A worker that opens a new branch uses the runner's worktree isolation feature
 when it has one. Otherwise, it creates a separate worktree and verifies its
-working directory. On a Herdr host, it uses the Herdr worktree commands:
+working directory. On a Herdr worker, it uses the Herdr worktree commands:
 
 ```sh
 herdr worktree list --cwd "$PWD"
@@ -262,7 +263,7 @@ herdr worktree open --path PATH --cwd "$PWD"
 
 A sync worker or a fix worker always makes its worktree with the git commands
 in "Pull requests come first". It never uses `herdr worktree create`. On a
-Herdr host, it then runs `herdr worktree open --path PATH --cwd "$PWD"`.
+Herdr worker, it then runs `herdr worktree open --path PATH --cwd "$PWD"`.
 
 `--trust-repository` gives Git trust for one command. Use it only after the
 owner verified the repository. Do not use it as a retry for a failed worktree
@@ -430,8 +431,8 @@ merge rules below. Exit code 1 means it does not. For an open PR approved at its
 current head SHA, the worker runs `git merge origin/release/next` on the PR
 branch. If the merge has conflicts, report them and stop. The orchestrator then
 dispatches a fix worker. It runs the same merge, resolves the conflicts, commits
-the result, and pushes. If the merge has no conflicts, push the branch to the
-remote that holds it. Run the check again. If it exits 0, continue to the merge
+the result, and pushes. If the merge has no conflicts, push it with the last
+command of that block. Run the check again. If it exits 0, continue to the merge
 rules. A sync is not a merge of the pull request. Otherwise stop. Do not
 rebase. Any other exit code from the first check means the check failed. Report
 it and stop. Do not merge.
