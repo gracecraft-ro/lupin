@@ -245,20 +245,21 @@ def make_checkout(tmp_path):
 
 
 @pytest.fixture(autouse=True)
-def clean_lupin_env(monkeypatch):
-    """Run each test with a clean LUPIN_* environment and the local backend.
+def clean_lupin_env(monkeypatch, tmp_path):
+    """Remove LUPIN_* settings and keep loop state in this test's directory.
 
-    The sandbox shell exports LUPIN_* variables. Without this fixture, a test can reach the shared Redis server.
-
-    Every LUPIN_* variable is deleted, then LUPIN_BACKEND is set to local.
-    Tests that need Redis pass the host and port as CLI flags.
-    Some tests in tests/test_cli.py set LUPIN_CMD_SIGNING_KEY and
-    LUPIN_CMD_SIGNING_KEYS_DIR after this fixture runs.
-
-    The list is built once, when this fixture runs. Variables set later stay.
-    Modules that read variables at import time keep their values, for example
-    STATE_DIR in loop_runtime.py.
+    Without this fixture, a test can connect to the shared Redis server or
+    write to the live loop state directory. Tests can set values they need
+    after the fixture runs.
     """
     for name in [key for key in os.environ if key.startswith("LUPIN_")]:
         monkeypatch.delenv(name)
     monkeypatch.setenv("LUPIN_BACKEND", "local")
+
+    from lupin import loop_runtime
+
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "REPOS_FILE", tmp_path / "repos")
+    monkeypatch.setattr(loop_runtime, "ORCHESTRATORS_FILE", tmp_path / "orchestrators.json")
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "herdr-loops")
+    monkeypatch.setattr(loop_runtime, "REPORTS_DIR", tmp_path / "reports")
