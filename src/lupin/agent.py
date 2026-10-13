@@ -88,7 +88,8 @@ SUBPROCESS_TIMEOUT_S = {
 OUTPUT_CAP = 8192  # 8 KiB, combined stdout+stderr -- design's "last 8 KiB combined"
 
 # Defense in depth: queue commands must pass this strict repo-name check.
-_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+# `repo~2` is a second loop on `repo`. Keep this in step with loop_runtime.REPO_RE.
+_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}(~([2-9]|[1-9][0-9]))?$")
 # These limits are big enough for a real value. They are small enough to
 # stop someone from hiding something else inside a long string.
 _CAL_EXPR_MAX_LEN = 256
@@ -103,7 +104,7 @@ class RejectedCommand(Exception):
 
 
 def _validate_repo(repo) -> str:
-    if not isinstance(repo, str) or not _REPO_RE.match(repo):
+    if not isinstance(repo, str) or not _REPO_RE.fullmatch(repo):
         raise RejectedCommand(f"invalid repo {repo!r}")
     return repo
 
@@ -166,6 +167,8 @@ def _check_cal_expr_with_systemd_analyze(expr: str) -> None:
 
 def _handle_repo_enable(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
+    if "~" in repo:
+        raise RejectedCommand(f"{repo} is a loop, not a repo")
     return ["lupin", "enable", repo]
 
 

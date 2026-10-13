@@ -255,6 +255,42 @@ def test_dispatch_fleet_runs_uses_each_targets_key_and_skips_unsafe_targets(redi
         assert payload["params"] == {"repo": result["repo"]}
         assert commands.verify(payload, keys[result["machine"]])
 
+def test_dispatch_fleet_runs_skips_a_worker_that_runs_a_numbered_loop_of_the_repo(redis_port, flush_redis):
+    # `widgets~2` on jesus holds the slot `loop-widgets`. A plain `widgets` run queued
+    # there would find the slot full and stop in `needs_attention`.
+    connection = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    records = [
+        {
+            "name": "jesus",
+            "state": "online",
+            "actions": ["loop.run"],
+            "repos": [{"repo": "widgets", "loopable": True}],
+            "loops": [{"repo": "widgets~2"}],
+            "slots": {"claude": {"used": 0, "max": 4}},
+        },
+        {
+            "name": "ralpha",
+            "state": "online",
+            "actions": ["loop.run"],
+            "repos": [{"repo": "widgets", "loopable": True}],
+            "loops": [],
+            "slots": {"claude": {"used": 3, "max": 4}},
+        },
+    ]
+    keys = {"pihome": "local-key", "jesus": "jesus-key", "ralpha": "ralpha-key"}
+
+    results = loops.dispatch_fleet_runs(
+        ["widgets"], records, local_host="pihome", signing_keys=keys, connection=connection,
+    )
+
+    assert [(r["repo"], r.get("machine"), r["queued"]) for r in results] == [("widgets", "ralpha", True)]
+
+    only_jesus = loops.dispatch_fleet_runs(
+        ["widgets"], records[:1], local_host="pihome", signing_keys=keys, connection=connection,
+    )
+    assert [(r["repo"], r["queued"]) for r in only_jesus] == [("widgets", False)]
+
+
 # --------------------------------------------------------------------------
 # ssh_target_for
 # --------------------------------------------------------------------------
