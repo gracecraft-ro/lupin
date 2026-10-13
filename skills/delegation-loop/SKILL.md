@@ -50,8 +50,11 @@ the owner.
 
 At the start of every cycle, the orchestrator handles the open PRs into
 `release/next`. The orchestrator is the agent that dispatches and merges work.
-It does this before it reads the backlog. Ignore draft PRs. For each other PR,
-do the first step that applies:
+It does this before it reads the backlog. Ignore draft PRs. Steps 2 and 3 are
+only for a PR that the loop opened. The loop opened a PR when the ledger has a
+dispatch event for its branch. Run `lupin ledger read OWNER/REPO --limit 200
+--json` to read the events. For each PR that is not a draft, do the first step
+that applies:
 
 1. The PR passes the four merge gates: merge it. See "Continuous merge of
    approved PRs".
@@ -68,25 +71,27 @@ do the first step that applies:
 5. The PR waits for a gate that is still running: wait for the result.
 
 A worker is a fix worker, a sync worker, or a reviewer. Do not dispatch a
-worker for a PR that already has one running. The loop opened a PR when the
-ledger has a dispatch event for its branch. Do not push to the branch of any
-other PR. If such a PR needs a sync or a fix, it is blocked.
+worker for a PR that already has one running. Do not push to the branch of a PR
+that the loop did not open.
 
 A PR is blocked on an owner decision when one of these is true:
 
+- It needs a sync or a fix, and the loop did not open it.
 - A worker for it fails. A worker fails when it ends without the push or the
-  report that its brief asks for.
+  report that its brief asks for. A worker also fails when its report says that
+  it could not do the work.
 - A worker for it stops to ask the owner.
 - A fix worker ends and the gate still fails.
 - Its merge fails.
 
-Report each blocked PR in the handoff, with its head SHA. Skip it. Retry it
-when its head SHA changes or the owner asks in a PR comment.
+Report each blocked PR in the handoff, with its head SHA. Skip it. On each
+cycle, read the new comments on each blocked PR. Retry the PR when its head
+SHA changes or the owner asks in a comment.
 
-Do not dispatch work on a new issue while a PR into `release/next` is open, is
-not a draft, is not merged, and is not blocked. Work that is already running
-continues. A reviewer, a sync worker, or a fix worker for an open PR is not new
-work.
+A PR is pending when it is open, is not a draft, is not merged, and is not
+blocked. Do not dispatch work on a new issue while a PR into `release/next` is
+pending. Work that is already running continues. A reviewer, a sync worker, or
+a fix worker for a pending PR is not new work.
 
 ## Install skills on loop hosts
 

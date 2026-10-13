@@ -55,8 +55,8 @@ benchmark category covers both.
 ## Decide what is ready
 
 - Handle the open PRs first. Do not dispatch a new issue while a PR into
-  `release/next` is open, not merged, and not blocked. See "Pull requests come
-  first" in the `delegation-loop` skill.
+  `release/next` is open, not a draft, not merged, and not blocked. See "Pull
+  requests come first" in the `delegation-loop` skill.
 - Check the dependency graph and the latest comments. Do not dispatch an issue
   with an open blocker.
 - Check that the issue has a clear result. For a large issue, split it into
