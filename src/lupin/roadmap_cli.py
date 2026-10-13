@@ -157,7 +157,11 @@ def build_roadmap(
     for repo, messages in dag.get("warnings", {}).items():
         warnings.extend(f"{repo}: {m}" for m in messages)
 
-    full_names = {repo: f"{owners[repo]}/{repo}" for repo in repos if owners.get(repo)}
+    full_names = {
+        repo: f"{owners[repo]}/{names[repo]}"
+        for repo in repos
+        if owners.get(repo) and names.get(repo)
+    }
     claimed_sessions: dict[tuple[str, int], str] = {}
     claim_rows: list[dict] = []
     now = _now()

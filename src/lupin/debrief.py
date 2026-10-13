@@ -407,13 +407,36 @@ def _write(
     )
     folder = root / "debriefs" / repo
     folder.mkdir(parents=True, exist_ok=True, mode=0o750)
-    stamp = end.strftime(STAMP_FORMAT)
-    path = folder / (f"{stamp}.md" if period is None else f"{stamp}-{period}.md")
+    if period is None:
+        path = _claim(folder, end)
+        try:
+            _store(path, text)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        return path
+    path = folder / f"{end.strftime(STAMP_FORMAT)}-{period}.md"
     _store(path, text)
-    if period is not None:
-        # The screenshots show the debrief page. That page must exist first.
-        _store(path, text + _screenshots(root, repo, path))
+    # The screenshots show the debrief page. That page must exist first.
+    _store(path, text + _screenshots(root, repo, path))
     return path
+
+
+def _claim(folder: Path, end: datetime) -> Path:
+    """Reserve the file for a stop debrief. If its second is taken, use the next one.
+
+    Two loops of one repo can stop in the same second. The second write must
+    not replace the first.
+    """
+    for offset in range(60):
+        stamp = (end + timedelta(seconds=offset)).strftime(STAMP_FORMAT)
+        path = folder / f"{stamp}.md"
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o640))
+        except FileExistsError:
+            continue
+        return path
+    raise DebriefError(f"no free debrief file name in {folder} after {end:%Y-%m-%d %H:%M:%S}")
 
 
 def _store(path: Path, text: str) -> None:

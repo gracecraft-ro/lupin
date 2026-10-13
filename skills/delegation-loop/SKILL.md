@@ -16,8 +16,9 @@ Read the root `AGENTS.md` first. If `docs/delegation-loop.md` exists, read
 it; Lupin can run without it. Follow the repo's branch, worktree, test, and
 release rules. Read the latest issue comments.
 
-A loop pushes its branch to upstream, the `origin` remote (`OWNER/REPO`). It
-opens the PR there, against `release/next`. Do not create or use a fork. Do not
+A loop pushes its branch to upstream, the `origin` remote (`OWNER/REPO`). If
+upstream denies the push, it pushes to the existing fork, the `fork` remote. It
+opens the PR on upstream, against `release/next`. Never create a new fork. Never
 open a PR or an issue on a fork.
 
 Use an isolated worktree for each worker. Do not let parallel workers edit the

@@ -88,7 +88,8 @@ SUBPROCESS_TIMEOUT_S = {
 OUTPUT_CAP = 8192  # 8 KiB, combined stdout+stderr -- design's "last 8 KiB combined"
 
 # Defense in depth: queue commands must pass this strict repo-name check.
-_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+# `repo~2` is a second loop on `repo`. Keep this in step with loop_runtime.REPO_RE.
+_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}(~([2-9]|[1-9][0-9]))?$")
 # These limits are big enough for a real value. They are small enough to
 # stop someone from hiding something else inside a long string.
 _CAL_EXPR_MAX_LEN = 256
@@ -103,7 +104,7 @@ class RejectedCommand(Exception):
 
 
 def _validate_repo(repo) -> str:
-    if not isinstance(repo, str) or not _REPO_RE.match(repo):
+    if not isinstance(repo, str) or not _REPO_RE.fullmatch(repo):
         raise RejectedCommand(f"invalid repo {repo!r}")
     return repo
 
@@ -166,6 +167,8 @@ def _check_cal_expr_with_systemd_analyze(expr: str) -> None:
 
 def _handle_repo_enable(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
+    if "~" in repo:
+        raise RejectedCommand(f"{repo} is a loop, not a repo")
     return ["lupin", "enable", repo]
 
 
@@ -461,10 +464,10 @@ def startup_scan(
     redis_username: str | None = None,
     redis_password: str | None = None,
 ) -> list[str]:
-    """Run once before polling starts. A command this host claimed (its own
-    `cmdres` still says `running`) but never finished means the previous
-    process crashed mid-run -- mark it `failed` rather than silently
-    re-running it on restart. Returns the ids it marked failed.
+    """Run once before polling starts. A `running` claim from this host
+    means the previous process stopped. The command may not have started.
+    Mark the claim `failed`. Do not run the command again.
+    Return the failed command IDs.
     """
     client = _client(redis_host, redis_port, redis_username, redis_password)
     try:
@@ -478,7 +481,10 @@ def startup_scan(
             if result.get("state") != "running" or result.get("host") != machine:
                 continue
             result["state"] = "failed"
-            result["reason"] = "orphaned: still running when the agent restarted"
+            result["reason"] = (
+                "orphaned: the agent restarted before it saved the command result. "
+                "The command may not have started."
+            )
             result["finished_at"] = time.time()
             _write_result(client, cmd_id, result, overwrite=True)
             _call_with_retry(lambda c=cmd_id: client.zrem(commands.queue_key(machine), c))

@@ -467,3 +467,5 @@ def test_hold_keeps_renewing_after_one_unexpected_renew_error(redis_port, flush_
     assert err.count("not renewed") == 1
     assert "unexpected renew error" in err
     assert slots_redis.status(**kw)["not-bmo"]["holders"] == 0
+
+
