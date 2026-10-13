@@ -447,7 +447,8 @@ may name this repo.
 ## Pull requests, review, and handoff
 
 Every code change goes through a pull request to upstream `main`. Upstream is
-the `origin` remote. The owner merges approved pull requests into `main`.
+the `origin` remote. The owner merges approved pull requests into `main`. The
+orchestrator can also merge, when all four conditions in step 2 are true.
 The loop policy is in `docs/delegation-loop.md`.
 
 1. Push the branch with `git push -u origin <branch>`. If your token cannot push

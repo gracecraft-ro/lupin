@@ -183,8 +183,9 @@ shared Redis when you run the tests.
 ## Contributing
 
 Open pull requests against the `main` branch. The owner merges approved pull
-requests into `main`. A reviewer who did not write the change must approve it.
-`AGENTS.md` gives the full rules.
+requests into `main`. The loop orchestrator can also merge, when the four
+conditions in `AGENTS.md` are true. A reviewer who did not write the change must
+approve it. `AGENTS.md` gives the full rules.
 
 ## Known limits
 

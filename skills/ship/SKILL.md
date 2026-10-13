@@ -126,7 +126,7 @@ branch to the fork. Open the PR on the fork. Then request review.
      --head <branch> --title "..." --body "Closes #<issue>. ..."
    ```
 
-   A merge into `main` closes the issue.
+   The orchestrator closes the issue by hand if the merge does not close it.
 
    Never use an upstream `--repo` in this flow. If it fails, report the error.
    Then go to "Report and release" below.
