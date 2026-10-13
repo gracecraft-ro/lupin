@@ -167,6 +167,8 @@ def _check_cal_expr_with_systemd_analyze(expr: str) -> None:
 
 def _handle_repo_enable(params: dict, cmd_id: str) -> list[str]:
     repo = _validate_repo(params.get("repo"))
+    if "~" in repo:
+        raise RejectedCommand(f"{repo} is a loop, not a repo")
     return ["lupin", "enable", repo]
 
 

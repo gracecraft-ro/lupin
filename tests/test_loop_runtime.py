@@ -1927,6 +1927,55 @@ def test_disable_repo_rejects_a_numbered_loop(monkeypatch, tmp_path: Path):
     assert loop_runtime.enabled_repos() == {"widgets": "claude"}
 
 
+def test_a_one_off_run_refuses_a_numbered_loop(monkeypatch, tmp_path: Path):
+    _setup_repos_file(monkeypatch, tmp_path)
+
+    with pytest.raises(loop_runtime.LoopError, match="widgets~2 is a loop, not a repo"):
+        loop_runtime.schedule_once("now", ["widgets", "widgets~2"])
+
+
+def test_the_repo_catalog_skips_a_checkout_named_like_a_numbered_loop(monkeypatch, tmp_path: Path):
+    _setup_repos_file(monkeypatch, tmp_path)
+    code_dir = tmp_path / "code"
+    for name in ("widgets", "widgets~2", "gadgets"):
+        (code_dir / name).mkdir(parents=True)
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
+
+    assert [row["repo"] for row in loop_runtime.repo_catalog()] == ["gadgets", "widgets"]
+
+
+def test_a_numbered_loop_uses_the_orchestrator_profile_of_its_repo(monkeypatch, tmp_path: Path, make_checkout):
+    # The profile belongs to the repo. A loop id has none of its own.
+    state_dir = tmp_path / "state"
+    code_dir = tmp_path / "code"
+    make_checkout(code_dir / "widgets")
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", state_dir)
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", state_dir / "herdr-loops")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "claude"})
+    monkeypatch.setattr(loop_runtime, "orchestrator_profiles", lambda: {"widgets": ["omp-candidate"]})
+    monkeypatch.setattr(loop_runtime, "_session_info", lambda session: None)
+    monkeypatch.setattr(loop_runtime, "_redis_kwargs", lambda: {})
+    monkeypatch.setattr("lupin.quota_cache.read_snapshot", lambda **kwargs: {})
+    seen = []
+
+    def select(candidates, snapshot):
+        seen.append(candidates)
+        return {"platform": "omp", "provider": None, "model": "opencode-go/glm-5.3"}
+
+    monkeypatch.setattr(loop_runtime, "select_orchestrator", select)
+    monkeypatch.setattr(
+        loop_runtime, "_run", lambda argv, **kwargs: (3, "inactive") if argv[0] == "systemctl" else (1, "no session")
+    )
+    monkeypatch.setattr(loop_runtime, "_systemd_run", lambda *args, **kwargs: (0, ""))
+
+    started, _ = loop_runtime.start_loop("widgets~2")
+
+    assert started
+    assert seen == [["omp-candidate"]]
+    assert loop_runtime._read_metadata("widgets~2")["platform"] == "omp"
+
+
 def test_a_numbered_loop_cannot_come_in_through_the_default_repos_or_the_repos_file(monkeypatch, tmp_path: Path):
     repos = _setup_repos_file(monkeypatch, tmp_path)
     monkeypatch.setenv("LUPIN_LOOP_DEFAULT_REPOS", "widgets,widgets~2")

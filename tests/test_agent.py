@@ -1092,6 +1092,12 @@ def test_poll_once_writes_cmdlog_entries_for_terminal_outcomes(redis_port, flush
     assert after[1][1]["state"] == "ok"
 
 
+def test_repo_enable_refuses_a_numbered_loop():
+    assert agent._handle_repo_enable({"repo": "widgets"}, "id") == ["lupin", "enable", "widgets"]
+    with pytest.raises(agent.RejectedCommand, match="widgets~2 is a loop, not a repo"):
+        agent._handle_repo_enable({"repo": "widgets~2"}, "id")
+
+
 def test_validate_repo_accepts_a_numbered_loop_and_rejects_loop_one():
     assert agent._validate_repo("widgets~2") == "widgets~2"
     for bad in ("widgets~1", "widgets~", "widgets~2~3", "a/b~2", "widgets\n", "widgets~2\n"):

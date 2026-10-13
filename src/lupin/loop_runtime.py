@@ -503,7 +503,7 @@ def repo_catalog() -> list[dict]:
     if not CODE_DIR.is_dir():
         return rows
     for path in sorted(CODE_DIR.iterdir(), key=lambda item: item.name.casefold()):
-        if not path.is_dir() or not REPO_RE.fullmatch(path.name):
+        if not path.is_dir() or not REPO_RE.fullmatch(path.name) or "~" in path.name:
             continue
         has_doc = (path / "docs" / "delegation-loop.md").is_file()
         rows.append({
@@ -1730,7 +1730,7 @@ def schedule_once(
     provider, model = validate_omp_options(selected, provider, model) if selected else (provider, model)
     if (provider is not None or model is not None) and selected != "omp":
         raise LoopError("--provider and --model require --platform omp")
-    repos = [validate_repo(repo) for repo in repos]
+    repos = [validate_plain_repo(repo) for repo in repos]
     if not repos:
         raise LoopError("at least one repo is required for a one-off run")
     when_value, relative = _event_time(when)

@@ -374,7 +374,7 @@ def _repo_platforms() -> dict[str, str]:
         with open(REPOS_FILE, encoding="utf-8") as fh:
             for line in fh:
                 parts = line.split()
-                if parts:
+                if parts and "~" not in parts[0]:
                     result[parts[0]] = parts[1] if len(parts) > 1 else "claude"
     except OSError:
         pass
@@ -592,19 +592,42 @@ def _loop_rank(row: dict) -> int:
     return _LOOP_STATE_RANK.get(row.get("state"), 4)
 
 
+def _sort_key(row: dict, repo: str) -> tuple[int, bool]:
+    """Most active first. At the same activity, the plain loop is first."""
+    return _loop_rank(row), row["repo"] != repo
+
+
+def _active_ids(rows: list[dict]) -> list[str]:
+    return [row["repo"] for row in rows if row.get("state") not in ("stopped", "unknown")]
+
+
 def _local_loop_states() -> dict[str, dict]:
-    """Map each repo to its most active local loop. A tie goes to the plain loop."""
-    states: dict[str, dict] = {}
+    """Map each repo to its most active local loop.
+
+    Each row also has `loop_ids`: every active loop of that repo on this machine.
+    """
+    groups: dict[str, list[dict]] = {}
     for row in loop_runtime.local_loops():
-        key = loop_runtime.loop_repo(row["repo"])
-        if key not in states or _loop_rank(row) < _loop_rank(states[key]):
-            states[key] = row
-    return states
+        groups.setdefault(loop_runtime.loop_repo(row["repo"]), []).append(row)
+    return {
+        repo: {**min(rows, key=lambda row: _sort_key(row, repo)), "loop_ids": _active_ids(rows)}
+        for repo, rows in groups.items()
+    }
+
+
+def _control_loop(entry: dict, repo: str) -> str:
+    """The loop that the controls on a row act on: the loop whose state the row shows."""
+    return entry.get("loop") or repo
+
+
+def _valid_loop_id(name: str) -> bool:
+    """A repo name, or a numbered loop on a repo."""
+    return isinstance(name, str) and loop_runtime.REPO_RE.fullmatch(name) is not None
 
 
 def _loop_hosts_from_heartbeat(machine_records: list[dict], local_host: str) -> dict[str, dict]:
     """Map each remote repo to its Herdr state and host."""
-    hosts = {}
+    groups: dict[str, list[dict]] = {}
     for record in machine_records:
         if record.get("name") == local_host:
             continue
@@ -615,10 +638,16 @@ def _loop_hosts_from_heartbeat(machine_records: list[dict], local_host: str) -> 
                 if record.get("state") == "offline":
                     state = "unknown"
                 row = {**loop, "state": state, "machine": record["name"]}
-                key = loop_runtime.loop_repo(repo)
-                # A repo with several loops shows its most active one. A tie goes to the later record.
-                if key not in hosts or _loop_rank(row) <= _loop_rank(hosts[key]):
-                    hosts[key] = row
+                groups.setdefault(loop_runtime.loop_repo(repo), []).append(row)
+    hosts = {}
+    for key, rows in groups.items():
+        # A repo with several loops shows its most active one. A tie goes to the later record.
+        winner = rows[0]
+        for row in rows[1:]:
+            if _sort_key(row, key) <= _sort_key(winner, key):
+                winner = row
+        same_machine = [row for row in rows if row["machine"] == winner["machine"]]
+        hosts[key] = {**winner, "loop_ids": _active_ids(same_machine)}
     return hosts
 
 
@@ -643,6 +672,8 @@ def gather_loops(connection: dict) -> dict:
         status = entry.get("state") or "unknown"
         entries.append({
             "repo": repo,
+            "loop": entry.get("repo") or repo,
+            "loop_ids": list(entry.get("loop_ids", [])),
             "enabled": repo in enabled,
             "status": status,
             "agent_status": status,
@@ -2658,7 +2689,7 @@ def render_loops(
             else:
                 main.append("<p class=dim>Use peek output to request the remote log.</p>")
             main.append(
-                f"<a href='/peek?repo={quote(selected_repo, safe='')}&machine={quote(selected['machine'], safe='')}&lines={lines}'>peek output</a>"
+                f"<a href='/peek?repo={quote(_control_loop(selected, selected_repo), safe='')}&machine={quote(selected['machine'], safe='')}&lines={lines}'>peek output</a>"
             )
             presets = sorted({25, 400, 2000, lines})
             picker = " ".join(
@@ -2695,16 +2726,16 @@ def render_loops(
         if active:
             main.append(
                 "<form method=post action=/loops/state style='display:inline'>"
-                f"<input type=hidden name=repo value='{esc(selected_repo)}'>"
+                f"<input type=hidden name=repo value='{esc(_control_loop(selected, selected_repo))}'>"
                 f"<input type=hidden name=machine value='{esc(selected['machine'])}'>"
                 "<button type=submit>refresh state</button></form>"
                 "<form method=post action=/loops/send style='display:inline'>"
-                f"<input type=hidden name=repo value='{esc(selected_repo)}'>"
+                f"<input type=hidden name=repo value='{esc(_control_loop(selected, selected_repo))}'>"
                 f"<input type=hidden name=machine value='{esc(selected['machine'])}'>"
                 "<input name=text maxlength=2000 size=40 required placeholder='type a line to send to the agent'> "
                 "<button type=submit>send</button></form>"
                 "<form method=post action=/loops/close style='display:inline'>"
-                f"<input type=hidden name=repo value='{esc(selected_repo)}'>"
+                f"<input type=hidden name=repo value='{esc(_control_loop(selected, selected_repo))}'>"
                 f"<input type=hidden name=machine value='{esc(selected['machine'])}'>"
                 "<select name=scope><option value=repo>this repo</option>"
                 "<option value=all>every loop on this machine</option></select> "
@@ -3425,7 +3456,10 @@ class Handler(BaseHTTPRequestHandler):
             and selected["status"] not in ("stopped", "unknown")
         ):
             try:
-                tail = loop_tail(selected["repo"], selected["machine"], lines, self.fleet_connection, self.cmd_signing_key)
+                tail = loop_tail(
+                    _control_loop(selected, selected_repo), selected["machine"], lines,
+                    self.fleet_connection, self.cmd_signing_key,
+                )
             except CoordinatorUnreachable:
                 self.reply(render_error("cannot reach the redis coordinator"), 502)
                 return
@@ -3444,20 +3478,21 @@ class Handler(BaseHTTPRequestHandler):
         if scope != "all":
             return [repo]
         entries = gather_loops(self.fleet_connection)["entries"]
-        targets = [
-            e["repo"] for e in entries if e["machine"] == machine and e["status"] not in ("stopped", "unknown")
-        ]
+        targets = []
+        for entry in entries:
+            if entry["machine"] == machine and entry["status"] not in ("stopped", "unknown"):
+                targets.extend(entry.get("loop_ids") or [entry["repo"]])
         return targets or [repo]
 
     def do_loops_close(self, form: dict) -> None:
         repo = form.get("repo", [""])[0].strip()
         machine = form.get("machine", [""])[0].strip()
         scope = form.get("scope", ["repo"])[0].strip()
-        if not repo or not _valid_repo_name(repo) or not machine:
+        if not repo or not _valid_loop_id(repo) or not machine:
             self.reply(render_error("bad close request"), 400)
             return
         targets = self._loop_targets(machine, scope, repo)
-        if any(not _valid_repo_name(t) for t in targets):
+        if any(not _valid_loop_id(t) for t in targets):
             self.reply(render_error("bad repo name"), 400)
             return
         local_host = machines.hostname()
@@ -3489,13 +3524,13 @@ class Handler(BaseHTTPRequestHandler):
         if errors:
             self.reply(render_error("stop failed:\n" + "\n".join(errors)), 502)
             return
-        self.redirect(f"/loops?repo={quote(repo, safe='')}")
+        self.redirect(f"/loops?repo={quote(loop_runtime.loop_repo(repo), safe='')}")
 
     def do_loops_send(self, form: dict) -> None:
         repo = form.get("repo", [""])[0].strip()
         machine = form.get("machine", [""])[0].strip()
         text = form.get("text", [""])[0].strip()
-        if not repo or not _valid_repo_name(repo) or not machine or not text:
+        if not repo or not _valid_loop_id(repo) or not machine or not text:
             self.reply(render_error("bad send request"), 400)
             return
         local_host = machines.hostname()
@@ -3518,7 +3553,7 @@ class Handler(BaseHTTPRequestHandler):
         if result["mode"] == "local" and result["returncode"] != 0:
             self.reply(render_error("send failed:\n" + result["output"].strip()), 502)
             return
-        self.redirect(f"/loops?repo={quote(repo, safe='')}")
+        self.redirect(f"/loops?repo={quote(loop_runtime.loop_repo(repo), safe='')}")
 
     def do_loops_start(self, form: dict) -> None:
         repo = form.get("repo", [""])[0].strip()
@@ -3551,7 +3586,7 @@ class Handler(BaseHTTPRequestHandler):
         if result["mode"] == "local" and result["returncode"] != 0:
             self.reply(render_error(f"run failed: {result['output'].strip()}"), 502)
             return
-        self.redirect(f"/loops?repo={quote(repo, safe='')}")
+        self.redirect(f"/loops?repo={quote(loop_runtime.loop_repo(repo), safe='')}")
 
     def do_schedule_timer(self, form: dict) -> None:
         """Start or stop `delegation-loop.timer` -- always on this machine.
@@ -3673,7 +3708,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_peek(self, query: dict) -> None:
         repo = query.get("repo", "").strip()
         machine = query.get("machine", "").strip()
-        if not repo or not _valid_repo_name(repo):
+        if not repo or not _valid_loop_id(repo):
             self.reply(render_error("bad repo name"), 400)
             return
         lines = query.get("lines", "60").strip() or "60"
@@ -3709,7 +3744,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_loops_state(self, form: dict) -> None:
         repo = form.get("repo", [""])[0].strip()
         machine = form.get("machine", [""])[0].strip()
-        if not repo or not _valid_repo_name(repo) or not machine:
+        if not repo or not _valid_loop_id(repo) or not machine:
             self.reply(render_error("bad state request"), 400)
             return
         local_host = machines.hostname()

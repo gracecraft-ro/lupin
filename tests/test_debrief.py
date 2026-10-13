@@ -240,6 +240,42 @@ def test_write_debrief_keeps_other_sections_when_ledger_is_down(tmp_path: Path, 
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
 
 
+def test_two_stop_debriefs_in_the_same_second_do_not_replace_each_other(tmp_path: Path, monkeypatch):
+    # Two loops of one repo can stop in the same second.
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    monkeypatch.setattr(debrief, "_gh", FakeGh(dict(RESPONSES)))
+    end = datetime(2026, 10, 13, 12, 0, 5, tzinfo=timezone.utc)
+
+    first = debrief._write(
+        tmp_path, "widgets", checkout, datetime(2026, 10, 13, 11, 0, tzinfo=timezone.utc), end, forced=True,
+    )
+    second = debrief._write(
+        tmp_path, "widgets", checkout, datetime(2026, 10, 13, 11, 30, tzinfo=timezone.utc), end, forced=True,
+    )
+
+    assert (first.name, second.name) == ("20261013-120005.md", "20261013-120006.md")
+    assert debrief.FILE_RE.fullmatch(second.name)
+    assert "2026-10-13T11:00:00" in first.read_text(encoding="utf-8")
+    assert "2026-10-13T11:30:00" in second.read_text(encoding="utf-8")
+    assert sorted(path.name for path in first.parent.iterdir()) == [first.name, second.name]
+
+
+def test_a_failed_stop_debrief_leaves_no_empty_file(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    monkeypatch.setattr(debrief, "_gh", FakeGh(dict(RESPONSES)))
+    monkeypatch.setattr(debrief, "_store", mock.Mock(side_effect=OSError("disk full")))
+    end = datetime(2026, 10, 13, 12, 0, 5, tzinfo=timezone.utc)
+
+    with pytest.raises(OSError):
+        debrief._write(
+            tmp_path, "widgets", checkout, datetime(2026, 10, 13, 11, 0, tzinfo=timezone.utc), end, forced=True,
+        )
+
+    assert list((tmp_path / "debriefs" / "widgets").iterdir()) == []
+
+
 def test_failed_list_call_cuts_only_its_section(tmp_path: Path, monkeypatch):
     checkout = tmp_path / "widgets"
     checkout.mkdir()

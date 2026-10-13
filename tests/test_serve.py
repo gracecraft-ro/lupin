@@ -2372,6 +2372,110 @@ class NumberedLoopDashboardTests(unittest.TestCase):
 
         self.assertEqual([(r["repo"], r["running"], r["running_machines"]) for r in rows], [("widgets", True, "jesus")])
 
+    def test_the_row_names_the_loop_it_shows_and_every_active_loop_of_the_repo(self):
+        local = [
+            {"repo": "widgets", "state": "idle", "backend": "herdr", "workspace_id": "w1"},
+            {"repo": "widgets~2", "state": "working", "backend": "herdr", "workspace_id": "w2"},
+            {"repo": "widgets~3", "state": "stopped", "backend": "herdr"},
+        ]
+
+        entry = self._gather(local=local, machines_=[])[0]
+
+        self.assertEqual((entry["repo"], entry["loop"]), ("widgets", "widgets~2"))
+        self.assertEqual(entry["loop_ids"], ["widgets", "widgets~2"])
+
+    def test_a_tie_goes_to_the_plain_loop_even_when_it_is_listed_last(self):
+        local = [
+            {"repo": "widgets~2", "state": "working", "backend": "herdr"},
+            {"repo": "widgets", "state": "working", "backend": "herdr"},
+        ]
+
+        self.assertEqual(self._gather(local=local, machines_=[])[0]["loop"], "widgets")
+
+    def test_a_tie_between_two_machines_goes_to_the_later_record(self):
+        remote = [
+            {"name": "jesus", "state": "online", "loops": [{"repo": "widgets", "state": "working"}]},
+            {"name": "ralpha", "state": "online", "loops": [{"repo": "widgets", "state": "working"}]},
+        ]
+
+        self.assertEqual(self._gather(local=[], machines_=remote)[0]["machine"], "ralpha")
+
+    def test_a_remote_row_lists_the_loops_on_its_own_machine_only(self):
+        remote = [
+            {"name": "jesus", "state": "online", "loops": [
+                {"repo": "widgets", "state": "idle"}, {"repo": "widgets~2", "state": "working"},
+            ]},
+            {"name": "ralpha", "state": "online", "loops": [{"repo": "widgets~3", "state": "idle"}]},
+        ]
+
+        entry = self._gather(local=[], machines_=remote)[0]
+
+        self.assertEqual((entry["machine"], entry["loop"], entry["loop_ids"]), ("jesus", "widgets~2", ["widgets", "widgets~2"]))
+
+    def test_the_controls_act_on_the_loop_the_row_shows(self):
+        data = {
+            "entries": [_loop_entry(
+                "widgets", "working", "h", session="lupin-loops", loop="widgets~2", loop_ids=["widgets~2"],
+            )],
+            "local_host": "h", "machines": [], "fleet_error": None,
+        }
+
+        page = serve.render_loops(data, group="repo", selected_repo="widgets", selected_tail="", lines=60).decode()
+
+        self.assertIn("/peek?repo=widgets~2&", page)
+        for action in ("state", "send", "close"):
+            self.assertIn(
+                f"action=/loops/{action} style='display:inline'><input type=hidden name=repo value='widgets~2'>", page,
+            )
+
+    def test_stop_acts_on_a_numbered_loop_and_goes_back_to_its_repo(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/close", {"repo": "widgets~2", "machine": "h", "scope": "repo"})
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
+        ):
+            handler.do_POST()
+
+        self.assertEqual(
+            [call.args[0] for call in fake_run.call_args_list],
+            [["lupin", "loop", "local-action", "stop", "widgets~2", "--force"]],
+        )
+        handler.redirect.assert_called_once_with("/loops?repo=widgets")
+
+    def test_stop_all_stops_every_active_loop_of_a_repo(self):
+        entries = [
+            _loop_entry("widgets", "working", "h", loop="widgets~2", loop_ids=["widgets", "widgets~2"]),
+            _loop_entry("other", "idle", "h"),
+            _loop_entry("gone", "stopped", "h"),
+        ]
+        handler = _loops_handler()
+        _post_body(handler, "/loops/close", {"repo": "widgets", "machine": "h", "scope": "all"})
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve, "gather_loops", return_value={"entries": entries}),
+            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
+        ):
+            handler.do_POST()
+
+        self.assertEqual(
+            [call.args[0][4] for call in fake_run.call_args_list], ["widgets", "widgets~2", "other"],
+        )
+
+    def test_a_loop_id_must_be_a_repo_or_a_numbered_loop(self):
+        for good in ("widgets", "widgets~2", "widgets~99", "a.b-c_d~10"):
+            self.assertTrue(serve._valid_loop_id(good), good)
+        for bad in ("widgets~1", "widgets~100", "widgets~", "a/b~2", "widgets\n", "widgets~2\n", "", None):
+            self.assertFalse(serve._valid_loop_id(bad), repr(bad))
+
+    def test_the_repos_file_reader_skips_a_numbered_loop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "repos")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("widgets omp\nwidgets~2 claude\n")
+            with mock.patch.object(serve, "REPOS_FILE", path):
+                self.assertEqual(serve._repo_platforms(), {"widgets": "omp"})
+
 
 class LoopsRouteUnitTests(unittest.TestCase):
     """Routing logic for controls that use Lupin and Herdr."""
