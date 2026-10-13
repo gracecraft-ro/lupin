@@ -180,9 +180,19 @@ visual change from the diff. A visual PR with no screenshots is not ready.
    Text after `#` is the image's alt text. A path that the body names is
    replaced with the uploaded image. An attached file that the body does not
    name goes at the end. One command takes up to 50 files.
-4. Open the PR in the browser, or run `gh pr view <PR_NUMBER> --repo
-   <owner>/<repo> --comments`. Check that the images show. Do not report that
-   you attached them until you checked.
+4. Run `gh pr view <PR_NUMBER> --repo <owner>/<repo> --comments`. In your
+   comment, each image must now be a `https://github.com/user-attachments/...`
+   link. A `./evidence/...` path means the upload did not happen. A private
+   repo gives an anonymous request a 403 for the link. That is normal. Do not
+   report that you attached the files until you checked.
+
+An upload needs write access to the repo that holds the PR. If the command
+fails with `attaching files requires write access to the repository`, your
+token cannot upload there. A token for a fork can post a plain comment on an
+upstream PR, but it cannot upload. Do not skip the screenshots. Keep the files
+in `evidence/<issue-number>/`. In your report, give the PR number, the machine,
+and the absolute path of each file, and say that the upload failed. The
+orchestrator attaches them with its own token.
 
 GitHub CLI 2.99.0 and newer has `--attach`. Run `gh --version` if the option is
 missing. Upgrade, or report that you cannot attach. Do not skip it silently.

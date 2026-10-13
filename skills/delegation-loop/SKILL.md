@@ -300,6 +300,12 @@ branch.
 
 After the PR opens, report its number to the orchestrator.
 
+For a visual change, check that the PR has screenshots before you dispatch the
+reviewer. A worker whose token cannot upload reports the path of each file and
+its machine. Attach those files yourself, with your own token. Use the command
+in "Attach screenshots to the PR" in the `ship` skill. Do not dispatch the
+reviewer on a visual PR with no screenshots.
+
 Use `lupin review-route --category CATEGORY --size SIZE --mode separate` for
 a reviewer recommendation. Compare it with the issue's implementation route
 and the worker's model tier.
