@@ -97,15 +97,15 @@ repository or artifact-store location.
 Commit the change. If the commit fails, report the error. Then go to "Report and
 release" below.
 
-Workers never push to `origin`, `main`, or `release/next`. Push the feature
+Workers never push to `origin` or `main`. Push the feature
 branch to the fork. Open the PR on the fork. Then request review.
 
 1. Run `git remote get-url fork` (the fork is the GitHub copy you push to). It
    must print `https://github.com/gracecraft-ro/<repo>.git`. If it does not, stop
    and report. Never run `git remote add`.
 2. Push only the feature branch. Find it with `git branch --show-current`.
-   If the branch is empty, detached (no branch name), `main`, or `release/next`,
-   stop. Report it.
+   If the branch is empty, detached (no branch name), or `main`, stop. Report
+   it.
    Then run `git push -u fork <branch>`. Never push any other ref.
 3. Open the PR on the fork. Set `<repo>` to the repo name in the fork URL
    from step 1. Look for an open PR on the branch first. Run:
@@ -122,12 +122,11 @@ branch to the fork. Open the PR on the fork. Then request review.
    `<PR_NUMBER>`. If it exits 0 and is empty, run:
 
    ```sh
-   gh pr create --repo gracecraft-ro/<repo> --base release/next \
+   gh pr create --repo gracecraft-ro/<repo> --base main \
      --head <branch> --title "..." --body "Closes #<issue>. ..."
    ```
 
-   The orchestrator closes the issue by hand, because a merge into
-   `release/next` does not close it.
+   The orchestrator closes the issue by hand if the merge does not close it.
 
    Never use an upstream `--repo` in this flow. If it fails, report the error.
    Then go to "Report and release" below.
