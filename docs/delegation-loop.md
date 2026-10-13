@@ -63,8 +63,9 @@ new one. Do not open a PR or an issue on a fork.
    git push -u fork <branch>
    ```
 
-   Never push `main` or `release/next`. You may use `/ship` for steps 3 and 4.
-   Check that it does not push `main` or `release/next`.
+   Never push `main` or `release/next`. You may use `/ship` for steps 3 and 4
+   if it follows them. It pushes to `origin` first, and it opens the PR on
+   upstream. Check that it does not push `main` or `release/next`.
 
 4. Open the PR on upstream. From a fork branch, add `--head FORK_OWNER:<branch>`:
 
