@@ -728,11 +728,9 @@ def build_model(
 def _repo_identity(repo_path: str):
     """Return (owner, name, warning) for the repo checked out at repo_path.
 
-    `gh repo view` is the authority -- it follows a repo that moved owners
-    -- but it is one network subprocess (~0.6 s), and a Roadmap page load
-    resolves an identity per repo. The checkout's `origin` URL only changes
-    when someone edits the remote, so it keys the cache: read it from git
-    (~5 ms), and ask `gh` only when that URL is new or its answer is stale.
+    `gh repo view` is the authority and follows a repo that moved owners.
+    If `gh` is not installed, use the owner and name in a standard GitHub
+    origin URL so this machine can still read the shared GitHub cache.
     """
     url = _git_remote_url(repo_path)
     # A checkout with no `origin` (or one that is not a repository at all)
@@ -749,8 +747,11 @@ def _repo_identity(repo_path: str):
         if cached and now - cached[0] < _identity_ttl(cached[1]):
             return cached[1]
     result = _gh_identity(repo_path)
-    with _IDENTITY_LOCK:
-        _IDENTITY_CACHE[key] = (time.monotonic(), result)
+    if result[2] == "GitHub repository data is unavailable: gh is not installed":
+        repository = _github_repo_from_remote(url)
+        if repository:
+            result = (*repository, None)
+    _IDENTITY_CACHE[key] = (time.monotonic(), result)
     if result[0]:
         _persist_cache()
     return result
@@ -768,6 +769,31 @@ def _gh_identity(repo_path: str):
     if not owner or not name:
         return None, None, "GitHub returned no repository owner or name"
     return owner, name, None
+
+def _github_repo_from_remote(url: str | None) -> tuple[str, str] | None:
+    """Read owner and repo from a standard GitHub origin URL."""
+    if not url:
+        return None
+    match = re.fullmatch(r"(?:git@)?github\.com:([^/]+)/([^/]+)", url)
+    if match:
+        owner, name = match.groups()
+        return owner, name[:-4] if name.endswith(".git") else name
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return None
+    if (
+        parsed.scheme not in {"https", "ssh"}
+        or parsed.hostname != "github.com"
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) != 2 or not all(parts):
+        return None
+    return parts[0], parts[1][:-4] if parts[1].endswith(".git") else parts[1]
+
 
 
 def _git_remote_url(repo_path: str) -> str | None:
