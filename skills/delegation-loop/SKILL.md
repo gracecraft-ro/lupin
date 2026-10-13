@@ -150,6 +150,8 @@ Give each worker a short brief with:
 - Claim or quest ID.
 - Machine, absolute worktree path, and branch.
 - Required tests and smoke checks.
+- For a visual change: attach before and after screenshots to the PR. See
+  "Attach screenshots to the PR" in the `ship` skill.
 
 Tell implementation workers to follow `AGENTS.md`, rule 1 under "Pull requests,
 review, and handoff". Do not repeat the `/ship` implementation checklist.

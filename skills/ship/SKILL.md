@@ -65,37 +65,32 @@ Follow the repository's `AGENTS.md`, issue workflow, and release rules.
   the user must know.
 
 For a visual change, open the real surface and capture before and after.
-Report if you could not view it.
+A visual change is any change that a person can see: a screen, a page, a
+control, a style, a rendered file, or a 3D model. Report if you could not view
+it. A PR for a visual change needs the screenshots. See "Attach screenshots to
+the PR".
 
 For a 3D change, render a contact sheet with the useful views. Use top, bottom,
 front, side or 90-degree, and 45-degree views when they help show the change.
 Compare before and after from the same views. Attach the sheet to the PR.
 
-## Save and attach evidence
+## Save evidence
 
 Save every screenshot, render, and other artifact under
 `evidence/<issue-number>/`. Use `evidence/<issue-number>/` for every issue.
 Check `.gitignore`. Add `evidence/` if it is not ignored. Keep these local
-copies out of commits.
-
-GitHub CLI 2.99.0 and newer supports `gh issue comment --attach`. Check
-`gh version` if the option is missing; upgrade instead of silently skipping
-an attachment. Attach evidence to the PR conversation:
-
-```sh
-gh issue comment <PR_NUMBER> --repo gracecraft-ro/<repo> \
-  --attach evidence/123/contact-sheet.png \
-  --body-file report.md
-```
-
-Attach each relevant screenshot or contact sheet. Do not attach an artifact you
-did not inspect. For a non-image artifact, include a link to its approved
-repository or artifact-store location.
+copies out of commits. You attach them to the PR after you open it. See
+"Attach screenshots to the PR".
 
 ## Commit and open the pull request
 
 Commit the change. If the commit fails, report the error. Then go to "Report and
 release" below.
+
+If the repo's `AGENTS.md` has a rule for where to push and open the PR (rule 1
+under "Pull requests, review, and handoff"), follow it. It takes precedence
+over steps 1 to 4 below. In the Lupin loop, that rule opens the PR on upstream,
+the repo that the PR belongs to. A PR on a fork does not get reviewed.
 
 Workers never push to `origin`, `main`, or `release/next`. Push the feature
 branch to the fork. Open the PR on the fork. Then request review.
@@ -146,12 +141,56 @@ branch to the fork. Open the PR on the fork. Then request review.
    step 3. `<sha>` is the output of `git rev-parse HEAD`. Then go to "Report and
    release" below. Do not merge. Do not wait for approval. The orchestrator
    dispatches a reviewer.
-5. If the push or PR creation fails, report the branch name and the commit
+5. Attach the screenshots. See "Attach screenshots to the PR" below. Do this
+   before you report, for every visual change.
+6. If the push or PR creation fails, report the branch name and the commit
    range. Then go to "Report and release" below.
 
 If the repo does not allow fork PRs, keep the local branch and report its name
 and commit range. A local commit is not a pull request and is not shipped.
 Do not merge the PR. The orchestrator reviews and merges it.
+
+## Attach screenshots to the PR
+
+Do this after the PR exists, for every visual change. A reviewer cannot judge a
+visual change from the diff. A visual PR with no screenshots is not ready.
+
+1. Get the repo and the number of the PR that holds the change. Use the PR URL.
+   For the PR in the current branch, run
+   `gh pr view --json number,url --jq '.number, .url'`. The URL is
+   `https://github.com/<owner>/<repo>/pull/<number>`. Use that `<owner>/<repo>`.
+   Do not use the fork name unless the PR is on the fork.
+2. Write the comment in a file. Show before and after. Say what the reader
+   should look at:
+
+   ```md
+   Before: ![before](./evidence/123/before.png)
+   After: ![after](./evidence/123/after.png)
+   ```
+
+3. Attach the files and post the comment:
+
+   ```sh
+   gh pr comment <PR_NUMBER> --repo <owner>/<repo> \
+     --attach './evidence/123/before.png#before' \
+     --attach './evidence/123/after.png#after' \
+     --body-file report.md
+   ```
+
+   Text after `#` is the image's alt text. A path that the body names is
+   replaced with the uploaded image. An attached file that the body does not
+   name goes at the end. One command takes up to 50 files.
+4. Open the PR in the browser, or run `gh pr view <PR_NUMBER> --repo
+   <owner>/<repo> --comments`. Check that the images show. Do not report that
+   you attached them until you checked.
+
+GitHub CLI 2.99.0 and newer has `--attach`. Run `gh --version` if the option is
+missing. Upgrade, or report that you cannot attach. Do not skip it silently.
+Attach only a screenshot you opened and checked. If you could not capture one,
+say so in the PR comment and in your report, and say why.
+
+For a non-image artifact, link to its approved repository or artifact-store
+location.
 
 ## Report and release
 
