@@ -150,8 +150,9 @@ Give each worker a short brief with:
 - Claim or quest ID.
 - Machine, absolute worktree path, and branch.
 - Required tests and smoke checks.
-- For a visual change: attach before and after screenshots to the PR. See
-  "Attach screenshots to the PR" in the `ship` skill.
+- For a visual change: attach before and after screenshots to the PR. For a new
+  screen, attach the new screen. See "Attach screenshots to the PR" in the
+  `ship` skill.
 
 Tell implementation workers to follow `AGENTS.md`, rule 1 under "Pull requests,
 review, and handoff". Do not repeat the `/ship` implementation checklist.
@@ -303,8 +304,11 @@ After the PR opens, report its number to the orchestrator.
 For a visual change, check that the PR has screenshots before you dispatch the
 reviewer. A PR has screenshots when a comment on it shows images from
 `user-attachments`. A `./evidence/` path does not count. A worker whose token
-cannot upload reports the path of each file and its machine. Copy a file from
-another machine with `scp` first. Then attach the files yourself, with your own
+cannot upload reports the path of each file and its machine. Copy the files
+before you run `lupin stop`, because stop deletes the worktree and `evidence/`
+with it. Copy from another machine with
+`scp <target>:<absolute path> ./evidence/<issue-number>/`. Take `<target>` from
+`~/.config/lupin/ssh-targets`. Then attach the files yourself, with your own
 token. Use the command in "Attach screenshots to the PR" in the `ship` skill.
 Do not dispatch the reviewer on a visual PR with no screenshots.
 

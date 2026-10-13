@@ -64,11 +64,11 @@ Follow the repository's `AGENTS.md`, issue workflow, and release rules.
 - The final report says what you skipped, what you did not check, and any risk
   the user must know.
 
-For a visual change, open the real surface and capture before and after.
-A visual change is any change that a person can see: a screen, a page, a
-control, a style, a rendered file, or a 3D model. Report if you could not view
-it. A PR for a visual change needs the screenshots. See "Attach screenshots to
-the PR".
+For a visual change, open the real surface and capture before and after. For a
+new screen with no before, capture the new screen. A visual change is any change
+that a person can see: a screen, a page, a control, a style, a rendered file,
+or a 3D model. Report if you could not view it. A PR for a visual change needs
+the screenshots. See "Attach screenshots to the PR".
 
 For a 3D change, render a contact sheet with the useful views. Use top, bottom,
 front, side or 90-degree, and 45-degree views when they help show the change.
@@ -87,11 +87,12 @@ copies out of commits. You attach them to the PR after you open it. See
 Commit the change. If the commit fails, report the error. Then go to "Report and
 release" below.
 
-If the repo's `AGENTS.md` has a rule for where to push and open the PR (rule 1
-under "Pull requests, review, and handoff"), follow it. It takes precedence
-over the next paragraph and over steps 1 to 4. In the Lupin loop, that rule
-opens the PR on upstream, the repo that the PR belongs to. A PR on a fork does
-not get reviewed.
+The repo's `AGENTS.md` may have a rule for where to push and open the PR. In
+the Lupin loop it is rule 1 under "Pull requests, review, and handoff". If it
+exists, follow it. It takes precedence over the next paragraph and over steps 1
+to 4. In the Lupin loop, it opens the PR on upstream, the repo that the PR
+belongs to. A PR on a fork does not get reviewed. After the PR opens, go to
+step 5.
 
 Workers never push to `origin`, `main`, or `release/next`. Push the feature
 branch to the fork. Open the PR on the fork. Then request review.
@@ -161,8 +162,9 @@ screenshots, follow it. Otherwise follow this section.
    `gh pr view --json number,url --jq '.number, .url'`. The URL is
    `https://github.com/<owner>/<repo>/pull/<number>`. Use that `<owner>/<repo>`.
    Do not use the fork name unless the PR is on the fork.
-2. Write the comment in a file. Show before and after. For a new screen with
-   no before, show the new screen. Say what the reader should look at:
+2. Write the comment in `evidence/<issue-number>/report.md`. Show before and
+   after. For a new screen with no before, show the new screen. Say what the
+   reader should look at. Use the same path in the body and in `--attach`:
 
    ```md
    Before: ![before](./evidence/123/before.png)
@@ -175,7 +177,7 @@ screenshots, follow it. Otherwise follow this section.
    gh pr comment <PR_NUMBER> --repo <owner>/<repo> \
      --attach './evidence/123/before.png#before' \
      --attach './evidence/123/after.png#after' \
-     --body-file report.md
+     --body-file ./evidence/123/report.md
    ```
 
    Text after `#` is the image's alt text. A path that the body names is
@@ -183,23 +185,24 @@ screenshots, follow it. Otherwise follow this section.
    name goes at the end. One command takes up to 50 files.
 4. Run `gh pr view <PR_NUMBER> --repo <owner>/<repo> --comments`. In your
    comment, each image must now be a `https://github.com/user-attachments/...`
-   link. A `./evidence/...` path means the upload did not happen. A private
-   repo gives an anonymous request a 403 for the link. That is normal. Do not
+   link. A `./evidence/...` path means the upload did not happen. Then follow
+   the paragraph below. A 403 for the link is expected on a private repo. Do not
    report that you attached the files until you checked.
 
 An upload needs write access to the repo that holds the PR. If the command
 fails with `attaching files requires write access to the repository`, your
 token cannot upload there. A token for a fork can post a plain comment on an
 upstream PR, but it cannot upload. Do not skip the screenshots. Keep the files
-in `evidence/<issue-number>/`. In your report, give the PR number, the machine,
-and the absolute path of each file, and say that the upload failed. The
-orchestrator attaches them with its own token.
+in `evidence/<issue-number>/`. In your report, say that the upload failed. Give
+the PR number, the machine, and the absolute path of each file. The orchestrator
+attaches them with its own token. Lupin deletes `evidence/` when it stops the
+loop, so the orchestrator copies the files first.
 
 GitHub CLI 2.99.0 and newer has `--attach`. Run `gh --version` if the option is
 missing. Upgrade, or report that you cannot attach. Do not skip it silently.
 Attach only a screenshot you opened and checked. If you could not capture one,
-post a PR comment that says so and why, and say so in your report. If you decide
-that a change is not visual, say so in your report, and say why.
+post a PR comment that says so and why. Say so in your report too. If you decide
+that a change is not visual, say so and why in your report and in a PR comment.
 
 For a non-image artifact, link to its approved repository or artifact-store
 location.
