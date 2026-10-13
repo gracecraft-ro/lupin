@@ -60,6 +60,8 @@ not open a PR or an issue on a fork.
    git worktree add <path> -b <branch> origin/release/next
    ```
 
+   On a Herdr worker, use the Herdr commands below instead.
+
 3. Push the branch. To `origin`, run `git push -u origin <branch>`. To the fork,
    add the fork remote if it is missing, then push:
 
@@ -82,7 +84,7 @@ not open a PR or an issue on a fork.
    If the PR opens, report its number to the orchestrator (the agent that
    dispatches and merges work). The orchestrator dispatches `/code-review`.
 
-On a Herdr worker, use the Herdr worktree commands:
+On a Herdr worker that opens a new branch, use the Herdr worktree commands:
 
 ```bash
 herdr worktree list --cwd <checkout>

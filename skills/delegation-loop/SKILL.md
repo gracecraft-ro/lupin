@@ -29,6 +29,8 @@ git fetch origin
 git worktree add <path> -b <branch> origin/release/next
 ```
 
+On a Herdr host, make the worktree as "Dispatch work" says instead.
+
 Keep each worktree under `.claude/worktrees/`. Record the machine, worktree
 path, branch, and issue in the dispatch and the repository's handoff record.
 When a worker runs in a Herdr pane, record its agent name, workspace ID, pane
@@ -247,9 +249,9 @@ journey, and a preview is ready, dispatch a separate QA task with
 and keep its browser data separate from implementation work. Ask for evidence,
 prioritized tickets, and a list of untested items. Do not ask the test agent to
 fix findings.
-Use the runner's worktree isolation feature when it has one. Otherwise, create
-a separate worktree and verify the worker's working directory. A worker on a
-Herdr host that opens a new branch uses the Herdr worktree commands:
+A worker that opens a new branch uses the runner's worktree isolation feature
+when it has one. Otherwise, it creates a separate worktree and verifies its
+working directory. On a Herdr host, it uses the Herdr worktree commands:
 
 ```sh
 herdr worktree list --cwd "$PWD"
@@ -258,9 +260,9 @@ herdr worktree create --branch BRANCH --base origin/release/next --cwd "$PWD"
 herdr worktree open --path PATH --cwd "$PWD"
 ```
 
-A sync worker or a fix worker does not use `herdr worktree create`. It makes its
-worktree with the git commands in "Pull requests come first". Then it runs
-`herdr worktree open --path PATH --cwd "$PWD"`.
+A sync worker or a fix worker always makes its worktree with the git commands
+in "Pull requests come first". It never uses `herdr worktree create`. On a
+Herdr host, it then runs `herdr worktree open --path PATH --cwd "$PWD"`.
 
 `--trust-repository` gives Git trust for one command. Use it only after the
 owner verified the repository. Do not use it as a retry for a failed worktree
