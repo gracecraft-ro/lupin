@@ -96,6 +96,10 @@ CONNECT_TIMEOUT = 2.0
 # Timeout for each connect and each read on the debrief path. See debrief_client.
 DEBRIEF_TIMEOUT_S = 1.0
 
+# Ask Redis to check about 1,000 keys per scan step.
+# Redis can return fewer keys when a match filter is set.
+SCAN_COUNT = 1000
+
 # KEYS[1] = slot:<name>, ARGV[1] = holder, ARGV[2] = now_ms, ARGV[3] = ttl_ms,
 # ARGV[4] = max holders. Returns 1 (added or renewed) or 0 (busy).
 _ACQUIRE_SCRIPT = """
@@ -427,7 +431,9 @@ def status(
     try:
         now = _now_ms()
         result: dict[str, dict] = {}
-        max_keys = _call_with_retry(lambda: list(client.scan_iter(match=f"{PREFIX}slot:*:max")))
+        max_keys = _call_with_retry(
+            lambda: list(client.scan_iter(match=f"{PREFIX}slot:*:max", count=SCAN_COUNT))
+        )
         for max_key in max_keys:
             slot = max_key[len(f"{PREFIX}slot:") : -len(":max")]
             members = client.zrange(f"{PREFIX}slot:{slot}", 0, -1, withscores=True)

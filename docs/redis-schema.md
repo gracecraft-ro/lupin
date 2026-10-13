@@ -530,6 +530,8 @@ If a wait reaches that limit, the stop ends. The debrief is then not written.
 - The claims scan counts as one request and reply. `SCAN` returns keys in pages.
   Each extra page is one more request and reply. The budget does not count the
   extra pages.
+  Each `scan_iter` call asks Redis to check about 1,000 keys per page
+  (`COUNT 1000`).
 - A server that sends data slowly can keep one reply going. Each read on
   `debrief_client` waits up to 1 second. For `loop.stop`, these are the calls
   after the command read. Each read on `_client` waits up to 2 seconds. The

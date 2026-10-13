@@ -44,7 +44,9 @@ def read_snapshot(**connection) -> dict[str, dict]:
     try:
         client = _client(connection)
         keys = slots_redis._call_with_retry(
-            lambda: list(client.scan_iter(match=f"{REDIS_KEY_PREFIX}*"))
+            lambda: list(
+                client.scan_iter(match=f"{REDIS_KEY_PREFIX}*", count=slots_redis.SCAN_COUNT)
+            )
         )
         snapshots = {}
         for key in keys:

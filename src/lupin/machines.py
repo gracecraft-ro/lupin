@@ -395,7 +395,7 @@ def machines(
     now = time.time()
 
     def op():
-        keys = list(client.scan_iter(match=f"{PREFIX}machine:*"))
+        keys = list(client.scan_iter(match=f"{PREFIX}machine:*", count=slots_redis.SCAN_COUNT))
         result = []
         unreadable = []
         for key in keys:

@@ -114,7 +114,7 @@ def _scan_claims(client) -> dict[str, dict]:
     why this scans directly instead of calling `claims.claims_for`.
     """
     prefix = f"{claims.PREFIX}claim:"
-    keys = _run(lambda: list(client.scan_iter(match=f"{prefix}*")))
+    keys = _run(lambda: list(client.scan_iter(match=f"{prefix}*", count=slots_redis.SCAN_COUNT)))
     result: dict[str, dict] = {}
     for key in keys:
         raw = _run(lambda k=key: client.get(k))
@@ -126,7 +126,7 @@ def _scan_claims(client) -> dict[str, dict]:
 
 def _scan_focuses(client) -> dict[str, dict]:
     prefix = f"{quest.PREFIX}focus:"
-    keys = _run(lambda: list(client.scan_iter(match=f"{prefix}*")))
+    keys = _run(lambda: list(client.scan_iter(match=f"{prefix}*", count=slots_redis.SCAN_COUNT)))
     result: dict[str, dict] = {}
     for key in keys:
         raw = _run(lambda k=key: client.get(k))
@@ -138,7 +138,7 @@ def _scan_focuses(client) -> dict[str, dict]:
 
 def _scan_started_quests(client) -> dict[str, dict]:
     prefix = f"{quest.PREFIX}quest:"
-    keys = _run(lambda: list(client.scan_iter(match=f"{prefix}*")))
+    keys = _run(lambda: list(client.scan_iter(match=f"{prefix}*", count=slots_redis.SCAN_COUNT)))
     result: dict[str, dict] = {}
     for key in keys:
         raw = _run(lambda k=key: client.get(k))
