@@ -59,9 +59,10 @@ Do not replace a PR review with a review of an unsubmitted branch.
 - Identify when docs should be revised to reflect updated functionality or architecture.
 - Check CI status. Do not treat passing CI checks as proof that the design is sound.
 - For visual changes, inspect the real surface and attached screenshots. A
-  visual change with no screenshots on the PR is a finding. Name it, and say
+  visual change with no screenshots on the PR is a `🔴 bug`. Name it, and say
   that the author must attach before and after screenshots. A new screen has
-  no before: the new screen is enough.
+  no before: the new screen is enough. See "Attach screenshots to the PR" in the
+  `ship` skill for what a visual change is.
 - For 3D changes, inspect the contact sheet and compare useful views.
 - Do not edit files, run linters, approve or request changes, or merge the PR.
   Return the verdict and findings to the orchestrator.

@@ -66,9 +66,11 @@ Follow the repository's `AGENTS.md`, issue workflow, and release rules.
 
 For a visual change, open the real surface and capture before and after. For a
 new screen with no before, capture the new screen. A visual change is any change
-that a person can see: a screen, a page, a control, a style, a rendered file,
-or a 3D model. Report if you could not view it. A PR for a visual change needs
-the screenshots. See "Attach screenshots to the PR".
+that a person can see. Examples: a screen, a page, a control, a style, a
+rendered file, or a 3D model. Report if you could not view it. A PR for a
+visual change needs the screenshots. See "Attach screenshots to the PR". If you
+decide that a change is not visual, say so and why in your report and in a PR
+comment.
 
 For a 3D change, render a contact sheet with the useful views. Use top, bottom,
 front, side or 90-degree, and 45-degree views when they help show the change.
@@ -201,8 +203,7 @@ loop, so the orchestrator copies the files first.
 GitHub CLI 2.99.0 and newer has `--attach`. Run `gh --version` if the option is
 missing. Upgrade, or report that you cannot attach. Do not skip it silently.
 Attach only a screenshot you opened and checked. If you could not capture one,
-post a PR comment that says so and why. Say so in your report too. If you decide
-that a change is not visual, say so and why in your report and in a PR comment.
+post a PR comment that says so and why. Say so in your report too.
 
 For a non-image artifact, link to its approved repository or artifact-store
 location.

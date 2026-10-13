@@ -260,7 +260,9 @@ lupin resume --machine MACHINE
 ```
 
 `peek` reads output. `attach` opens the loop terminal. The other commands
-control the loop or its schedule.
+control the loop or its schedule. Before you run `lupin stop` on a loop whose PR
+has screenshots to copy, copy its `evidence/` files first. See "Review and merge
+each pull request".
 
 `herdr --machine MACHINE` must come before the subcommand on every command,
 including the discovery command. It cannot be used with `--session` or
@@ -306,11 +308,12 @@ reviewer. A PR has screenshots when a comment on it shows images from
 `user-attachments`. A `./evidence/` path does not count. A worker whose token
 cannot upload reports the path of each file and its machine. Copy the files
 before you run `lupin stop`, because stop deletes the worktree and `evidence/`
-with it. Copy from another machine with
-`scp <target>:<absolute path> ./evidence/<issue-number>/`. Take `<target>` from
-`~/.config/lupin/ssh-targets`. Then attach the files yourself, with your own
-token. Use the command in "Attach screenshots to the PR" in the `ship` skill.
-Do not dispatch the reviewer on a visual PR with no screenshots.
+with it. To copy from another machine, run `mkdir -p ./evidence/<issue-number>`.
+Then run `scp <target>:<absolute path> ./evidence/<issue-number>/`. Take
+`<target>` from `~/.config/lupin/ssh-targets`. Then attach the files yourself,
+with your own token. Write your own `report.md` in the same folder. Use the
+command in "Attach screenshots to the PR" in the `ship` skill. Do not dispatch
+the reviewer on a visual PR with no screenshots.
 
 Use `lupin review-route --category CATEGORY --size SIZE --mode separate` for
 a reviewer recommendation. Compare it with the issue's implementation route
@@ -327,7 +330,9 @@ it costs more.
 
 If the review finds a problem, dispatch a `fix` worker with the exact finding.
 Tell it to push with `git push origin <branch>`, as in AGENTS.md item 1, and
-update the same PR. Review the latest PR commit.
+update the same PR. If the finding is about a visual change, tell the worker to
+capture new screenshots and attach them after it pushes. See "Attach screenshots
+to the PR" in the `ship` skill. Review the latest PR commit.
 Repeat until the reviewer approves the current head SHA. The head SHA is the
 newest commit ID on the branch.
 The orchestrator (the agent that dispatches and merges work) posts the verdict
