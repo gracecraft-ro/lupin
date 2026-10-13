@@ -331,8 +331,8 @@ it costs more.
 If the review finds a problem, dispatch a `fix` worker with the exact finding.
 Tell it to push with `git push origin <branch>`, as in AGENTS.md item 1, and
 update the same PR. If the finding is about a visual change, tell the worker to
-capture new screenshots and attach them after it pushes. See "Attach screenshots
-to the PR" in the `ship` skill. Review the latest PR commit.
+capture new screenshots. It attaches them after it pushes. See "Attach
+screenshots to the PR" in the `ship` skill. Review the latest PR commit.
 Repeat until the reviewer approves the current head SHA. The head SHA is the
 newest commit ID on the branch.
 The orchestrator (the agent that dispatches and merges work) posts the verdict

@@ -69,8 +69,8 @@ new screen with no before, capture the new screen. A visual change is any change
 that a person can see. Examples: a screen, a page, a control, a style, a
 rendered file, or a 3D model. Report if you could not view it. A PR for a
 visual change needs the screenshots. See "Attach screenshots to the PR". If you
-decide that a change is not visual, say so and why in your report and in a PR
-comment.
+decide that a change is not visual, say so in your report and in a PR comment.
+Give the reason.
 
 For a 3D change, render a contact sheet with the useful views. Use top, bottom,
 front, side or 90-degree, and 45-degree views when they help show the change.
