@@ -261,14 +261,13 @@ A machine that finds the slot already held just reads whatever is in
 
 Backs `place`/`quest`/`roadmap`'s read-only `gh` lookups (issue #35):
 issue state, issue body/labels, quest-labeled issues, dependency links.
-Written by the machine named in `LUPIN_GH_CANONICAL_FETCHER`
-(a hard pin to one named machine, not a race any machine could win).
-Every other machine reads it while that fetcher is alive. When the pinned
-machine is not maintaining the cache — draining, offline, or never joined
-— a machine that needs the data fetches it and publishes through the same
-`gh-fetch/<owner>/<repo>` slot, so the first machine to win still answers
-for the fleet and no two machines fetch the same repo at once.
-Read by every machine, the pinned machine included.
+The machine named in `LUPIN_GH_CANONICAL_FETCHER` writes this cache while
+it is online. Other machines read it. If the named machine is offline, or
+the setting is empty, a machine with Redis access can fetch under the
+`gh-fetch/<owner>/<repo>` slot. A caller that finds the slot busy reads
+the cache once more. If the entry is still empty and no machine is pinned,
+it reports that a fetch is in progress. Only the pinned machine fetches
+when Redis is unavailable.
 The roadmap uses the dashboard's Redis connection for this cache.
 
 ```json
@@ -291,13 +290,10 @@ different queries that must not share one cache entry: `issues:<state>`
 (`roadmap_cli`'s blocker-exists check), `quest-locate-issue:<number>`
 (`quest`'s issue-to-repo lookup).
 
-Guarded by the existing `slot:<name>` shape above, as
-`slot:gh-fetch/<owner>/<repo>` (max 1 holder, `/` not `:` -- a colon in the
-slot name breaks `release`/`renew`'s lease-id parsing, which splits on the
-first colon) — this only stops the pinned machine from running the same fetch
-twice if two `lupin` invocations there race each other. A machine that is
-not pinned never takes this lock and never calls `gh` for these lookups at all; on a
-miss it reports "no data yet" instead.
+The `slot:gh-fetch/<owner>/<repo>` allows one holder for each repo. Its
+name uses `/` because the lease ID uses `:` to separate the slot from its
+holder. Both the pinned machine and a fallback fetcher use the slot.
+When no machine is pinned, a caller does not fetch without the slot.
 
 ### `quota-snapshot`
 

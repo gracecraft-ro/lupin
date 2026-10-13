@@ -1,39 +1,8 @@
-"""Shared cache for quota data (issue #38): one fleet-wide reading per
-provider (Claude, opencode-go, OpenAI/Codex -- see issue #36), not a
-per-machine fact. A provider can have more than one login. Each row then
-has an `account` label (see `quota.py`). `quota.quota_usage()` already reads whichever provider
-this machine has credentials for; this module adds the fleet-shared
-publish step so `lupin serve` (pinned to a machine with no credentials,
-see issue #35) and `lupin quota` on any other machine see the same real
-numbers instead of nothing.
+"""Share provider quota readings across machines.
 
-Modeled on `gh_cache.py` (#35) and `benchmark_fetch.py` (#17), adapted:
-
-- **5-minute cadence, not daily.** `CACHE_TTL` below.
-- **No fixed canonical hostname.** `gh_cache.py` pins one named machine
-  (set by `LUPIN_GH_CANONICAL_FETCHER`) because Grace corrected away from a lock-race
-  model for GH specifically -- one machine is always known to hold the
-  right `gh` login. Quota credentials for different providers can live on
-  different machines, and which machine has which is not known in
-  advance, so a fixed pin doesn't fit here. Instead, "canonical" is
-  decided dynamically, per provider, by whether a machine's own local
-  `quota.quota_usage()` call actually returned real data (a `used_pct`)
-  for that provider. A machine with no credentials for a provider never
-  has real data for it, so it never writes for it -- it can't clobber a
-  good reading from elsewhere, without needing to know in advance who the
-  "right" machine is. This is the same end effect as `gh_cache`'s pin
-  (one real source of truth per key), reached a different way.
-- **One shared key, one entry per provider.** Different providers can go
-  stale/fresh independently (one machine might refresh "claude" while
-  another refreshes "openai"), so each provider's entry carries its own
-  `fetched_at`/`fetched_by`, inside one Redis key (`quota-snapshot`) --
-  same single-key-many-entries shape `machine:<name>`'s own `quota` field
-  already uses, just shared instead of per-machine.
-
-The lock below (`quota-fetch/<provider>`) only stops two `lupin`
-processes on the *same* real-data machine from publishing the same
-provider at once -- same narrow job `gh_cache.py`'s and
-`benchmark_fetch.py`'s own locks do.
+Each provider snapshot holds all login rows from a machine with real quota
+data for that provider. Readers use the shared snapshot instead of calling
+provider APIs.
 """
 
 from __future__ import annotations

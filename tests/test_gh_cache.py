@@ -156,7 +156,7 @@ def test_unreadable_registry_keeps_the_conservative_answer(redis_port, flush_red
 def test_canonical_fetcher_check_refuses_when_the_registry_is_partly_unreadable(redis_port, flush_redis):
     """The pinned fetcher's own record is corrupt. The check must read that as
     unknown and report the fetcher live, not absent."""
-    _raw_client(redis_port).set(f"{machines.PREFIX}machine:{gh_cache.CANONICAL_GH_FETCHER}", "not json")
+    _raw_client(redis_port).set(f"{machines.PREFIX}machine:{PINNED_FETCHER}", "not json")
 
     assert gh_cache._canonical_fetcher_live(_kw(redis_port)) is True
 
@@ -363,18 +363,46 @@ def test_canonical_fetcher_is_none_when_unset_or_empty(monkeypatch, value):
     assert gh_cache.canonical_fetcher() is None
 
 
-def test_unset_setting_pins_no_machine_so_a_miss_fetches_here(redis_port, flush_redis, monkeypatch):
-    monkeypatch.delenv("LUPIN_GH_CANONICAL_FETCHER")
-    fetch = mock.Mock(return_value=([{"number": 1}], None))
-    with mock.patch.object(machines, "hostname", return_value="jesus"):
-        with mock.patch.object(machines, "machines", return_value=[_record(PINNED_FETCHER)]):
-            data, error = gh_cache.cached_gh_json(
-                "acme", "repo", "issues:open", fetch, connection=_kw(redis_port)
-            )
+@pytest.mark.parametrize("value", [None, ""])
+def test_unset_or_empty_setting_three_callers_fetch_once(redis_port, flush_redis, monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("LUPIN_GH_CANONICAL_FETCHER")
+    else:
+        monkeypatch.setenv("LUPIN_GH_CANONICAL_FETCHER", value)
+    fetching = threading.Event()
+    finish = threading.Event()
+    results = [None, None, None]
 
-    assert data == [{"number": 1}]
-    assert error is None
-    fetch.assert_called_once()
+    def fetch():
+        fetching.set()
+        finish.wait()
+        return [{"number": 1}], None
+
+    fetch_fn = mock.Mock(side_effect=fetch)
+
+    def call(index):
+        results[index] = gh_cache.cached_gh_json(
+            "acme", "repo", "issues:open", fetch_fn, connection=_kw(redis_port)
+        )
+
+    threads = [threading.Thread(target=call, args=(index,)) for index in range(3)]
+    try:
+        threads[0].start()
+        assert fetching.wait(timeout=5)
+        for thread in threads[1:]:
+            thread.start()
+        for thread in threads[1:]:
+            thread.join(timeout=5)
+        assert all(not thread.is_alive() for thread in threads[1:])
+    finally:
+        finish.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(timeout=5)
+
+    assert fetch_fn.call_count == 1
+    assert results[0] == ([{"number": 1}], None)
+    assert all(result[0] is None and "fetch in progress" in result[1] for result in results[1:])
 
 
 def test_unset_setting_never_fetches_when_redis_is_down(closed_port, monkeypatch):

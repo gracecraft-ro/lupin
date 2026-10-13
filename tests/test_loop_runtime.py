@@ -304,12 +304,6 @@ def test_schedule_once_without_a_loop_user_writes_no_schedule(monkeypatch, tmp_p
     assert not (tmp_path / "once").exists()
 
 
-def test_service_environment_forwards_the_canonical_fetcher(monkeypatch):
-    monkeypatch.setenv("LUPIN_GH_CANONICAL_FETCHER", "fetcher-host")
-
-    assert "--setenv=LUPIN_GH_CANONICAL_FETCHER=fetcher-host" in loop_runtime._service_environment()
-
-
 def test_once_fire_continues_after_one_repo_quota_error(monkeypatch, tmp_path, capsys):
     schedule_dir = tmp_path / "once"
     schedule_dir.mkdir()

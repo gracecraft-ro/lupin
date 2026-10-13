@@ -309,8 +309,8 @@ not pay for `gh` again.
 `LUPIN_GH_CANONICAL_FETCHER` names the one machine that runs `gh` on a cache
 miss. Set it to that machine's hostname on every machine that reads the cache.
 The named machine also fetches when Redis is down. When the variable is unset,
-no machine is pinned. Each machine then fetches on a miss, but only while Redis
-is reachable.
+no machine is pinned. A machine can fetch on a miss only while Redis is
+reachable and the per-repo fetch slot is free.
 
 Each run has its own Git worktree in `worktrees/<repo>/` in the loop state
 directory. A worktree is a second working copy of the repo, with its own files
