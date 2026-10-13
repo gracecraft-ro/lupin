@@ -35,17 +35,11 @@ The `delegation-loop` skill gives the full steps. The short list:
 ## Rule 1: push the branch, open the PR upstream
 
 The PR goes to upstream `OWNER/REPO`, against `release/next`. A worker pushes its
-branch to `origin` if its `gh` token can push there. If not, it pushes to the
-fork `FORK_OWNER/REPO` and opens the PR upstream from the fork. Check push access:
-
-```bash
-gh api repos/OWNER/REPO --jq .permissions.push
-gh api repos/FORK_OWNER/REPO --jq .permissions.push
-```
-
-The first command must print `true` to push to `origin`. The second must print
-`true` to push to the fork. Use the existing fork. Do not create a new one. Do
-not open a PR or an issue on a fork.
+branch to `origin`. If upstream denies the push, it pushes to the fork
+`FORK_OWNER/REPO` and opens the PR upstream from the fork. Do not test access
+with `gh api repos/OWNER/REPO --jq .permissions.push`. It can print `true` for
+a token that cannot push. Try the push. Use the existing fork. Do not create a
+new one. Do not open a PR or an issue on a fork.
 
 1. Fetch upstream. From the repo checkout, run:
 
@@ -60,8 +54,9 @@ not open a PR or an issue on a fork.
    git worktree add <path> -b <branch> origin/release/next
    ```
 
-3. Push the branch. To `origin`, run `git push -u origin <branch>`. To the fork,
-   add the fork remote if it is missing, then push:
+3. Push the branch. First run `git push -u origin <branch>`. If upstream denies
+   the push (for example, with a `403` error), push to the fork. Add the fork
+   remote if it is missing, then push:
 
    ```bash
    git remote add fork https://github.com/FORK_OWNER/REPO.git
