@@ -119,9 +119,12 @@ from . import loop_runtime
 
 DEFAULT_RESULT_WAIT_S = 20.0  # how long stop/peek/schedule/pause/resume
 # wait, by default, for a remote result before they report exit code 4
-# ("sent, result unknown"). This is not how long the action itself is
-# allowed to run -- that limit is agent.py's own EXEC_TIMEOUT_S (120s; 900s for stop). A
-# caller who wants to wait longer than 20 seconds passes --wait.
+# ("sent, result unknown"). This is not the time limit for the action
+# itself. agent.py sets that. Other actions use EXEC_TIMEOUT_S. For
+# loop.stop on the queue, the stop subprocess uses SUBPROCESS_TIMEOUT_S,
+# which is derived from ACTION_TIMEOUT_S. A local loop.stop uses
+# ACTION_TIMEOUT_S as its limit. A caller who wants to wait longer than
+# 20 seconds passes --wait.
 
 
 def _route_args(parser: argparse.ArgumentParser) -> None:
@@ -307,14 +310,14 @@ def _redis_conn_args(parser: argparse.ArgumentParser) -> None:
 
 def _claim_args(parser: argparse.ArgumentParser) -> None:
     """Shared by `claim` and `renew-claim` -- both take a TTL."""
-    parser.add_argument("target", help="OWNER/REPO#N, e.g. gracecraft/lupin#6")
+    parser.add_argument("target", help="OWNER/REPO#N")
     parser.add_argument("--holder", required=True)
     parser.add_argument("--ttl", type=float, default=claims.DEFAULT_TTL, help="claim TTL in seconds")
     _redis_conn_args(parser)
 
 
 def _release_claim_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("target", help="OWNER/REPO#N, e.g. gracecraft/lupin#6")
+    parser.add_argument("target", help="OWNER/REPO#N")
     parser.add_argument("--holder", required=True)
     _redis_conn_args(parser)
 
@@ -346,7 +349,7 @@ def _ledger_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _roadmap_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--repo", default=None, help="only this repo (default: every enabled repo)")
+    parser.add_argument("--repo", default=None, help="only this repo (default: every repo that any machine enables)")
     parser.add_argument("--limit", type=int, default=10, help="show the top N (default: 10)")
     parser.add_argument("--stage", choices=["ready", "blocked", "all"], default="ready")
     parser.add_argument("--dag", action="store_true", help="draw dependencies between tasks")
@@ -687,12 +690,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_route(args: argparse.Namespace) -> int:
-    result = route_mod.route(
-        args.category,
-        args.size,
-        bmo_available=args.bmo_available,
-        primary_effort=args.primary_effort,
-    )
+    try:
+        result = route_mod.route(
+            args.category,
+            args.size,
+            bmo_available=args.bmo_available,
+            primary_effort=args.primary_effort,
+        )
+    except route_mod.RouteInputError as err:
+        print(f"lupin route: {err}", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(result))
     else:
@@ -799,7 +806,8 @@ def _cmd_quota(args: argparse.Namespace) -> int:
             label = duration.label if isinstance(duration, quota.QuotaDuration) else str(duration)
             left = max(0.0, 100 - row["used_pct"])
             resets = serve.time_until_reset(row.get("resets_at"))
-            print(f"{provider:<12} {label:<9} {left:.0f}% left   resets in {resets:<8} (fetched {age} via {fetched_by})")
+            name = f"{provider}/{row['account']}" if row.get("account") else provider
+            print(f"{name:<12} {label:<9} {left:.0f}% left   resets in {resets:<8} (fetched {age} via {fetched_by})")
     return 0
 
 
@@ -991,6 +999,13 @@ def _fleet_connection(args: argparse.Namespace) -> dict:
     )
 
 
+def _warn_unreadable(skipped: list[str]) -> None:
+    """Name the machine records a display command left out."""
+    if skipped:
+        names = ", ".join(sorted(skipped))
+        print(f"warning: skipped unreadable Redis record(s): {names}", file=sys.stderr)
+
+
 def _cmd_join(args: argparse.Namespace) -> int:
     try:
         record = machines.join(
@@ -1055,14 +1070,16 @@ def _cmd_undrain(args: argparse.Namespace) -> int:
 
 
 def _cmd_machines(args: argparse.Namespace) -> int:
+    skipped: list[str] = []
     try:
-        result = machines.machines(_fleet_connection(args))
+        result = machines.machines(_fleet_connection(args), skipped, strict=False)
     except _REDIS_REFUSED as exc:
         _print_auth_failed(exc, "the machine list", fleet=True)
         return 3
     except machines.CoordinatorUnreachable as exc:
         print(f"cannot reach the {exc}", file=sys.stderr)
         return 3
+    _warn_unreadable(skipped)
     if args.json:
         print(json.dumps(result))
     else:
@@ -1379,11 +1396,18 @@ def _cmd_roadmap(args: argparse.Namespace) -> int:
     # which has no such flag, and `resolve_connection` falls back to the
     # same default fleet config every other reader uses.
     connection = machines.resolve_connection(**_claim_kwargs(args))
-    claims_lookup = functools.partial(claims.claims_for, **connection)
+    # Records that `machines` or `claims` skipped. `run` reports the count.
+    unreadable: list[str] = []
+    claims_lookup = functools.partial(
+        claims.claims_for, with_ttl=True, skipped=unreadable, **connection
+    )
     text, code = roadmap_cli.run(
         args.repo, args.limit, args.stage, args.dag, args.json, args.refresh,
         claims_lookup=claims_lookup,
         connection=connection,
+        code_dir=os.environ.get("LUPIN_LOOP_CODE_DIR", "/code"),
+        machine_records=functools.partial(machines.machines, connection, skipped=unreadable, strict=False),
+        unreadable=unreadable,
     )
     print(text)
     return code
@@ -1630,7 +1654,7 @@ def _cmd_fleet_run(args: argparse.Namespace) -> int:
             print("no enabled repos to dispatch", file=sys.stderr)
             return 1
         connection = _fleet_connection(args)
-        records = machines.machines(connection)
+        records = machines.machines(connection, strict=True)
         signing_keys = {}
         key_dir = os.environ.get("LUPIN_CMD_SIGNING_KEYS_DIR")
         for record in records:
@@ -1731,10 +1755,14 @@ def _cmd_loops(args: argparse.Namespace) -> int:
     local_host = machines.hostname()
     machine = args.machine or local_host
     if machine == local_host:
-        if args.repo:
-            rows = [loop_runtime.loop_state(args.repo)]
-        else:
-            rows = loop_runtime.status_rows()
+        try:
+            if args.repo:
+                rows = [loop_runtime.loop_state(args.repo)]
+            else:
+                rows = loop_runtime.status_rows()
+        except loop_runtime.LoopError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
     elif args.repo:
         try:
             result = loops_mod.dispatch_loop_action(
@@ -1768,14 +1796,16 @@ def _cmd_loops(args: argparse.Namespace) -> int:
             print("remote loop state returned invalid JSON", file=sys.stderr)
             return 1
     else:
+        skipped: list[str] = []
         try:
-            records = machines.machines(_fleet_connection(args))
+            records = machines.machines(_fleet_connection(args), skipped, strict=False)
         except _REDIS_REFUSED as exc:
             _print_auth_failed(exc, "the machine list", fleet=True)
             return 3
         except machines.CoordinatorUnreachable as exc:
             print(f"cannot reach the {exc}", file=sys.stderr)
             return 3
+        _warn_unreadable(skipped)
         record = next((item for item in records if item["name"] == machine), None)
         if record is None:
             print(f"no machine named {machine!r}", file=sys.stderr)
@@ -1843,6 +1873,7 @@ def _cmd_stop(args: argparse.Namespace) -> int:
             queue_action="loop.stop", queue_params={"repo": args.repo, "force": args.force},
             connection=connection, signing_key=args.signing_key,
             actor=os.environ.get("USER", "lupin"), issuer=local_host, wait_s=args.wait,
+            run_local=lambda argv: loops_mod.run_subprocess(argv, timeout=agent_mod.ACTION_TIMEOUT_S["loop.stop"]),
         )
     except _REDIS_REFUSED as exc:
         _print_auth_failed(exc, f"stop {args.repo!r} on {machine!r}", fleet=True)
@@ -2003,7 +2034,7 @@ def _cmd_pause_resume(args: argparse.Namespace, verb: str) -> int:
     local_host = machines.hostname()
     if args.all:
         try:
-            targets = sorted(record["name"] for record in machines.machines(connection))
+            targets = sorted(record["name"] for record in machines.machines(connection, strict=True))
         except _REDIS_REFUSED as exc:
             _print_auth_failed(exc, f"{verb} --all", fleet=True)
             return 3

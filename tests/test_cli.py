@@ -9,7 +9,7 @@ from unittest import mock
 import pytest
 import redis as redis_lib
 
-from lupin import benchmark_fetch, cli, commands, loop_runtime, loops, machines, slots
+from lupin import agent, benchmark_fetch, cli, commands, loop_runtime, loops, machines, quota, slots
 
 
 @pytest.fixture(autouse=True)
@@ -105,7 +105,7 @@ def test_fleet_run_uses_only_per_machine_signing_keys(monkeypatch, tmp_path, cap
         lambda: {"widgets": ["opencode-go/step-5-preview-free:xhigh"]},
     )
     monkeypatch.setattr(machines, "hostname", lambda: "pihome")
-    monkeypatch.setattr(machines, "machines", lambda connection: [{"name": "jesus"}, {"name": "ralpha"}])
+    monkeypatch.setattr(machines, "machines", lambda connection, **kwargs: [{"name": "jesus"}, {"name": "ralpha"}])
     monkeypatch.setattr(cli, "_fleet_connection", lambda args: {"redis_host": "redis"})
     dispatched = {}
 
@@ -173,7 +173,7 @@ def test_fleet_run_acl_denial_exits_three_and_names_the_acl(
     monkeypatch.setenv("LUPIN_CMD_SIGNING_KEYS_DIR", str(key_dir))
     monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
     monkeypatch.setattr(machines, "hostname", lambda: "pihome")
-    monkeypatch.setattr(machines, "machines", lambda connection: records)
+    monkeypatch.setattr(machines, "machines", lambda connection, **kwargs: records)
     monkeypatch.setattr(cli, "_fleet_connection", lambda args: connection)
 
     assert cli.main(["fleet-run"]) == 3
@@ -246,7 +246,7 @@ def test_fleet_run_queues_signed_run_to_worker(redis_port, flush_redis, monkeypa
     monkeypatch.setenv("LUPIN_CMD_SIGNING_KEY", "shared-secret")
     monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
     monkeypatch.setattr(machines, "hostname", lambda: "pihome")
-    monkeypatch.setattr(machines, "machines", lambda connection: records)
+    monkeypatch.setattr(machines, "machines", lambda connection, **kwargs: records)
     monkeypatch.setattr(cli, "_fleet_connection", lambda args: connection)
 
     assert cli.main(["fleet-run", "--json"]) == 0
@@ -292,6 +292,18 @@ def test_future_once_without_enabled_repos_does_not_schedule(monkeypatch, tmp_pa
 
     assert "at least one repo is required" in capsys.readouterr().err
     assert not (tmp_path / "once").exists()
+
+
+def test_loops_unreadable_repos_file_exits_one_without_traceback(monkeypatch, tmp_path: Path, capsys):
+    repos = tmp_path / "repos"
+    repos.write_bytes(b"\xff\n")
+    monkeypatch.setattr(loop_runtime, "REPOS_FILE", repos)
+
+    assert cli.main(["loops"]) == 1
+
+    err = capsys.readouterr().err
+    assert f"could not read {repos}" in err
+    assert "Traceback" not in err
 
 
 
@@ -370,6 +382,31 @@ def test_stop_json_shape(capsys):
     captured = capsys.readouterr()
     assert code == 0
     assert json.loads(captured.out) == {"mode": "local", "returncode": 0, "output": "ok"}
+
+
+def test_local_stop_runs_with_stop_time_limit(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, timeout=20.0):
+        seen["timeout"] = timeout
+        return 0, ""
+
+    monkeypatch.setattr(loops, "run_subprocess", fake_run)
+    code = cli.main(["stop", "widgets", "--machine", "h"])
+    assert code == 0
+    assert seen["timeout"] == agent.ACTION_TIMEOUT_S["loop.stop"]
+
+
+def test_remote_stop_queues_and_skips_local_runner(capsys):
+    with (
+        mock.patch.object(loops, "run_subprocess") as local_runner,
+        mock.patch.object(loops.commands, "enqueue", return_value="cmd-1") as enqueue,
+        mock.patch.object(loops.commands, "get_status", return_value={"state": "ok"}),
+    ):
+        code = cli.main(["stop", "widgets", "--machine", "other", "--signing-key", "k"])
+    assert code == 0
+    assert enqueue.call_args.args[:2] == ("other", "loop.stop")
+    local_runner.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -635,6 +672,70 @@ def test_schedule_defaults_machine_to_local_host():
 
 
 # --------------------------------------------------------------------------
+# Unreadable machine records: acting commands stop, display commands warn.
+# --------------------------------------------------------------------------
+
+
+def _fleet_with_corrupt_record(redis_port, tmp_path):
+    """One readable machine (`good-box`) and one corrupt record (`old-box`).
+    Returns the connection flags for `cli.main`. `--config-path` keeps the
+    machine's real fleet config (which may set a Redis username) out of it."""
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port)
+    raw.set("lupin:v1:machine:old-box", "not json")
+    raw.set("lupin:v1:machine:good-box", json.dumps({
+        "version": "0.0.0+dev", "heartbeat": machines._now_iso(), "state": "online",
+        "slots": {}, "providers": [], "quota": {}, "loops": [{"repo": "widgets"}],
+    }))
+    return [
+        "--redis-host", "127.0.0.1", "--redis-port", str(redis_port),
+        "--config-path", str(tmp_path / "fleet.json"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("argv", "dispatch_name"),
+    [
+        (["pause", "--all"], "dispatch_loop_action"),
+        (["resume", "--all"], "dispatch_loop_action"),
+        (["fleet-run"], "dispatch_fleet_runs"),
+    ],
+)
+def test_acting_commands_stop_on_an_unreadable_machine_record(
+    redis_port, flush_redis, monkeypatch, tmp_path, argv, dispatch_name
+):
+    redis_args = _fleet_with_corrupt_record(redis_port, tmp_path)
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: ["widgets"])
+    dispatch = mock.Mock(
+        name=dispatch_name,
+        side_effect=AssertionError("acted on a partly read machine registry"),
+    )
+    monkeypatch.setattr(loops, dispatch_name, dispatch)
+
+    with pytest.raises(json.JSONDecodeError):
+        cli.main([*argv, *redis_args])
+
+    dispatch.assert_not_called()
+
+
+def test_machines_command_warns_and_skips_an_unreadable_record(redis_port, flush_redis, tmp_path, capsys):
+    redis_args = _fleet_with_corrupt_record(redis_port, tmp_path)
+
+    assert cli.main(["machines", "--json", *redis_args]) == 0
+
+    captured = capsys.readouterr()
+    assert [m["name"] for m in json.loads(captured.out)] == ["good-box"]
+    assert "machine:old-box" in captured.err
+
+
+def test_loops_command_warns_when_the_machine_record_is_unreadable(redis_port, flush_redis, tmp_path, capsys):
+    redis_args = _fleet_with_corrupt_record(redis_port, tmp_path)
+
+    assert cli.main(["loops", "--machine", "old-box", *redis_args]) == 1
+
+    assert "machine:old-box" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------
 # pause / resume
 # --------------------------------------------------------------------------
 
@@ -773,3 +874,48 @@ def test_pause_all_severity_beats_first_non_zero_wins():
         code_b = cli.main(["pause", "--all"])
 
     assert code_a == code_b == 1
+
+
+def test_quota_prints_the_account_beside_the_provider(monkeypatch, capsys):
+    rows = [
+        {"provider": "openai", "account": "free", "duration": quota.QuotaDuration.MONTHLY,
+         "used_pct": 100, "resets_at": None},
+        {"provider": "openai", "account": "plus", "duration": quota.QuotaDuration.FIVE_HOURS,
+         "used_pct": 1, "resets_at": None},
+        {"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 40, "resets_at": None},
+    ]
+    merged = {
+        provider: {"rows": [r for r in rows if r["provider"] == provider],
+                   "fetched_at": None, "fetched_by": "h"}
+        for provider in ("openai", "claude")
+    }
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: {})
+    monkeypatch.setattr(cli.quota_cache, "refresh_snapshot", lambda **connection: merged)
+    monkeypatch.setattr(cli.usage_cache, "refresh_snapshot", lambda **connection: {})
+
+    assert cli.main(["quota"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert any(line.startswith("openai/free") and "0% left" in line for line in lines)
+    assert any(line.startswith("openai/plus") and "99% left" in line for line in lines)
+    assert any(line.startswith("claude ") and "60% left" in line for line in lines)
+
+
+def test_route_unknown_category_or_size_is_a_usage_error_not_a_traceback(capsys):
+    assert cli.main(["route", "code", "size-m"]) == 2
+    err = capsys.readouterr().err
+    assert len(err.splitlines()) == 1
+    assert "unknown category 'code'" in err
+    assert "coding" in err
+
+    assert cli.main(["route", "coding", "m"]) == 2
+    err = capsys.readouterr().err
+    assert len(err.splitlines()) == 1
+    assert "unknown size 'm'" in err
+    assert "size-m" in err
+
+
+def test_route_does_not_hide_a_value_error_from_inside_route():
+    with mock.patch.object(cli.route_mod, "route", side_effect=ValueError("bad tiers file")):
+        with pytest.raises(ValueError, match="bad tiers file"):
+            cli.main(["route", "coding", "size-m"])

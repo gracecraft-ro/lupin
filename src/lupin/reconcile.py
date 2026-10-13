@@ -1,5 +1,5 @@
 """`lupin reconcile` (issue #14, the last ticket in #2's fleet-CLI split):
-apply the release rules in `lupin-ctl-copy.md` section 4, one shot per
+apply the release rules in `docs/lupin-ctl-copy.md` section 4, one shot per
 call. Something else (a timer, a cron job) calls this on a schedule; this
 module does not loop or sleep itself.
 
@@ -53,7 +53,7 @@ dropped):
 
 - `stale` (claims) and `stalled` (quest focus): both need an activity
   signal this project does not compute yet.
-- "Kept" lines (`lupin-ctl-copy.md`'s "focus is kept when..." list):
+- "Kept" lines (`docs/lupin-ctl-copy.md`'s "focus is kept when..." list):
   reconcile only prints a line when it changes something. Explaining why a
   focus was left alone needs the same missing activity/stall signals, so
   it is not shipped either.
@@ -80,7 +80,7 @@ from .roadmap import CODE_DIR
 
 CoordinatorUnreachable = slots_redis.CoordinatorUnreachable
 
-IDLE_AFTER = 1800.0  # 30 minutes, lupin-ctl-copy.md section 4 ("idle")
+IDLE_AFTER = 1800.0  # 30 minutes, docs/lupin-ctl-copy.md section 4 ("idle")
 
 _REDIS_ERRORS = (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)
 
@@ -200,7 +200,8 @@ def _release_quest_focuses(
     `idle_since` bookkeeping field). `quests` is `load_quests`'s result --
     passed in so a single reconcile run only reads GitHub once.
     """
-    records = machines.machines(connection)
+    # strict: a bad record must stop the pass. Skipping it would read as offline.
+    records = machines.machines(connection, strict=True)
     by_name = {record["name"]: record for record in records}
     dag_box: list[dict] = []  # fetched lazily, at most once -- most runs touch no focus at all
 
@@ -270,7 +271,8 @@ def _release_started_quests(repos: list[str], connection: dict, *, code_dir: str
     `place.place`'s own scoring, before ending the quest outright).
     """
     client = _client(connection)
-    records = machines.machines(connection)
+    # strict: as in `_release_quest_focuses`. A skipped record would read as offline.
+    records = machines.machines(connection, strict=True)
     by_name = {record["name"]: record for record in records}
 
     lines = []

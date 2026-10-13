@@ -66,6 +66,17 @@ class MainCliTests(unittest.TestCase):
         self.assertIn("model", payload)
         self.assertIn("plan", payload)
 
+    def test_unknown_category_prints_one_line_and_exits_2(self):
+        import contextlib
+        import io
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc = review_dispatch.main(["--category", "code", "--size", "size-m"])
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(err.getvalue().splitlines()), 1)
+        self.assertIn("unknown category 'code'", err.getvalue())
+
     def test_issue_json_is_classified_first(self):
         import contextlib
         import io

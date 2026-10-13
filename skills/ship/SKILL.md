@@ -38,10 +38,31 @@ Follow the repository's `AGENTS.md`, issue workflow, and release rules.
 
 - Inspect the relevant code and tests before editing.
 - Make the smallest change that meets the acceptance checks.
+- Take the first option that fully works, in this order:
+  1. Does it need to exist? Skip features and options that nobody asked for.
+  2. Does the codebase already have it? Reuse it.
+  3. Does the standard library or the platform have it? Use it.
+  4. Is an installed dependency enough? Use it. Never add a dependency for a few lines.
+  5. Can it be one line? Write one line.
+  6. Otherwise, write the minimum code that works.
+- Keep the solution small. Do not leave out any part the task needs.
+- Do not add an abstraction, wrapper, option, config, or "for later" code that nobody asked for.
+- Write a comment only for the why behind the code. Keep it to one line.
 - Add or update a regression test for a behavior change.
 - Run the repo's documented gate. Then run the changed feature and observe
   the result. A passing build or test alone does not prove it works.
 - Read the final diff. Check issue and PR comments again before reporting.
+- List every place your change must reach (callers, tests, fixtures, config, exports) before you edit.
+- For a bug fix, grep every caller first. Fix the root cause once, in the
+  shared code.
+- When you move code, keep its error handling and validation.
+- New non-trivial logic (a branch, a loop, a parser, money, or security) gets one
+  small test or an assert. Trivial changes need none.
+- A shortcut with a known limit gets a comment: `shortcut: <limit>, <upgrade trigger>`.
+- Never cut validation at points where outside data enters the system,
+  data-loss handling, security, or accessibility.
+- The final report says what you skipped, what you did not check, and any risk
+  the user must know.
 
 For a visual change, open the real surface and capture before and after.
 Report if you could not view it.
@@ -62,7 +83,7 @@ GitHub CLI 2.99.0 and newer supports `gh issue comment --attach`. Check
 an attachment. Attach evidence to the PR conversation:
 
 ```sh
-gh issue comment <PR_NUMBER> --repo OWNER/REPO \
+gh issue comment <PR_NUMBER> --repo gracecraft-ro/<repo> \
   --attach evidence/123/contact-sheet.png \
   --body-file report.md
 ```
@@ -73,28 +94,60 @@ repository or artifact-store location.
 
 ## Commit and open the pull request
 
-Commit the change. If direct push is allowed, push the branch and open or update
-its PR. Link the issue with `Closes #123`.
+Commit the change. If the commit fails, report the error. Then go to "Report and
+release" below.
 
-If direct push is denied, check the repository's fork policy. Use an existing
-fork or create one if the repository permits it. Make sure a `fork` remote
-points to that fork. If it is missing, add it:
+Workers never push to `origin`, `main`, or `release/next`. Push the feature
+branch to the fork. Open the PR on the fork. Then request review.
 
-```sh
-git remote add fork https://github.com/FORK_OWNER/REPO.git
-```
+1. Run `git remote get-url fork` (the fork is the GitHub copy you push to). It
+   must print `https://github.com/gracecraft-ro/<repo>.git`. If it does not, stop
+   and report. Never run `git remote add`.
+2. Push only the feature branch. Find it with `git branch --show-current`.
+   If the branch is empty, detached (no branch name), `main`, or `release/next`,
+   stop. Report it.
+   Then run `git push -u fork <branch>`. Never push any other ref.
+3. Open the PR on the fork. Set `<repo>` to the repo name in the fork URL
+   from step 1. Look for an open PR on the branch first. Run:
 
-Then push the branch and open a PR to the upstream repo:
+   ```sh
+   gh pr list --repo gracecraft-ro/<repo> --head <branch> --state open \
+     --json number --jq '.[0].number // empty'
+   ```
 
-```sh
-git push -u fork <branch>
-gh pr create --repo OWNER/REPO --base <base> \
-  --head FORK_OWNER:<branch> --title "..." --body "Closes #123"
-```
+   If the lookup exits non-zero, report the error. Then go to "Report and
+   release" below. Do not create a PR.
 
-This `--head` form works for a user-owned fork. If the fork belongs to an
-organization, check `gh pr create --help`; this CLI does not support an
-organization name in `--head`.
+   If the output is not empty, skip the create step. Use that number as
+   `<PR_NUMBER>`. If it exits 0 and is empty, run:
+
+   ```sh
+   gh pr create --repo gracecraft-ro/<repo> --base release/next \
+     --head <branch> --title "..." --body "Closes #<issue>. ..."
+   ```
+
+   The orchestrator closes the issue by hand, because a merge into
+   `release/next` does not close it.
+
+   Never use an upstream `--repo` in this flow. If it fails, report the error.
+   Then go to "Report and release" below.
+4. Request review with one comment on the PR. Run:
+
+   ```sh
+   gh pr comment <PR_NUMBER> --repo gracecraft-ro/<repo> \
+     --body "Review requested. Head: <sha>."
+   ```
+
+   If it fails, report the error and the PR number. Then go to "Report and
+   release" below.
+
+   `<PR_NUMBER>` is the number at the end of the PR URL that `gh pr create`
+   prints. If step 3 skipped `gh pr create`, use the number from the lookup in
+   step 3. `<sha>` is the output of `git rev-parse HEAD`. Then go to "Report and
+   release" below. Do not merge. Do not wait for approval. The orchestrator
+   dispatches a reviewer.
+5. If the push or PR creation fails, report the branch name and the commit
+   range. Then go to "Report and release" below.
 
 If the repo does not allow fork PRs, keep the local branch and report its name
 and commit range. A local commit is not a pull request and is not shipped.
@@ -111,5 +164,6 @@ Post a short report to the issue. Include:
 
 Keep the issue open while the PR waits for review or merge. Do not say it is
 shipped until the orchestrator approves and merges it. If you own the Lupin
-claim, release it when your work ends, remove the `claimed` label, and comment
-with the PR number or stop reason. The orchestrator owns the final merge.
+claim (a lock on the issue), release it when your work ends. Remove the
+`claimed` label. Then comment with the PR number or stop reason. If the label
+edit fails, report it and stop. The orchestrator owns the final merge.

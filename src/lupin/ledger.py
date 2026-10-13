@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from datetime import datetime, timezone
 
 import redis
@@ -130,19 +131,30 @@ def read_events(
     redis_port: int | None = None,
     redis_username: str | None = None,
     redis_password: str | None = None,
+    client: "redis.Redis | None" = None,
 ) -> list[dict]:
-    """Return the latest `limit` events, oldest first.
+    """Return up to `limit` events, oldest first.
 
     `limit` defaults to 10 and must be positive. Pass `None` to read the full
     stream. An empty stream returns an empty list. Raises
     `CoordinatorUnreachable` when Redis cannot be reached.
+    An entry is skipped when one of its fields is not valid UTF-8. An entry is
+    also skipped when `_decode` raises KeyError, ValueError, or RecursionError.
+    The entry ID and the exception type and message go to stderr for each skipped
+    entry. A skipped entry still counts toward `limit`.
+    Pass `client` to use a ready client, as the debrief path does. Without it,
+    a client is made from the connection arguments.
     """
     key = _stream_key(repo)
     if limit is not None and (
         not isinstance(limit, int) or isinstance(limit, bool) or limit < 1
     ):
         raise ValueError("limit must be a positive integer")
-    client = _client(redis_host, redis_port, redis_username, redis_password)
+    if client is None:
+        client = _client(
+            redis_host, redis_port, redis_username, redis_password,
+            decode_responses=False,
+        )
     try:
         if limit is None:
             entries = _call_with_retry(lambda: client.xrange(key))
@@ -152,4 +164,20 @@ def read_events(
         raise CoordinatorUnreachable(repo) from exc
     if limit is not None:
         entries = reversed(entries)
-    return [_decode(stream_id, fields) for stream_id, fields in entries]
+    records = []
+    for raw_id, raw_fields in entries:
+        stream_id = raw_id.decode("utf-8") if isinstance(raw_id, bytes) else raw_id
+        try:
+            fields = {
+                name.decode("utf-8") if isinstance(name, bytes) else name:
+                value.decode("utf-8") if isinstance(value, bytes) else value
+                for name, value in raw_fields.items()
+            }
+            records.append(_decode(stream_id, fields))
+        except (KeyError, UnicodeDecodeError, ValueError, RecursionError) as exc:
+            print(
+                f"ledger: skipped bad entry {stream_id}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+    return records

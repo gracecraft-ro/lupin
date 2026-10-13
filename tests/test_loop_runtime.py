@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from lupin import loop_runtime
+from lupin.quota import QuotaDuration
 
 
 def test_systemd_run_uses_nixos_sudo_wrapper_when_not_on_path(monkeypatch, tmp_path):
@@ -248,6 +254,7 @@ def test_schedule_once_keeps_omp_provider_and_model(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
     monkeypatch.setattr(loop_runtime, "_event_time", lambda when: ("2h", True))
     monkeypatch.setattr(loop_runtime, "_run", lambda *args, **kwargs: (0, ""))
+    monkeypatch.setenv("LUPIN_LOOP_USER", "loops")
 
     assert loop_runtime.schedule_once(
         "+2h", ["widgets"], platform="omp", provider="openai", model="openai/gpt-5.2"
@@ -259,6 +266,48 @@ def test_schedule_once_keeps_omp_provider_and_model(monkeypatch, tmp_path: Path)
         "omp", "openai", "openai/gpt-5.2"
     )
 
+
+
+def test_loop_user_prefers_lupin_loop_user(monkeypatch):
+    monkeypatch.setenv("LUPIN_LOOP_USER", "loops")
+    monkeypatch.setenv("USER", "grace")
+
+    assert loop_runtime._loop_user() == "loops"
+
+
+def test_loop_user_falls_back_to_user(monkeypatch):
+    monkeypatch.delenv("LUPIN_LOOP_USER", raising=False)
+    monkeypatch.setenv("USER", "grace")
+
+    assert loop_runtime._loop_user() == "grace"
+
+
+def test_missing_loop_user_is_a_clear_error(monkeypatch):
+    monkeypatch.delenv("LUPIN_LOOP_USER", raising=False)
+    monkeypatch.delenv("USER", raising=False)
+    monkeypatch.setattr(loop_runtime, "_run", lambda *args, **kwargs: pytest.fail("systemd ran"))
+
+    with pytest.raises(loop_runtime.LoopError, match="set LUPIN_LOOP_USER or USER"):
+        loop_runtime._systemd_run("widgets", "loop", ["lupin", "loop", "worker"])
+
+
+def test_schedule_once_without_a_loop_user_writes_no_schedule(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "_event_time", lambda when: ("2h", True))
+    monkeypatch.setattr(loop_runtime, "_run", lambda *args, **kwargs: pytest.fail("systemd ran"))
+    monkeypatch.delenv("LUPIN_LOOP_USER", raising=False)
+    monkeypatch.delenv("USER", raising=False)
+
+    with pytest.raises(loop_runtime.LoopError, match="set LUPIN_LOOP_USER or USER"):
+        loop_runtime.schedule_once("+2h", ["widgets"])
+
+    assert not (tmp_path / "once").exists()
+
+
+def test_service_environment_forwards_the_canonical_fetcher(monkeypatch):
+    monkeypatch.setenv("LUPIN_GH_CANONICAL_FETCHER", "fetcher-host")
+
+    assert "--setenv=LUPIN_GH_CANONICAL_FETCHER=fetcher-host" in loop_runtime._service_environment()
 
 
 def test_once_fire_continues_after_one_repo_quota_error(monkeypatch, tmp_path, capsys):
@@ -533,6 +582,86 @@ def test_launch_agent_omp_does_not_skip_permissions(monkeypatch, tmp_path: Path)
     )
 
     assert "--dangerously-skip-permissions" not in calls[0]
+
+
+_START_TIMEOUT = '{"error":{"code":"timeout","message":"timed out waiting for agent startup"},"id":"cli:agent:start"}'
+
+
+def _launch_after_start_failure(monkeypatch, tmp_path: Path, output: str, agents: list[dict]):
+    prompt_file = tmp_path / "prompt"
+    prompt_file.write_text("work the backlog\n", encoding="utf-8")
+    workspace = {"id": "w1", "root_pane": {"pane_id": "w1:p1", "workspace_id": "w1"}}
+    herdr_calls = []
+    waited = []
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: (2, output))
+    monkeypatch.setattr(loop_runtime, "_agents", lambda session: agents)
+    monkeypatch.setattr(loop_runtime, "_herdr", lambda session, *args, **kwargs: herdr_calls.append(args) or "")
+    monkeypatch.setattr(loop_runtime, "_wait_agent", lambda session, workspace_id: waited.append(workspace_id) or 0)
+
+    def launch():
+        return loop_runtime._launch_agent(
+            "lupin-loops", "claude", workspace, str(prompt_file), resume=False, name="lupin-widgets-abc12345",
+        )
+
+    return launch, herdr_calls, waited
+
+
+@pytest.mark.parametrize("status", ["working", "blocked", "idle", "unknown", "done"])
+def test_launch_agent_names_and_watches_an_agent_in_the_pane_when_the_start_times_out(monkeypatch, tmp_path: Path, status):
+    # Herdr waits at most 5 minutes for the agent to be ready. An agent that
+    # starts on its prompt at once is still working then, and Herdr drops its
+    # name. Without the name the loop cannot see its own agent.
+    agents = [{"pane_id": "w1:p1", "workspace_id": "w1", "agent_status": status, "name": None}]
+    launch, herdr_calls, waited = _launch_after_start_failure(monkeypatch, tmp_path, _START_TIMEOUT, agents)
+
+    assert launch() == 0
+
+    assert herdr_calls == [("agent", "rename", "w1:p1", "lupin-widgets-abc12345")]
+    assert waited == ["w1"]
+
+
+def test_launch_agent_fails_when_the_start_times_out_and_no_agent_is_in_the_pane(monkeypatch, tmp_path: Path):
+    other = [{"pane_id": "w2:p1", "workspace_id": "w2", "agent_status": "working", "name": None}]
+    launch, herdr_calls, waited = _launch_after_start_failure(monkeypatch, tmp_path, _START_TIMEOUT, other)
+
+    with pytest.raises(loop_runtime.HerdrError):
+        launch()
+
+    assert herdr_calls == []
+
+
+@pytest.mark.parametrize("broken", ["_agents", "_herdr"])
+def test_launch_agent_keeps_the_timeout_text_when_it_cannot_keep_the_agent(monkeypatch, tmp_path: Path, broken):
+    agents = [{"pane_id": "w1:p1", "workspace_id": "w1", "agent_status": "working", "name": None}]
+    launch, _, waited = _launch_after_start_failure(monkeypatch, tmp_path, _START_TIMEOUT, agents)
+
+    def fail(*args, **kwargs):
+        raise loop_runtime.HerdrError("no such pane")
+
+    monkeypatch.setattr(loop_runtime, broken, fail)
+
+    with pytest.raises(
+        loop_runtime.HerdrError,
+        match="timed out waiting for agent startup.*could not keep the agent: no such pane",
+    ):
+        launch()
+
+    assert waited == []
+
+
+@pytest.mark.parametrize(
+    "output",
+    ['{"error":{"code":"pane_not_found","message":"pane w1:p1 not found"}}', "not json", '{"error":"timeout"}'],
+)
+def test_launch_agent_fails_on_any_other_start_error(monkeypatch, tmp_path: Path, output):
+    agents = [{"pane_id": "w1:p1", "workspace_id": "w1", "agent_status": "working", "name": None}]
+    launch, herdr_calls, waited = _launch_after_start_failure(monkeypatch, tmp_path, output, agents)
+
+    with pytest.raises(loop_runtime.HerdrError):
+        launch()
+
+    assert herdr_calls == []
+    assert waited == []
 
 
 @pytest.mark.parametrize(
@@ -1131,6 +1260,14 @@ def test_default_base_uses_origin_main_when_origin_head_is_not_set(tmp_path: Pat
     assert loop_runtime._default_base(checkout) == "origin/main"
 
 
+def test_default_base_prefers_release_next_when_the_remote_has_it(tmp_path: Path, make_checkout):
+    checkout = make_checkout(tmp_path / "code" / "widgets")
+    _git_out(checkout, "push", "origin", "main:refs/heads/release/next")
+    _git_out(checkout, "fetch", "origin")
+
+    assert loop_runtime._default_base(checkout) == "origin/release/next"
+
+
 def test_default_base_refuses_when_the_checkout_has_no_remote_branch(tmp_path: Path, make_checkout):
     checkout = make_checkout(tmp_path / "code" / "widgets")
     _git_out(checkout, "remote", "remove", "origin")
@@ -1554,3 +1691,132 @@ def test_stop_keeps_a_branch_with_unmerged_commits(monkeypatch, tmp_path: Path, 
     assert not worktree.exists()
     assert branch in _git_out(checkout, "branch", "--list")
     assert f"branch {branch} kept" in result
+
+
+def test_main_dispatches_monitor(monkeypatch):
+    # `worker` runs `lupin loop monitor`. An action with no branch in `main`
+    # falls through to `return 1` and prints nothing.
+    calls = []
+    monkeypatch.setattr(loop_runtime, "monitor", lambda *args: calls.append(args) or 0)
+
+    rc = loop_runtime.main([
+        "monitor", "--repo", "widgets", "--platform", "claude",
+        "--session", "lupin-loops", "--prompt-file", "prompt.md", "--resume",
+    ])
+
+    assert rc == 0
+    assert calls == [("widgets", "claude", "lupin-loops", "prompt.md", True)]
+
+
+def test_main_says_so_when_an_action_has_no_handler(monkeypatch, capsys):
+    parsed = argparse.Namespace(action="bogus")
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", lambda self, argv=None: parsed)
+
+    rc = loop_runtime.main(["bogus"])
+
+    assert rc == 1
+    assert "no handler for action bogus" in capsys.readouterr().err
+
+
+def _setup_worker(monkeypatch, tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    code_dir = tmp_path / "code"
+    (code_dir / "widgets").mkdir(parents=True)
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", state_dir)
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", state_dir / "herdr-loops")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
+    monkeypatch.setattr(loop_runtime, "_redis_kwargs", lambda: {})
+
+
+def test_worker_marks_the_loop_failed_when_the_monitor_dies_before_a_workspace(monkeypatch, tmp_path: Path):
+    _setup_worker(monkeypatch, tmp_path)
+    monkeypatch.setattr(loop_runtime.slots_redis, "hold", lambda *args, **kwargs: 1)
+
+    rc = loop_runtime.worker("widgets", "claude", loop_runtime.SESSION_NAME, "prompt.md")
+
+    assert rc == 1
+    assert loop_runtime._read_metadata("widgets")["state"] == "failed"
+
+
+def test_worker_keeps_the_state_the_monitor_wrote(monkeypatch, tmp_path: Path):
+    _setup_worker(monkeypatch, tmp_path)
+
+    def hold(*args, **kwargs):
+        metadata = loop_runtime._read_metadata("widgets")
+        loop_runtime._write_metadata("widgets", {**metadata, "state": "needs_attention"})
+        return 1
+
+    monkeypatch.setattr(loop_runtime.slots_redis, "hold", hold)
+
+    rc = loop_runtime.worker("widgets", "claude", loop_runtime.SESSION_NAME, "prompt.md")
+
+    assert rc == 1
+    assert loop_runtime._read_metadata("widgets")["state"] == "needs_attention"
+
+
+@pytest.mark.parametrize(
+    "module",
+    ["lupin.loop_runtime", "lupin.agent", "lupin.roadmap", "lupin.debrief", "lupin.cli", "lupin.serve"],
+)
+def test_module_imports_in_a_fresh_process(module: str):
+    # A new process imports this module first. Shared test imports hide cycles.
+    src = Path(__file__).resolve().parents[1] / "src"
+    env = {key: value for key, value in os.environ.items() if not key.startswith("LUPIN_")}
+    env["PYTHONPATH"] = str(src)
+
+    result = subprocess.run(
+        [sys.executable, "-c", f"import {module}"],
+        env=env, capture_output=True, text=True, timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def _quota_entry(rows):
+    return {"rows": rows, "fetched_at": datetime.now(timezone.utc).isoformat(), "fetched_by": "h"}
+
+
+def _quota_row(provider, used_pct, resets_in_ms, duration, now, account=None):
+    row = {
+        "provider": provider,
+        "duration": duration,
+        "used_pct": used_pct,
+        "resets_at": now * 1000 + resets_in_ms,
+    }
+    if account:
+        row["account"] = account
+    return row
+
+
+_HOUR_MS = 60 * 60 * 1000
+
+
+def test_select_orchestrator_uses_the_account_with_quota_left():
+    now = time.time()
+    snapshot = {
+        "openai": _quota_entry([
+            _quota_row("openai", 100, 20 * 24 * _HOUR_MS, QuotaDuration.MONTHLY, now, "free"),
+            _quota_row("openai", 10, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now, "plus"),
+        ]),
+        "claude": _quota_entry([_quota_row("claude", 50, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now)]),
+    }
+
+    choice = loop_runtime.select_orchestrator(["claude", "openai/gpt-5"], snapshot, now=now)
+
+    # The free account is used up. Headroom is the paid account's 90%, not 0%.
+    assert choice == {"platform": "omp", "provider": "openai", "model": "openai/gpt-5"}
+
+
+def test_select_orchestrator_skips_a_provider_when_every_account_is_blocked():
+    now = time.time()
+    snapshot = {
+        "openai": _quota_entry([
+            _quota_row("openai", 100, 20 * 24 * _HOUR_MS, QuotaDuration.MONTHLY, now, "free"),
+            _quota_row("openai", 100, 4 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now, "plus"),
+        ]),
+        "claude": _quota_entry([_quota_row("claude", 90, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now)]),
+    }
+
+    choice = loop_runtime.select_orchestrator(["openai/gpt-5", "claude"], snapshot, now=now)
+
+    assert choice["platform"] == "claude"

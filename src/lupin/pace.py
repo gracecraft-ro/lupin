@@ -1,10 +1,15 @@
 """Quota pacing facts for `route()` (issue #36).
 
-Every provider (Claude, opencode-go, Codex) is one account shared by the
-whole fleet -- quota is never a per-machine signal, so this module takes
-quota rows (`quota.quota_usage()`'s shape) and a timestamp, and answers two
-questions for one provider at a time: is it blocked, and should a task
-lean in (route up one tier to use a surplus before it resets)?
+Quota is shared by the whole fleet -- never a per-machine signal. This
+module takes quota rows (`quota.quota_usage()`'s shape) and a timestamp,
+and answers two questions for one provider at a time: is it blocked, and
+should a task lean in (route up one tier to use a surplus before it
+resets)?
+
+A provider can have more than one account. Rows then have an `account`
+label. `omp` picks the account for each session. So a provider is blocked
+only when every account is blocked. A blocked account never counts for
+lean-in or headroom.
 
 Pure. No stored state, no Redis, no file access -- every number comes from
 the rows a caller passes in. `route.py` is the only caller; it decides what
@@ -63,23 +68,60 @@ def _window_blocked(used_pct: float, resets_at: float, now_ms: float) -> bool:
     return False
 
 
-def blocked(rows: list[dict], provider: str, now_ms: float) -> bool:
-    """True if any of `provider`'s windows is blocked (reserve rule)."""
+def _accounts(rows: list[dict], provider: str) -> list[list[dict]]:
+    """`provider`'s usable rows, one list for each account.
+
+    Rows with no `account` label are one account.
+    """
+    accounts: dict[str | None, list[dict]] = {}
+    for row in _usable_rows(rows, provider):
+        accounts.setdefault(row.get("account"), []).append(row)
+    return list(accounts.values())
+
+
+def _account_blocked(account_rows: list[dict], now_ms: float) -> bool:
     return any(
         _window_blocked(row["used_pct"], row["resets_at"], now_ms)
-        for row in _usable_rows(rows, provider)
+        for row in account_rows
     )
 
 
-def _longest_window(rows: list[dict], provider: str) -> dict | None:
-    """The provider's longest window with real data and a known length.
+def blocked(rows: list[dict], provider: str, now_ms: float) -> bool:
+    """True if every account of `provider` has a blocked window (reserve rule).
+
+    An account with no usable rows is unknown, not blocked, and not counted.
+    """
+    accounts = _accounts(rows, provider)
+    return bool(accounts) and all(_account_blocked(account_rows, now_ms) for account_rows in accounts)
+
+
+def headroom(rows: list[dict], provider: str, now_ms: float) -> float | None:
+    """The most quota left (in percent) on one account that is not blocked.
+
+    For one account this is its most-used window. `None` when no account
+    has data, or every account is blocked.
+    """
+    open_accounts = [
+        account_rows for account_rows in _accounts(rows, provider)
+        if not _account_blocked(account_rows, now_ms)
+    ]
+    if not open_accounts:
+        return None
+    return max(
+        min(100 - row["used_pct"] for row in account_rows)
+        for account_rows in open_accounts
+    )
+
+
+def _longest_window(account_rows: list[dict]) -> dict | None:
+    """One account's longest window with real data and a known length.
 
     `QuotaDuration.OTHER` has no `.milliseconds` -- a window of unknown
     length can't be compared to another, so it's excluded here (it still
     counts for `blocked()`, which doesn't need a length).
     """
     candidates = [
-        row for row in _usable_rows(rows, provider)
+        row for row in account_rows
         if isinstance(row.get("duration"), QuotaDuration) and row["duration"].milliseconds
     ]
     if not candidates:
@@ -87,20 +129,8 @@ def _longest_window(rows: list[dict], provider: str) -> dict | None:
     return max(candidates, key=lambda row: row["duration"].milliseconds)
 
 
-def lean_in(rows: list[dict], provider: str, now_ms: float) -> bool:
-    """True if `provider` has earned a one-tier-up lean-in (decision 2).
-
-    Looks only at the provider's longest window with real data. Blocked
-    always wins: a blocked provider never leans in, even if that same
-    window would otherwise qualify.
-
-    A surplus means used_pct is below the elapsed percent of the longest
-    window. The 30-minute clause needs a surplus. The 24-hour clause
-    needs used_pct under 50 and does not check for a surplus.
-    """
-    if blocked(rows, provider, now_ms):
-        return False
-    window = _longest_window(rows, provider)
+def _account_leans_in(account_rows: list[dict], now_ms: float) -> bool:
+    window = _longest_window(account_rows)
     if window is None:
         return False
     remaining = window["resets_at"] - now_ms
@@ -111,6 +141,27 @@ def lean_in(rows: list[dict], provider: str, now_ms: float) -> bool:
     if remaining < LEAN_IN_SOON_MS and has_surplus:
         return True
     return window["used_pct"] < LEAN_IN_LOW_USE_PCT and remaining < LEAN_IN_LOW_USE_WINDOW_MS
+
+
+def lean_in(rows: list[dict], provider: str, now_ms: float) -> bool:
+    """True if `provider` has earned a one-tier-up lean-in (decision 2).
+
+    Looks only at the longest window with real data of each account. A
+    blocked account is skipped. Blocked always wins: a provider with no
+    open account never leans in. `omp` can pick any open account, so every
+    open account must qualify.
+
+    A surplus means used_pct is below the elapsed percent of the longest
+    window. The 30-minute clause needs a surplus. The 24-hour clause
+    needs used_pct under 50 and does not check for a surplus.
+    """
+    open_accounts = [
+        account_rows for account_rows in _accounts(rows, provider)
+        if not _account_blocked(account_rows, now_ms)
+    ]
+    return bool(open_accounts) and all(
+        _account_leans_in(account_rows, now_ms) for account_rows in open_accounts
+    )
 
 
 def earliest_reset(rows: list[dict], providers: list[str], now_ms: float) -> float | None:

@@ -9,10 +9,15 @@ imports the functions below instead of defining them.
 per provider, `{provider: {pct_left, resets_at, source}}`. The rest of
 this module is the detail `snapshot()` and `serve.py`'s rendering build
 on top of.
+
+A provider can have more than one login (for example, a free and a paid
+OpenAI account). Then each row has an `account` label. `omp` picks the
+login for each session, so Lupin only reads each login's quota.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -395,6 +400,40 @@ def add_quota_fallbacks(rows: list[dict]) -> list[dict]:
     return rows
 
 
+def _report_provider(report: dict) -> str:
+    provider = report.get("provider", "unknown")
+    return "openai" if provider == "openai-codex" else provider
+
+
+def _account_labels(reports: list[dict]) -> list[str | None]:
+    """One label per `omp` report. `None` when the provider has one login.
+
+    The label is the plan name (`free`, `plus`). Two logins on the same
+    plan get a short hash of the account ID too. The email and the account
+    ID never leave this function: the label goes to Redis and the dashboard.
+    """
+    by_provider: dict[str, list[int]] = {}
+    for index, report in enumerate(reports):
+        by_provider.setdefault(_report_provider(report), []).append(index)
+    labels: list[str | None] = [None] * len(reports)
+    for indexes in by_provider.values():
+        if len(indexes) < 2:
+            continue
+        metadata = [
+            reports[index].get("metadata")
+            if isinstance(reports[index].get("metadata"), dict) else {}
+            for index in indexes
+        ]
+        plans = [str(item.get("planType") or "account") for item in metadata]
+        for index, item, plan in zip(indexes, metadata, plans):
+            if plans.count(plan) == 1:
+                labels[index] = plan
+            else:
+                identity = str(item.get("accountId") or index)
+                labels[index] = f"{plan}-{hashlib.sha256(identity.encode()).hexdigest()[:6]}"
+    return labels
+
+
 def quota_usage() -> list[dict]:
     rc, out = run(["omp", "usage", "--json"])
     if rc != 0:
@@ -415,16 +454,16 @@ def quota_usage() -> list[dict]:
 
     generated_at = epoch_ms_to_local(data.get("generatedAt"))
     rows = []
-    for report in data.get("reports", []):
-        provider = report.get("provider", "unknown")
+    reports = data.get("reports", [])
+    for report, account in zip(reports, _account_labels(reports)):
+        provider = _report_provider(report)
         if provider == "ollama":
             continue
-        if provider == "openai-codex":
-            provider = "openai"
+        who = {"account": account} if account else {}
         limits = report.get("limits") or []
         if not limits:
             for note in report.get("notes") or ["no quota data reported"]:
-                rows.append({"provider": provider, "note": note, "generated_at": generated_at})
+                rows.append({"provider": provider, "note": note, "generated_at": generated_at, **who})
             continue
         for limit in limits:
             amount = limit.get("amount") or {}
@@ -437,6 +476,7 @@ def quota_usage() -> list[dict]:
                 "used_pct": None if used_fraction is None else used_fraction * 100,
                 "resets_at": quota_reset_timestamp(window.get("resetsAt")),
                 "generated_at": generated_at,
+                **who,
             })
     return add_quota_fallbacks(rows)
 
@@ -461,13 +501,27 @@ def snapshot() -> dict[str, dict]:
     usable percentage (an error or a "no data" note) still gets an entry,
     with `pct_left`/`resets_at` as `None` -- callers (`machines.py`'s
     heartbeat, eventually `place`) decide what to do with missing data.
+
+    With more than one account, this picks one row for each account as
+    above. Then it keeps the row with the most quota left, because `omp`
+    sends work to an account that has quota.
     """
-    chosen: dict[str, dict] = {}
+    per_account: dict[tuple[str, str | None], dict] = {}
     for row in quota_usage():
         provider = row.get("provider")
         if not provider:
             continue
-        if provider not in chosen or row.get("duration") == QuotaDuration.FIVE_HOURS:
+        key = (provider, row.get("account"))
+        if key not in per_account or row.get("duration") == QuotaDuration.FIVE_HOURS:
+            per_account[key] = row
+
+    def _left(row: dict) -> float:
+        used = row.get("used_pct")
+        return max(0.0, 100 - used) if isinstance(used, (int, float)) else -1.0
+
+    chosen: dict[str, dict] = {}
+    for (provider, _), row in per_account.items():
+        if provider not in chosen or _left(row) > _left(chosen[provider]):
             chosen[provider] = row
 
     result = {}
