@@ -465,9 +465,9 @@ def fleet_state(connection: dict) -> dict:
 
     full_names = {}
     for repo in enabled_repos():
-        owner, _name, _warning = roadmap._repo_identity(os.path.join(CODE_DIR, repo))
-        if owner:
-            full_names[repo] = f"{owner}/{repo}"
+        owner, name, _warning = roadmap._repo_identity(os.path.join(CODE_DIR, repo))
+        if owner and name:
+            full_names[repo] = f"{owner}/{name}"
 
     claims_data: dict = {}
     if full_names:
@@ -578,9 +578,9 @@ def _repo_full_names() -> dict[str, str]:
     """
     full_names = {}
     for repo in enabled_repos():
-        owner, _name, _warning = roadmap._repo_identity(os.path.join(CODE_DIR, repo))
-        if owner:
-            full_names[repo] = f"{owner}/{repo}"
+        owner, name, _warning = roadmap._repo_identity(os.path.join(CODE_DIR, repo))
+        if owner and name:
+            full_names[repo] = f"{owner}/{name}"
     return full_names
 
 

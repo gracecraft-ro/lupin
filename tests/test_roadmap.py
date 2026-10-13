@@ -206,6 +206,31 @@ class RoadmapTests(unittest.TestCase):
             self.assertEqual(second, ("acme", "repo", None))
             gh_identity.assert_called_once_with(directory)
 
+    def test_repo_identity_uses_github_origin_when_gh_is_missing(self):
+        roadmap._IDENTITY_CACHE.clear()
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(
+                    roadmap, "_git_remote_url",
+                    return_value="git@github.com:acme/repo.git",
+                ),
+                mock.patch.object(
+                    roadmap, "_gh_identity",
+                    return_value=(
+                        None, None,
+                        "GitHub repository data is unavailable: gh is not installed",
+                    ),
+                ),
+                mock.patch.object(roadmap, "_persist_cache"),
+            ):
+                result = roadmap._repo_identity(directory)
+
+        self.assertEqual(result, ("acme", "repo", None))
+
+    def test_github_repo_from_remote_rejects_non_github_urls(self):
+        self.assertIsNone(roadmap._github_repo_from_remote("https://gitlab.com/acme/repo.git"))
+
+
     def test_repo_identity_asks_gh_again_when_the_remote_changes(self):
         roadmap._IDENTITY_CACHE.clear()
         with tempfile.TemporaryDirectory() as directory:
