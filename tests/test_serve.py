@@ -1236,6 +1236,32 @@ class FleetStateTests(unittest.TestCase):
             strict=True,
         )
 
+    def test_alias_checkout_maps_dashboard_claims_to_canonical_slug(self):
+        alias = "local-widgets"
+        canonical = "acme/widgets-service"
+        with tempfile.TemporaryDirectory() as code_dir:
+            os.mkdir(os.path.join(code_dir, alias))
+            with (
+                mock.patch.object(serve.machines, "machines", return_value=[]),
+                mock.patch.object(serve, "enabled_repos", return_value=[alias]),
+                mock.patch.object(serve, "CODE_DIR", code_dir),
+                mock.patch.object(
+                    serve.roadmap, "_repo_identity",
+                    return_value=("acme", "widgets-service", None),
+                ),
+                mock.patch.object(
+                    serve.claims, "claims_for",
+                    return_value={f"{canonical}#7": {"session": "loop#1"}},
+                ) as claims_for,
+            ):
+                result = serve.fleet_state({})
+                full_names = serve._repo_full_names()
+
+        claims_for.assert_called_once()
+        self.assertEqual(claims_for.call_args.args[0], [canonical])
+        self.assertEqual(result["claims"], {f"{canonical}#7": {"session": "loop#1"}})
+        self.assertEqual(full_names, {alias: canonical})
+
     def test_repos_with_no_resolvable_owner_skip_the_claims_lookup(self):
         with (
             mock.patch.object(serve.machines, "machines", return_value=[]),

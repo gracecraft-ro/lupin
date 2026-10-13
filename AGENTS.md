@@ -303,8 +303,9 @@ serializes local start and stop actions. Herdr keeps its own session and
 workspace state.
 The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 The same file also holds each checkout's repo identity, so a restart does
-not pay for `gh` again. If `gh` is missing, Lupin gets the owner and repo
-from a standard GitHub `origin` URL.
+not pay for `gh` again. If `gh` is missing, Lupin gets the GitHub owner
+and repo name from a standard `origin` URL. It uses that name for claim keys,
+even when the checkout folder has another name.
 
 `gh_cache.py` shares read-only `gh` results across the fleet through Redis.
 `LUPIN_GH_CANONICAL_FETCHER` names the one machine that runs `gh` on a cache
