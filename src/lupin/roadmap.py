@@ -751,7 +751,8 @@ def _repo_identity(repo_path: str):
         repository = _github_repo_from_remote(url)
         if repository:
             result = (*repository, None)
-    _IDENTITY_CACHE[key] = (time.monotonic(), result)
+    with _IDENTITY_LOCK:
+        _IDENTITY_CACHE[key] = (time.monotonic(), result)
     if result[0]:
         _persist_cache()
     return result
