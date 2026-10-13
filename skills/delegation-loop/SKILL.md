@@ -49,26 +49,32 @@ then no longer covers it, and the PR needs a new review. The purpose of
 the owner.
 
 At the start of every cycle, the orchestrator (the agent that dispatches and
-merges work) works through the open PRs into `release/next`. It does this
-before it reads the backlog. Use this order:
+merges work) handles the open PRs into `release/next`. It does this before it
+reads the backlog. Ignore draft PRs. For each other PR, do the first step that
+applies:
 
-1. Merge each PR that passes the four merge gates. See "Continuous merge of
+1. The PR passes the four merge gates: merge it. See "Continuous merge of
    approved PRs".
-2. Dispatch a worker to sync each PR that is approved at its current head SHA.
-   Sync it only if it does not contain the current `release/next`. A sync
-   changes the head SHA, so get a new approval. If the sync has conflicts,
-   dispatch a fix worker to resolve them on the same branch. Do not repeat a
-   sync that reported conflicts.
-3. Dispatch a fix worker for each PR that has review findings or a failed repo
-   gate (the checks that `AGENTS.md` defines). Give the worker the findings or
-   the gate output. The fix goes on the same branch.
-4. Dispatch a reviewer for each PR that has no review at its current head SHA.
-   Do not wait for the worker to request a review.
+2. The PR is approved at its current head SHA and does not contain the current
+   `release/next`: dispatch a worker to sync it. A sync changes the head SHA,
+   so get a new approval. If the sync has conflicts, dispatch a fix worker to
+   resolve them on the same branch. Do not repeat a sync that reported
+   conflicts.
+3. The PR has review findings at its current head SHA, or a failed repo gate
+   (the checks that `AGENTS.md` defines): dispatch a fix worker. Give it the
+   findings or the gate output. The fix goes on the same branch.
+4. The PR has no review at its current head SHA: dispatch a reviewer. Do not
+   wait for the worker to request a review.
+5. The PR waits for a gate that is still running: wait for the result.
 
-A PR is blocked on an owner decision when a worker for it fails, or when its
-merge fails. A worker can be a fix worker, a sync worker, or a reviewer. Report
-each blocked PR in the handoff. Skip a blocked PR in steps 1 to 4 until the
-owner acts.
+Do not dispatch a worker for a PR that already has a worker running. Do not
+push to the branch of a PR that the loop did not open. Such a PR that needs a
+sync or a fix is blocked.
+
+A PR is blocked on an owner decision when a worker for it fails. It is also
+blocked when a fix worker ends and the gate still fails. Report each blocked PR
+in the handoff, with its head SHA. Skip it until the owner acts or its head SHA
+changes.
 
 Do not dispatch work on a new issue while a PR into `release/next` is open,
 not merged, and not blocked. Work that is already running continues. A
@@ -108,8 +114,8 @@ needs is missing.
 
 ## Read the backlog
 
-Read the backlog only after you work through the open PRs. See "Pull requests
-come first".
+Read the backlog only after you handle the open PRs. See "Pull requests come
+first".
 
 From a configured checkout, run:
 
@@ -183,9 +189,9 @@ agent. Do not claim those issues again.
 
 ## Dispatch work
 
-Do not dispatch a worker on a new issue until you work through the open PRs.
-See "Pull requests come first". A reviewer, a sync worker, or a fix worker for
-an open PR is not new work.
+Do not dispatch a worker on a new issue until you handle the open PRs. See
+"Pull requests come first". A reviewer, a sync worker, or a fix worker for an
+open PR is not new work.
 
 Give each worker a short brief with:
 
@@ -532,8 +538,8 @@ Upstream `main` is owner-only. The owner opens one pull request from
 changes to this skill also go to upstream `main` as a pull request, which the
 owner merges.
 
-The loop is not finished while a PR that is not blocked waits for a review, a
-fix, or a merge.
+The loop is not finished while an unblocked PR waits for a review, a fix, or a
+merge.
 
 Continue working until the backlog is empty or every remaining item is blocked
 on an owner decision. Then run `/handoff`. State the exact next action and any

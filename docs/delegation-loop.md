@@ -134,8 +134,8 @@ repo:
    closes it manually right after the merge into `release/next`.
 7. On every orchestrator cycle, merge each approved PR that passes step 6. Follow
    "Continuous merge of approved PRs" in the `delegation-loop` skill.
-8. PRs come first. Work through the open PRs into `release/next` before you
-   start work on a new issue. A PR that is blocked on an owner decision does
+8. PRs come first. Handle the open PRs into `release/next` before you start
+   work on a new issue. A PR that is blocked on an owner decision does
    not hold it back. A PR that waits goes stale. See "Pull requests come
    first" in the `delegation-loop` skill.
 
