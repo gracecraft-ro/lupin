@@ -89,8 +89,9 @@ release" below.
 
 If the repo's `AGENTS.md` has a rule for where to push and open the PR (rule 1
 under "Pull requests, review, and handoff"), follow it. It takes precedence
-over steps 1 to 4 below. In the Lupin loop, that rule opens the PR on upstream,
-the repo that the PR belongs to. A PR on a fork does not get reviewed.
+over the next paragraph and over steps 1 to 4. In the Lupin loop, that rule
+opens the PR on upstream, the repo that the PR belongs to. A PR on a fork does
+not get reviewed.
 
 Workers never push to `origin`, `main`, or `release/next`. Push the feature
 branch to the fork. Open the PR on the fork. Then request review.
@@ -133,16 +134,14 @@ branch to the fork. Open the PR on the fork. Then request review.
      --body "Review requested. Head: <sha>."
    ```
 
-   If it fails, report the error and the PR number. Then go to "Report and
-   release" below.
+   If it fails, report the error and the PR number. Then go to step 5.
 
    `<PR_NUMBER>` is the number at the end of the PR URL that `gh pr create`
    prints. If step 3 skipped `gh pr create`, use the number from the lookup in
-   step 3. `<sha>` is the output of `git rev-parse HEAD`. Then go to "Report and
-   release" below. Do not merge. Do not wait for approval. The orchestrator
-   dispatches a reviewer.
+   step 3. `<sha>` is the output of `git rev-parse HEAD`. Then go to step 5. Do
+   not merge. Do not wait for approval. The orchestrator dispatches a reviewer.
 5. Attach the screenshots. See "Attach screenshots to the PR" below. Do this
-   before you report, for every visual change.
+   for every visual change. Then go to "Report and release" below.
 6. If the push or PR creation fails, report the branch name and the commit
    range. Then go to "Report and release" below.
 
@@ -153,15 +152,17 @@ Do not merge the PR. The orchestrator reviews and merges it.
 ## Attach screenshots to the PR
 
 Do this after the PR exists, for every visual change. A reviewer cannot judge a
-visual change from the diff. A visual PR with no screenshots is not ready.
+visual change from the diff. A visual PR with no screenshots is not ready. If
+the repo's `AGENTS.md` or a repo skill says how to capture or attach
+screenshots, follow it. Otherwise follow this section.
 
 1. Get the repo and the number of the PR that holds the change. Use the PR URL.
    For the PR in the current branch, run
    `gh pr view --json number,url --jq '.number, .url'`. The URL is
    `https://github.com/<owner>/<repo>/pull/<number>`. Use that `<owner>/<repo>`.
    Do not use the fork name unless the PR is on the fork.
-2. Write the comment in a file. Show before and after. Say what the reader
-   should look at:
+2. Write the comment in a file. Show before and after. For a new screen with
+   no before, show the new screen. Say what the reader should look at:
 
    ```md
    Before: ![before](./evidence/123/before.png)
@@ -197,7 +198,8 @@ orchestrator attaches them with its own token.
 GitHub CLI 2.99.0 and newer has `--attach`. Run `gh --version` if the option is
 missing. Upgrade, or report that you cannot attach. Do not skip it silently.
 Attach only a screenshot you opened and checked. If you could not capture one,
-say so in the PR comment and in your report, and say why.
+post a PR comment that says so and why, and say so in your report. If you decide
+that a change is not visual, say so in your report, and say why.
 
 For a non-image artifact, link to its approved repository or artifact-store
 location.
