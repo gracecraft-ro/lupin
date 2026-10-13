@@ -136,7 +136,7 @@ repo:
    "Continuous merge of approved PRs" in the `delegation-loop` skill.
 8. PRs come first. Handle the open PRs into `release/next` before you start
    work on a new issue. A PR that is blocked on an owner decision does
-   not hold it back. A PR that waits goes stale. See "Pull requests come
+   not delay it. A PR that waits goes stale. See "Pull requests come
    first" in the `delegation-loop` skill.
 
 Changes to this policy go to upstream `main`, which the owner merges. Feature

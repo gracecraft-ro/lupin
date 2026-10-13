@@ -41,44 +41,52 @@ Get pull requests (PRs) approved and merged first. This is the top priority.
 Do it before you start work on any new issue.
 
 A PR that waits goes stale. `release/next` gets new commits. The PR branch no
-longer contains the current `release/next`, so the PR cannot merge. A sync (a
-merge of the current `release/next` into the PR branch) fixes that. A sync
-changes the head SHA (the newest commit ID on the PR branch). The approval
+longer contains the current `release/next`, so the PR fails a merge gate. A
+sync (a merge of the current `release/next` into the PR branch) fixes that. A
+sync changes the head SHA (the newest commit ID on the PR branch). The approval
 then no longer covers it, and the PR needs a new review. The purpose of
 `release/next` is to merge an approved PR at once. The loop does not wait for
 the owner.
 
-At the start of every cycle, the orchestrator (the agent that dispatches and
-merges work) handles the open PRs into `release/next`. It does this before it
-reads the backlog. Ignore draft PRs. For each other PR, do the first step that
-applies:
+At the start of every cycle, the orchestrator handles the open PRs into
+`release/next`. The orchestrator is the agent that dispatches and merges work.
+It does this before it reads the backlog. Ignore draft PRs. For each other PR,
+do the first step that applies:
 
 1. The PR passes the four merge gates: merge it. See "Continuous merge of
    approved PRs".
-2. The PR is approved at its current head SHA and does not contain the current
-   `release/next`: dispatch a worker to sync it. A sync changes the head SHA,
-   so get a new approval. If the sync has conflicts, dispatch a fix worker to
-   resolve them on the same branch. Do not repeat a sync that reported
-   conflicts.
-3. The PR has review findings at its current head SHA, or a failed repo gate
-   (the checks that `AGENTS.md` defines): dispatch a fix worker. Give it the
-   findings or the gate output. The fix goes on the same branch.
+2. The PR is approved at its current head SHA and is behind `release/next`:
+   dispatch a worker to sync it. A sync changes the head SHA, so get a new
+   approval. If the sync has conflicts, dispatch a fix worker to resolve them.
+   Do not repeat a sync that reported conflicts.
+3. The PR has review findings or a failed repo gate at its current head SHA:
+   dispatch a fix worker. The repo gate is the set of checks that `AGENTS.md`
+   defines. Give the worker the findings or the gate output. The fix goes on
+   the same branch.
 4. The PR has no review at its current head SHA: dispatch a reviewer. Do not
    wait for the worker to request a review.
 5. The PR waits for a gate that is still running: wait for the result.
 
-Do not dispatch a worker for a PR that already has a worker running. Do not
-push to the branch of a PR that the loop did not open. Such a PR that needs a
-sync or a fix is blocked.
+A worker is a fix worker, a sync worker, or a reviewer. Do not dispatch a
+worker for a PR that already has one running. The loop opened a PR when the
+ledger has a dispatch event for its branch. Do not push to the branch of any
+other PR. If such a PR needs a sync or a fix, it is blocked.
 
-A PR is blocked on an owner decision when a worker for it fails. It is also
-blocked when a fix worker ends and the gate still fails. Report each blocked PR
-in the handoff, with its head SHA. Skip it until the owner acts or its head SHA
-changes.
+A PR is blocked on an owner decision when one of these is true:
 
-Do not dispatch work on a new issue while a PR into `release/next` is open,
-not merged, and not blocked. Work that is already running continues. A
-reviewer, a sync worker, or a fix worker for an open PR is not new work.
+- A worker for it fails. A worker fails when it ends without the push or the
+  report that its brief asks for.
+- A worker for it stops to ask the owner.
+- A fix worker ends and the gate still fails.
+- Its merge fails.
+
+Report each blocked PR in the handoff, with its head SHA. Skip it. Retry it
+when its head SHA changes or the owner asks in a PR comment.
+
+Do not dispatch work on a new issue while a PR into `release/next` is open, is
+not a draft, is not merged, and is not blocked. Work that is already running
+continues. A reviewer, a sync worker, or a fix worker for an open PR is not new
+work.
 
 ## Install skills on loop hosts
 
@@ -431,7 +439,7 @@ until no approved PR is left.
 
    ```sh
    gh pr list --repo OWNER/REPO --base release/next --state open \
-     --json number,headRefOid,headRefName,headRepositoryOwner
+     --json number,headRefOid,headRefName,headRepositoryOwner,isDraft
    ```
 
    `headRepositoryOwner.login` names the owner of the repository that holds the
