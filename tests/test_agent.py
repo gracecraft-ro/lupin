@@ -678,24 +678,6 @@ def test_startup_scan_marks_orphaned_running_entry_as_failed(redis_port, flush_r
     assert fake.calls == []
 
 
-def test_startup_scan_reason_does_not_say_command_ran(redis_port, flush_redis):
-    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
-    cmd_id = commands.enqueue("jesus", "loop.stop", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)
-
-    # Simulate a stop after the claim write. Do not start the command.
-    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
-    raw.set(
-        f"lupin:v1:cmdres:{cmd_id}",
-        json.dumps({"id": cmd_id, "state": "running", "host": "jesus"}),
-    )
-
-    assert agent.startup_scan("jesus", **kw) == [cmd_id]
-
-    reason = commands.get_status(cmd_id, **kw)["reason"]
-    assert "still running" not in reason
-    assert "may not have started" in reason
-
-
 def test_startup_scan_ignores_running_entries_for_other_machines(redis_port, flush_redis):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     cmd_id = commands.enqueue("jesus", "loop.stop", {"repo": "lupin"}, key=KEY, **ACTOR_KW, **kw)

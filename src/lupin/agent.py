@@ -479,7 +479,7 @@ def startup_scan(
                 continue
             result["state"] = "failed"
             result["reason"] = (
-                "orphaned: the agent restarted before the command finished. "
+                "orphaned: the agent restarted before it saved the command result. "
                 "The command may not have started."
             )
             result["finished_at"] = time.time()
