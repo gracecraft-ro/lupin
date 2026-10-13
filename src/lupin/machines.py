@@ -211,7 +211,7 @@ def _write_record(
     totals -- `quota` only keeps one summarized row per provider, which is
     enough for `place`'s scoring but not for the `/usage` page's richer
     tables. Reported here, by whichever host actually has the provider
-    logins, so a reader (pihome, which has none) never needs its own.
+    logins, so a reader with no logins never needs its own.
     `actions` is read live from `agent.py`'s own `ACTIONS` table (imported
     here, not at module load, to avoid a top-level import cycle -- `agent.py`
     imports this module to check `draining` state). This way the list can
@@ -243,6 +243,16 @@ def _write_record(
 def _read_record(client, name: str) -> dict | None:
     raw = client.get(_record_key(name))
     return json.loads(raw) if raw is not None else None
+
+
+def _readable_record(raw: str) -> dict | None:
+    """The record, or None if `raw` is not a JSON object with a heartbeat that parses."""
+    try:
+        record = json.loads(raw)
+        _parse_iso(record["heartbeat"])
+    except (ValueError, TypeError, KeyError):
+        return None
+    return record if isinstance(record, dict) else None
 
 
 def _run(op):
@@ -343,7 +353,9 @@ def undrain(connection: dict) -> dict:
     return _set_state(connection, "online")
 
 
-def machines(connection: dict) -> list[dict]:
+def machines(
+    connection: dict, skipped: list[str] | None = None, *, strict: bool = True
+) -> list[dict]:
     """Every registered machine, each as:
     `{"name", "state", "version", "heartbeat", "version_mismatch", "slots",
     "providers", "quota", "usage_detail", "loops", "session_backend",
@@ -362,6 +374,16 @@ def machines(connection: dict) -> list[dict]:
 
     `loops`/`repos`/`session_backend`/`actions` are optional additions. Old
     records return empty lists or `None` for these fields.
+
+    A record that cannot be read is not JSON, not an object, or has no
+    readable `heartbeat`.
+
+    `strict=True` (the default) raises the error for that record
+    (`json.JSONDecodeError`, `KeyError`, or `AttributeError`). Acting
+    callers use it. A list without the record is a partial list.
+
+    `strict=False` leaves the record out. Its `machine:<name>` label is
+    added to `skipped` when `skipped` is a list. Display callers use it.
     """
     client = slots_redis._client(
         connection.get("redis_host"),
@@ -375,12 +397,19 @@ def machines(connection: dict) -> list[dict]:
     def op():
         keys = list(client.scan_iter(match=f"{PREFIX}machine:*"))
         result = []
+        unreadable = []
         for key in keys:
             name = key[len(f"{PREFIX}machine:") :]
             raw = client.get(key)
             if raw is None:
                 continue
-            record = json.loads(raw)
+            if strict:
+                record = json.loads(raw)
+            else:
+                record = _readable_record(raw)
+                if record is None:
+                    unreadable.append(f"machine:{name}")
+                    continue
             state = record.get("state", "online")
             if now - _parse_iso(record["heartbeat"]) > OFFLINE_AFTER:
                 state = "offline"
@@ -401,6 +430,10 @@ def machines(connection: dict) -> list[dict]:
                     "actions": record.get("actions", []),
                 }
             )
-        return result
+        return result, unreadable
 
-    return _run(op)
+    # `_run` may retry `op`, so the labels are added only after it returns.
+    result, unreadable = _run(op)
+    if skipped is not None:
+        skipped.extend(unreadable)
+    return result

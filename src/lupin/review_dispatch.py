@@ -202,13 +202,17 @@ def main(argv: list[str] | None = None) -> int:
     else:
         category, size = args.category, args.size
 
-    result = decide(
-        category,
-        size,
-        bmo_available=not args.bmo_unavailable,
-        primary_effort=args.primary_effort,
-        mode=args.mode,
-    )
+    try:
+        result = decide(
+            category,
+            size,
+            bmo_available=not args.bmo_unavailable,
+            primary_effort=args.primary_effort,
+            mode=args.mode,
+        )
+    except route.RouteInputError as err:
+        print(f"lupin review-route: {err}", file=sys.stderr)
+        return 2
     print(json.dumps({**result, "category": category, "size": size}))
     return 0
 

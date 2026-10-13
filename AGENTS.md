@@ -58,14 +58,21 @@ lupin resume [--machine M | --all] [--json]
 ```
 
 `route` and `classify` print a plain result by default (`model effort`, or
-`category size`). Add `--json` for a JSON object instead.
+`category size`). Add `--json` for a JSON object instead. If the
+category or size is not known, `route` and `review-route` print one line to
+stderr. The line lists the valid values. The exit code is 2.
 
 `ledger append` stores events in Redis. It records the time and host. Repeat
 digest options to add more than one item. Repeat `--child` for each split
-issue. `ledger read --json` returns the latest 10 events, oldest first.
-Use `--limit N` to choose another positive count. Both commands exit 3 if
-Redis is unavailable. The roadmap shows no ledger annotations and a warning.
-It ignores `.loop/loop-state.json`.
+issue. `ledger read --json` returns up to the latest 10 events, oldest first.
+Use `--limit N` to choose another positive count. `_decode` in
+`src/lupin/ledger.py` turns one entry's ID and decoded fields into a dict.
+`read_events` decodes each entry on its own. It skips an entry when a
+field is not valid UTF-8. It also skips an entry when `_decode` raises
+KeyError, ValueError, or RecursionError. It reports each skipped entry on
+stderr. A skipped entry still counts toward the limit. Both commands exit 3
+if Redis is unavailable. When Redis is unavailable, the roadmap shows no
+ledger annotations and a warning. It ignores `.loop/loop-state.json`.
 
 `review-route --prefetch` fetches issue/PR text up front -- body, comments,
 and (for a PR) reviews and a diff stat (changed files, additions/deletions,
@@ -132,7 +139,9 @@ Profiles are local to each worker. Set them on each worker that can start the
 repo. At loop start, Lupin uses quota data from the shared cache. The data
 must be less than five minutes old and include usable quota for a candidate.
 Lupin skips blocked providers, then picks the candidate with the most quota
-headroom across its known windows. Profile order breaks ties. If no candidate
+headroom across its known windows. For a provider with more than one login,
+headroom is that of the best login that is not blocked. Profile order breaks
+ties. If no candidate
 has fresh, usable quota, Lupin refuses to start the loop.
 
 Explicit `--platform`, `--provider`, or `--model` options select a fixed
@@ -261,6 +270,15 @@ per-machine Redis snapshots. The page adds totals by provider and marks a
 snapshot stale after five minutes. Each snapshot expires after 24 hours.
 Systemd runs `lupin quota` every five minutes on Jesus and Ralpha.
 
+A provider can have more than one login, for example a free and a paid
+OpenAI account. `omp usage` reports each login. Lupin labels each row with
+the plan name (`free`, `plus`). The `/usage` page and `lupin quota` show
+the label. Lupin never shows an email or account ID. `omp` chooses the
+login for each session. So a provider is blocked only when all of its
+logins are blocked. The most quota left is the best open login. A machine
+that publishes a provider replaces the whole entry for that provider, so
+each machine that publishes it needs every login for it.
+
 ## How a slot's limit (`max`) works
 
 A slot does not know its own limit until something tells it. The first
@@ -287,11 +305,19 @@ The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 The same file also holds each checkout's repo identity, so a restart does
 not pay for `gh` again.
 
+`gh_cache.py` shares read-only `gh` results across the fleet through Redis.
+`LUPIN_GH_CANONICAL_FETCHER` names the one machine that runs `gh` on a cache
+miss. Set it to that machine's hostname on every machine that reads the cache.
+The named machine also fetches when Redis is down. When the variable is unset,
+no machine is pinned. Each machine then fetches on a miss, but only while Redis
+is reachable.
+
 Each run has its own Git worktree in `worktrees/<repo>/` in the loop state
 directory. A worktree is a second working copy of the repo, with its own files
 and branch. This one is on a new branch, `lupin-loop/<time>`. `run` runs
-`git fetch origin` first. The branch starts at the fetched remote default
-branch: the target of `origin/HEAD`, or else `origin/main` or `origin/master`.
+`git fetch origin` first. The branch starts at `origin/release/next` when the
+remote has it. Otherwise it starts at the remote default branch: the target of
+`origin/HEAD`, or else `origin/main` or `origin/master`.
 If the fetch fails, `run` refuses to start. The agent works in this worktree.
 The main checkout in `LUPIN_LOOP_CODE_DIR` is never the agent's working
 directory.
@@ -341,10 +367,10 @@ the page shows no issues. Add the checkout to Git's `safe.directory` list.
 
 ## Dashboard mockups
 
-`ui.dc.html` contains dashboard mockups. Read the matching section before
+`docs/ui.dc.html` contains dashboard mockups. Read the matching section before
 changing a dashboard page. For example, the Machines page is section `1k`.
 `docs/ui-mockups.md` shows a screenshot for each mockup section. Use the
-matching screenshot as a visual reference. Use `ui.dc.html` for layout and
+matching screenshot as a visual reference. Use `docs/ui.dc.html` for layout and
 content. Treat its values as sample data.
 Keep real data and controls accurate. Do not show shared fleet capacity as a
 per-machine limit or add controls that the current code cannot support.
@@ -397,19 +423,95 @@ per-machine limit or add controls that the current code cannot support.
 
 ## Build and test
 
+Full gate (the repo's gate, used by the merge rules):
+
 ```
 nix flake check                                    # build + test, all systems
 nix shell nixpkgs#python3Packages.pytest -c pytest -v
 ```
 
+`nix develop <dir> -c <command>` runs `<command>` in the current directory. It
+does not run in `<dir>`. A relative test path then picks up files from the
+directory you are in. Run `cd <checkout>` first. To test a reviewed commit, run
+`git archive <sha> | tar -x -C <empty-dir>`, then run the tests from `<empty-dir>`.
+
+## Commands in docs and skills
+
+Commands in this file and in the skills must work for any user of this tool.
+Use `OWNER/REPO` for the repo, `origin` for the upstream remote, and `<checkout>`
+for a path. Do not write a real owner name or machine path into a command. Prose
+may name this repo.
+
 ## Pull requests, review, and handoff
 
-Every change goes through a pull request. The base branch is `main`.
+Every feature change goes through a pull request to upstream `release/next`.
+Upstream is the `origin` remote. The owner merges `release/next` into `main`
+when they choose. Policy changes go to upstream `main` for the owner to merge.
+The loop policy is in `docs/delegation-loop.md`.
 
-1. Use `/ship`. It pushes the branch and opens a PR with `Closes #N`. If the
-   push is denied, it pushes to a fork. If that fails, report the branch name
-   and commit range. That branch is the PR.
+1. Push the branch with `git push -u origin <branch>`. If your token cannot push
+   to upstream, push to the existing fork with `git push -u fork <branch>`.
+   Never push `main` or `release/next`. Do not create a new fork. You may use
+   `/ship`. Check that it does not push `main` or `release/next`. Open the PR on
+   upstream. From a fork branch, add `--head FORK_OWNER:<branch>`:
+
+   <!-- markdownlint-disable MD013 -->
+   ```sh
+   gh pr create --repo OWNER/REPO --base release/next --title "<title>" --body "Closes #N"
+   ```
+   <!-- markdownlint-enable MD013 -->
+
+   The PR body has `Closes #N`. The merge into `release/next` does not close
+   the issue. The orchestrator (the agent that dispatches and merges work)
+   closes it manually right after the merge into `release/next`.
+   If the push fails, report the branch name and commit range. Do not merge
+   that branch. If the PR opens, report its number to the orchestrator. The
+   orchestrator dispatches `/code-review`.
 2. Do not merge your own work. A reviewer who is not the author runs
-   `/code-review`. The orchestrator merges after approval and a passing gate.
+   `/code-review`. The orchestrator (the agent that dispatches and merges
+   work) merges into `release/next` only when all four are true:
+   1. The PR is open on upstream, `OWNER/REPO`, with base `release/next`.
+   2. A reviewer approves the current head SHA. The head SHA is the newest
+      commit ID on the branch.
+   3. The PR branch contains the current `release/next`. The ancestor check
+      asks git whether one branch contains another. The check is in the
+      `delegation-loop` skill.
+   4. The repo's full gate, as its `AGENTS.md` defines it, passes.
+
+   A worker or reviewer never merges a pull request.
+   On every orchestrator cycle, merge each approved PR that passes these gates.
+   See "Continuous merge of approved PRs" in the `delegation-loop` skill.
 3. At the end of a session, run `/handoff`. It runs `lupin ledger append`.
 4. Loop details for this repo: `docs/delegation-loop.md`.
+
+### Preview server
+
+This repo has a runnable dashboard. Its preview serves `release/next`.
+
+- Worktree: `.claude/worktrees/preview`. The skill gives the setup commands.
+- Start command. Run it from the preview worktree:
+
+```sh
+nix develop --command env \
+  LUPIN_LOOP_STATE_DIR="$HOME/.local/state/lupin-preview" PYTHONPATH=src \
+  python3 -c '
+import sys
+from lupin.cli import main
+sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
+'
+```
+
+- Port: `8789`. Check it is free with `ss -ltn` first. The `ss` command lists
+  listening ports.
+- Machine: not set yet. The owner names it.
+- Owner tunnel command: `ssh -N -L 8789:127.0.0.1:8789 MACHINE`. A tunnel
+  forwards a port on your computer to the machine.
+- Local URL: `http://localhost:8789`.
+- Keep it running: a Herdr pane, or `systemd-run --user`. The `systemd-run`
+  command starts a command as a background service.
+- To bind means to choose the address a server listens on. Never bind to
+  `0.0.0.0`. This is a security rule.
+- Do not set `LUPIN_REDIS_HOST` to the fleet Redis unless the test needs it.
+- Do not use the start, stop, or run controls on this dashboard. New runs use
+  the `lupin-loops` session. Older loops may use an old session until they
+  stop.

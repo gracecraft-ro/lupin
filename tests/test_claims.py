@@ -14,6 +14,96 @@ import redis as redis_lib
 from lupin import cli, claims, slots
 
 
+class _FakePipeline:
+    """Queues commands and runs them inside MULTI/EXEC, as redis-py does by default."""
+
+    def __init__(self, client):
+        self._client = client
+        self._queued = []
+
+    def get(self, key):
+        self._queued.append(("GET", key))
+        return self
+
+    def pttl(self, key):
+        self._queued.append(("PTTL", key))
+        return self
+
+    def execute(self, **kwargs):
+        self._client.commands.append("MULTI")
+        results = []
+        for name, key in self._queued:
+            self._client.commands.append(name)
+            results.append(self._client.values[key] if name == "GET" else 90_000)
+        self._client.commands.append("EXEC")
+        return results
+
+
+class _FakeClient:
+    """Records each command in order. Serves one scan result and its values."""
+
+    def __init__(self, values):
+        self.values = values
+        self.commands = []
+
+    def scan_iter(self, match):
+        self.commands.append("SCAN")
+        return iter(self.values)
+
+    def get(self, key):
+        self.commands.append("GET")
+        return self.values[key]
+
+    def pipeline(self):
+        return _FakePipeline(self)
+
+
+def test_claims_for_reads_only_the_value_by_default(monkeypatch):
+    key = "lupin:v1:claim:gracecraft/lupin#6"
+    fake = _FakeClient({key: '{"host": "h", "session": "s", "since": 1}'})
+    monkeypatch.setattr(claims, "_client", lambda *a: fake)
+
+    result = claims.claims_for(["gracecraft/lupin"])
+
+    assert fake.commands == ["SCAN", "MULTI", "GET", "EXEC"]
+    assert result == {"gracecraft/lupin#6": {"host": "h", "session": "s", "since": 1}}
+
+
+def test_claims_for_reads_the_ttl_in_one_round_trip_when_asked(monkeypatch):
+    key = "lupin:v1:claim:gracecraft/lupin#6"
+    fake = _FakeClient({key: '{"host": "h", "session": "s", "since": 1}'})
+    monkeypatch.setattr(claims, "_client", lambda *a: fake)
+
+    result = claims.claims_for(["gracecraft/lupin"], with_ttl=True)
+
+    assert fake.commands == ["SCAN", "MULTI", "GET", "PTTL", "EXEC"]
+    assert result["gracecraft/lupin#6"]["ttl"] == 90.0
+
+
+def test_claims_for_skips_a_claim_that_is_not_a_json_object(redis_port, flush_redis):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    claims.claim("gracecraft/lupin#6", "holder-a", **kw)
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set("lupin:v1:claim:gracecraft/lupin#8", "not json")
+    raw.set("lupin:v1:claim:gracecraft/lupin#9", "[1, 2]")
+    skipped = []
+
+    result = claims.claims_for(["gracecraft/lupin"], with_ttl=True, skipped=skipped, **kw)
+
+    assert set(result) == {"gracecraft/lupin#6"}
+    assert sorted(skipped) == ["claim:gracecraft/lupin#8", "claim:gracecraft/lupin#9"]
+
+
+@pytest.mark.parametrize("raw_value", ["not json", "[1, 2]"])
+def test_claims_for_strict_raises_on_a_claim_that_is_not_a_json_object(redis_port, flush_redis, raw_value):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set("lupin:v1:claim:gracecraft/lupin#9", raw_value)
+
+    with pytest.raises(ValueError):
+        claims.claims_for(["gracecraft/lupin"], strict=True, **kw)
+
+
 def test_claim_succeeds_and_is_visible_in_redis(redis_port, flush_redis):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     claims.claim("gracecraft/lupin#6", "host-a:session-1", **kw)
@@ -93,6 +183,28 @@ def test_claims_for_across_repos_mixed_claimed_and_unclaimed(redis_port, flush_r
     assert result["gracecraft/nix#212"]["session"] == "holder-b"
 
 
+def test_claims_for_reports_seconds_left_only_when_asked(redis_port, flush_redis):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    claims.claim("gracecraft/lupin#6", "holder-a", ttl=100, **kw)
+
+    plain = claims.claims_for(["gracecraft/lupin"], **kw)
+    timed = claims.claims_for(["gracecraft/lupin"], with_ttl=True, **kw)
+
+    assert "ttl" not in plain["gracecraft/lupin#6"]
+    assert 90 < timed["gracecraft/lupin#6"]["ttl"] <= 100
+    assert timed["gracecraft/lupin#6"]["session"] == "holder-a"
+
+
+def test_claims_for_ttl_is_none_when_the_key_never_expires(redis_port, flush_redis):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set("lupin:v1:claim:gracecraft/lupin#7", '{"host": "h", "session": "s", "since": 1}')
+
+    result = claims.claims_for(["gracecraft/lupin"], with_ttl=True, **kw)
+
+    assert result["gracecraft/lupin#7"]["ttl"] is None
+
+
 def test_claims_for_only_returns_repos_asked_for(redis_port, flush_redis):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     claims.claim("gracecraft/lupin#6", "holder-a", **kw)
@@ -100,6 +212,77 @@ def test_claims_for_only_returns_repos_asked_for(redis_port, flush_redis):
 
     result = claims.claims_for(["gracecraft/lupin"], **kw)
     assert set(result) == {"gracecraft/lupin#6"}
+
+
+def test_claims_for_raises_when_a_claim_key_has_the_wrong_type(redis_port, flush_redis):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.rpush("lupin:v1:claim:gracecraft/lupin#6", "not a claim")
+
+    # A wrong-type key is a bug, not an empty claim. It must raise, not vanish.
+    with pytest.raises(redis_lib.exceptions.ResponseError):
+        claims.claims_for(["gracecraft/lupin"], **kw)
+
+
+def test_claims_for_skips_a_claim_that_expired_after_the_scan(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    claims.claim("gracecraft/lupin#6", "holder-a", **kw)
+    claims.claim("gracecraft/lupin#7", "holder-b", **kw)
+    real = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+
+    class ExpireAfterScan:
+        """Scans as usual, then deletes #6 before the read, as if its TTL ran out."""
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def scan_iter(self, *args, **kwargs):
+            keys = list(real.scan_iter(*args, **kwargs))
+            real.delete("lupin:v1:claim:gracecraft/lupin#6")
+            return iter(keys)
+
+    monkeypatch.setattr(claims, "_client", lambda *_args: ExpireAfterScan())
+
+    result = claims.claims_for(["gracecraft/lupin"], **kw)
+
+    assert set(result) == {"gracecraft/lupin#7"}
+
+
+def test_claims_for_retry_reads_every_key(redis_port, flush_redis, monkeypatch):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    claims.claim("gracecraft/lupin#6", "holder-a", **kw)
+    claims.claim("gracecraft/lupin#7", "holder-b", **kw)
+    real = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    dropped = []
+
+    class DropFirstExecute:
+        """Runs the first pipeline, then drops the reply as if the link broke."""
+
+        def __getattr__(self, name):
+            return getattr(real, name)
+
+        def pipeline(self, **kwargs):
+            pipe = real.pipeline(**kwargs)
+
+            class Pipe:
+                def __getattr__(self, name):
+                    return getattr(pipe, name)
+
+                def execute(self, *args, **kwargs):
+                    replies = pipe.execute(*args, **kwargs)
+                    if not dropped:
+                        dropped.append(True)
+                        raise redis_lib.exceptions.ConnectionError("reply lost")
+                    return replies
+
+            return Pipe()
+
+    monkeypatch.setattr(claims, "_client", lambda *_args: DropFirstExecute())
+
+    result = claims.claims_for(["gracecraft/lupin"], **kw)
+
+    assert dropped == [True]
+    assert set(result) == {"gracecraft/lupin#6", "gracecraft/lupin#7"}
 
 
 def test_unreachable_redis_raises_for_every_claim_call(closed_port):

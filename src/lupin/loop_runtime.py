@@ -47,6 +47,9 @@ UNFINISHED_GIT_STATES = (
     ("REVERT_HEAD", "revert"),
 )
 SERVER_START_TIMEOUT = 30.0
+PANE_READ_TIMEOUT = 60.0
+SYSTEMCTL_CHECK_TIMEOUT = 3.0
+SYSTEMCTL_STOP_TIMEOUT = 30.0
 LEASE_TTL = 60.0
 HANDOFF_GRACE_S = 600.0
 HANDOFF_TEXT = (
@@ -130,15 +133,9 @@ def select_orchestrator(
         if not isinstance(rows, list):
             continue
         rows = [row for row in rows if isinstance(row, dict)]
-        usable = [
-            row for row in rows
-            if row.get("provider") == provider
-            and isinstance(row.get("used_pct"), (int, float))
-            and isinstance(row.get("resets_at"), (int, float))
-        ]
-        if not usable or pace.blocked(rows, provider, now_ms):
+        headroom = pace.headroom(rows, provider, now_ms)
+        if headroom is None:
             continue
-        headroom = min(100 - row["used_pct"] for row in usable)
         choices.append((headroom, -index, {
             "platform": platform,
             "provider": provider if platform == "omp" else None,
@@ -406,7 +403,7 @@ def enabled_repos() -> dict[str, str]:
     values: dict[str, str] = {}
     try:
         lines = REPOS_FILE.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise LoopError(f"could not read {REPOS_FILE}: {exc}") from exc
     for line in lines:
         fields = line.split()
@@ -526,10 +523,18 @@ def _credential_properties(values: dict[str, str]) -> list[str]:
     return [f"--property=LoadCredential={name}:{source}" for name, source in values.items()]
 
 
+def _loop_user() -> str:
+    user = os.environ.get("LUPIN_LOOP_USER") or os.environ.get("USER")
+    if not user:
+        raise LoopError("no loop user: set LUPIN_LOOP_USER or USER")
+    return user
+
+
 def _service_environment() -> list[str]:
     names = (
         "HOME", "LUPIN_BACKEND", "LUPIN_REDIS_HOST", "LUPIN_REDIS_PORT",
         "LUPIN_REDIS_USERNAME", "LUPIN_STATE_ROOT", "LUPIN_EXECUTABLE", "LUPIN_HERDR_BIN",
+        "LUPIN_GH_CANONICAL_FETCHER",
         "LUPIN_LOOP_STATE_DIR", "LUPIN_LOOP_CODE_DIR", "LUPIN_LOOP_USER", "LUPIN_LOOP_GROUP",
         "LUPIN_LOOP_DEFAULT_REPOS", "LUPIN_LOOP_CLAUDE_MAX_CONCURRENT",
         "LUPIN_LOOP_CREDENTIALS_FILE", "LUPIN_LOOP_REDIS_PASSWORD_FILE",
@@ -556,7 +561,7 @@ def _systemd_run(
     credentials: dict[str, str] | None = None,
     claude_limits: bool = False,
 ) -> tuple[int, str]:
-    user = os.environ.get("LUPIN_LOOP_USER", os.environ.get("USER", "ghosta"))
+    user = _loop_user()
     group = os.environ.get("LUPIN_LOOP_GROUP", "users")
     unit = unit_name(repo, kind) if repo else f"lupin-{kind}-machine"
     argv = _sudo_argv(
@@ -699,7 +704,15 @@ def _refuse_unfinished_git_work(checkout: Path) -> None:
 
 
 def _default_base(checkout: Path) -> str:
-    """Return the remote branch that a run starts from, for example `origin/main`."""
+    """Return the remote branch that a run starts from, for example `origin/main`.
+
+    Use `origin/release/next` when the remote has it.
+    """
+    try:
+        _git(checkout, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/release/next")
+        return "origin/release/next"
+    except LoopError:
+        pass
     try:
         base = _git(checkout, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").strip()
     except LoopError:
@@ -1117,8 +1130,30 @@ def _launch_agent(
     argv.append(prompt)
     rc, output = _run(argv, timeout=310.0, env=_herdr_env())
     if rc:
-        raise HerdrError(output or "Herdr could not start the agent")
+        try:
+            kept = _keep_agent_after_timeout(session, pane, name, output)
+        except LoopError as exc:
+            raise HerdrError(f"{output}; could not keep the agent: {exc}") from exc
+        if not kept:
+            raise HerdrError(output or "Herdr could not start the agent")
     return _wait_agent(session, workspace_id)
+
+
+def _keep_agent_after_timeout(session: str, pane: str, name: str, output: str) -> bool:
+    """Give a started agent its name back when `agent start` times out.
+
+    Herdr waits 5 minutes at most for the agent to be ready, then drops its
+    name, and `_agent_for_workspace` needs it. An agent in the pane is alive,
+    so watch it. Any other error, or no agent in the pane, is a failed start.
+    """
+    try:
+        code = json.loads(output)["error"]["code"]
+    except (ValueError, KeyError, TypeError):
+        return False
+    if code != "timeout" or not any(row.get("pane_id") == pane for row in _agents(session)):
+        return False
+    _herdr(session, "agent", "rename", pane, name)
+    return True
 
 
 def _wait_existing_agent(session: str, workspace_id: str) -> int:
@@ -1250,7 +1285,7 @@ def worker(
     if resume:
         command.append("--resume")
     try:
-        return slots_redis.hold(
+        rc = slots_redis.hold(
             command, slot=f"loop-{repo}", holder=unit_name(repo), wait=0.0,
             ttl=LEASE_TTL, max_holders=1, **kwargs,
         )
@@ -1258,6 +1293,15 @@ def worker(
         metadata["state"] = "needs_attention"
         _write_metadata(repo, metadata)
         raise LoopError(f"fleet loop slot is full for {repo}")
+    if rc:
+        # The monitor records a workspace as soon as it has one. `starting` here
+        # means it died first. No later step ends that state, and `run` refuses
+        # a repo that stays in it.
+        latest = _read_metadata(repo)
+        if latest and latest.get("state") == "starting":
+            latest["state"] = "failed"
+            _write_metadata(repo, latest)
+    return rc
 
 
 def monitor(repo: str, platform: str, session: str, prompt_file: str, resume: bool) -> int:
@@ -1301,7 +1345,7 @@ def _save_report(repo: str, session: str, workspace: dict) -> Path:
     pane = _pane_id(workspace)
     if not pane:
         raise HerdrError("Herdr workspace has no pane ID")
-    output = _herdr(session, "pane", "read", pane, "--source", "recent", "--lines", "100000", "--format", "text", timeout=60.0)
+    output = _herdr(session, "pane", "read", pane, "--source", "recent", "--lines", "100000", "--format", "text", timeout=PANE_READ_TIMEOUT)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True, mode=0o750)
     path = REPORTS_DIR / f"{validate_repo(repo)}-{_stamp()}-{time.time_ns() % 1000000:06d}.log"
     temporary = path.with_suffix(path.suffix + ".part")
@@ -1367,11 +1411,11 @@ def stop_loop(repo: str, *, force: bool = False, grace: float = HANDOFF_GRACE_S)
             if not workspace_id:
                 raise HerdrError("Herdr workspace has no ID")
             _herdr_json(session, "workspace", "close", workspace_id)
-        _, state = _run(["systemctl", "is-active", f"{unit_name(repo)}.service"], timeout=3.0)
+        _, state = _run(["systemctl", "is-active", f"{unit_name(repo)}.service"], timeout=SYSTEMCTL_CHECK_TIMEOUT)
         if state in {"active", "activating", "deactivating"}:
             rc, output = _run(
                 _sudo_argv("systemctl", "stop", f"{unit_name(repo)}.service"),
-                timeout=30.0,
+                timeout=SYSTEMCTL_STOP_TIMEOUT,
             )
             if rc:
                 raise LoopError(output or f"could not stop Lupin worker for {repo}")
@@ -1383,7 +1427,7 @@ def stop_loop(repo: str, *, force: bool = False, grace: float = HANDOFF_GRACE_S)
         metadata["workspace_id"] = None
         metadata["pane_id"] = None
         _write_metadata(repo, metadata)
-        return (
+        message = (
             f"stopped {repo}"
             + (f"; report saved to {report}" if report else "")
             + handoff_note
@@ -1391,6 +1435,45 @@ def stop_loop(repo: str, *, force: bool = False, grace: float = HANDOFF_GRACE_S)
         )
     finally:
         lock.close()
+    _write_debrief(repo, metadata, forced=force)
+    return message
+
+
+def _write_debrief(repo: str, metadata: dict, *, forced: bool) -> None:
+    """Write the debrief. The stop already happened, so a failure only prints a warning."""
+    # Local import: debrief -> roadmap -> loop_runtime is a cycle.
+    from . import debrief
+
+    try:
+        debrief.write_debrief(
+            STATE_DIR, repo, CODE_DIR / repo, metadata.get("started_at"), forced=forced,
+        )
+    except Exception as exc:
+        print(f"lupin loop: no debrief for {repo}: {exc}", file=sys.stderr)
+
+
+def write_due_periodic_debriefs(now: datetime | None = None) -> None:
+    """Write each periodic debrief that is due. A failure only prints a warning."""
+    # Local import: debrief -> roadmap -> loop_runtime is a cycle.
+    from . import debrief
+
+    now = datetime.now(timezone.utc) if now is None else now
+    try:
+        repos = enabled_repos()
+    except (LoopError, OSError) as exc:
+        # enabled_repos writes the default file when it is missing. That write can raise OSError.
+        print(f"lupin agent: no periodic debriefs: {exc} ({REPOS_FILE})", file=sys.stderr)
+        return
+    for repo in repos:
+        checkout = CODE_DIR / repo
+        if not checkout.is_dir():
+            continue
+        for period in debrief.PERIODS:
+            try:
+                if debrief.period_due(STATE_DIR, repo, period, now):
+                    debrief.write_period(STATE_DIR, repo, checkout, period, now=now)
+            except Exception as exc:
+                print(f"lupin agent: no {period} debrief for {repo}: {exc}", file=sys.stderr)
 
 
 def peek_loop(repo: str, lines: int = 60) -> str:
@@ -1616,6 +1699,7 @@ def schedule_once(
     if not repos:
         raise LoopError("at least one repo is required for a one-off run")
     when_value, relative = _event_time(when)
+    user = _loop_user()
     identifier = hashlib.sha256(f"{time.time_ns()}:{os.getpid()}:{repos}".encode()).hexdigest()[:16]
     entry = {
         "id": identifier,
@@ -1635,7 +1719,6 @@ def schedule_once(
     os.chmod(path, 0o640)
     unit = f"lupin-once-{identifier}"
     command = _lupin_command("once-fire", "--id", identifier)
-    user = os.environ.get("LUPIN_LOOP_USER", os.environ.get("USER", "ghosta"))
     group = os.environ.get("LUPIN_LOOP_GROUP", "users")
     argv = _sudo_argv(
         "systemd-run", f"--unit={unit}", "--collect",
@@ -1811,6 +1894,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.action == "herdr-server":
             return herdr_server(args.session)
+        if args.action == "monitor":
+            return monitor(args.repo, args.platform, args.session, args.prompt_file, args.resume)
         if args.action == "launch-agent":
             return launch_agent(
                 args.repo,
@@ -1854,4 +1939,5 @@ def main(argv: list[str] | None = None) -> int:
     except (IndexError, ValueError) as exc:
         print(f"lupin loop: invalid arguments: {exc}", file=sys.stderr)
         return 2
+    print(f"lupin loop: no handler for action {args.action}", file=sys.stderr)
     return 1
