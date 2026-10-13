@@ -1085,6 +1085,12 @@ NAV_ITEMS = [
         "M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3",
     ),
     (
+        "debriefs",
+        "/debrief",
+        "Debriefs",
+        "M6 3h9l3 3v15H6zM14 3v4h4M9 12h6M9 16h6",
+    ),
+    (
         "schedule",
         "/schedule",
         "Schedule",
@@ -2818,6 +2824,7 @@ def render_debrief_index(items: list[tuple[str, str]]) -> bytes:
         "Debriefs",
         f"<header><h1>Debriefs</h1></header><div class=card>{listing}</div>",
         debrief.CSS,
+        active="debriefs",
     )
 
 
@@ -3154,6 +3161,7 @@ class Handler(BaseHTTPRequestHandler):
                 "<a href='/debrief'>all debriefs</a></header>"
                 f"<div class=card><div class=debrief>{debrief.render_html(markdown, repo)}</div></div>",
                 debrief.CSS,
+                active="debriefs",
             )
         )
 
