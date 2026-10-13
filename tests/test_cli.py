@@ -18,6 +18,31 @@ def local_host(monkeypatch):
     yield "h"
 
 
+def test_help_is_user_facing(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli._build_parser().parse_args(["--help"])
+
+    assert exc_info.value.code == 0
+    root_help = capsys.readouterr().out
+    assert "ghostbook" not in root_help
+    assert "issue #" not in root_help
+    assert "7-day usage totals" not in root_help
+    assert "Routing:" in root_help
+    assert "Slots:" in root_help
+    assert "Dashboard:" in root_help
+    assert "Fleet:" in root_help
+    assert "Exit codes, by design:" in root_help
+    assert "SUPPRESS" not in root_help
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli._build_parser().parse_args(["route", "--help"])
+
+    assert exc_info.value.code == 0
+    route_help = capsys.readouterr().out
+    assert "category" in route_help
+    assert "size" in route_help
+
+
 def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     monkeypatch, tmp_path, capsys, make_checkout
 ):
