@@ -52,16 +52,20 @@ At the start of every cycle, the orchestrator handles the open PRs into
 `release/next`. The orchestrator is the agent that dispatches and merges work.
 It does this before it reads the backlog. Ignore draft PRs. Steps 2 and 3 are
 only for a PR that the loop opened. The loop opened a PR when the ledger has a
-dispatch event for its branch. Run `lupin ledger read OWNER/REPO --limit 200
---json` to read the events. For each PR that is not a draft, do the first step
-that applies:
+dispatch event for its branch. Read all the events:
+
+```sh
+lupin ledger read OWNER/REPO --limit 100000 --json
+```
+
+For each PR that is not a draft, do the first step that applies:
 
 1. The PR passes the four merge gates: merge it. See "Continuous merge of
    approved PRs".
 2. The PR is approved at its current head SHA and is behind `release/next`:
    dispatch a worker to sync it. A sync changes the head SHA, so get a new
-   approval. If the sync has conflicts, dispatch a fix worker to resolve them.
-   Do not repeat a sync that reported conflicts.
+   approval. If the sync stops on conflicts, the worker did not fail. Dispatch
+   a fix worker to resolve them. Do not repeat that sync.
 3. The PR has review findings or a failed repo gate at its current head SHA:
    dispatch a fix worker. The repo gate is the set of checks that `AGENTS.md`
    defines. Give the worker the findings or the gate output. The fix goes on
@@ -73,6 +77,20 @@ that applies:
 A worker is a fix worker, a sync worker, or a reviewer. Do not dispatch a
 worker for a PR that already has one running. Do not push to the branch of a PR
 that the loop did not open.
+
+A sync worker or a fix worker starts from the PR branch. Give it the remote and
+the branch name. The remote is `origin` or `fork`, the one that holds the PR
+branch. The first two commands below make its worktree. The third pushes its
+commits:
+
+```sh
+git fetch <remote> <branch>
+git worktree add --detach <path> <remote>/<branch>
+git push <remote> HEAD:<branch>
+```
+
+These replace the other worktree and push commands in this skill. A detached
+worktree does not touch a local branch that has commits the remote lacks.
 
 A PR is blocked on an owner decision when one of these is true:
 
