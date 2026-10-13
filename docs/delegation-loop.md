@@ -34,7 +34,7 @@ The `delegation-loop` skill gives the full steps. The short list:
 
 ## Rule 1: push the branch, open the PR upstream
 
-The PR goes to upstream `OWNER/REPO`, against `release/next`. A worker pushes its
+The PR goes to upstream `OWNER/REPO`, against `main`. A worker pushes its
 branch to `origin`. If upstream denies the push, it pushes to the fork
 `FORK_OWNER/REPO` and opens the PR upstream from the fork. Do not test access
 with `gh api repos/OWNER/REPO --jq .permissions.push`. It can print `true` for
@@ -51,7 +51,7 @@ new one. Do not open a PR or an issue on a fork.
    Run:
 
    ```bash
-   git worktree add <path> -b <branch> origin/release/next
+   git worktree add <path> -b <branch> origin/main
    ```
 
 3. Push the branch. First run `git push -u origin <branch>`. If upstream denies
@@ -63,15 +63,15 @@ new one. Do not open a PR or an issue on a fork.
    git push -u fork <branch>
    ```
 
-   Never push `main` or `release/next`. Use `/ship` for steps 3 and 4 only if it
-   pushes to `origin` first and opens the PR on upstream. If it does not, do
-   steps 3 and 4 yourself. Check that it does not push `main` or `release/next`.
+   Never push `main`. Use `/ship` for steps 3 and 4 only if it pushes to
+   `origin` first and opens the PR on upstream. If it does not, do steps 3 and
+   4 yourself. Check that it does not push `main`.
 
 4. Open the PR on upstream. From a fork branch, add `--head FORK_OWNER:<branch>`:
 
    <!-- markdownlint-disable MD013 -->
    ```sh
-   gh pr create --repo OWNER/REPO --base release/next --title "<title>" --body "Closes #N"
+   gh pr create --repo OWNER/REPO --base main --title "<title>" --body "Closes #N"
    ```
    <!-- markdownlint-enable MD013 -->
 
@@ -83,7 +83,7 @@ On a Herdr worker, use the Herdr worktree commands:
 ```bash
 herdr worktree list --cwd <checkout>
 git -C <checkout> fetch origin
-herdr worktree create --branch <branch> --base origin/release/next --cwd <checkout>
+herdr worktree create --branch <branch> --base origin/main --cwd <checkout>
 ```
 
 A linked worktree shares its remotes with the checkout it came from. If that
@@ -100,7 +100,7 @@ Every feature change goes through a pull request. The shared steps are in
 "Review and merge each pull request" in the `delegation-loop` skill. In this
 repo:
 
-1. The base branch is `release/next` on upstream (`OWNER/REPO`). A feature PR
+1. The base branch is `main` on upstream (`OWNER/REPO`). A feature PR
    targets that branch.
 2. A worker follows rule 1 to push and open the PR. It can use `/ship` for
    the work and the report. If neither push works, the worker stops.
@@ -113,11 +113,11 @@ repo:
    Repeat until the reviewer approves the current head SHA. The head SHA is the
    newest commit ID on the branch.
 5. The orchestrator posts the verdict on the PR.
-6. The orchestrator merges into `release/next` only when all four are true:
-   1. The PR is open on `OWNER/REPO`, with base `release/next`.
+6. The orchestrator merges into `main` only when all four are true:
+   1. The PR is open on `OWNER/REPO`, with base `main`.
    2. A reviewer approves the current head SHA.
-   3. The PR branch contains the current `release/next`. The ancestor check
-      asks git whether one branch contains another. The check is in the
+   3. The PR branch contains the current `main`. The ancestor check asks git
+      whether one branch contains another. The check is in the
       `delegation-loop` skill.
    4. The repo's full gate, as its `AGENTS.md` defines it, passes.
    Record the approved SHA before you merge. Merge with
@@ -125,15 +125,13 @@ repo:
    --match-head-commit <approved-SHA>`. Do not rebase. Do not force-push.
    See the paragraph that starts "Before a branch is merged" in the
    `delegation-loop` skill. A worker or reviewer never merges a pull request.
-   The PR body has `Closes #N`. The merge into `release/next` does not close
-   the issue. The orchestrator (the agent that dispatches and merges work)
-   closes it manually right after the merge into `release/next`.
+   The PR body has `Closes #N`. GitHub closes the issue when the PR merges
+   into the default branch, `main`.
 7. On every orchestrator cycle, merge each approved PR that passes step 6. Follow
    "Continuous merge of approved PRs" in the `delegation-loop` skill.
 
-Changes to this policy go to upstream `main`, which the owner merges. Feature
-work goes to upstream `release/next`. The owner merges `release/next` into
-`main` when they choose.
+Changes to this policy and feature work go to upstream `main`, which the
+owner merges.
 
 At the end of a session, run `/handoff`.
 
@@ -163,5 +161,5 @@ Before you merge or dispatch anything, check for work already done:
 
 ```bash
 git -C <checkout> fetch origin
-git -C <checkout> branch --no-merged origin/release/next
+git -C <checkout> branch --no-merged origin/main
 ```
