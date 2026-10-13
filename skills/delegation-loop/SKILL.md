@@ -37,31 +37,36 @@ pane" below.
 
 ## Pull requests come first
 
-Getting pull requests (PRs) approved and merged is the top priority. Do it
-before you start work on any new issue.
+Get pull requests (PRs) approved and merged first. This is the top priority.
+Do it before you start work on any new issue.
 
-`release/next` exists so that an approved PR merges at once. The loop does not
-wait for the owner. A PR that waits goes stale. `release/next` moves on. The
-branch then no longer contains it, and the approval no longer covers the head
-SHA. The PR then needs a sync and a new review.
+A PR that waits goes stale. `release/next` gets new commits, so the PR branch
+no longer contains the current `release/next`. The approval no longer covers
+the head SHA (the newest commit ID on the PR branch). The PR then needs a sync
+(a merge of the current `release/next` into the PR branch) and a new review.
+The purpose of `release/next` is that an approved PR merges at once. The loop
+does not wait for the owner.
 
-At the start of every orchestrator cycle, clear the PR queue. Do this before
-you read the backlog. Use this order:
+At the start of every orchestrator cycle, clear the open PRs into
+`release/next`. Do this before you read the backlog. Use this order:
 
 1. Merge each PR that passes the four merge gates. See "Continuous merge of
    approved PRs".
-2. Dispatch a worker to sync each approved PR whose branch does not contain
-   the current `release/next`. A sync changes the head SHA, so get a new
-   approval.
-3. Dispatch a fix worker for each PR that has review findings. The fix goes on
-   the same branch.
+2. Dispatch a worker to sync each PR that is approved at its current head SHA
+   and does not contain the current `release/next`. A sync changes the head
+   SHA, so get a new approval. If the sync has conflicts, dispatch a fix worker
+   to resolve them on the same branch. Do not repeat a sync that reported
+   conflicts.
+3. Dispatch a fix worker for each PR that has review findings or a failed gate.
+   Give the worker the findings or the gate output. The fix goes on the same
+   branch. If the worker cannot fix it, the PR is blocked on an owner decision.
 4. Dispatch a reviewer for each PR that has no review at its current head SHA.
-   Do not wait for the worker to ask.
+   Do not wait for the worker to request a review.
 
-Do not dispatch work on a new issue while a PR for this repo is open and not
-merged. Work that is already running continues. A PR that waits for an owner
-decision is blocked. Do not wait for it. If you start new work while a PR
-waits for any other reason, write the reason in the handoff.
+Do not dispatch work on a new issue while a PR into `release/next` is open and
+not merged. Work that is already running continues. A reviewer, a sync worker,
+or a fix worker for an open PR is not new work. A PR that waits for an owner
+decision is blocked. It does not hold back new work.
 
 ## Install skills on loop hosts
 
@@ -97,7 +102,7 @@ needs is missing.
 
 ## Read the backlog
 
-Read the backlog only after the PR queue is clear. See "Pull requests come
+Read the backlog only after you clear the open PRs. See "Pull requests come
 first".
 
 From a configured checkout, run:
@@ -172,8 +177,9 @@ agent. Do not claim those issues again.
 
 ## Dispatch work
 
-Do not dispatch a worker on a new issue until the PR queue is clear. See "Pull
-requests come first". A reviewer or a fix worker for an open PR is not new work.
+Do not dispatch a worker on a new issue until you clear the open PRs. See
+"Pull requests come first". A reviewer, a sync worker, or a fix worker for an
+open PR is not new work.
 
 Give each worker a short brief with:
 
@@ -413,7 +419,7 @@ until no approved PR is left.
 
    ```sh
    gh pr list --repo OWNER/REPO --base release/next --state open \
-     --json number,headRefOid
+     --json number,headRefOid,headRefName,headRepositoryOwner
    ```
 
 2. For each PR, get the commit of its latest approval:
