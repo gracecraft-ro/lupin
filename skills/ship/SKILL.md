@@ -81,7 +81,7 @@ Compare before and after from the same views. Attach the sheet to the PR.
 Save every screenshot, render, and other artifact under
 `evidence/<issue-number>/`. Use `evidence/<issue-number>/` for every issue.
 Check `.gitignore`. Add `evidence/` if it is not ignored. Keep these local
-copies out of commits. You attach them to the PR after you open it. See
+copies out of commits. You attach the images to the PR after you open it. See
 "Attach screenshots to the PR".
 
 ## Commit and open the pull request
@@ -210,8 +210,8 @@ Attach only a screenshot you opened and checked.
 If you could not capture a screenshot, post a PR comment that says so and why.
 Say so in your report too. The orchestrator then treats the PR as blocked.
 
-For a non-image artifact, link to its approved repository or artifact-store
-location.
+Do not attach a file that is not an image, such as a 3D model file. In the PR
+comment, say where it is kept: a link, or the machine and the absolute path.
 
 ## Report and release
 
