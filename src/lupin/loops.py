@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import commands, machines
+from .loop_runtime import loop_repo
 
 SSH_TARGETS_PATH = Path.home() / ".config" / "lupin" / "ssh-targets"
 
@@ -182,7 +183,7 @@ def dispatch_fleet_runs(
                 for entry in worker.get("repos", [])
             )
             and not any(
-                entry.get("repo") == repo
+                loop_repo(str(entry.get("repo") or "")) == repo
                 for entry in worker.get("loops", [])
             )
         ]

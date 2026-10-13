@@ -2318,6 +2318,61 @@ class GatherLoopsTests(unittest.TestCase):
             [("ghostbook.nix", "ralpha", "idle"), ("roundsmith", "jesus", "working")],
         )
 
+class NumberedLoopDashboardTests(unittest.TestCase):
+    """A numbered loop `repo~2` is another loop on `repo`. The page has one row per repo."""
+
+    def _gather(self, *, local, machines_):
+        with (
+            mock.patch.object(serve, "code_repos", return_value=[{"repo": "widgets", "loopable": True}]),
+            mock.patch.object(serve.loop_runtime, "local_loops", return_value=local),
+            mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(serve, "fleet_state", return_value={
+                "claims": {}, "machines": machines_, "fleet_error": None,
+            }),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            return serve.gather_loops({})["entries"]
+
+    def test_a_repo_whose_only_remote_loop_is_numbered_is_not_shown_as_stopped(self):
+        remote = [{"name": "jesus", "state": "online",
+                   "loops": [{"repo": "widgets~2", "state": "working", "backend": "herdr"}]}]
+
+        entries = self._gather(local=[], machines_=remote)
+
+        self.assertEqual([(e["repo"], e["machine"], e["status"]) for e in entries], [("widgets", "jesus", "working")])
+
+    def test_a_repo_with_several_local_loops_shows_the_most_active_one(self):
+        local = [
+            {"repo": "widgets", "state": "idle", "backend": "herdr", "workspace_id": "w1"},
+            {"repo": "widgets~2", "state": "working", "backend": "herdr", "workspace_id": "w2"},
+        ]
+
+        entries = self._gather(local=local, machines_=[])
+
+        self.assertEqual([(e["repo"], e["status"], e["workspace_id"]) for e in entries], [("widgets", "working", "w2")])
+
+    def test_a_tie_between_local_loops_goes_to_the_plain_loop(self):
+        local = [
+            {"repo": "widgets", "state": "working", "backend": "herdr", "workspace_id": "w1"},
+            {"repo": "widgets~2", "state": "working", "backend": "herdr", "workspace_id": "w2"},
+        ]
+
+        entries = self._gather(local=local, machines_=[])
+
+        self.assertEqual(entries[0]["workspace_id"], "w1")
+
+    def test_the_repo_inventory_marks_a_repo_running_for_a_numbered_loop(self):
+        record = {
+            "name": "jesus", "state": "online", "actions": ["loop.run"],
+            "repos": [{"repo": "widgets", "enabled": True, "loopable": True}],
+            "loops": [{"repo": "widgets~2", "state": "working"}],
+        }
+
+        rows = serve.merge_repo_inventory([], [record], "pihome")
+
+        self.assertEqual([(r["repo"], r["running"], r["running_machines"]) for r in rows], [("widgets", True, "jesus")])
+
+
 class LoopsRouteUnitTests(unittest.TestCase):
     """Routing logic for controls that use Lupin and Herdr."""
 

@@ -1898,9 +1898,48 @@ def test_a_numbered_loop_is_told_to_claim_its_issues(monkeypatch, tmp_path: Path
     assert "--holder" in second
 
 
-def test_enable_repo_rejects_a_numbered_loop():
-    with pytest.raises(loop_runtime.LoopError, match="enable the repo widgets, not the loop widgets~2"):
+def _setup_repos_file(monkeypatch, tmp_path: Path) -> Path:
+    state_dir = tmp_path / "state"
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", state_dir)
+    monkeypatch.setattr(loop_runtime, "REPOS_FILE", state_dir / "repos")
+    monkeypatch.setattr(loop_runtime, "ORCHESTRATORS_FILE", state_dir / "orchestrators.json")
+    monkeypatch.delenv("LUPIN_LOOP_DEFAULT_REPOS", raising=False)
+    return state_dir / "repos"
+
+
+def test_enable_repo_rejects_a_numbered_loop(monkeypatch, tmp_path: Path):
+    repos = _setup_repos_file(monkeypatch, tmp_path)
+
+    with pytest.raises(loop_runtime.LoopError, match=r"widgets~2 is a loop, not a repo; use the repo name widgets"):
         loop_runtime.enable_repo("widgets~2")
+
+    assert not repos.exists()
+
+
+def test_disable_repo_rejects_a_numbered_loop(monkeypatch, tmp_path: Path):
+    # It used to report success and change nothing.
+    _setup_repos_file(monkeypatch, tmp_path)
+    loop_runtime.enable_repo("widgets")
+
+    with pytest.raises(loop_runtime.LoopError, match=r"widgets~9 is a loop, not a repo"):
+        loop_runtime.disable_repo("widgets~9")
+
+    assert loop_runtime.enabled_repos() == {"widgets": "claude"}
+
+
+def test_a_numbered_loop_cannot_come_in_through_the_default_repos_or_the_repos_file(monkeypatch, tmp_path: Path):
+    repos = _setup_repos_file(monkeypatch, tmp_path)
+    monkeypatch.setenv("LUPIN_LOOP_DEFAULT_REPOS", "widgets,widgets~2")
+
+    with pytest.raises(loop_runtime.LoopError, match="widgets~2 is a loop"):
+        loop_runtime.enabled_repos()
+    assert not repos.exists()
+
+    monkeypatch.delenv("LUPIN_LOOP_DEFAULT_REPOS")
+    repos.parent.mkdir(parents=True)
+    repos.write_text("widgets claude\nwidgets~2 claude\n", encoding="utf-8")
+    with pytest.raises(loop_runtime.LoopError, match="widgets~2 is a loop"):
+        loop_runtime.enabled_repos()
 
 
 @pytest.mark.parametrize(

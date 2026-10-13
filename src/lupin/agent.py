@@ -104,7 +104,7 @@ class RejectedCommand(Exception):
 
 
 def _validate_repo(repo) -> str:
-    if not isinstance(repo, str) or not _REPO_RE.match(repo):
+    if not isinstance(repo, str) or not _REPO_RE.fullmatch(repo):
         raise RejectedCommand(f"invalid repo {repo!r}")
     return repo
 

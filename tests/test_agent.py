@@ -1094,6 +1094,6 @@ def test_poll_once_writes_cmdlog_entries_for_terminal_outcomes(redis_port, flush
 
 def test_validate_repo_accepts_a_numbered_loop_and_rejects_loop_one():
     assert agent._validate_repo("widgets~2") == "widgets~2"
-    for bad in ("widgets~1", "widgets~", "widgets~2~3", "a/b~2"):
+    for bad in ("widgets~1", "widgets~", "widgets~2~3", "a/b~2", "widgets\n", "widgets~2\n"):
         with pytest.raises(agent.RejectedCommand):
             agent._validate_repo(bad)

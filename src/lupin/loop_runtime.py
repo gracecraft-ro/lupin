@@ -170,13 +170,26 @@ def validate_repo(repo: Any) -> str:
     return repo
 
 
+def loop_repo(loop: str) -> str:
+    """The repo part of a loop id, with no check. Use it on data from other machines."""
+    return loop.partition("~")[0]
+
+
 def base_repo(loop: str) -> str:
     """The repo that a loop works on: `bodysmith~2` works on `bodysmith`.
 
     Use it for anything that belongs to the repo and not to one loop: the
     checkout, the credentials, the profile, the fleet slot.
     """
-    return validate_repo(loop).partition("~")[0]
+    return loop_repo(validate_repo(loop))
+
+
+def validate_plain_repo(repo: Any) -> str:
+    """A repo name that is not a numbered loop. Use it for what is kept per repo."""
+    repo = validate_repo(repo)
+    if repo != base_repo(repo):
+        raise LoopError(f"{repo} is a loop, not a repo; use the repo name {base_repo(repo)}")
+    return repo
 
 
 def validate_platform(platform: Any) -> str:
@@ -404,7 +417,7 @@ def _write_metadata(repo: str, value: dict) -> None:
 
 def _default_repos() -> list[tuple[str, str]]:
     raw = os.environ.get("LUPIN_LOOP_DEFAULT_REPOS", "")
-    return [(validate_repo(item), "claude") for item in raw.split(",") if item.strip()]
+    return [(validate_plain_repo(item), "claude") for item in raw.split(",") if item.strip()]
 
 
 def enabled_repos() -> dict[str, str]:
@@ -420,7 +433,7 @@ def enabled_repos() -> dict[str, str]:
         fields = line.split()
         if not fields or fields[0].startswith("#"):
             continue
-        repo = validate_repo(fields[0])
+        repo = validate_plain_repo(fields[0])
         platform = fields[1] if len(fields) > 1 else "claude"
         values[repo] = validate_platform(platform)
     return values
@@ -428,7 +441,7 @@ def enabled_repos() -> dict[str, str]:
 
 def write_repos(values: list[tuple[str, str]]) -> None:
     REPOS_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
-    content = "".join(f"{validate_repo(repo)} {validate_platform(platform)}\n" for repo, platform in values)
+    content = "".join(f"{validate_plain_repo(repo)} {validate_platform(platform)}\n" for repo, platform in values)
     fd, temporary = tempfile.mkstemp(prefix=".repos.", dir=REPOS_FILE.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -452,9 +465,7 @@ def enable_repo(
     *,
     clear_orchestrators: bool = False,
 ) -> None:
-    repo = validate_repo(repo)
-    if repo != base_repo(repo):
-        raise LoopError(f"enable the repo {base_repo(repo)}, not the loop {repo}")
+    repo = validate_plain_repo(repo)
     platform = validate_platform(platform)
     if orchestrators is not None and clear_orchestrators:
         raise LoopError("use --orchestrator or --clear-orchestrators, not both")
@@ -476,7 +487,7 @@ def enable_repo(
 
 
 def disable_repo(repo: str) -> None:
-    repo = validate_repo(repo)
+    repo = validate_plain_repo(repo)
     values = enabled_repos()
     values.pop(repo, None)
     profiles = orchestrator_profiles()

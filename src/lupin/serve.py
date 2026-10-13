@@ -509,7 +509,7 @@ def merge_repo_inventory(
         loops = record.get("loops", [])
         running_repos = (
             {
-                loop.get("repo")
+                loop_runtime.loop_repo(loop["repo"])
                 for loop in loops
                 if isinstance(loop, dict) and isinstance(loop.get("repo"), str)
             }
@@ -584,6 +584,24 @@ def _repo_full_names() -> dict[str, str]:
     return full_names
 
 
+# Lower is more active.
+_LOOP_STATE_RANK = {"working": 0, "running": 0, "blocked": 1, "needs_attention": 1, "idle": 2, "done": 2, "starting": 3}
+
+
+def _loop_rank(row: dict) -> int:
+    return _LOOP_STATE_RANK.get(row.get("state"), 4)
+
+
+def _local_loop_states() -> dict[str, dict]:
+    """Map each repo to its most active local loop. A tie goes to the plain loop."""
+    states: dict[str, dict] = {}
+    for row in loop_runtime.local_loops():
+        key = loop_runtime.loop_repo(row["repo"])
+        if key not in states or _loop_rank(row) < _loop_rank(states[key]):
+            states[key] = row
+    return states
+
+
 def _loop_hosts_from_heartbeat(machine_records: list[dict], local_host: str) -> dict[str, dict]:
     """Map each remote repo to its Herdr state and host."""
     hosts = {}
@@ -596,14 +614,18 @@ def _loop_hosts_from_heartbeat(machine_records: list[dict], local_host: str) -> 
                 state = loop.get("state") or "unknown"
                 if record.get("state") == "offline":
                     state = "unknown"
-                hosts[repo] = {**loop, "state": state, "machine": record["name"]}
+                row = {**loop, "state": state, "machine": record["name"]}
+                key = loop_runtime.loop_repo(repo)
+                # A repo with several loops shows its most active one. A tie goes to the later record.
+                if key not in hosts or _loop_rank(row) <= _loop_rank(hosts[key]):
+                    hosts[key] = row
     return hosts
 
 
 def gather_loops(connection: dict) -> dict:
     """Return local Herdr state and remote Herdr heartbeat state."""
     local_host = machines.hostname()
-    local_states = {row["repo"]: row for row in loop_runtime.local_loops()}
+    local_states = _local_loop_states()
     enabled = set(enabled_repos())
     state = fleet_state(connection)
     remote_states = _loop_hosts_from_heartbeat(state.get("machines", []), local_host)
