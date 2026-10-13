@@ -139,7 +139,9 @@ Profiles are local to each worker. Set them on each worker that can start the
 repo. At loop start, Lupin uses quota data from the shared cache. The data
 must be less than five minutes old and include usable quota for a candidate.
 Lupin skips blocked providers, then picks the candidate with the most quota
-headroom across its known windows. Profile order breaks ties. If no candidate
+headroom across its known windows. For a provider with more than one login,
+headroom is that of the best login that is not blocked. Profile order breaks
+ties. If no candidate
 has fresh, usable quota, Lupin refuses to start the loop.
 
 Explicit `--platform`, `--provider`, or `--model` options select a fixed
@@ -268,6 +270,15 @@ per-machine Redis snapshots. The page adds totals by provider and marks a
 snapshot stale after five minutes. Each snapshot expires after 24 hours.
 Systemd runs `lupin quota` every five minutes on Jesus and Ralpha.
 
+A provider can have more than one login, for example a free and a paid
+OpenAI account. `omp usage` reports each login. Lupin labels each row with
+the plan name (`free`, `plus`). The `/usage` page and `lupin quota` show
+the label. Lupin never shows an email or account ID. `omp` chooses the
+login for each session. So a provider is blocked only when all of its
+logins are blocked. The most quota left is the best open login. A machine
+that publishes a provider replaces the whole entry for that provider, so
+each machine that publishes it needs every login for it.
+
 ## How a slot's limit (`max`) works
 
 A slot does not know its own limit until something tells it. The first
@@ -293,6 +304,13 @@ workspace state.
 The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 The same file also holds each checkout's repo identity, so a restart does
 not pay for `gh` again.
+
+`gh_cache.py` shares read-only `gh` results across the fleet through Redis.
+`LUPIN_GH_CANONICAL_FETCHER` names the one machine that runs `gh` on a cache
+miss. Set it to that machine's hostname on every machine that reads the cache.
+The named machine also fetches when Redis is down. When the variable is unset,
+no machine is pinned. Each machine then fetches on a miss, but only while Redis
+is reachable.
 
 Each run has its own Git worktree in `worktrees/<repo>/` in the loop state
 directory. A worktree is a second working copy of the repo, with its own files
@@ -349,10 +367,10 @@ the page shows no issues. Add the checkout to Git's `safe.directory` list.
 
 ## Dashboard mockups
 
-`ui.dc.html` contains dashboard mockups. Read the matching section before
+`docs/ui.dc.html` contains dashboard mockups. Read the matching section before
 changing a dashboard page. For example, the Machines page is section `1k`.
 `docs/ui-mockups.md` shows a screenshot for each mockup section. Use the
-matching screenshot as a visual reference. Use `ui.dc.html` for layout and
+matching screenshot as a visual reference. Use `docs/ui.dc.html` for layout and
 content. Treat its values as sample data.
 Keep real data and controls accurate. Do not show shared fleet capacity as a
 per-machine limit or add controls that the current code cannot support.

@@ -305,7 +305,7 @@ def _read_comments(
     """Return (comments, error): recent comments per open issue, paginated.
 
     Goes through `gh_cache.cached_gh_json` (issue #35) -- only
-    `gh_cache.CANONICAL_GH_FETCHER` runs the loop below on a cache miss.
+    the canonical fetcher (`LUPIN_GH_CANONICAL_FETCHER`) runs the loop below on a cache miss.
     """
 
     def _fetch():
@@ -804,7 +804,7 @@ def load_github(repo_path: str, state: str = "open", *, connection: dict | None 
             cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).date().isoformat()
             issue_args.extend(["--search", f"closed:>={cutoff}"])
             max_issues = 100
-        # gh_cache.cached_gh_json (issue #35): only CANONICAL_GH_FETCHER runs
+        # gh_cache.cached_gh_json (issue #35): only the canonical fetcher runs
         # this `gh issue list` call on a cache miss.
         issues, error = gh_cache.cached_gh_json(
             owner, name, f"issues:{state}",
@@ -877,7 +877,7 @@ def _read_dependencies(repo_path: str, owner: str, name: str, *, connection: dic
     travels with the link, so a target in another repo is still usable.
 
     Goes through `gh_cache.cached_gh_json` (issue #35) -- only
-    `gh_cache.CANONICAL_GH_FETCHER` runs the loop below on a cache miss.
+    the canonical fetcher (`LUPIN_GH_CANONICAL_FETCHER`) runs the loop below on a cache miss.
     """
 
     def _fetch():
@@ -1861,6 +1861,14 @@ def render_combined_page(repos: list[str], models: dict, page_fn, query=None, qu
     body, css = board_fragment(repos, models, query, quest_state)
     return page_fn("Roadmap", body, css, "")
 
+
+def skipped_warning(skipped: list[str]) -> str:
+    """Warning text for the registry records a display read left out. Empty if none."""
+    if not skipped:
+        return ""
+    return f"warning: skipped unreadable Redis record(s): {', '.join(sorted(skipped))}"
+
+
 def _render_quest_section(repo: str | None, quest_state: dict | None) -> str:
     """The quest card: a "Start quest" button that submits whichever issue
     checkboxes (rendered elsewhere, via `form=quest-start`) are ticked, and,
@@ -1892,7 +1900,11 @@ def _render_quest_section(repo: str | None, quest_state: dict | None) -> str:
         f"<input type=hidden name=id value='{_escape_attr(quest_state['id'])}'>"
         "<button type='submit'>Stop quest</button></form>"
     )
-    return f"<div class='card'><h2>Quest</h2>{progress}{stop_form}{start_form}</div>"
+    warning = skipped_warning(quest_state.get("skipped", []))
+    warning_html = (
+        f"<p class='dim'>{_escape_attr(warning)}. Progress may be wrong.</p>" if warning else ""
+    )
+    return f"<div class='card'><h2>Quest</h2>{progress}{warning_html}{stop_form}{start_form}</div>"
 
 
 def render_page(

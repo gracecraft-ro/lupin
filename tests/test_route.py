@@ -406,6 +406,85 @@ class RoutePacingTests(unittest.TestCase):
         self.assertEqual(result, {"model": "sonnet", "effort": "medium"})
 
 
+_OPENAI_THEN_CLAUDE = {
+    "coding": {
+        "tiers": {
+            "tier1": [{"model": "openai/gpt-5", "effort": "high"}],
+            "tier2": [{"model": "opus", "effort": "high"}],
+        }
+    },
+}
+
+_OPENAI_LEAN_IN = {
+    "coding": {
+        "tiers": {
+            "tier1": [{"model": "openai/gpt-5", "effort": "high"}],
+            "tier2": [{"model": "openai/gpt-5-pro", "effort": "high"}],
+        }
+    },
+}
+
+
+class RouteMultiAccountTests(unittest.TestCase):
+    """One provider with two logins, for example a free and a paid OpenAI
+    account. `omp` picks the login for each session, so route() treats the
+    provider as blocked only when every login is blocked. test_pace.py
+    covers the rules themselves.
+    """
+
+    def _row(self, account, used_pct, resets_in_ms, duration=QuotaDuration.FIVE_HOURS, provider="openai"):
+        row = {
+            "provider": provider,
+            "duration": duration,
+            "used_pct": used_pct,
+            "resets_at": time.time() * 1000 + resets_in_ms,
+        }
+        if account:
+            row["account"] = account
+        return row
+
+    def _free_used_up(self):
+        return self._row("free", 100, 20 * 24 * HOUR_MS, QuotaDuration.MONTHLY)
+
+    def test_a_used_up_login_does_not_move_the_pick_off_its_provider(self):
+        rows = [self._free_used_up(), self._row("plus", 60, 4 * HOUR_MS)]
+        result = route.route("coding", "size-m", tiers=_OPENAI_THEN_CLAUDE, quota_rows=rows)
+
+        self.assertEqual(result, {"model": "openai/gpt-5", "effort": "high"})
+
+    def test_every_login_blocked_falls_back_to_another_provider(self):
+        rows = [self._free_used_up(), self._row("plus", 100, 4 * HOUR_MS)]
+        result = route.route("coding", "size-m", tiers=_OPENAI_THEN_CLAUDE, quota_rows=rows)
+
+        self.assertEqual(result["model"], "opus")
+        self.assertEqual(result["downgraded_from"], {"model": "openai/gpt-5", "effort": "high"})
+
+    def test_wait_uses_the_soonest_reset_of_any_login(self):
+        rows = [
+            self._free_used_up(),
+            self._row("plus", 100, 4 * HOUR_MS),
+            self._row(None, 100, 10 * HOUR_MS, provider="claude"),
+        ]
+        result = route.route("coding", "size-m", tiers=_OPENAI_THEN_CLAUDE, quota_rows=rows)
+
+        self.assertEqual(result["model"], "openai/gpt-5")
+        self.assertAlmostEqual(result["wait_seconds"], 4 * 60 * 60, delta=2)
+
+    def test_lean_in_follows_the_login_that_is_not_blocked(self):
+        # plus: 10% used, 20 minutes to reset -> surplus. free is used up,
+        # and its 30-day window must not hide that.
+        rows = [self._free_used_up(), self._row("plus", 10, 20 * MIN_MS)]
+        result = route.route("coding", "size-m", tiers=_OPENAI_LEAN_IN, quota_rows=rows)
+
+        self.assertEqual(result, {"model": "openai/gpt-5-pro", "effort": "high"})
+
+    def test_lean_in_needs_every_open_login_to_have_a_surplus(self):
+        rows = [self._row("a", 10, 20 * MIN_MS), self._row("b", 80, 4 * HOUR_MS)]
+        result = route.route("coding", "size-m", tiers=_OPENAI_LEAN_IN, quota_rows=rows)
+
+        self.assertEqual(result, {"model": "openai/gpt-5", "effort": "high"})
+
+
 class PackagedTiersTests(unittest.TestCase):
     def test_size_m_coding_with_readable_quota_picks_opencode_go_high(self):
         # Check 1 (issue #99): both accounts readable and unpressed, so no

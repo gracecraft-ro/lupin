@@ -254,6 +254,33 @@ class QuotaRenderingTests(unittest.TestCase):
         self.assertIn("via jesus", page)
         self.assertIn("stale", page)
 
+    def test_usage_page_names_the_account_of_each_row(self):
+        reset_at_ms = 1_790_547_474_348
+        rows = [
+            {"provider": "openai", "account": "free", "duration": serve.QuotaDuration.MONTHLY,
+             "used_pct": 100.0, "resets_at": reset_at_ms, "generated_at": "2026-01-01 00:00:00"},
+            {"provider": "openai", "account": "plus", "duration": serve.QuotaDuration.FIVE_HOURS,
+             "used_pct": 1.0, "resets_at": reset_at_ms, "generated_at": "2026-01-01 00:00:00"},
+        ]
+        snapshot = {"openai": {
+            "rows": rows, "fetched_at": "2026-01-01T00:00:00+00:00", "fetched_by": "jesus",
+        }}
+        with (
+            mock.patch.object(quota_cache, "read_snapshot", return_value=snapshot),
+            mock.patch.object(usage_cache, "read_snapshot", return_value={}),
+        ):
+            page = serve.render_usage().decode()
+
+        self.assertIn("<div class=dim>free</div>", page)
+        self.assertIn("<div class=dim>plus</div>", page)
+        # The summary names the account too: free is the most used row.
+        self.assertIn("openai (free)", page)
+
+    def test_usage_page_has_no_account_line_for_one_account(self):
+        row = {"provider": "claude", "duration": serve.QuotaDuration.FIVE_HOURS,
+               "used_pct": 40.0, "resets_at": 1_790_547_474_348}
+        self.assertNotIn("class=dim>", serve.render_quota_row(row, 0))
+
     def test_quota_note_and_error_rows_render_as_dim_text(self):
         omp_snapshot = {
             "omp": {
@@ -432,7 +459,7 @@ class MachinesRouteUnitTests(unittest.TestCase):
             mock.patch.object(serve.slots_redis, "status", return_value={}),
         ):
             handler.do_GET()
-        fake.assert_called_once_with({"redis_host": "127.0.0.1"})
+        fake.assert_called_once_with({"redis_host": "127.0.0.1"}, strict=True)
         handler.reply.assert_called_once()
 
     def test_machines_route_unreachable_coordinator_is_502(self):
@@ -1206,6 +1233,7 @@ class FleetStateTests(unittest.TestCase):
         claims_for.assert_called_once_with(
             ["acme/widgets"],
             redis_host="127.0.0.1", redis_port=1, redis_username=None, redis_password=None,
+            strict=True,
         )
 
     def test_repos_with_no_resolvable_owner_skip_the_claims_lookup(self):
@@ -1393,6 +1421,96 @@ def test_dashboard_shows_real_fleet_data_from_redis(redis_port, flush_redis):
     assert "<span class='pill on'>online</span>" in body
     assert "acme/widgets#7" in body
     assert "loop-widgets#1" in body
+
+
+def _corrupt_raw(redis_port, key, raw):
+    """Write `raw` at `key` unchanged. The readers must refuse it."""
+    redis_lib.Redis(host="127.0.0.1", port=redis_port).set(key, raw)
+
+
+def _real_connection(redis_port):
+    return {
+        "redis_host": "127.0.0.1", "redis_port": redis_port,
+        "redis_username": None, "redis_password": None,
+    }
+
+
+def test_fleet_state_raises_on_unreadable_machine_record(redis_port, flush_redis):
+    """Dashboard overview reads stop on a bad machine record. They do not
+    show a partial fleet.
+    """
+    _corrupt_raw(redis_port, machines._record_key("bad"), "{not json")
+    with pytest.raises(json.JSONDecodeError):
+        serve.fleet_state(_real_connection(redis_port))
+
+
+def test_fleet_state_raises_on_unreadable_claim_record(redis_port, flush_redis):
+    _corrupt_raw(redis_port, "lupin:v1:claim:acme/widgets#7", "[]")
+    with (
+        mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+        mock.patch.object(serve.roadmap, "_repo_identity", return_value=("acme", "widgets", None)),
+        pytest.raises(ValueError, match="not a JSON object"),
+    ):
+        serve.fleet_state(_real_connection(redis_port))
+
+
+def test_machines_page_raises_on_unreadable_machine_record(redis_port, flush_redis):
+    _corrupt_raw(redis_port, machines._record_key("bad"), "{not json")
+    handler = _get_handler("/machines", _real_connection(redis_port))
+    with pytest.raises(json.JSONDecodeError):
+        handler.do_GET()
+    handler.reply.assert_not_called()
+
+
+def test_roadmap_page_warns_about_unreadable_machine_record(redis_port, flush_redis):
+    _write_machine_record(redis_port, "jesus", state="online")
+    _corrupt_raw(redis_port, machines._record_key("bad"), "{not json")
+    with (
+        mock.patch.object(serve, "code_repos", return_value=[]),
+        _live_dashboard(_real_connection(redis_port)) as port,
+    ):
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/roadmap", timeout=15) as response:
+            status = response.status
+            body = response.read().decode()
+    assert status == 200
+    assert "1 of 1 machines" in body
+    assert "warning: skipped unreadable Redis record(s): machine:bad" in body
+
+
+def test_quest_state_warns_when_a_claim_record_is_unreadable(
+    redis_port, flush_redis, monkeypatch
+):
+    locate_table = {
+        31: ("repo-a", "acme/repo-a", _issue_json(31)),
+        32: ("repo-a", "acme/repo-a", _issue_json(32)),
+    }
+    monkeypatch.setattr(quest, "_locate_issue", _fake_locate(locate_table))
+    monkeypatch.setattr(
+        quest.roadmap, "cached_dependency_dag", lambda repos, code_dir: {"repos": {}}
+    )
+    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection, **_: {"pick": "jesus"})
+    started = quest.start([31, 32], ["repo-a"], connection=_kw(redis_port))
+    _corrupt_raw(redis_port, "lupin:v1:claim:acme/repo-a#31", "[]")
+
+    state = _quest_handler(redis_port).quest_state(started["id"])
+
+    assert state["skipped"] == ["claim:acme/repo-a#31"]
+
+
+def test_render_page_warns_when_quest_progress_skipped_a_claim():
+    issues = [{"number": 5, "title": "Do thing", "body": "", "labels": []}]
+    model = roadmap.build_model(issues, {}, [], repo="nix")
+    render = lambda title, body, css, js: body
+    quest_state = {
+        "id": "q7", "machine": "jesus", "state": "running",
+        "pending": [5], "done": [], "total": 1,
+        "skipped": ["claim:acme/nix#5"],
+    }
+
+    page = roadmap.render_page("nix", ["nix"], model, render, quest_state)
+
+    assert "warning: skipped unreadable Redis record(s): claim:acme/nix#5" in page
+    assert "Progress may be wrong" in page
 
 
 def test_roadmap_route_reads_ledger_from_dashboard_connection(
@@ -1722,7 +1840,7 @@ def test_do_post_quest_start_creates_quest_writes_redis_and_redirects(
     monkeypatch.setattr(
         quest.roadmap, "cached_dependency_dag", lambda repos, code_dir: {"repos": {}}
     )
-    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection: {"pick": "jesus"})
+    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection, **_: {"pick": "jesus"})
     monkeypatch.setattr(serve, "enabled_repos", lambda: ["repo-a"])
 
     handler = _quest_handler(redis_port)
@@ -1764,7 +1882,7 @@ def test_do_post_quest_stop_releases_claims_deletes_record_and_redirects(
     monkeypatch.setattr(
         quest.roadmap, "cached_dependency_dag", lambda repos, code_dir: {"repos": {}}
     )
-    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection: {"pick": "jesus"})
+    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection, **_: {"pick": "jesus"})
     started = quest.start([21], ["repo-a"], connection=_kw(redis_port))
 
     handler = _quest_handler(redis_port)
@@ -1855,7 +1973,7 @@ def test_quest_state_partitions_pending_and_done(redis_port, flush_redis, monkey
     monkeypatch.setattr(
         quest.roadmap, "cached_dependency_dag", lambda repos, code_dir: {"repos": {}}
     )
-    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection: {"pick": "jesus"})
+    monkeypatch.setattr(quest.place_mod, "place", lambda task, connection, **_: {"pick": "jesus"})
     started = quest.start([31, 32], ["repo-a"], connection=_kw(redis_port))
     # Simulate #31 merging: something else (e.g. `reconcile`) releases its
     # claim the way a closed/merged issue's own claim gets released.
@@ -2820,6 +2938,17 @@ class ScheduleRunRouteUnitTests(unittest.TestCase):
             handler.do_POST()
         self.assertEqual(handler.reply.call_args.args[1], 400)
 
+    def test_placement_reads_the_registry_strictly(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "a-repo", "place": "any"})
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", return_value=[]) as fake_machines,
+        ):
+            handler.do_POST()
+        self.assertTrue(fake_machines.call_args.kwargs.get("strict"))
+
 
 
 class TestSchedulePageIntegration:
@@ -3108,7 +3237,7 @@ class GatherReposTests(unittest.TestCase):
         assert "Enable on jesus" in page
         assert "action=/repos/enable" in page
         assert "action=/loops/start" not in page
-        assert "No local repos under /code" in page
+        assert f"No local repos under {serve.CODE_DIR}" in page
 
     def test_enabled_remote_repo_has_start_control(self):
         machine = {
@@ -3267,14 +3396,14 @@ class RepoRenderTests(unittest.TestCase):
     def test_add_panel_says_no_repos_found_when_code_repos_is_empty(self):
         """No local repos and no fleet report means there is nothing to add."""
         page = serve.render_repos(self._data(repos=[]), add="existing").decode()
-        self.assertIn("No repos found under /code", page)
+        self.assertIn(f"No repos found under {serve.CODE_DIR}", page)
         self.assertNotIn("already on the schedule", page)
 
     def test_add_panel_says_every_repo_already_enabled_when_none_are_left_to_add(self):
         repos = [{"repo": "widgets", "state": "enabled", "loopable": True,
                    "running": False, "machine": "pihome", "max": 2}]
         page = serve.render_repos(self._data(repos=repos), add="existing").decode()
-        self.assertIn("Every repo under /code is already on the schedule", page)
+        self.assertIn(f"Every repo under {serve.CODE_DIR} is already on the schedule", page)
         self.assertNotIn("No repos found", page)
 
     def test_doc_panel_view_mode_shows_the_text(self):
@@ -3358,7 +3487,7 @@ class TestReposPageRoutes:
             "repos": [{"repo": "widgets", "enabled": False, "loopable": True}],
         }
         monkeypatch.setattr(serve.machines, "hostname", lambda: "pihome")
-        monkeypatch.setattr(serve.machines, "machines", lambda connection: [machine])
+        monkeypatch.setattr(serve.machines, "machines", lambda connection, **_: [machine])
         dispatch = mock.Mock(return_value={"mode": "queued", "id": "cmd", "result": None})
         monkeypatch.setattr(serve.loops, "dispatch_loop_action", dispatch)
         handler = _repos_handler()
@@ -3655,6 +3784,8 @@ def test_debrief_index_lists_newest_first_with_utc_file_name_times(tmp_path, mon
     handler.do_GET()
 
     body = handler.reply.call_args.args[0].decode()
+    assert "<a class='navlink active' href='/debrief'>" in body
+    assert "<span>Debriefs</span>" in body
     assert "href='/debrief?repo=widgets&amp;file=20261002-090000.md'" in body
     assert "2026-10-02 09:00:00 UTC" in body
     assert body.index("20261002-090000") < body.index("20261001-090000")
@@ -3688,6 +3819,8 @@ def test_debrief_page_renders_markdown_escapes_text_and_maps_images(tmp_path, mo
     handler.do_GET()
 
     body = handler.reply.call_args.args[0].decode()
+    assert "<a class='navlink active' href='/debrief'>" in body
+    assert "<span>Debriefs</span>" in body
     assert "<h1>Debrief: acme/widgets</h1>" in body
     assert "<li>PR #11: Shipped feature &lt;b&gt;x&lt;/b&gt;</li>" in body
     assert f"<img src='/image?id={DEBRIEF_ATTACHMENT}'" in body
@@ -3798,6 +3931,25 @@ def test_debrief_shot_route_refuses_with_404_over_http(tmp_path, monkeypatch, re
             )
 
     assert refused.value.code == 404
+
+
+def test_add_panel_names_the_real_code_dir(monkeypatch):
+    monkeypatch.setattr(serve, "CODE_DIR", "/srv/checkouts")
+
+    panel = serve._render_add_panel("existing", [])
+
+    assert "No repos found under /srv/checkouts." in panel
+    assert "Or pick a directory in /srv/checkouts" in panel
+    assert "/code" not in panel
+
+
+def test_remove_panel_names_the_real_code_dir(monkeypatch):
+    monkeypatch.setattr(serve, "CODE_DIR", "/srv/checkouts")
+
+    panel = serve._render_remove_panel("widgets")
+
+    assert "Files in /srv/checkouts are untouched." in panel
+    assert "/code" not in panel
 
 
 if __name__ == "__main__":

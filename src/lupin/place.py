@@ -151,7 +151,7 @@ def _fetch_issue(number: str, connection: dict | None = None) -> tuple[dict, str
     is still possible without a working `gh`.
 
     Goes through `gh_cache.cached_gh_json` (issue #35): only
-    `gh_cache.CANONICAL_GH_FETCHER` ever runs the `gh` call below, every
+    the canonical fetcher (`LUPIN_GH_CANONICAL_FETCHER`) ever runs the `gh` call below, every
     other machine reads the shared cache. A repo-identity lookup is needed
     first to key that cache -- this costs one extra `gh repo view` call on
     an uncached `place`, same ambient-repo lookup `roadmap.py` already does

@@ -201,7 +201,7 @@ def _delegation_doc_template(repo: str) -> str:
 
 
 def code_repos() -> list[dict]:
-    """Every directory under /code, with whether it can run a loop."""
+    """Every directory under CODE_DIR, with whether it can run a loop."""
     out = []
     enabled = set(enabled_repos())
     try:
@@ -454,9 +454,12 @@ def fleet_state(connection: dict) -> dict:
     short names, `roadmap._repo_identity()` to resolve each one's GitHub
     owner from its local checkout. A repo with no local checkout (or no
     `gh` access) is silently skipped, same as `/roadmap` already tolerates.
+
+    Reads are strict: an unreadable machine or claim record raises. The
+    dashboard never shows a partial fleet.
     """
     try:
-        machine_list = machines.machines(connection)
+        machine_list = machines.machines(connection, strict=True)
     except machines.CoordinatorUnreachable as exc:
         return {"machines": [], "claims": {}, "fleet_error": str(exc)}
 
@@ -475,6 +478,7 @@ def fleet_state(connection: dict) -> dict:
                 redis_port=connection.get("redis_port"),
                 redis_username=connection.get("redis_username"),
                 redis_password=connection.get("redis_password"),
+                strict=True,
             )
         except claims.CoordinatorUnreachable:
             pass
@@ -1028,6 +1032,12 @@ NAV_ITEMS = [
         "M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3",
     ),
     (
+        "debriefs",
+        "/debrief",
+        "Debriefs",
+        "M6 3h9l3 3v15H6zM14 3v4h4M9 12h6M9 16h6",
+    ),
+    (
         "schedule",
         "/schedule",
         "Schedule",
@@ -1353,6 +1363,12 @@ def quota_status(row: dict, now_ms=None) -> tuple[str, str]:
     return "On pace", ""
 
 
+def quota_row_name(row: dict) -> str:
+    """The provider, plus the account when the provider has more than one."""
+    account = row.get("account")
+    return f"{row['provider']} ({account})" if account else row["provider"]
+
+
 def render_quota_summary(rows: list[dict], now_ms: int) -> str:
     measured = [row for row in rows if quota_progress_pct(row) is not None]
     ahead = [row for row in measured if quota_status(row, now_ms)[1] == "ahead"]
@@ -1363,18 +1379,18 @@ def render_quota_summary(rows: list[dict], now_ms: int) -> str:
     ]
     next_reset = min(resets, key=lambda row: row["resets_at"], default=None)
     attention = (
-        ", ".join(f"{row['provider']} {quota_duration_label(row)}" for row in ahead)
+        ", ".join(f"{quota_row_name(row)} {quota_duration_label(row)}" for row in ahead)
         if ahead else "None"
     )
     most_value = (
-        f"{most_used['provider']} · {quota_duration_label(most_used)}"
+        f"{quota_row_name(most_used)} · {quota_duration_label(most_used)}"
         if most_used else "Not available"
     )
     most_note = (
         f"{quota_progress_pct(most_used):.0f}% used" if most_used else "No quota data"
     )
     next_value = (
-        f"{next_reset['provider']} · {quota_duration_label(next_reset)}"
+        f"{quota_row_name(next_reset)} · {quota_duration_label(next_reset)}"
         if next_reset else "Not available"
     )
     next_note = (
@@ -1411,6 +1427,7 @@ def render_quota_row(row: dict, now_ms: int) -> str:
         else f"<div class=quota-meter-elapsed style='left:{elapsed:.1f}%' "
         "title='time elapsed in window'></div>"
     )
+    account_html = f"<div class=dim>{esc(row['account'])}</div>" if row.get("account") else ""
     aria_label = "quota usage unavailable"
     if used is not None and elapsed is not None:
         aria_label = f"{used:.0f}% used, {elapsed:.0f}% of window elapsed"
@@ -1421,6 +1438,7 @@ def render_quota_row(row: dict, now_ms: int) -> str:
         f"data-resets-at-ms='{esc(reset_timestamp)}'>"
         "<div><div class=quota-window>"
         f"{esc(quota_duration_label(row))}</div>"
+        f"{account_html}"
         f"<div class='quota-status {status_class}'>{esc(status)}</div></div>"
         "<div>"
         f"<div class=quota-values><span><strong>{available_text}</strong> available</span>"
@@ -2183,14 +2201,17 @@ def _render_add_panel(tab: str, repos: list[dict]) -> str:
     if rows:
         picker = "".join(rows)
     elif local_repos:
-        picker = "<p class=dim>Every repo under /code is already on the schedule.</p>"
+        picker = f"<p class=dim>Every repo under {esc(CODE_DIR)} is already on the schedule.</p>"
     elif repos:
-        picker = "<p class=dim>No local repos under /code. Fleet repos are listed below.</p>"
+        picker = (
+            f"<p class=dim>No local repos under {esc(CODE_DIR)}. "
+            "Fleet repos are listed below.</p>"
+        )
     else:
-        picker = "<p class=dim>No repos found under /code.</p>"
+        picker = f"<p class=dim>No repos found under {esc(CODE_DIR)}.</p>"
     body = (
         f"{clone}"
-        f"<div style='font-size:12px;color:var(--ink3);margin:14px 0 6px'>Or pick a directory in /code</div>"
+        f"<div style='font-size:12px;color:var(--ink3);margin:14px 0 6px'>Or pick a directory in {esc(CODE_DIR)}</div>"
         f"{picker}"
     )
     return f"<div class=card>{tabs}{body}</div>"
@@ -2247,7 +2268,7 @@ def _render_remove_panel(repo: str) -> str:
         "<form method=post action=/repos/remove class=row>"
         f"<div><b>Remove {esc(repo)} from the schedule?</b>"
         "<div class=dim>Stops scheduled and one-off runs. A live session keeps "
-        "running. Files in /code are untouched. Type the repo name to confirm.</div></div>"
+        f"running. Files in {esc(CODE_DIR)} are untouched. Type the repo name to confirm.</div></div>"
         f"<input type=hidden name=repo value='{esc(repo)}'>"
         f"<input type=text name=confirm placeholder='{esc(repo)}' required>"
         "<button type=submit>Remove repo</button>"
@@ -2750,6 +2771,7 @@ def render_debrief_index(items: list[tuple[str, str]]) -> bytes:
         "Debriefs",
         f"<header><h1>Debriefs</h1></header><div class=card>{listing}</div>",
         debrief.CSS,
+        active="debriefs",
     )
 
 
@@ -2915,13 +2937,17 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_dashboard(gather(self.peek_lines, self.fleet_connection)))
         elif url.path == "/roadmap":
             try:
-                machine_records = machines.machines(self.fleet_connection)
+                machine_skipped: list[str] = []
+                machine_records = machines.machines(self.fleet_connection, machine_skipped, strict=False)
                 online = sum(record.get("state") == "online" for record in machine_records)
                 fleet_html = (
                     "<a class='machine-count' href='/machines' style='display:flex;align-items:center;gap:6px'>"
                     f"<span class='machine-dot {'online' if online == len(machine_records) else ''}'></span>"
                     f"{online} of {len(machine_records)} machines</a>"
                 )
+                warning = roadmap.skipped_warning(machine_skipped)
+                if warning:
+                    fleet_html += f"<span class='machine-count'>{html.escape(warning)}</span>"
             except machines.CoordinatorUnreachable:
                 fleet_html = "<span class='machine-count'>Machine status unavailable</span>"
             recurring = next((row for row in timers() if row["unit"] == "delegation-loop.timer"), None)
@@ -2995,7 +3021,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_model_tiers(sent=query.get("sent"), connection=self.fleet_connection))
         elif url.path == "/machines":
             try:
-                records = machines.machines(self.fleet_connection)
+                records = machines.machines(self.fleet_connection, strict=True)
                 slot_status = slots_redis.status(**self.fleet_connection)
                 timer_list = timers()
                 recurring_timer = next(
@@ -3082,6 +3108,7 @@ class Handler(BaseHTTPRequestHandler):
                 "<a href='/debrief'>all debriefs</a></header>"
                 f"<div class=card><div class=debrief>{debrief.render_html(markdown, repo)}</div></div>",
                 debrief.CSS,
+                active="debriefs",
             )
         )
 
@@ -3176,7 +3203,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("bad remote repo enable request"), 400)
             return
         try:
-            records = machines.machines(self.fleet_connection)
+            # strict: do not send a command based on a partial machine list.
+            records = machines.machines(self.fleet_connection, strict=True)
         except CoordinatorUnreachable:
             self.reply(render_error("cannot reach the redis coordinator"), 502)
             return
@@ -3574,7 +3602,8 @@ class Handler(BaseHTTPRequestHandler):
 
         local_host = machines.hostname()
         try:
-            records = machines.machines(self.fleet_connection)
+            # strict: do not place runs on a partial machine list.
+            records = machines.machines(self.fleet_connection, strict=True)
         except CoordinatorUnreachable:
             records = []
 
@@ -3702,6 +3731,8 @@ class Handler(BaseHTTPRequestHandler):
         merged). Returns `None` if there's no id, no such quest, or Redis
         can't be reached -- the roadmap page just skips the progress card
         in that case rather than failing the whole (read-only) page.
+        An unreadable claim record is left out and listed in `skipped`, so
+        the card can warn.
         """
         if not quest_id:
             return None
@@ -3713,8 +3744,13 @@ class Handler(BaseHTTPRequestHandler):
             return None
         targets = record.get("targets", [])
         owner_repos = sorted({target.rpartition("#")[0] for target in targets})
+        claim_skipped: list[str] = []
         try:
-            held = claims.claims_for(owner_repos, **self.fleet_connection) if owner_repos else {}
+            held = (
+                claims.claims_for(owner_repos, skipped=claim_skipped, **self.fleet_connection)
+                if owner_repos
+                else {}
+            )
         except CoordinatorUnreachable:
             held = {}
         holder = f"quest:{quest_id}"
@@ -3731,6 +3767,7 @@ class Handler(BaseHTTPRequestHandler):
             "pending": pending,
             "done": done,
             "total": len(record.get("issues", [])),
+            "skipped": sorted(claim_skipped),
         }
 
     def do_POST(self):  # noqa: N802

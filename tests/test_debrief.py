@@ -1120,6 +1120,7 @@ def test_failed_dashboard_start_marks_every_shot_not_captured(tmp_path: Path, fa
     assert not folder.exists() or list(folder.glob("*.png")) == []
 
 
+@pytest.mark.skipif(shutil.which("ps") is None, reason="needs ps on PATH")
 def test_browser_timeout_kills_the_whole_process_group(tmp_path: Path, fake_browser, monkeypatch):
     pid_file = tmp_path / "child.pid"
     # The child holds no pipe. Only a group kill stops it.
