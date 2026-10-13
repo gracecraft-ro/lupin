@@ -35,6 +35,34 @@ ID, tab ID, and cwd.
 `herdr agent list` reports all of them. See "Talk to an agent in a Herdr
 pane" below.
 
+## Pull requests come first
+
+Getting pull requests (PRs) approved and merged is the top priority. Do it
+before you start work on any new issue.
+
+`release/next` exists so that an approved PR merges at once. The loop does not
+wait for the owner. A PR that waits goes stale. `release/next` moves on. The
+branch then no longer contains it, and the approval no longer covers the head
+SHA. The PR then needs a sync and a new review.
+
+At the start of every orchestrator cycle, clear the PR queue. Do this before
+you read the backlog. Use this order:
+
+1. Merge each PR that passes the four merge gates. See "Continuous merge of
+   approved PRs".
+2. Dispatch a worker to sync each approved PR whose branch does not contain
+   the current `release/next`. A sync changes the head SHA, so get a new
+   approval.
+3. Dispatch a fix worker for each PR that has review findings. The fix goes on
+   the same branch.
+4. Dispatch a reviewer for each PR that has no review at its current head SHA.
+   Do not wait for the worker to ask.
+
+Do not dispatch work on a new issue while a PR for this repo is open and not
+merged. Work that is already running continues. A PR that waits for an owner
+decision is blocked. Do not wait for it. If you start new work while a PR
+waits for any other reason, write the reason in the handoff.
+
 ## Install skills on loop hosts
 
 The `skills/` tree is the source. Installing the Lupin command does not
@@ -68,6 +96,9 @@ confirm it loads `/ui-pressure-test`. Do not start a worker if a skill it
 needs is missing.
 
 ## Read the backlog
+
+Read the backlog only after the PR queue is clear. See "Pull requests come
+first".
 
 From a configured checkout, run:
 
@@ -140,6 +171,9 @@ orders the issues, then registers a quest on a machine. It does not start an
 agent. Do not claim those issues again.
 
 ## Dispatch work
+
+Do not dispatch a worker on a new issue until the PR queue is clear. See "Pull
+requests come first". A reviewer or a fix worker for an open PR is not new work.
 
 Give each worker a short brief with:
 
@@ -481,6 +515,8 @@ Upstream `main` is owner-only. The owner opens one pull request from
 `release/next` to `main` when they choose. Loops do not wait for it. Policy
 changes to this skill also go to upstream `main` as a pull request, which the
 owner merges.
+
+The loop is not finished while a PR waits for a review, a fix, or a merge.
 
 Continue working until the backlog is empty or every remaining item is blocked
 on an owner decision. Then run `/handoff`. State the exact next action and any

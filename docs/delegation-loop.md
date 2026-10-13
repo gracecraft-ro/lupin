@@ -134,6 +134,9 @@ repo:
    closes it manually right after the merge into `release/next`.
 7. On every orchestrator cycle, merge each approved PR that passes step 6. Follow
    "Continuous merge of approved PRs" in the `delegation-loop` skill.
+8. PRs come first. Clear the PR queue before you start work on a new issue. A
+   PR that waits goes stale. See "Pull requests come first" in the
+   `delegation-loop` skill.
 
 Changes to this policy go to upstream `main`, which the owner merges. Feature
 work goes to upstream `release/next`. The owner merges `release/next` into

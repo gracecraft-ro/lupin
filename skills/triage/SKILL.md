@@ -54,6 +54,8 @@ benchmark category covers both.
 
 ## Decide what is ready
 
+- Clear the PR queue first. Do not dispatch a new issue while a PR waits. See
+  "Pull requests come first" in the `delegation-loop` skill.
 - Check the dependency graph and the latest comments. Do not dispatch an issue
   with an open blocker.
 - Check that the issue has a clear result. For a large issue, split it into
