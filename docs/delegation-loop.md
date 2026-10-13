@@ -113,7 +113,8 @@ repo:
    `/code-review` for every PR, including docs-only changes. The reviewer is
    not the worker. The reviewer's model tier is not lower than the worker's.
 4. If the review finds a problem, dispatch a fix worker with the exact
-   finding. It pushes the fix to the same branch with `git push origin <branch>`.
+   finding. It pushes the fix to the same branch. See "Pull requests come first"
+   in the `delegation-loop` skill.
    Repeat until the reviewer approves the current head SHA. The head SHA is the
    newest commit ID on the branch.
 5. The orchestrator posts the verdict on the PR.

@@ -395,8 +395,8 @@ Never dispatch Fable without the user's approval. Use Opus sparingly because
 it costs more.
 
 If the review finds a problem, dispatch a `fix` worker with the exact finding.
-Tell it to push with `git push origin <branch>`, as in AGENTS.md item 1, and
-update the same PR. Review the latest PR commit.
+Tell it to push as in "Pull requests come first", and update the same PR.
+Review the latest PR commit.
 Repeat until the reviewer approves the current head SHA. The head SHA is the
 newest commit ID on the branch.
 The orchestrator (the agent that dispatches and merges work) posts the verdict
@@ -416,11 +416,13 @@ git merge-base --is-ancestor origin/release/next REMOTE/BRANCH
 Exit code 0 means the PR branch contains `release/next`. Then continue to the
 merge rules below. Exit code 1 means it does not. For an open PR approved at its
 current head SHA, the worker runs `git merge origin/release/next` on the PR
-branch. If the merge has conflicts, report them and stop. If it has none, push
-the branch to the remote that holds it. Run the check again. If it exits 0,
-continue to the merge rules. A sync is not a merge of the pull request.
-Otherwise stop. Do not rebase. Any other exit code from the first check means
-the check failed. Report it and stop. Do not merge.
+branch. If the merge has conflicts, report them and stop. The orchestrator then
+dispatches a fix worker. It runs the same merge, resolves the conflicts, commits
+the result, and pushes. If the merge has no conflicts, push the branch to the
+remote that holds it. Run the check again. If it exits 0, continue to the merge
+rules. A sync is not a merge of the pull request. Otherwise stop. Do not
+rebase. Any other exit code from the first check means the check failed. Report
+it and stop. Do not merge.
 
 An approval binds to the head SHA. If the sync changed the head, get a new
 approval at the new head before you merge. The reviewer may limit that review
