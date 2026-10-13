@@ -248,7 +248,7 @@ prioritized tickets, and a list of untested items. Do not ask the test agent to
 fix findings.
 Use the runner's worktree isolation feature when it has one. Otherwise, create
 a separate worktree and verify the worker's working directory. On a Herdr
-worker, use the Herdr worktree commands:
+worker, use the Herdr worktree commands. A worker that opens a new branch runs:
 
 ```sh
 herdr worktree list --cwd "$PWD"
@@ -256,6 +256,10 @@ git fetch origin
 herdr worktree create --branch BRANCH --base origin/release/next --cwd "$PWD"
 herdr worktree open --path PATH --cwd "$PWD"
 ```
+
+A sync worker or a fix worker does not use `herdr worktree create`. It makes its
+worktree with the git commands in "Pull requests come first". Then it runs
+`herdr worktree open --path PATH --cwd "$PWD"`.
 
 `--trust-repository` gives Git trust for one command. Use it only after the
 owner verified the repository. Do not use it as a retry for a failed worktree
