@@ -40,6 +40,7 @@ SOFTWARE.
 `docs/support.js` is generated. Its header names the source: `dc-runtime/src/*.ts`. That source is not in this repo.
 
 - Build command, from the header: `cd dc-runtime && bun run build`
+- Git record: first added in commit `6459dc2` on 2026-10-05. The file has not changed since.
 - Origin (author, repo, commit): not recorded.
 - Version: not recorded.
 - License: not recorded.
