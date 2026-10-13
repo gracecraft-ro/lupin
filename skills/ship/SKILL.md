@@ -91,10 +91,10 @@ release" below.
 
 The repo's `AGENTS.md` may have a rule for where to push and open the PR. In
 the Lupin loop it is rule 1 under "Pull requests, review, and handoff". If it
-exists, follow it. It takes precedence over the next paragraph and over steps 1
-to 4. In the Lupin loop, it opens the PR on upstream, the repo that the PR
-belongs to. A PR on a fork does not get reviewed. After the PR opens, go to
-step 5.
+exists, follow it, including its fallback to the fork when upstream denies the
+push. It takes precedence over the next paragraph and over steps 1 to 4. In
+the Lupin loop, it opens the PR on upstream, the repo that the PR belongs to. A
+PR on a fork does not get reviewed. After the PR opens, go to step 5.
 
 Workers never push to `origin`, `main`, or `release/next`. Push the feature
 branch to the fork. Open the PR on the fork. Then request review.
@@ -145,8 +145,8 @@ branch to the fork. Open the PR on the fork. Then request review.
    not merge. Do not wait for approval. The orchestrator dispatches a reviewer.
 5. Attach the screenshots. See "Attach screenshots to the PR" below. Do this
    for every visual change. Then go to "Report and release" below.
-6. If the push or PR creation fails, report the branch name and the commit
-   range. Then go to "Report and release" below.
+6. If every push route fails, or PR creation fails, report the branch name and
+   the commit range. Then go to "Report and release" below.
 
 If the repo does not allow fork PRs, keep the local branch and report its name
 and commit range. A local commit is not a pull request and is not shipped.
@@ -202,8 +202,12 @@ loop, so the orchestrator copies the files first.
 
 GitHub CLI 2.99.0 and newer has `--attach`. Run `gh --version` if the option is
 missing. Upgrade, or report that you cannot attach. Do not skip it silently.
-Attach only a screenshot you opened and checked. If you could not capture one,
-post a PR comment that says so and why. Say so in your report too.
+Attach only a screenshot you opened and checked. Look for a secret, a token, a
+private address, and personal data. A public repo shows the image to everyone.
+If you find one, crop the image or capture it again.
+
+If you could not capture a screenshot, post a PR comment that says so and why.
+Say so in your report too. The orchestrator then treats the PR as blocked.
 
 For a non-image artifact, link to its approved repository or artifact-store
 location.

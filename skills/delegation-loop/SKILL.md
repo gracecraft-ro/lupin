@@ -315,6 +315,10 @@ with your own token. Write your own `report.md` in the same folder. Use the
 command in "Attach screenshots to the PR" in the `ship` skill. Do not dispatch
 the reviewer on a visual PR with no screenshots.
 
+If the worker says it could not capture a screenshot, the PR is blocked on an
+owner decision. Report the PR number and the reason in the handoff. Ask the
+owner how to go on.
+
 Use `lupin review-route --category CATEGORY --size SIZE --mode separate` for
 a reviewer recommendation. Compare it with the issue's implementation route
 and the worker's model tier.
@@ -489,9 +493,10 @@ Use `.loop/loop-state.json` only when a ledger command exits 3. The
 and that file.
 
 A worker's task ends when its issue is merged into `release/next`. A task also
-ends when it is blocked on an owner decision. A pull request that waits for
-review is not blocked. The orchestrator dispatches the review and any fix. The
-fix goes on the same branch.
+ends when it is blocked on an owner decision. A visual PR that cannot get
+screenshots is blocked. A pull request that waits for review is not blocked.
+The orchestrator dispatches the review and any fix. The fix goes on the same
+branch.
 
 "Blocked" means an owner decision is needed. An example is a model-routing
 policy change.
