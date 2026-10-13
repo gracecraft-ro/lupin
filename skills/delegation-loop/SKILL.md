@@ -21,7 +21,8 @@ opens the PR there, against `release/next`. Do not create or use a fork. Do not
 open a PR or an issue on a fork.
 
 Use an isolated worktree for each worker. Do not let parallel workers edit the
-same checkout. Each worker creates its worktree from upstream `release/next`:
+same checkout. A worker that opens a new branch creates its worktree from
+upstream `release/next`:
 
 ```sh
 git fetch origin
@@ -89,15 +90,17 @@ git worktree add --detach <path> <remote>/<branch>
 git push <remote> HEAD:<branch>
 ```
 
-These replace the other worktree and push commands in this skill. A detached
-worktree does not touch a local branch that has commits the remote lacks.
+A sync worker or a fix worker uses these commands, not the other worktree and
+push commands in this skill. A detached worktree does not touch a local branch
+that has commits the remote lacks.
 
 A PR is blocked on an owner decision when one of these is true:
 
 - It needs a sync or a fix, and the loop did not open it.
 - A worker for it fails. A worker fails when it ends without the push or the
   report that its brief asks for. A worker also fails when its report says that
-  it could not do the work.
+  it could not do the work. A sync worker that stops on conflicts does not
+  fail. See step 2.
 - A worker for it stops to ask the owner.
 - A fix worker ends and the gate still fails.
 - Its merge fails.
@@ -360,8 +363,10 @@ Dispatch `/code-review` for every pull request, including docs-only changes.
 Review the current PR diff, not only the issue or a worker's report. Re-fetch
 the latest PR comments and reviews before merge.
 
-A worker pushes only its own branch, with `git push -u origin <branch>`. If its
-token cannot push upstream, it pushes to the fork with `git push -u fork <branch>`.
+A worker that opens a new branch pushes only that branch, with
+`git push -u origin <branch>`. If its token cannot push upstream, it pushes to
+the fork with `git push -u fork <branch>`. A sync worker or a fix worker pushes
+as in "Pull requests come first".
 It never pushes `main` or `release/next`. The PR base is `release/next` on upstream:
 
 <!-- markdownlint-disable MD013 -->
