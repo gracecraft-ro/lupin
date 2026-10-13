@@ -247,6 +247,91 @@ class QuotaUsageTests(unittest.TestCase):
         self.assertEqual(rows[0]["duration"], quota.QuotaDuration.FIVE_HOURS)
         self.assertEqual(rows[0]["resets_at"], 1_790_547_474_348)
 
+    @staticmethod
+    def _codex_report(plan, account_id, limits, email="someone@example.com"):
+        return {
+            "provider": "openai-codex",
+            "limits": [
+                {
+                    "label": label,
+                    "window": {"durationMs": duration_ms, "resetsAt": 1_790_547_474_348},
+                    "amount": {"usedFraction": used},
+                }
+                for label, duration_ms, used in limits
+            ],
+            "metadata": {"planType": plan, "accountId": account_id, "email": email},
+        }
+
+    def _omp_rows(self, *reports):
+        report = {"generatedAt": 1_790_529_505_926, "reports": list(reports)}
+        with mock.patch.object(quota, "run", return_value=(0, json.dumps(report))):
+            return [row for row in quota.quota_usage() if row["provider"] == "openai"]
+
+    def test_labels_each_login_when_a_provider_has_two(self):
+        rows = self._omp_rows(
+            self._codex_report("free", "id-free", [("30 days", 2_592_000_000, 1.0)]),
+            self._codex_report("plus", "id-plus", [
+                ("5 hours", 18_000_000, 0.01),
+                ("7 days", 604_800_000, 0.0),
+            ]),
+        )
+
+        self.assertEqual(
+            [(row["account"], row["duration"], row["used_pct"]) for row in rows],
+            [
+                ("free", quota.QuotaDuration.MONTHLY, 100.0),
+                ("plus", quota.QuotaDuration.FIVE_HOURS, 1.0),
+                ("plus", quota.QuotaDuration.WEEKLY, 0.0),
+            ],
+        )
+        # The label is the plan name only. No email or account ID leaves quota.py.
+        self.assertNotIn("someone@example.com", json.dumps(rows, default=str))
+        self.assertNotIn("id-plus", json.dumps(rows, default=str))
+
+    def test_one_login_has_no_account_label(self):
+        rows = self._omp_rows(
+            self._codex_report("plus", "id-plus", [("5 hours", 18_000_000, 0.4)]),
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("account", rows[0])
+
+    def test_two_logins_on_one_plan_get_different_labels(self):
+        reports = (
+            self._codex_report("plus", "id-one", [("5 hours", 18_000_000, 0.1)]),
+            self._codex_report("plus", "id-two", [("5 hours", 18_000_000, 0.2)]),
+        )
+        first, second = (row["account"] for row in self._omp_rows(*reports))
+
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.startswith("plus-") and second.startswith("plus-"))
+        # Same logins, same labels on the next read.
+        self.assertEqual(first, self._omp_rows(*reports)[0]["account"])
+
+    def test_two_logins_with_no_metadata_still_get_different_labels(self):
+        bare = {
+            "provider": "openai-codex",
+            "limits": [{
+                "label": "5 hours",
+                "window": {"durationMs": 18_000_000, "resetsAt": 1_790_547_474_348},
+                "amount": {"usedFraction": 0.3},
+            }],
+        }
+        rows = self._omp_rows(bare, bare)
+        self.assertEqual(len({row["account"] for row in rows}), 2)
+
+    def test_a_login_with_a_note_and_no_limits_keeps_its_label(self):
+        rows = self._omp_rows(
+            self._codex_report("plus", "id-plus", [("5 hours", 18_000_000, 0.1)]),
+            {
+                "provider": "openai-codex",
+                "limits": [],
+                "notes": ["no usage"],
+                "metadata": {"planType": "free", "accountId": "id-free"},
+            },
+        )
+        note = next(row for row in rows if "note" in row)
+        self.assertEqual((note["account"], note["note"]), ("free", "no usage"))
+
     def test_unavailable_on_nonzero_exit_or_bad_json(self):
         with mock.patch.object(quota, "run", return_value=(1, "boom")):
             rows = quota.quota_usage()
@@ -374,6 +459,28 @@ class SnapshotTests(unittest.TestCase):
             "resets_at": 3,
             "source": quota.quota_source_label("openai"),
         })
+
+    def test_picks_the_account_with_the_most_quota_left(self):
+        # A login that is used up must not hide a login with room left, even
+        # when the used-up login's 5-hour row comes last.
+        rows = [
+            {"provider": "openai", "account": "plus", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 0, "resets_at": 8},
+            {"provider": "openai", "account": "plus", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 1, "resets_at": 7},
+            {"provider": "openai", "account": "free", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 100, "resets_at": 9},
+        ]
+        with mock.patch.object(quota, "quota_usage", return_value=rows):
+            result = quota.snapshot()
+        self.assertEqual(result["openai"]["pct_left"], 99)
+        self.assertEqual(result["openai"]["resets_at"], 7)
+
+    def test_an_account_with_data_beats_an_account_with_only_a_note(self):
+        rows = [
+            {"provider": "openai", "account": "free", "note": "no usage"},
+            {"provider": "openai", "account": "plus", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 30, "resets_at": 7},
+        ]
+        with mock.patch.object(quota, "quota_usage", return_value=rows):
+            result = quota.snapshot()
+        self.assertEqual(result["openai"]["pct_left"], 70)
 
     def test_falls_back_to_first_row_when_no_five_hour_window(self):
         rows = [{"provider": "opencode-go", "duration": quota.QuotaDuration.MONTHLY, "used_pct": 20, "resets_at": 5}]

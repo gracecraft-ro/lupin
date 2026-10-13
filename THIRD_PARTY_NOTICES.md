@@ -34,3 +34,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## support.js
+
+`docs/support.js` is generated. Its header names the source: `dc-runtime/src/*.ts`. That source is not in this repo.
+
+- Build command, from the header: `cd dc-runtime && bun run build`
+- Origin (author, repo, commit): not recorded.
+- Version: not recorded.
+- License: not recorded.

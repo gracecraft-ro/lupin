@@ -133,15 +133,9 @@ def select_orchestrator(
         if not isinstance(rows, list):
             continue
         rows = [row for row in rows if isinstance(row, dict)]
-        usable = [
-            row for row in rows
-            if row.get("provider") == provider
-            and isinstance(row.get("used_pct"), (int, float))
-            and isinstance(row.get("resets_at"), (int, float))
-        ]
-        if not usable or pace.blocked(rows, provider, now_ms):
+        headroom = pace.headroom(rows, provider, now_ms)
+        if headroom is None:
             continue
-        headroom = min(100 - row["used_pct"] for row in usable)
         choices.append((headroom, -index, {
             "platform": platform,
             "provider": provider if platform == "omp" else None,
@@ -529,10 +523,18 @@ def _credential_properties(values: dict[str, str]) -> list[str]:
     return [f"--property=LoadCredential={name}:{source}" for name, source in values.items()]
 
 
+def _loop_user() -> str:
+    user = os.environ.get("LUPIN_LOOP_USER") or os.environ.get("USER")
+    if not user:
+        raise LoopError("no loop user: set LUPIN_LOOP_USER or USER")
+    return user
+
+
 def _service_environment() -> list[str]:
     names = (
         "HOME", "LUPIN_BACKEND", "LUPIN_REDIS_HOST", "LUPIN_REDIS_PORT",
         "LUPIN_REDIS_USERNAME", "LUPIN_STATE_ROOT", "LUPIN_EXECUTABLE", "LUPIN_HERDR_BIN",
+        "LUPIN_GH_CANONICAL_FETCHER",
         "LUPIN_LOOP_STATE_DIR", "LUPIN_LOOP_CODE_DIR", "LUPIN_LOOP_USER", "LUPIN_LOOP_GROUP",
         "LUPIN_LOOP_DEFAULT_REPOS", "LUPIN_LOOP_CLAUDE_MAX_CONCURRENT",
         "LUPIN_LOOP_CREDENTIALS_FILE", "LUPIN_LOOP_REDIS_PASSWORD_FILE",
@@ -559,7 +561,7 @@ def _systemd_run(
     credentials: dict[str, str] | None = None,
     claude_limits: bool = False,
 ) -> tuple[int, str]:
-    user = os.environ.get("LUPIN_LOOP_USER", os.environ.get("USER", "ghosta"))
+    user = _loop_user()
     group = os.environ.get("LUPIN_LOOP_GROUP", "users")
     unit = unit_name(repo, kind) if repo else f"lupin-{kind}-machine"
     argv = _sudo_argv(
@@ -1128,8 +1130,30 @@ def _launch_agent(
     argv.append(prompt)
     rc, output = _run(argv, timeout=310.0, env=_herdr_env())
     if rc:
-        raise HerdrError(output or "Herdr could not start the agent")
+        try:
+            kept = _keep_agent_after_timeout(session, pane, name, output)
+        except LoopError as exc:
+            raise HerdrError(f"{output}; could not keep the agent: {exc}") from exc
+        if not kept:
+            raise HerdrError(output or "Herdr could not start the agent")
     return _wait_agent(session, workspace_id)
+
+
+def _keep_agent_after_timeout(session: str, pane: str, name: str, output: str) -> bool:
+    """Give a started agent its name back when `agent start` times out.
+
+    Herdr waits 5 minutes at most for the agent to be ready, then drops its
+    name, and `_agent_for_workspace` needs it. An agent in the pane is alive,
+    so watch it. Any other error, or no agent in the pane, is a failed start.
+    """
+    try:
+        code = json.loads(output)["error"]["code"]
+    except (ValueError, KeyError, TypeError):
+        return False
+    if code != "timeout" or not any(row.get("pane_id") == pane for row in _agents(session)):
+        return False
+    _herdr(session, "agent", "rename", pane, name)
+    return True
 
 
 def _wait_existing_agent(session: str, workspace_id: str) -> int:
@@ -1261,7 +1285,7 @@ def worker(
     if resume:
         command.append("--resume")
     try:
-        return slots_redis.hold(
+        rc = slots_redis.hold(
             command, slot=f"loop-{repo}", holder=unit_name(repo), wait=0.0,
             ttl=LEASE_TTL, max_holders=1, **kwargs,
         )
@@ -1269,6 +1293,15 @@ def worker(
         metadata["state"] = "needs_attention"
         _write_metadata(repo, metadata)
         raise LoopError(f"fleet loop slot is full for {repo}")
+    if rc:
+        # The monitor records a workspace as soon as it has one. `starting` here
+        # means it died first. No later step ends that state, and `run` refuses
+        # a repo that stays in it.
+        latest = _read_metadata(repo)
+        if latest and latest.get("state") == "starting":
+            latest["state"] = "failed"
+            _write_metadata(repo, latest)
+    return rc
 
 
 def monitor(repo: str, platform: str, session: str, prompt_file: str, resume: bool) -> int:
@@ -1666,6 +1699,7 @@ def schedule_once(
     if not repos:
         raise LoopError("at least one repo is required for a one-off run")
     when_value, relative = _event_time(when)
+    user = _loop_user()
     identifier = hashlib.sha256(f"{time.time_ns()}:{os.getpid()}:{repos}".encode()).hexdigest()[:16]
     entry = {
         "id": identifier,
@@ -1685,7 +1719,6 @@ def schedule_once(
     os.chmod(path, 0o640)
     unit = f"lupin-once-{identifier}"
     command = _lupin_command("once-fire", "--id", identifier)
-    user = os.environ.get("LUPIN_LOOP_USER", os.environ.get("USER", "ghosta"))
     group = os.environ.get("LUPIN_LOOP_GROUP", "users")
     argv = _sudo_argv(
         "systemd-run", f"--unit={unit}", "--collect",
@@ -1861,6 +1894,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.action == "herdr-server":
             return herdr_server(args.session)
+        if args.action == "monitor":
+            return monitor(args.repo, args.platform, args.session, args.prompt_file, args.resume)
         if args.action == "launch-agent":
             return launch_agent(
                 args.repo,
@@ -1904,4 +1939,5 @@ def main(argv: list[str] | None = None) -> int:
     except (IndexError, ValueError) as exc:
         print(f"lupin loop: invalid arguments: {exc}", file=sys.stderr)
         return 2
+    print(f"lupin loop: no handler for action {args.action}", file=sys.stderr)
     return 1
