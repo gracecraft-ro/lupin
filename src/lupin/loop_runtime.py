@@ -18,7 +18,9 @@ from typing import Any
 
 from . import slots, slots_redis
 
-REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+# A loop id is a repo name. `repo~2` is a second loop on the same repo on this
+# machine, `repo~3` a third, and so on. There is no `repo~1`: that is `repo`.
+REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}(~([2-9]|[1-9][0-9]))?$")
 PLATFORMS = {"claude", "omp"}
 AGENT_NAME = "lupin-loop"
 # One Herdr session per machine. Each loop is one workspace in it.
@@ -166,6 +168,15 @@ def validate_repo(repo: Any) -> str:
     if not isinstance(repo, str) or not REPO_RE.fullmatch(repo):
         raise LoopError(f"invalid repo name {repo!r}")
     return repo
+
+
+def base_repo(loop: str) -> str:
+    """The repo that a loop works on: `bodysmith~2` works on `bodysmith`.
+
+    Use it for anything that belongs to the repo and not to one loop: the
+    checkout, the credentials, the profile, the fleet slot.
+    """
+    return validate_repo(loop).partition("~")[0]
 
 
 def validate_platform(platform: Any) -> str:
@@ -442,6 +453,8 @@ def enable_repo(
     clear_orchestrators: bool = False,
 ) -> None:
     repo = validate_repo(repo)
+    if repo != base_repo(repo):
+        raise LoopError(f"enable the repo {base_repo(repo)}, not the loop {repo}")
     platform = validate_platform(platform)
     if orchestrators is not None and clear_orchestrators:
         raise LoopError("use --orchestrator or --clear-orchestrators, not both")
@@ -502,7 +515,7 @@ def _runtime_paths(repo: str) -> dict:
         raise LoopError(f"could not read loop credential map: {exc}") from exc
     if not isinstance(values, dict):
         raise LoopError("loop credential map must be a JSON object")
-    value = values.get(repo)
+    value = values.get(base_repo(repo))
     if value is None:
         return {}
     if not isinstance(value, str) or not Path(value).is_absolute():
@@ -580,7 +593,7 @@ def _systemd_run(
         argv.extend(["--property=OOMPolicy=kill", "--property=MemoryMax=5G"])
     argv.extend(_service_environment())
     argv.extend(_credential_properties(credentials or {}))
-    directory = CODE_DIR / validate_repo(repo) if repo else CODE_DIR
+    directory = CODE_DIR / base_repo(repo) if repo else CODE_DIR
     argv.extend(["--working-directory", str(directory), "--", *command])
     return _run(argv, timeout=HERDR_TIMEOUT)
 
@@ -630,6 +643,12 @@ def _write_prompt(repo: str, note: str | None, resume: bool) -> str:
         base = (
             f"The last run kept its HANDOFF.md at {handoff_doc}. Read it before you start.\n\n"
             + base
+        )
+    if repo != base_repo(repo):
+        base += (
+            f"\n\nYou are the loop {repo}. Other loops work on {base_repo(repo)} on this "
+            "machine at the same time. Claim an issue with your own --holder before you "
+            "start it, so that no two loops work the same issue.\n"
         )
     if note:
         base += f"\n\nExtra instructions for this run:\n{note}\n"
@@ -801,7 +820,7 @@ def _remove_worktree(repo: str, metadata: dict) -> tuple[bool, str]:
                 return False, f"; worktree kept at {path}: its commit is on no branch"
             _keep_handoff(repo, path)
             try:
-                _git(CODE_DIR / repo, "worktree", "remove", str(path))
+                _git(CODE_DIR / base_repo(repo), "worktree", "remove", str(path))
             except LoopError as exc:
                 try:
                     changed = _git(path, "status", "--porcelain").strip()
@@ -814,7 +833,7 @@ def _remove_worktree(repo: str, metadata: dict) -> tuple[bool, str]:
     branch = metadata.get("branch")
     if branch:
         try:
-            _git(CODE_DIR / repo, "branch", "-d", branch)
+            _git(CODE_DIR / base_repo(repo), "branch", "-d", branch)
         except LoopError:
             return True, f"; branch {branch} kept: git branch -d refused it"
         metadata.pop("branch", None)
@@ -866,9 +885,10 @@ def start_loop(
     resume: bool = False,
 ) -> tuple[bool, str]:
     repo = validate_repo(repo)
-    selected = validate_platform(platform or enabled_repos().get(repo, "claude"))
+    source = base_repo(repo)
+    selected = validate_platform(platform or enabled_repos().get(source, "claude"))
     provider, model = validate_omp_options(selected, provider, model)
-    checkout = CODE_DIR / repo
+    checkout = CODE_DIR / source
     if not checkout.is_dir():
         return False, f"skip {repo}: no checkout at {checkout}"
     if note is not None and (
@@ -904,7 +924,7 @@ def start_loop(
         if legacy and legacy.get("running"):
             return False, f"skip {repo}: an old Herdr session is still running; use lupin stop first"
         if platform is None and provider is None and model is None:
-            candidates = orchestrator_profiles().get(repo)
+            candidates = orchestrator_profiles().get(source)
             if candidates:
                 from . import quota_cache
 
@@ -1266,8 +1286,8 @@ def worker(
     platform = validate_platform(platform)
     if not _owns_session(repo, session):
         raise LoopError("Herdr session name does not match repo")
-    if not (CODE_DIR / repo).is_dir():
-        raise LoopError(f"repo directory does not exist: {CODE_DIR / repo}")
+    if not (CODE_DIR / base_repo(repo)).is_dir():
+        raise LoopError(f"repo directory does not exist: {CODE_DIR / base_repo(repo)}")
     credential = _load_credential("redis-password")
     if credential:
         os.environ["LUPIN_REDIS_PASSWORD"] = credential
@@ -1286,13 +1306,16 @@ def worker(
         command.append("--resume")
     try:
         rc = slots_redis.hold(
-            command, slot=f"loop-{repo}", holder=unit_name(repo), wait=0.0,
+            command, slot=f"loop-{base_repo(repo)}", holder=unit_name(repo), wait=0.0,
             ttl=LEASE_TTL, max_holders=1, **kwargs,
         )
     except slots.SlotFull:
         metadata["state"] = "needs_attention"
         _write_metadata(repo, metadata)
-        raise LoopError(f"fleet loop slot is full for {repo}")
+        raise LoopError(
+            f"fleet loop slot loop-{base_repo(repo)} is full for {repo}; "
+            "raise its stored max to run more loops on this repo"
+        )
     if rc:
         # The monitor records a workspace as soon as it has one. `starting` here
         # means it died first. No later step ends that state, and `run` refuses
@@ -1446,7 +1469,8 @@ def _write_debrief(repo: str, metadata: dict, *, forced: bool) -> None:
 
     try:
         debrief.write_debrief(
-            STATE_DIR, repo, CODE_DIR / repo, metadata.get("started_at"), forced=forced,
+            STATE_DIR, base_repo(repo), CODE_DIR / base_repo(repo), metadata.get("started_at"),
+            forced=forced,
         )
     except Exception as exc:
         print(f"lupin loop: no debrief for {repo}: {exc}", file=sys.stderr)

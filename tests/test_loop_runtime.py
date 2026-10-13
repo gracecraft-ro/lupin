@@ -1754,6 +1754,155 @@ def test_worker_keeps_the_state_the_monitor_wrote(monkeypatch, tmp_path: Path):
     assert loop_runtime._read_metadata("widgets")["state"] == "needs_attention"
 
 
+@pytest.mark.parametrize("loop", ["widgets", "widgets~2", "widgets~9", "widgets~10", "widgets~99", "a.b-c_d~2"])
+def test_validate_repo_accepts_a_repo_and_its_numbered_loops(loop):
+    assert loop_runtime.validate_repo(loop) == loop
+
+
+@pytest.mark.parametrize(
+    "loop",
+    ["widgets~", "widgets~0", "widgets~1", "widgets~01", "widgets~100", "widgets~2~3", "~2", "widgets~a", "wid/gets~2"],
+)
+def test_validate_repo_rejects_any_other_suffix(loop):
+    # There is no `widgets~1`: that loop is `widgets`.
+    with pytest.raises(loop_runtime.LoopError):
+        loop_runtime.validate_repo(loop)
+
+
+def test_base_repo_names_the_repo_of_a_loop():
+    assert loop_runtime.base_repo("widgets") == "widgets"
+    assert loop_runtime.base_repo("widgets~2") == "widgets"
+    assert loop_runtime.base_repo("widgets.nix~12") == "widgets.nix"
+
+
+def test_each_loop_of_a_repo_has_its_own_state_unit_agent_and_lock(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "state" / "herdr-loops")
+    loops = ("widgets", "widgets~2", "widgets~3")
+
+    for name_of in (
+        loop_runtime.unit_name,
+        loop_runtime.agent_name,
+        loop_runtime._metadata_path,
+        lambda loop: loop_runtime._lock_file(loop).name,
+    ):
+        assert len({name_of(loop) for loop in loops}) == 3
+    assert all(len(loop_runtime.agent_name(loop)) <= 32 for loop in loops)
+
+
+def test_start_loop_runs_a_second_loop_on_the_same_repo(monkeypatch, tmp_path: Path, make_checkout):
+    state_dir = tmp_path / "state"
+    code_dir = tmp_path / "code"
+    make_checkout(code_dir / "widgets")
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", state_dir)
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", state_dir / "herdr-loops")
+    monkeypatch.setattr(loop_runtime, "REPOS_FILE", state_dir / "repos")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
+    monkeypatch.setattr(loop_runtime, "_session_info", lambda session: None)
+    monkeypatch.setattr(loop_runtime, "_server_running", lambda session: True)
+    monkeypatch.setattr(loop_runtime, "_find_workspace", lambda session, metadata: None)
+    monkeypatch.setattr(
+        loop_runtime, "_run", lambda argv, **kwargs: (3, "inactive") if argv[0] == "systemctl" else (1, "no session")
+    )
+    launches = []
+    monkeypatch.setattr(
+        loop_runtime, "_systemd_run", lambda repo, kind, command, **kwargs: launches.append((repo, command)) or (0, "")
+    )
+
+    first_ok, _ = loop_runtime.start_loop("widgets")
+    second_ok, _ = loop_runtime.start_loop("widgets~2")
+    again_ok, again_message = loop_runtime.start_loop("widgets~2")
+
+    assert first_ok and second_ok
+    assert not again_ok and "widgets~2" in again_message
+    assert [repo for repo, _ in launches] == ["widgets", "widgets~2"]
+    # The second loop takes its platform from the enabled repo, and works from the repo's checkout.
+    first, second = loop_runtime._read_metadata("widgets"), loop_runtime._read_metadata("widgets~2")
+    assert (first["repo"], second["repo"]) == ("widgets", "widgets~2")
+    assert second["platform"] == "omp"
+    assert first["worktree"] != second["worktree"]
+    assert Path(second["worktree"]).parent.name == "widgets~2"
+    assert launches[1][1][launches[1][1].index("--repo") + 1] == "widgets~2"
+    assert sorted(row["repo"] for row in loop_runtime.local_loops()) == ["widgets", "widgets~2"]
+    # Removing the second loop's worktree leaves the first loop's alone.
+    second_worktree = Path(second["worktree"])
+    gone, _ = loop_runtime._remove_worktree("widgets~2", second)
+    assert gone and not second_worktree.exists()
+    assert Path(first["worktree"]).is_dir()
+
+
+def test_the_unit_of_a_numbered_loop_starts_in_the_checkout_of_its_repo(monkeypatch, tmp_path: Path):
+    # systemd refuses a unit whose working directory is missing (status 200/CHDIR).
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", tmp_path / "code")
+    monkeypatch.setattr(loop_runtime, "_loop_user", lambda: "user")
+    monkeypatch.setattr(loop_runtime, "_service_environment", lambda: [])
+    monkeypatch.setattr(loop_runtime, "_sudo_argv", lambda *args: list(args))
+    runs = []
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: runs.append(argv) or (0, ""))
+
+    loop_runtime._systemd_run("widgets", "loop", ["lupin", "x"])
+    loop_runtime._systemd_run("widgets~2", "loop", ["lupin", "x"])
+
+    directories = [argv[argv.index("--working-directory") + 1] for argv in runs]
+    assert directories == [str(tmp_path / "code" / "widgets")] * 2
+    units = [next(item for item in argv if item.startswith("--unit=")) for argv in runs]
+    assert units[0] != units[1]
+
+
+def test_worker_takes_the_slot_of_the_repo_with_a_holder_of_its_own(monkeypatch, tmp_path: Path):
+    _setup_worker(monkeypatch, tmp_path)
+    taken = []
+    monkeypatch.setattr(loop_runtime.slots_redis, "hold", lambda *args, **kwargs: taken.append(kwargs) or 0)
+
+    loop_runtime.worker("widgets", "claude", loop_runtime.SESSION_NAME, "prompt.md")
+    loop_runtime.worker("widgets~2", "claude", loop_runtime.SESSION_NAME, "prompt.md")
+
+    assert [row["slot"] for row in taken] == ["loop-widgets", "loop-widgets"]
+    assert taken[0]["holder"] != taken[1]["holder"]
+
+
+def test_worker_names_the_slot_when_the_repo_has_no_room_for_another_loop(monkeypatch, tmp_path: Path):
+    _setup_worker(monkeypatch, tmp_path)
+
+    def full(*args, **kwargs):
+        raise loop_runtime.slots.SlotFull()
+
+    monkeypatch.setattr(loop_runtime.slots_redis, "hold", full)
+
+    with pytest.raises(loop_runtime.LoopError, match=r"loop-widgets is full for widgets~2; raise its stored max"):
+        loop_runtime.worker("widgets~2", "claude", loop_runtime.SESSION_NAME, "prompt.md")
+
+    assert loop_runtime._read_metadata("widgets~2")["state"] == "needs_attention"
+
+
+def test_credentials_come_from_the_repo_of_the_loop(monkeypatch, tmp_path: Path):
+    token = tmp_path / "token"
+    token.write_text("secret\n", encoding="utf-8")
+    credentials = tmp_path / "credentials.json"
+    credentials.write_text(json.dumps({"widgets": str(token)}), encoding="utf-8")
+    monkeypatch.setenv("LUPIN_LOOP_CREDENTIALS_FILE", str(credentials))
+
+    assert loop_runtime._runtime_paths("widgets~2") == {"gh-token": str(token)}
+
+
+def test_a_numbered_loop_is_told_to_claim_its_issues(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path / "state")
+    monkeypatch.delenv("LUPIN_LOOP_PROMPT_FILE", raising=False)
+
+    first = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
+    second = Path(loop_runtime._write_prompt("widgets~2", None, False)).read_text(encoding="utf-8")
+
+    assert "You are the loop" not in first
+    assert "You are the loop widgets~2. Other loops work on widgets on this machine" in second
+    assert "--holder" in second
+
+
+def test_enable_repo_rejects_a_numbered_loop():
+    with pytest.raises(loop_runtime.LoopError, match="enable the repo widgets, not the loop widgets~2"):
+        loop_runtime.enable_repo("widgets~2")
+
+
 @pytest.mark.parametrize(
     "module",
     ["lupin.loop_runtime", "lupin.agent", "lupin.roadmap", "lupin.debrief", "lupin.cli", "lupin.serve"],

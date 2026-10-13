@@ -88,7 +88,8 @@ SUBPROCESS_TIMEOUT_S = {
 OUTPUT_CAP = 8192  # 8 KiB, combined stdout+stderr -- design's "last 8 KiB combined"
 
 # Defense in depth: queue commands must pass this strict repo-name check.
-_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+# `repo~2` is a second loop on `repo`. Keep this in step with loop_runtime.REPO_RE.
+_REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}(~([2-9]|[1-9][0-9]))?$")
 # These limits are big enough for a real value. They are small enough to
 # stop someone from hiding something else inside a long string.
 _CAL_EXPR_MAX_LEN = 256
