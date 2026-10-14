@@ -9,7 +9,9 @@ import shutil
 import signal
 import stat
 import subprocess
+import sys
 import time
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +40,8 @@ def _key(args: list[str]) -> str:
     def flag(name: str) -> str:
         return args[args.index(name) + 1] if name in args else ""
 
+    if args[0] == "api":
+        return "api"
     return " ".join([*args[:2], flag("--state"), flag("--label")]).strip()
 
 
@@ -597,7 +601,7 @@ def test_write_period_starts_at_the_newest_period_file(tmp_path: Path, monkeypat
 
 def test_write_period_refuses_an_unknown_period(tmp_path: Path):
     with pytest.raises(debrief.DebriefError):
-        debrief.write_period(tmp_path, "widgets", tmp_path, "12h", now=NOW)
+        debrief.write_period(tmp_path, "widgets", tmp_path, "3h", now=NOW)
     assert not (tmp_path / "debriefs").exists()
 
 
@@ -692,26 +696,27 @@ def test_last_period_end_skips_an_impossible_date(tmp_path: Path):
 def test_list_and_read_periodic_debriefs(tmp_path: Path):
     _debrief_file(tmp_path, "widgets", "20261010-120000.md", "# stop\n")
     _debrief_file(tmp_path, "widgets", "20261010-120000-6h.md", "# six\n")
-    _debrief_file(tmp_path, "widgets", "20261010-120000-12h.md", "# twelve\n")
+    _debrief_file(tmp_path, "widgets", "20261010-120000-3h.md", "# three\n")
 
     listed = debrief.list_debriefs(tmp_path)
 
     assert ("widgets", "20261010-120000-6h.md") in listed
     assert ("widgets", "20261010-120000.md") in listed
-    assert ("widgets", "20261010-120000-12h.md") not in listed
+    assert ("widgets", "20261010-120000-3h.md") not in listed
     assert debrief.read_debrief(tmp_path, "widgets", "20261010-120000-6h.md") == "# six\n"
     with pytest.raises(debrief.DebriefError):
-        debrief.read_debrief(tmp_path, "widgets", "20261010-120000-12h.md")
+        debrief.read_debrief(tmp_path, "widgets", "20261010-120000-3h.md")
 
 
 def test_list_sorts_one_time_stamp_by_period_length_then_stop_file(tmp_path: Path):
-    for name in ("20261010-120000-6h.md", "20261010-120000-24h.md", "20261010-120000-7d.md",
-                 "20261010-120000.md", "20261010-110000-7d.md"):
+    for name in ("20261010-120000-6h.md", "20261010-120000-12h.md", "20261010-120000-24h.md",
+                 "20261010-120000-7d.md", "20261010-120000.md", "20261010-110000-7d.md"):
         _debrief_file(tmp_path, "widgets", name)
 
     assert [name for _repo, name in debrief.list_debriefs(tmp_path)] == [
         "20261010-120000-7d.md",
         "20261010-120000-24h.md",
+        "20261010-120000-12h.md",
         "20261010-120000-6h.md",
         "20261010-120000.md",
         "20261010-110000-7d.md",
@@ -723,7 +728,7 @@ def test_write_due_periodic_debriefs_writes_only_what_is_due(tmp_path: Path, mon
     (code / "widgets").mkdir(parents=True)
     (code / "broken").mkdir()
     state = tmp_path / "state"
-    # The 6h debrief ended at 11:00, so 6h is not due at 12:00. 24h and 7d have no file.
+    # The 6h debrief ended at 11:00, so 6h is not due at 12:00. 12h, 24h and 7d have no file.
     _debrief_file(state, "widgets", "20261010-110000-6h.md")
 
     class FailingForBroken(FakeGh):
@@ -742,7 +747,10 @@ def test_write_due_periodic_debriefs_writes_only_what_is_due(tmp_path: Path, mon
     loop_runtime.write_due_periodic_debriefs(now=NOW)
 
     names = sorted(path.name for path in (state / "debriefs" / "widgets").iterdir())
-    assert names == ["20261010-110000-6h.md", "20261010-120000-24h.md", "20261010-120000-7d.md"]
+    assert names == [
+        "20261010-110000-6h.md", "20261010-120000-12h.md",
+        "20261010-120000-24h.md", "20261010-120000-7d.md",
+    ]
     err = capsys.readouterr().err
     # The broken repo fails each period. The widgets writes still happen after it.
     for period in debrief.PERIODS:
@@ -1228,3 +1236,221 @@ def test_render_html_maps_local_screenshots_to_the_shot_route():
     ) in html
     assert "![Escape](../secret.png)" in html
     assert html.count("<img") == 1
+
+
+def test_periods_hold_6h_12h_24h_and_7d():
+    assert debrief.PERIODS == {
+        "6h": timedelta(hours=6), "12h": timedelta(hours=12),
+        "24h": timedelta(hours=24), "7d": timedelta(days=7),
+    }
+    for period in debrief.PERIODS:
+        assert debrief.FILE_RE.fullmatch(f"20261010-120000-{period}.md")
+
+
+def test_12h_is_due_at_twelve_hours_and_not_before(tmp_path: Path):
+    last = datetime(2026, 10, 10, 0, 0, 0, tzinfo=timezone.utc)
+    _debrief_file(tmp_path, "widgets", "20261010-000000-12h.md")
+
+    assert debrief.period_due(tmp_path, "widgets", "12h", last + timedelta(hours=12, seconds=-1)) is False
+    assert debrief.period_due(tmp_path, "widgets", "12h", last + timedelta(hours=12)) is True
+    # A 12h file does not move the 6h or 24h schedule.
+    assert debrief.period_due(tmp_path, "widgets", "6h", last + timedelta(hours=1)) is True
+    assert debrief.period_due(tmp_path, "widgets", "24h", last + timedelta(hours=13)) is True
+
+
+def test_write_period_12h_starts_twelve_hours_back(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    _stub_io(monkeypatch)
+
+    path = debrief.write_period(tmp_path, "widgets", checkout, "12h", now=NOW)
+
+    text = path.read_text(encoding="utf-8")
+    assert path.name == "20261010-120000-12h.md"
+    assert "- From: 2026-10-10T00:00:00Z" in text
+    assert "- Period: 12h" in text
+
+
+DAY_START = datetime(2026, 10, 9, tzinfo=timezone.utc)
+
+
+def test_write_day_window_is_midnight_to_midnight_and_half_open(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    gh = FakeGh({
+        "repo view": {"nameWithOwner": FULL},
+        "pr list merged": [
+            {"number": 1, "title": "Day start", "mergedAt": "2026-10-09T00:00:00Z", "mergeCommit": {"oid": "a" * 40}},
+            {"number": 2, "title": "Last second", "mergedAt": "2026-10-09T23:59:59Z", "mergeCommit": {"oid": "b" * 40}},
+            {"number": 3, "title": "Next day start", "mergedAt": "2026-10-10T00:00:00Z", "mergeCommit": {"oid": "c" * 40}},
+            {"number": 4, "title": "Before", "mergedAt": "2026-10-08T23:59:59Z", "mergeCommit": {"oid": "d" * 40}},
+        ],
+        "issue list closed": [], "issue list all": [], "pr list all": [],
+        "api": [],
+    })
+    monkeypatch.setattr(debrief, "_gh", gh)
+    monkeypatch.setattr(debrief.ledger, "read_events", lambda repo, **kw: [])
+
+    path = debrief.write_day(tmp_path, "widgets", checkout, DAY_START)
+
+    text = path.read_text(encoding="utf-8")
+    assert path.name == "20261010-000000-day.md"
+    assert "- From: 2026-10-09T00:00:00Z" in text
+    assert "- To: 2026-10-10T00:00:00Z" in text
+    assert "PR #1:" in text and "PR #2:" in text
+    assert "PR #3:" not in text and "PR #4:" not in text
+    search = [a[a.index("--search") + 1] for a in gh.calls if "--search" in a]
+    assert "merged:2026-10-09..2026-10-09" in search
+    assert "closed:2026-10-09..2026-10-09" in search
+
+
+def test_write_day_does_not_show_todays_state_as_history(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    gh = FakeGh({"repo view": {"nameWithOwner": FULL}, "pr list merged": [], "issue list closed": [],
+                 "issue list all": [], "pr list all": [], "api": []})
+    monkeypatch.setattr(debrief, "_gh", gh)
+    monkeypatch.setattr(debrief.ledger, "read_events", lambda repo, **kw: [])
+    monkeypatch.setattr(debrief.claims, "claims_for", lambda *a, **kw: pytest.fail("claims read"))
+
+    text = debrief.write_day(tmp_path, "widgets", checkout, DAY_START).read_text(encoding="utf-8")
+
+    assert "Claims are for today only" in text
+    assert "Not collected: past day" in text
+    assert not any("--label" in call or "open" in call for call in gh.calls)
+
+
+def test_write_day_says_when_redis_is_unreachable(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    monkeypatch.setattr(debrief, "_gh", FakeGh({
+        "repo view": {"nameWithOwner": FULL}, "pr list merged": [], "issue list closed": [],
+        "issue list all": [], "pr list all": [], "api": [],
+    }))
+
+    def down(repo, **kw):
+        raise CoordinatorUnreachable("no route")
+
+    monkeypatch.setattr(debrief.ledger, "read_events", down)
+
+    text = debrief.write_day(tmp_path, "widgets", checkout, DAY_START).read_text(encoding="utf-8")
+
+    assert "Ledger unavailable: no route" in text
+
+
+def test_write_day_lists_commits_in_the_window(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    commits = [
+        {"sha": "1" * 40, "commit": {"message": "fix a\n\nbody", "committer": {"date": "2026-10-09T10:00:00Z"}}},
+        {"sha": "2" * 40, "commit": {"message": "at end", "committer": {"date": "2026-10-10T00:00:00Z"}}},
+        {"sha": "c" * 40, "commit": {"message": "merge", "committer": {"date": "2026-10-09T11:00:00Z"}}},
+    ]
+    monkeypatch.setattr(debrief, "_gh", FakeGh({
+        "repo view": {"nameWithOwner": FULL},
+        "pr list merged": [{"number": 3, "title": "P", "mergedAt": "2026-10-09T11:00:00Z", "mergeCommit": {"oid": "c" * 40}}],
+        "issue list closed": [], "issue list all": [], "pr list all": [], "api": commits,
+    }))
+    monkeypatch.setattr(debrief.ledger, "read_events", lambda repo, **kw: [])
+
+    text = debrief.write_day(tmp_path, "widgets", checkout, DAY_START).read_text(encoding="utf-8")
+
+    assert "- Commit 1111111: fix a (2026-10-09T10:00:00Z)" in text
+    assert "2222222" not in text and "Commit ccccccc" not in text
+
+
+def test_write_day_refuses_a_time_that_is_not_midnight_utc(tmp_path: Path):
+    with pytest.raises(debrief.DebriefError):
+        debrief.write_day(tmp_path, "widgets", tmp_path, DAY_START + timedelta(hours=1))
+
+
+def test_day_file_does_not_change_period_due_or_the_period_window(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    _stub_io(monkeypatch)
+    # Backfill files for the days around NOW, including one that ends after NOW.
+    for name in ("20261010-000000-day.md", "20261010-120000-day.md", "20261011-000000-day.md",
+                 "20271010-000000-day.md"):
+        _debrief_file(tmp_path, "widgets", name)
+
+    for period in debrief.PERIODS:
+        assert debrief.last_period_end(tmp_path, "widgets", period, NOW) is None
+        assert debrief._period_ends(tmp_path, "widgets", period) == []
+        assert debrief.period_due(tmp_path, "widgets", period, NOW) is True
+    path = debrief.write_period(tmp_path, "widgets", checkout, "6h", now=NOW)
+    assert "- From: 2026-10-10T06:00:00Z" in path.read_text(encoding="utf-8")
+
+
+def test_day_file_is_listed_on_the_dashboard_and_readable(tmp_path: Path):
+    _debrief_file(tmp_path, "widgets", "20261010-000000-day.md", "# day\n")
+
+    assert ("widgets", "20261010-000000-day.md") in debrief.list_debriefs(tmp_path)
+    assert debrief.read_debrief(tmp_path, "widgets", "20261010-000000-day.md") == "# day\n"
+
+
+def test_active_days_counts_prs_issues_and_commits(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(debrief, "_gh", FakeGh({
+        "repo view": {"nameWithOwner": FULL},
+        "pr list merged": [{"mergedAt": "2026-10-08T05:00:00Z"}],
+        "issue list closed": [{"closedAt": "2026-10-09T05:00:00Z"}],
+        "api": [{"sha": "1" * 40, "commit": {"message": "m", "committer": {"date": "2026-10-11T05:00:00Z"}}}],
+    }))
+    first = datetime(2026, 10, 7, tzinfo=timezone.utc)
+    last = datetime(2026, 10, 13, tzinfo=timezone.utc)
+
+    days = debrief.active_days(tmp_path, first, last)
+
+    assert days == [datetime(2026, 10, d, tzinfo=timezone.utc) for d in (8, 9, 11)]
+
+
+def test_redis_client_uses_the_agent_configuration(tmp_path: Path, monkeypatch):
+    for name in ("LUPIN_REDIS_HOST", "LUPIN_REDIS_PORT", "LUPIN_REDIS_USERNAME", "LUPIN_REDIS_PASSWORD"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("LUPIN_REDIS_HOST", "100.64.0.11")
+    monkeypatch.setenv("LUPIN_REDIS_PORT", "6380")
+    monkeypatch.setenv("LUPIN_REDIS_USERNAME", "agent-user")
+    creds = tmp_path / "creds"
+    creds.mkdir()
+    (creds / "redis-password").write_text("not-a-real-secret\n")
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(creds))
+    monkeypatch.setenv("LUPIN_FLEET_CONFIG", str(tmp_path / "none.json"))
+    seen = []
+
+    def fake_client(*args):
+        seen.append(args)
+        return redis.Redis()
+
+    monkeypatch.setattr(debrief.slots_redis, "debrief_client", fake_client)
+    monkeypatch.setattr(debrief, "_gh", FakeGh({"repo view": {"nameWithOwner": FULL}}))
+    monkeypatch.setattr(debrief.ledger, "read_events", lambda repo, **kw: [])
+    monkeypatch.setattr(debrief.claims, "claims_for", lambda repos, **kw: {})
+    monkeypatch.setattr(debrief, "build_markdown", lambda *a, **kw: "# x\n")
+
+    debrief._write(tmp_path, "widgets", tmp_path, START, END, forced=False, past_day=True)
+
+    assert seen == [("100.64.0.11", 6380, "agent-user", "not-a-real-secret")]
+
+
+def test_serve_env_lets_a_bare_interpreter_import_lupin(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    probe = [sys.executable, "-S", "-c", "import lupin, redis"]  # -S: no site-packages, like a bare interpreter.
+
+    bare = subprocess.run(probe, cwd=tmp_path, capture_output=True, env={**os.environ, "PYTHONPATH": ""})
+    fixed = subprocess.run(probe, cwd=tmp_path, capture_output=True, env=debrief._serve_env(tmp_path))
+
+    assert bare.returncode != 0
+    assert fixed.returncode == 0, fixed.stderr.decode()
+    assert debrief._serve_env(tmp_path)["LUPIN_LOOP_STATE_DIR"] == str(tmp_path)
+
+
+def test_serve_starts_and_answers_healthz_from_another_directory(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    port = debrief._free_port()
+
+    server = debrief._serve(tmp_path, port)
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=5) as resp:
+            assert resp.status == 200
+    finally:
+        server.kill()
+        server.wait()

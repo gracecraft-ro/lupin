@@ -30,17 +30,27 @@ from urllib.parse import urlencode
 
 import redis
 
-from . import claims, ledger, roadmap, slots_redis
+from . import claims, ledger, machines, roadmap, slots_redis
 from .slots import CoordinatorUnreachable
 
 GH_TIMEOUT = 30.0
 DEBRIEF_TIME_LIMIT_S = 10.0  # Time limit for all gh calls in one debrief. Redis reads do not count.
 LIST_LIMIT = "200"
+COMMIT_PAGE = 100  # The most commits one GitHub API page gives.
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 STAMP_FORMAT = "%Y%m%d-%H%M%S"
-PERIODS = {"6h": timedelta(hours=6), "24h": timedelta(hours=24), "7d": timedelta(days=7)}
-_PERIOD_NAMES = "|".join(map(re.escape, PERIODS))
+PERIODS = {
+    "6h": timedelta(hours=6),
+    "12h": timedelta(hours=12),
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+}
+# A backfill file covers one UTC day. Its name ends in `-day.md`. `DAY` is not
+# in `PERIODS`, so `period_due` and `last_period_end` never see these files.
+DAY = "day"
+_PERIOD_NAMES = "|".join(map(re.escape, [*PERIODS, DAY]))
 # Stop files are `<file name time>.md`. Periodic files are `<file name time>-<period>.md`.
+# Backfill files are `<file name time>-day.md`. The file name time is the end of the day.
 FILE_RE = re.compile(rf"^\d{{8}}-\d{{6}}(?:-(?:{_PERIOD_NAMES}))?\.md$")
 # Screenshot links in a periodic debrief. `_screenshots` writes this shape only.
 SHOT_PATH_RE = re.compile(
@@ -156,9 +166,10 @@ def _iso(when: datetime) -> str:
     return when.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _in_window(value, start: datetime, end: datetime) -> bool:
+def _in_window(value, start: datetime, end: datetime, *, closed_end: bool = True) -> bool:
+    """Return True when `value` is in `[start, end]`, or in `[start, end)` if `closed_end` is False."""
     when = _parse(value)
-    return when is not None and start <= when <= end
+    return when is not None and start <= when and (when <= end if closed_end else when < end)
 
 
 def _well_formed(event: dict) -> bool:
@@ -198,8 +209,13 @@ def build_markdown(
     claimed: set[int] | None = None,
     time_limit: _TimeLimit | None = None,
     period: str | None = None,
+    past_day: bool = False,
 ) -> str:
     """Return the debrief for `full_name` over `[start, end]` as markdown.
+
+    `past_day` is set for a backfill file. Its window is `[start, end)`. GitHub
+    shows open PRs, labels and claims for today only, so those sections say
+    "not collected". The Shipped section also lists commits.
 
     `events` is None when the ledger was not read. `claimed` is None when
     claims were not read. A forced stop uses GitHub facts only. A section
@@ -209,12 +225,16 @@ def build_markdown(
     day = start.strftime("%Y-%m-%d")
     repo = ["--repo", full_name]
     time_limit = _TimeLimit(DEBRIEF_TIME_LIMIT_S) if time_limit is None else time_limit
+
+    def in_window(value) -> bool:
+        return _in_window(value, start, end, closed_end=not past_day)
+
+    # GitHub search dates are inclusive. A past day gets an upper bound too.
+    last_day = (end - timedelta(seconds=1)).strftime("%Y-%m-%d")
+    span = f"{day}..{last_day}" if past_day else f">={day}"
     window_events = (
         [] if forced or events is None
-        else [
-            e for e in events
-            if _well_formed(e) and _in_window(e.get("timestamp"), start, end)
-        ]
+        else [e for e in events if _well_formed(e) and in_window(e.get("timestamp"))]
     )
     lines = [f"# Debrief: {full_name}", "", "## Window", f"- From: {_iso(start)}", f"- To: {_iso(end)}"]
     if period is None:
@@ -224,21 +244,32 @@ def build_markdown(
     lines.append("")
 
     merged_all, merged_reason = _list(time_limit, ["pr", "list", *repo, "--state", "merged",
-                                "--search", f"merged:>={day}",
+                                "--search", f"merged:{span}",
                                 "--json", "number,title,mergedAt,mergeCommit"])
-    merged = [pr for pr in merged_all or [] if _in_window(pr.get("mergedAt"), start, end)]
+    merged = [pr for pr in merged_all or [] if in_window(pr.get("mergedAt"))]
     closed_all, closed_reason = _list(time_limit, ["issue", "list", *repo, "--state", "closed",
-                                "--search", f"closed:>={day}",
+                                "--search", f"closed:{span}",
                                 "--json", "number,title,closedAt"])
-    closed = [issue for issue in closed_all or [] if _in_window(issue.get("closedAt"), start, end)]
+    closed = [issue for issue in closed_all or [] if in_window(issue.get("closedAt"))]
+    commits, commits_reason = (
+        _day_commits(time_limit, full_name, start, end, {(pr.get("mergeCommit") or {}).get("oid") for pr in merged})
+        if past_day else ([], "")
+    )
     lines.append("## Shipped")
     for pr in merged:
         commit = (pr.get("mergeCommit") or {}).get("oid", "")[:7]
         lines.append(f"- PR #{pr['number']}: {pr['title']} (merged {pr['mergedAt']}, commit {commit})")
     for issue in closed:
         lines.append(f"- Issue #{issue['number']}: {issue['title']} (closed {issue['closedAt']})")
-    if not merged and not closed and merged_all is not None and closed_all is not None:
+    for sha, subject, when in commits or []:
+        lines.append(f"- Commit {sha[:7]}: {subject} ({when})")
+    if (not merged and not closed and not commits and merged_all is not None
+            and closed_all is not None and commits is not None):
         lines.append("- None.")
+    if commits is None:
+        lines.append(f"- Not collected: {commits_reason}. Shipped: commit list.")
+    elif len(commits) >= COMMIT_PAGE:
+        lines.append(f"- Shipped: commit list cut at {COMMIT_PAGE} items. Some items may be missing.")
     lines += _cut("Shipped", "merged PR", merged_all, merged_reason)
     lines += _cut("Shipped", "closed issue", closed_all, closed_reason)
     lines.append("")
@@ -258,14 +289,19 @@ def build_markdown(
     lines.append("")
 
     failing = []
-    open_prs, open_reason = _list(time_limit, ["pr", "list", *repo, "--state", "open",
-                              "--json", "number,title,statusCheckRollup"])
+    if past_day:
+        # GitHub keeps no history of check results or labels. Do not show today's.
+        open_prs, open_reason = None, "past day, GitHub shows today only"
+        blocked, blocked_reason = None, open_reason
+    else:
+        open_prs, open_reason = _list(time_limit, ["pr", "list", *repo, "--state", "open",
+                                  "--json", "number,title,statusCheckRollup"])
+        blocked, blocked_reason = _list(time_limit, ["issue", "list", *repo, "--state", "open",
+                                                     "--label", "blocked", "--json", "number,title"])
     for pr in open_prs or []:
         names = _failing_checks(pr)
         if names:
             failing.append((pr, names))
-    blocked, blocked_reason = _list(time_limit, ["issue", "list", *repo, "--state", "open",
-                                                 "--label", "blocked", "--json", "number,title"])
     decisions = [text for event in window_events for text in event.get("decisions", [])]
     risk = []
     for pr, names in failing:
@@ -287,11 +323,16 @@ def build_markdown(
     lines += _cut("Risk", "blocked issue", blocked, blocked_reason)
     lines.append("")
 
-    ready, ready_reason = _list(time_limit, ["issue", "list", *repo, "--state", "open",
-                                             "--label", "ready", "--json", "number,title"])
+    if past_day:
+        ready, ready_reason = None, "past day, GitHub shows today only"
+    else:
+        ready, ready_reason = _list(time_limit, ["issue", "list", *repo, "--state", "open",
+                                                 "--label", "ready", "--json", "number,title"])
     lines.append("## Opportunities")
     if forced:
         lines.append("Forced stop. Claims not read.")
+    elif past_day:
+        lines.append("Past day. Claims are for today only, so they are not read.")
     elif claimed is None:
         lines.append("Claims not read. Listed issues may already be claimed.")
     unclaimed = [issue for issue in ready or [] if not claimed or issue["number"] not in claimed]
@@ -319,10 +360,10 @@ def build_markdown(
         complete = complete and items is not None
         for item in items or []:
             texts = []
-            if _in_window(item.get("updatedAt"), start, end):
+            if in_window(item.get("updatedAt")):
                 texts.append(item.get("body"))
             texts += [c.get("body") for c in item.get("comments") or []
-                      if _in_window(c.get("createdAt"), start, end)]
+                      if in_window(c.get("createdAt"))]
             for text in texts:
                 for attachment in _attachments(text):
                     if attachment in seen:
@@ -370,6 +411,7 @@ def _write(
     *,
     forced: bool,
     period: str | None = None,
+    past_day: bool = False,
 ) -> Path:
     """Build the debrief for `[start, end]` and write it. Return its path.
 
@@ -377,6 +419,8 @@ def _write(
     The gh calls share one time limit. If a section's gh call fails or
     times out, the file marks that section as not collected. `period` adds the
     period to the file name. A periodic file also gets screenshots.
+    `past_day` writes a backfill file: window `[start, end)`, no claims, no
+    screenshots, name `<end>-day.md`.
     """
     time_limit = _TimeLimit(DEBRIEF_TIME_LIMIT_S)
     view = time_limit.gh(["repo", "view", "--json", "nameWithOwner"], cwd=str(checkout))
@@ -388,25 +432,31 @@ def _write(
     if not forced:
         # Both Redis reads use one debrief client. Each Redis read uses the
         # debrief client timeouts (DEBRIEF_TIMEOUT_S).
-        client = slots_redis.debrief_client(None, None)
+        client = slots_redis.debrief_client(*_redis_connection())
         try:
             events = ledger.read_events(full_name, limit=None, client=client)
         except (CoordinatorUnreachable, redis.exceptions.RedisError, ValueError, KeyError) as exc:
             ledger_note = f"Ledger unavailable: {exc.__cause__ or exc}"
-        try:
-            held = claims.claims_for([full_name], client=client)
-            claimed = {
-                int(key.rsplit("#", 1)[1]) for key in held if key.startswith(f"{full_name}#")
-            }
-        except (CoordinatorUnreachable, redis.exceptions.RedisError, ValueError):
-            claimed = None
+        if not past_day:  # Claims show today only.
+            try:
+                held = claims.claims_for([full_name], client=client)
+                claimed = {
+                    int(key.rsplit("#", 1)[1]) for key in held if key.startswith(f"{full_name}#")
+                }
+            except (CoordinatorUnreachable, redis.exceptions.RedisError, ValueError):
+                claimed = None
 
     text = build_markdown(
         full_name, start, end, forced=forced, events=events,
-        ledger_note=ledger_note, claimed=claimed, time_limit=time_limit, period=period,
+        ledger_note=ledger_note, claimed=claimed, time_limit=time_limit,
+        period=DAY if past_day else period, past_day=past_day,
     )
     folder = root / "debriefs" / repo
     folder.mkdir(parents=True, exist_ok=True, mode=0o750)
+    if past_day:
+        path = folder / f"{end.strftime(STAMP_FORMAT)}-{DAY}.md"
+        _store(path, text)
+        return path
     if period is None:
         path = _claim(folder, end)
         try:
@@ -420,6 +470,50 @@ def _write(
     # The screenshots show the debrief page. That page must exist first.
     _store(path, text + _screenshots(root, repo, path))
     return path
+
+
+def _redis_connection() -> tuple[str | None, int | None, str | None, str | None]:
+    """Return (host, port, username, password) for the debrief's Redis client.
+
+    This is the agent's own setting: `LUPIN_REDIS_HOST`, `LUPIN_REDIS_PORT` and
+    `LUPIN_REDIS_USERNAME` from the environment, then the `lupin join` config.
+    The password comes from the systemd credential `redis-password`, or from
+    `LUPIN_REDIS_PASSWORD` (`machines.resolve_connection`). It is never logged.
+    """
+    port = os.environ.get("LUPIN_REDIS_PORT")
+    conn = machines.resolve_connection(
+        redis_host=os.environ.get("LUPIN_REDIS_HOST"),
+        redis_port=int(port) if port and port.isdigit() else None,
+        redis_username=os.environ.get("LUPIN_REDIS_USERNAME"),
+    )
+    return conn["redis_host"], conn["redis_port"], conn["redis_username"], conn["redis_password"]
+
+
+def _day_commits(
+    time_limit: _TimeLimit, full_name: str, start: datetime, end: datetime, skip: set[str],
+) -> tuple[list[tuple[str, str, str]] | None, str]:
+    """Return ([(sha, subject, date)], reason) for the default branch commits in `[start, end)`.
+
+    Commits in `skip` (merge commits of the listed PRs) are left out.
+    The list is None when the call failed.
+    """
+    query = urlencode({"since": _iso(start), "until": _iso(end), "per_page": COMMIT_PAGE})
+    try:
+        found = time_limit.gh(["api", f"repos/{full_name}/commits?{query}"])
+    except GhTimeout:
+        return None, "time limit reached"
+    except DebriefError:
+        return None, "gh error"
+    commits = []
+    for item in found or []:
+        sha = item.get("sha") or ""
+        info = item.get("commit") or {}
+        when = (info.get("committer") or {}).get("date") or ""
+        # `until` includes its own second. Drop a commit at exactly `end`.
+        if sha in skip or not _in_window(when, start, end, closed_end=False):
+            continue
+        commits.append((sha, (info.get("message") or "").splitlines()[0] if info.get("message") else "", when))
+    return commits, ""
 
 
 def _claim(folder: Path, end: datetime) -> Path:
@@ -461,11 +555,24 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
+def _serve_env(root: Path) -> dict[str, str]:
+    """Return the environment for the dashboard process.
+
+    `sys.executable` can be a bare interpreter that cannot import `lupin`.
+    The nix wrapper sets `sys.path` in this process only. `PYTHONPATH` copies
+    that path to the child, so it finds `lupin` and its libraries too.
+    """
+    paths = [p for p in sys.path if p]
+    if os.environ.get("PYTHONPATH"):
+        paths.append(os.environ["PYTHONPATH"])
+    return {**os.environ, "LUPIN_LOOP_STATE_DIR": str(root), "PYTHONPATH": os.pathsep.join(paths)}
+
+
 def _serve(root: Path, port: int) -> subprocess.Popen:
     """Start the dashboard on `port`, reading debriefs from `root`. Return once it answers."""
     proc = subprocess.Popen(
         [sys.executable, "-m", "lupin.serve", "--port", str(port)],
-        env={**os.environ, "LUPIN_LOOP_STATE_DIR": str(root)},
+        env=_serve_env(root),
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     deadline = time.monotonic() + SHOT_SERVER_WAIT_S
@@ -621,6 +728,57 @@ def write_period(
     if not checkout.is_dir():
         raise DebriefError(f"no checkout at {checkout}")
     return _write(root, repo, checkout, start, end, forced=False, period=period)
+
+
+def write_day(root: Path, repo: str, checkout: Path, day: datetime) -> Path:
+    """Write the backfill debrief for one UTC day and return its path.
+
+    `day` must be midnight UTC. The window is `[day, day + 1 day)`. The file
+    name is `<day + 1 day>-day.md`. `period_due` ignores such a file.
+    """
+    if day.tzinfo is None or day.utcoffset() != timedelta(0) or day != day.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    ):
+        raise DebriefError(f"{day!r} is not midnight UTC")
+    if not REPO_RE.fullmatch(repo or ""):
+        raise DebriefError(f"invalid repo name {repo!r}")
+    if not checkout.is_dir():
+        raise DebriefError(f"no checkout at {checkout}")
+    return _write(
+        root, repo, checkout, day, day + timedelta(days=1), forced=False, past_day=True,
+    )
+
+
+def active_days(checkout: Path, first: datetime, last: datetime) -> list[datetime]:
+    """Return the UTC days in `[first, last + 1 day)` with a merged PR, a closed issue or a commit.
+
+    `first` and `last` are midnight UTC. Raises `DebriefError` if a gh call fails.
+    """
+    time_limit = _TimeLimit(DEBRIEF_TIME_LIMIT_S * 3)
+    view = time_limit.gh(["repo", "view", "--json", "nameWithOwner"], cwd=str(checkout))
+    full_name = view["nameWithOwner"]
+    end = last + timedelta(days=1)
+    span = f"{first:%Y-%m-%d}..{last:%Y-%m-%d}"
+    repo = ["--repo", full_name]
+    days = set()
+    for args, key in (
+        (["pr", "list", *repo, "--state", "merged", "--search", f"merged:{span}",
+          "--json", "mergedAt", "--limit", "1000"], "mergedAt"),
+        (["issue", "list", *repo, "--state", "closed", "--search", f"closed:{span}",
+          "--json", "closedAt", "--limit", "1000"], "closedAt"),
+    ):
+        for item in time_limit.gh(args) or []:
+            when = _parse(item.get(key))
+            if when is not None and first <= when < end:
+                days.add(when.replace(hour=0, minute=0, second=0, microsecond=0))
+    commits, reason = _day_commits(time_limit, full_name, first, end, set())
+    if commits is None:
+        raise DebriefError(f"commit list not collected: {reason}")
+    for _sha, _subject, when in commits:
+        parsed = _parse(when)
+        if parsed is not None:
+            days.add(parsed.replace(hour=0, minute=0, second=0, microsecond=0))
+    return sorted(days)
 
 
 def _newest_first(item: tuple[str, str]) -> tuple[datetime, timedelta, str]:
