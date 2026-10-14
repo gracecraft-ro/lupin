@@ -25,8 +25,8 @@ four jobs:
 | `gh` (GitHub CLI) | Claims, roadmap, dashboard | The Nix package adds it to `PATH`. |
 | `git` | Loops, roadmap | The Nix package adds it to `PATH`. |
 | systemd (Linux) | Loop workers, timers | Not available on macOS. |
-| Herdr | Loop workers | In nixpkgs (`pkgs.herdr`). The Lupin package does not add it to `PATH` yet. |
-| `omp` | OMP loops, `fetch-benchmarks`, some quota data | From the `github:can1357/oh-my-pi` flake. The Lupin package does not add it to `PATH` yet. |
+| Herdr | Loop workers | The Lupin package adds it to `PATH`. Set `LUPIN_HERDR_BIN` to use another binary. |
+| `omp` | OMP loops, `fetch-benchmarks`, some quota data | The default adds it to `PATH` from a pinned input. `without-omp` saves about 228 MiB; install `omp` separately for OMP tasks. |
 
 ## Install
 
