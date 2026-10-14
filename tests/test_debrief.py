@@ -1496,23 +1496,57 @@ def test_active_days_fails_when_a_later_commit_page_fails(tmp_path: Path, monkey
         debrief.active_days(tmp_path, FIRST, LAST)
 
 
-def test_commit_pages_stop_at_the_page_cap_with_an_error(tmp_path: Path, monkeypatch):
+def test_commit_list_at_the_page_cap_is_complete(tmp_path: Path, monkeypatch):
     calls: list = []
     full = [_commit(12, n) for n in range(debrief.COMMIT_PAGE)]
-    monkeypatch.setattr(debrief, "_gh", _paged_gh([full] * debrief.COMMIT_PAGES_MAX, calls))
+    pages = [full] * debrief.COMMIT_PAGES_MAX + [[]]
+    monkeypatch.setattr(debrief, "_gh", _paged_gh(pages, calls))
+
+    debrief.active_days(tmp_path, FIRST, LAST)
+
+    assert len(calls) == debrief.COMMIT_PAGES_MAX + 1
+
+
+def test_commit_list_over_the_page_cap_fails(tmp_path: Path, monkeypatch):
+    calls: list = []
+    full = [_commit(12, n) for n in range(debrief.COMMIT_PAGE)]
+    pages = [full] * (debrief.COMMIT_PAGES_MAX + 1)
+    monkeypatch.setattr(debrief, "_gh", _paged_gh(pages, calls))
 
     with pytest.raises(debrief.DebriefError, match="more than"):
         debrief.active_days(tmp_path, FIRST, LAST)
-    assert len(calls) == debrief.COMMIT_PAGES_MAX
+    assert len(calls) == debrief.COMMIT_PAGES_MAX + 1
 
 
-def test_active_days_fails_when_a_pr_list_may_be_cut(tmp_path: Path, monkeypatch):
-    rows = [{"mergedAt": "2026-10-08T05:00:00Z"}] * debrief.PR_ISSUE_LIMIT
-    monkeypatch.setattr(debrief, "_gh", FakeGh({"repo view": {"nameWithOwner": FULL}, "pr list merged": rows}))
+@pytest.mark.parametrize("kind,field", [("pr", "mergedAt"), ("issue", "closedAt")])
+def test_active_days_accepts_exact_pr_issue_cap(tmp_path: Path, monkeypatch, kind, field):
+    rows = [{field: "2026-10-08T05:00:00Z"}] * debrief.PR_ISSUE_LIMIT
+    gh = FakeGh({
+        "repo view": {"nameWithOwner": FULL}, f"{kind} list {'merged' if kind == 'pr' else 'closed'}": rows,
+        f"{'issue' if kind == 'pr' else 'pr'} list {'closed' if kind == 'pr' else 'merged'}": [],
+        "api": [],
+    })
+    monkeypatch.setattr(debrief, "_gh", gh)
 
-    with pytest.raises(debrief.DebriefError, match="pr list cut at"):
+    assert debrief.active_days(tmp_path, FIRST, LAST) == [datetime(2026, 10, 8, tzinfo=timezone.utc)]
+    list_call = next(call for call in gh.calls if call[:2] == [kind, "list"])
+    assert list_call[list_call.index("--limit") + 1] == str(debrief.PR_ISSUE_LIMIT + 1)
+
+
+@pytest.mark.parametrize("kind,field", [("pr", "mergedAt"), ("issue", "closedAt")])
+def test_active_days_rejects_pr_issue_overflow(tmp_path: Path, monkeypatch, kind, field):
+    rows = [{field: "2026-10-08T05:00:00Z"}] * (debrief.PR_ISSUE_LIMIT + 1)
+    gh = FakeGh({
+        "repo view": {"nameWithOwner": FULL}, f"{kind} list {'merged' if kind == 'pr' else 'closed'}": rows,
+        f"{'issue' if kind == 'pr' else 'pr'} list {'closed' if kind == 'pr' else 'merged'}": [],
+        "api": [],
+    })
+    monkeypatch.setattr(debrief, "_gh", gh)
+
+    with pytest.raises(debrief.DebriefError, match=f"{kind} list cut at"):
         debrief.active_days(tmp_path, FIRST, LAST)
-
+    list_call = next(call for call in gh.calls if call[:2] == [kind, "list"])
+    assert list_call[list_call.index("--limit") + 1] == str(debrief.PR_ISSUE_LIMIT + 1)
 
 def test_write_day_refuses_a_day_that_is_not_over(tmp_path: Path):
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)

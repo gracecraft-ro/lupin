@@ -505,7 +505,7 @@ def _day_commits(
     A short page ends the list. More than `COMMIT_PAGES_MAX` pages is a failure.
     """
     found: list = []
-    for page in range(1, COMMIT_PAGES_MAX + 1):
+    for page in range(1, COMMIT_PAGES_MAX + 2):
         query = urlencode({
             "since": _iso(start), "until": _iso(end), "per_page": COMMIT_PAGE, "page": page,
         })
@@ -515,11 +515,13 @@ def _day_commits(
             return None, "time limit reached"
         except DebriefError:
             return None, "gh error"
+        if page > COMMIT_PAGES_MAX:
+            if items:
+                return None, f"more than {COMMIT_PAGES_MAX * COMMIT_PAGE} commits"
+            break
         found += items
         if len(items) < COMMIT_PAGE:
             break
-    else:
-        return None, f"more than {COMMIT_PAGES_MAX * COMMIT_PAGE} commits"
     commits = []
     for item in found:
         sha = item.get("sha") or ""
@@ -782,12 +784,12 @@ def active_days(checkout: Path, first: datetime, last: datetime) -> list[datetim
     days = set()
     for args, key in (
         (["pr", "list", *repo, "--state", "merged", "--search", f"merged:{span}",
-          "--json", "mergedAt", "--limit", str(PR_ISSUE_LIMIT)], "mergedAt"),
+          "--json", "mergedAt", "--limit", str(PR_ISSUE_LIMIT + 1)], "mergedAt"),
         (["issue", "list", *repo, "--state", "closed", "--search", f"closed:{span}",
-          "--json", "closedAt", "--limit", str(PR_ISSUE_LIMIT)], "closedAt"),
+          "--json", "closedAt", "--limit", str(PR_ISSUE_LIMIT + 1)], "closedAt"),
     ):
         items = time_limit.gh(args) or []
-        if len(items) >= PR_ISSUE_LIMIT:
+        if len(items) > PR_ISSUE_LIMIT:
             raise DebriefError(f"{args[0]} list cut at {PR_ISSUE_LIMIT} items for {span}")
         for item in items:
             when = _parse(item.get(key))
