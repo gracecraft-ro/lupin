@@ -37,6 +37,8 @@ GH_TIMEOUT = 30.0
 DEBRIEF_TIME_LIMIT_S = 10.0  # Time limit for all gh calls in one debrief. Redis reads do not count.
 LIST_LIMIT = "200"
 COMMIT_PAGE = 100  # The most commits one GitHub API page gives.
+COMMIT_PAGES_MAX = 50  # Stop after this many pages (5000 commits). More is an error, not a cut list.
+PR_ISSUE_LIMIT = 1000  # `active_days` list size. A full list may be cut, so it is an error.
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 STAMP_FORMAT = "%Y%m%d-%H%M%S"
 PERIODS = {
@@ -268,8 +270,6 @@ def build_markdown(
         lines.append("- None.")
     if commits is None:
         lines.append(f"- Not collected: {commits_reason}. Shipped: commit list.")
-    elif len(commits) >= COMMIT_PAGE:
-        lines.append(f"- Shipped: commit list cut at {COMMIT_PAGE} items. Some items may be missing.")
     lines += _cut("Shipped", "merged PR", merged_all, merged_reason)
     lines += _cut("Shipped", "closed issue", closed_all, closed_reason)
     lines.append("")
@@ -432,12 +432,17 @@ def _write(
     if not forced:
         # Both Redis reads use one debrief client. Each Redis read uses the
         # debrief client timeouts (DEBRIEF_TIMEOUT_S).
-        client = slots_redis.debrief_client(*_redis_connection())
+        client = None
         try:
-            events = ledger.read_events(full_name, limit=None, client=client)
+            client = slots_redis.debrief_client(*_redis_connection())
+        except (ValueError, OSError) as exc:  # A fleet config file that cannot be read or parsed.
+            ledger_note = f"Ledger unavailable: {exc}"
+        try:
+            if client is not None:
+                events = ledger.read_events(full_name, limit=None, client=client)
         except (CoordinatorUnreachable, redis.exceptions.RedisError, ValueError, KeyError) as exc:
             ledger_note = f"Ledger unavailable: {exc.__cause__ or exc}"
-        if not past_day:  # Claims show today only.
+        if client is not None and not past_day:  # Claims show today only.
             try:
                 held = claims.claims_for([full_name], client=client)
                 claimed = {
@@ -485,6 +490,7 @@ def _redis_connection() -> tuple[str | None, int | None, str | None, str | None]
         redis_host=os.environ.get("LUPIN_REDIS_HOST"),
         redis_port=int(port) if port and port.isdigit() else None,
         redis_username=os.environ.get("LUPIN_REDIS_USERNAME"),
+        config_path=os.environ.get("LUPIN_FLEET_CONFIG"),
     )
     return conn["redis_host"], conn["redis_port"], conn["redis_username"], conn["redis_password"]
 
@@ -495,17 +501,27 @@ def _day_commits(
     """Return ([(sha, subject, date)], reason) for the default branch commits in `[start, end)`.
 
     Commits in `skip` (merge commits of the listed PRs) are left out.
-    The list is None when the call failed.
+    The list is None when a call failed. It reads every page, so the list is complete.
+    A short page ends the list. More than `COMMIT_PAGES_MAX` pages is a failure.
     """
-    query = urlencode({"since": _iso(start), "until": _iso(end), "per_page": COMMIT_PAGE})
-    try:
-        found = time_limit.gh(["api", f"repos/{full_name}/commits?{query}"])
-    except GhTimeout:
-        return None, "time limit reached"
-    except DebriefError:
-        return None, "gh error"
+    found: list = []
+    for page in range(1, COMMIT_PAGES_MAX + 1):
+        query = urlencode({
+            "since": _iso(start), "until": _iso(end), "per_page": COMMIT_PAGE, "page": page,
+        })
+        try:
+            items = time_limit.gh(["api", f"repos/{full_name}/commits?{query}"]) or []
+        except GhTimeout:
+            return None, "time limit reached"
+        except DebriefError:
+            return None, "gh error"
+        found += items
+        if len(items) < COMMIT_PAGE:
+            break
+    else:
+        return None, f"more than {COMMIT_PAGES_MAX * COMMIT_PAGE} commits"
     commits = []
-    for item in found or []:
+    for item in found:
         sha = item.get("sha") or ""
         info = item.get("commit") or {}
         when = (info.get("committer") or {}).get("date") or ""
@@ -735,11 +751,14 @@ def write_day(root: Path, repo: str, checkout: Path, day: datetime) -> Path:
 
     `day` must be midnight UTC. The window is `[day, day + 1 day)`. The file
     name is `<day + 1 day>-day.md`. `period_due` ignores such a file.
+    The day must be over. Today is refused.
     """
     if day.tzinfo is None or day.utcoffset() != timedelta(0) or day != day.replace(
         hour=0, minute=0, second=0, microsecond=0
     ):
         raise DebriefError(f"{day!r} is not midnight UTC")
+    if day + timedelta(days=1) > datetime.now(timezone.utc):
+        raise DebriefError(f"{day:%Y-%m-%d} is not over yet")
     if not REPO_RE.fullmatch(repo or ""):
         raise DebriefError(f"invalid repo name {repo!r}")
     if not checkout.is_dir():
@@ -763,11 +782,14 @@ def active_days(checkout: Path, first: datetime, last: datetime) -> list[datetim
     days = set()
     for args, key in (
         (["pr", "list", *repo, "--state", "merged", "--search", f"merged:{span}",
-          "--json", "mergedAt", "--limit", "1000"], "mergedAt"),
+          "--json", "mergedAt", "--limit", str(PR_ISSUE_LIMIT)], "mergedAt"),
         (["issue", "list", *repo, "--state", "closed", "--search", f"closed:{span}",
-          "--json", "closedAt", "--limit", "1000"], "closedAt"),
+          "--json", "closedAt", "--limit", str(PR_ISSUE_LIMIT)], "closedAt"),
     ):
-        for item in time_limit.gh(args) or []:
+        items = time_limit.gh(args) or []
+        if len(items) >= PR_ISSUE_LIMIT:
+            raise DebriefError(f"{args[0]} list cut at {PR_ISSUE_LIMIT} items for {span}")
+        for item in items:
             when = _parse(item.get(key))
             if when is not None and first <= when < end:
                 days.add(when.replace(hour=0, minute=0, second=0, microsecond=0))

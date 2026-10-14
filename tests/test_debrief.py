@@ -1454,3 +1454,94 @@ def test_serve_starts_and_answers_healthz_from_another_directory(tmp_path: Path,
     finally:
         server.kill()
         server.wait()
+
+
+def _commit(day: int, n: int = 0) -> dict:
+    return {"sha": f"{day:02d}{n:038d}", "commit": {"message": "m", "committer": {"date": f"2026-10-{day:02d}T05:00:00Z"}}}
+
+
+def _paged_gh(pages: list, calls: list):
+    """Stand-in for `_gh`: the "page" query value picks an entry of `pages`."""
+    def fake(args, cwd=None, timeout=None):
+        if args[0] != "api":
+            return {"nameWithOwner": FULL} if args[:2] == ["repo", "view"] else []
+        calls.append(args[1])
+        page = int(args[1].rsplit("&page=", 1)[1])
+        if isinstance(pages[page - 1], Exception):
+            raise pages[page - 1]
+        return pages[page - 1]
+    return fake
+
+
+FIRST = datetime(2026, 10, 1, tzinfo=timezone.utc)
+LAST = datetime(2026, 10, 12, tzinfo=timezone.utc)
+
+
+def test_active_days_reads_every_commit_page(tmp_path: Path, monkeypatch):
+    calls: list = []
+    full = [_commit(12, n) for n in range(debrief.COMMIT_PAGE)]
+    monkeypatch.setattr(debrief, "_gh", _paged_gh([full, [_commit(3)]], calls))
+
+    days = debrief.active_days(tmp_path, FIRST, LAST)
+
+    assert days == [datetime(2026, 10, 3, tzinfo=timezone.utc), datetime(2026, 10, 12, tzinfo=timezone.utc)]
+    assert len(calls) == 2
+
+
+def test_active_days_fails_when_a_later_commit_page_fails(tmp_path: Path, monkeypatch):
+    full = [_commit(12, n) for n in range(debrief.COMMIT_PAGE)]
+    monkeypatch.setattr(debrief, "_gh", _paged_gh([full, debrief.DebriefError("boom")], []))
+
+    with pytest.raises(debrief.DebriefError, match="commit list not collected: gh error"):
+        debrief.active_days(tmp_path, FIRST, LAST)
+
+
+def test_commit_pages_stop_at_the_page_cap_with_an_error(tmp_path: Path, monkeypatch):
+    calls: list = []
+    full = [_commit(12, n) for n in range(debrief.COMMIT_PAGE)]
+    monkeypatch.setattr(debrief, "_gh", _paged_gh([full] * debrief.COMMIT_PAGES_MAX, calls))
+
+    with pytest.raises(debrief.DebriefError, match="more than"):
+        debrief.active_days(tmp_path, FIRST, LAST)
+    assert len(calls) == debrief.COMMIT_PAGES_MAX
+
+
+def test_active_days_fails_when_a_pr_list_may_be_cut(tmp_path: Path, monkeypatch):
+    rows = [{"mergedAt": "2026-10-08T05:00:00Z"}] * debrief.PR_ISSUE_LIMIT
+    monkeypatch.setattr(debrief, "_gh", FakeGh({"repo view": {"nameWithOwner": FULL}, "pr list merged": rows}))
+
+    with pytest.raises(debrief.DebriefError, match="pr list cut at"):
+        debrief.active_days(tmp_path, FIRST, LAST)
+
+
+def test_write_day_refuses_a_day_that_is_not_over(tmp_path: Path):
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    with pytest.raises(debrief.DebriefError, match="not over yet"):
+        debrief.write_day(tmp_path, "widgets", tmp_path, today)
+
+
+def test_redis_connection_reads_the_fleet_config_named_by_the_environment(tmp_path: Path, monkeypatch):
+    for name in ("LUPIN_REDIS_HOST", "LUPIN_REDIS_PORT", "LUPIN_REDIS_USERNAME", "LUPIN_REDIS_PASSWORD"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    config = tmp_path / "fleet.json"
+    config.write_text(json.dumps({"redis_host": "100.64.0.9", "redis_port": 6390}), encoding="utf-8")
+    monkeypatch.setenv("LUPIN_FLEET_CONFIG", str(config))
+
+    host, port, _user, _password = debrief._redis_connection()
+
+    assert (host, port) == ("100.64.0.9", 6390)
+
+
+def test_write_debrief_notes_a_bad_fleet_config_and_still_writes(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    _stub_io(monkeypatch)
+    bad = tmp_path / "fleet.json"
+    bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("LUPIN_FLEET_CONFIG", str(bad))
+
+    path = debrief.write_period(tmp_path, "widgets", checkout, "6h", now=NOW)
+
+    assert "Ledger unavailable" in _section(path.read_text(encoding="utf-8"), "Follow-up tasks")
