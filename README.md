@@ -82,10 +82,11 @@ Set `LUPIN_MODEL_TIERS` to a JSON file to use your own model tiers. The
 category selected by `route` must exist in the file. Each category has a
 `tiers` object with one or more of `tier0`, `tier1`, and `tier2`. Each tier
 is a list of ordered `{model, effort}` choices. The first choice is tried
-first. Effort must be `low`, `medium`, `high`, or `xhigh`. You can omit a
-tier. If a route needs it, Lupin uses the next higher tier. Optional fields
-are `source`, `last_verified`, and `note`. A top-level key that starts with
-`_` is ignored. The Models page shows the file path.
+first. Effort must be `low`, `medium`, `high`, or `xhigh`. You can omit a tier.
+If a route needs it, Lupin uses the next higher tier. If no higher tier exists,
+the route reports an error. Optional fields are `source`, `last_verified`, and
+`note`. A top-level key that starts with `_` is ignored. The Models page shows
+the file path.
 
 ```json
 {

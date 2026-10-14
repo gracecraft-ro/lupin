@@ -246,13 +246,21 @@ def route(
         raise RouteInputError(f"unknown size {size!r}; valid: {', '.join(_SIZE_TO_TIER)}")
     row = all_tiers[category]["tiers"]
 
-    tier = _resolve_tier(row, _SIZE_TO_TIER[size])
-    if (
-        tier == "tier0"
-        and not bmo_available
-        and any(entry["model"].startswith("bmo:") for entry in row["tier0"])
-    ):
-        tier = _resolve_tier(row, "tier1")
+    needed_tier = _SIZE_TO_TIER[size]
+    try:
+        tier = _resolve_tier(row, needed_tier)
+        if (
+            tier == "tier0"
+            and not bmo_available
+            and any(entry["model"].startswith("bmo:") for entry in row["tier0"])
+        ):
+            needed_tier = "tier1"
+            tier = _resolve_tier(row, needed_tier)
+    except KeyError as error:
+        location = f" in {source!r}" if source is not None else ""
+        raise RouteInputError(
+            f"category {category!r}{location} has no tier at or above {needed_tier!r}"
+        ) from error
 
     live_quota_rows = quota_mod.quota_usage() if quota_rows is None else quota_rows
     return _apply_pacing(row, tier, live_quota_rows)

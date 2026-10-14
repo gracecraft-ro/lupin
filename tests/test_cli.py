@@ -956,3 +956,26 @@ def test_route_reports_a_bad_model_tier_file(monkeypatch, tmp_path, capsys):
     assert "needs an effort" in error
 
 
+def test_place_reports_a_missing_model_category(monkeypatch, tmp_path, capsys):
+    path = tmp_path / "tiers.json"
+    path.write_text(
+        json.dumps({"coding": {"tiers": {"tier1": [{"model": "custom", "effort": "high"}]}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LUPIN_MODEL_TIERS", str(path))
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: {})
+    monkeypatch.setattr(
+        cli.place_mod,
+        "_resolve_task",
+        lambda task, connection: ({"title": "translation", "body": "", "labels": []}, task),
+    )
+
+    assert cli.main(["place", "123"]) == 2
+
+    error = capsys.readouterr().err
+    assert len(error.splitlines()) == 1
+    assert "unknown category 'translation'" in error
+    assert str(path) in error
+
+
+

@@ -32,6 +32,21 @@ def test_route_uses_the_configured_file_and_reports_a_missing_category(tmp_path,
         route.route("prose", "size-m", quota_rows=[])
     assert str(custom) in str(caught.value)
     assert "coding" in str(caught.value)
+    with pytest.raises(route.RouteInputError, match="no tier at or above 'tier2'") as caught:
+        route.route("coding", "size-l", quota_rows=[])
+    assert str(custom) in str(caught.value)
+
+
+def test_unavailable_bmo_reports_missing_fallback_tier(tmp_path, monkeypatch):
+    custom = tmp_path / "bmo-tiers.json"
+    _write_tiers(custom, {
+        "coding": {"tiers": {"tier0": [{"model": "bmo:qwen", "effort": "low"}]}}
+    })
+    monkeypatch.setenv(model_tiers.SETTING, str(custom))
+
+    with pytest.raises(route.RouteInputError, match="no tier at or above 'tier1'") as caught:
+        route.route("coding", "size-xs", bmo_available=False, quota_rows=[])
+    assert str(custom) in str(caught.value)
 
 
 @pytest.mark.parametrize(
