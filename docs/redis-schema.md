@@ -530,6 +530,8 @@ If a wait reaches that limit, the stop ends. The debrief is then not written.
 - The claims scan counts as one request and reply. `SCAN` returns keys in pages.
   Each extra page is one more request and reply. The budget does not count the
   extra pages.
+  Each `scan_iter` call asks Redis to check about 1,000 keys per page
+  (`COUNT 1000`).
 - A server that sends data slowly can keep one reply going. Each read on
   `debrief_client` waits up to 1 second. For `loop.stop`, these are the calls
   after the command read. Each read on `_client` waits up to 2 seconds. The
@@ -606,8 +608,9 @@ claim belongs to this attempt when `claim` matches its token and `state` is
 ```
 
 A `running` entry that is still queued when `lupin agent` restarts is marked
-`failed`. Its reason is `orphaned: still running when the agent restarted`. The
-startup scan does this. It never runs the command again.
+`failed`. Its reason says that the agent restarted before it saved the
+command result. The command may not have started. The startup scan does this.
+It never runs the command again.
 Three cases can leave such an entry for any action:
 
 - The agent process stopped after it wrote the claim, and before it wrote the

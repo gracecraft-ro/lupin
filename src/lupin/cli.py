@@ -1,83 +1,10 @@
-"""The `lupin` command-line entry point: one executable, subcommands.
+"""The `lupin` command-line entry point.
 
-`route` and `classify` are the model-routing calls, moved out of
-ghostbook.nix in issue #203. `fetch-models` fetches a daily snapshot of
-which model IDs each subscription can call today and what they cost
-(issue #16; see `model_fetch.py`). `fetch-benchmarks` fetches (or reads the
-fleet-shared cache of) a daily benchmark/quality score per model, via
-sharded free-model `omp` agent calls, not a local file (issue #17's
-reopen; see `benchmark_fetch.py`). `quota` publishes provider quota and
-this machine's `7-day usage totals to shared Redis for the dashboard.
-`acquire`/`hold`/`release`/`status` are the
-slot-lease commands (issue #205 for the `local` backend, #210 for
-`redis`). `ledger` appends and reads shared repository events in Redis
-(see `ledger.py`). `claim`/`renew-claim`/`release-claim` mark a GitHub issue
-as one loop's own, so two loops never work the same task (issue #6; Redis only,
-no `--backend` choice -- see `claims.py`). `review-route` picks which lock a
-routed model needs (issue #185), `roadmap` prints prioritized open tasks
-from `roadmap.py`'s data plus claims (issue #10), and `serve` runs the
-read-only dashboard (issue #204). `join`/`heartbeat`/`drain`/`undrain`/
-`machines` are the fleet machine registry (issue #7); see `machines.py` for
-the Redis record they read and write. `place` picks which registered
-machine should run a task already routed to a model (issue #9; see
-`place.py`). `quest` lists quests (GitHub issues labeled `quest`) and their
-progress (issue #11, read-only); `quest focus`/`quest release` pin a quest
-to a machine (issue #12); `start`/`stop` claim and release a quest's issues
-(issue #13). `reconcile` applies the automatic release rules -- a claim
-with no heartbeat, a quest focus that is done/closed/idle/down, a started
-quest that is done/down (issue #14; see `reconcile.py`). `cmd` sends,
-checks, or lists signed cross-machine commands; `agent` is the
-long-running process that polls its own queue and runs them through a
-fixed action table (issue #28, implementing #27's design; see
-`run` starts a loop, `once` starts or schedules one, and `enable`/`disable`
-edit the local repo list. `loops` reads Herdr's agent state. `stop`/`peek`/
-`schedule`/`pause`/`resume` can target any fleet machine. Local actions run
-through Lupin. Remote actions use the signed Redis queue and `agent.py`.
-`attach` is direct: it runs the Herdr terminal here or connects to the
-remote Herdr server over SSH. It never uses the queue. `loops.py` owns the
-shared local-or-remote dispatch.
-
-Slot commands use `--backend local|redis`, or `LUPIN_BACKEND` if the flag is
-not set. A host can set the default once in its systemd environment.
-
-Exit codes, by design (see #198's architecture plan):
-  0  done
-  2  busy/full (acquire, hold) -- skip and try again later, or a usage error
-     from argparse itself (its own default for a bad flag; both meanings are
-     "this invocation didn't produce a result", so sharing the code is fine).
-     `place` reuses this code too: no online machine runs the routed
-     provider right now, which is the same "try again later" shape.
-  3  cannot reach the coordinator, and this slot has no local fallback. The
-     `local` backend's coordinator is the filesystem, which it always
-     reaches once the state root is writable, so it never returns 3. The
-     `redis` backend returns 3 for any slot other than `bmo` when Redis is
-     unreachable -- `bmo` falls back to the `local` backend instead (see
-     `slots_redis.py`), so it does not reach this exit code. Claims have no
-     local fallback at all, so `claim`/`renew-claim`/`release-claim` return
-     3 for every unreachable-Redis case. For every slot, `acquire` and
-     `release` return 3 when Redis refuses a login. `bmo` does not fall back
-     for this. They also return 3 when the ACL denies a command. The message
-     names the cause.
-  1  any other error (malformed lease id, bad JSON input, hold with neither
-     --lease nor <slot>/--holder, etc.) -- also `renew-claim`/`release-claim`
-     when the caller isn't the claim's current holder.
-
-`claim` returns 2 when another holder already has the issue -- same "busy,
-skip and try again later" meaning as a full slot. `quest start` reuses the
-same two codes for its own validation failures: 2 for "claimed by another
-loop" or "target machine draining" (both "try again later"), 1 for
-anything else (closed, missing, or blocked by an issue outside the quest).
-
-`stop`/`peek`/`schedule`/`pause`/`resume` (issue #2 phase A) add two more
-exit codes. Both apply only to a remote target, sent through the signed
-command queue:
-  4  sent, but the result is unknown. The command was queued, but no
-     final state (`ok`/`failed`/`rejected`/`expired`) arrived within
-     `--wait` seconds. It may still be running -- check
-     `lupin cmd status <id>` later.
-  5  the repo's loop matched zero machines, or more than one, in the
-     fleet registry's `loops` field (`stop`/`peek` only, and only when
-     `--machine` isn't given). Pass `--machine` instead of guessing.
+Routing: classify work and choose a model and effort for each task.
+Slots: coordinate leases so workers can share capacity safely.
+Dashboard: inspect quota, usage, machine health, and loop status.
+Fleet: join machines, dispatch loops, and manage remote actions.
+Use a subcommand's own `--help` output for its arguments.
 """
 
 from __future__ import annotations
@@ -126,10 +53,23 @@ DEFAULT_RESULT_WAIT_S = 20.0  # how long stop/peek/schedule/pause/resume
 # ACTION_TIMEOUT_S as its limit. A caller who wants to wait longer than
 # 20 seconds passes --wait.
 
+ROOT_EPILOG = """Exit codes, by design:
+
+  0  the command completed successfully
+  1  another error, including malformed input or a failed local/remote action
+  2  the request was busy or full and should be retried later, or the command
+     line was invalid
+  3  the coordinator could not be reached and no local fallback was available
+  4  a remote command was sent but its final result is still unknown; check
+     `lupin cmd status <id>` later
+  5  a repository matched zero or multiple fleet machines; pass `--machine`
+     instead of guessing
+"""
+
 
 def _route_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("category")
-    parser.add_argument("size")
+    parser.add_argument("category", help="task category, such as coding or translation")
+    parser.add_argument("size", help="task size label, such as size-s or size-m")
     parser.add_argument(
         "--no-bmo",
         dest="bmo_available",
@@ -254,7 +194,7 @@ def _slot_common_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _acquire_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("slot")
+    parser.add_argument("slot", help="slot name to acquire")
     parser.add_argument("--holder", required=True)
     parser.add_argument("--wait", type=float, default=0.0, help="seconds to poll before giving up")
     parser.add_argument(
@@ -265,7 +205,7 @@ def _acquire_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _hold_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("slot", nargs="?", default=None)
+    parser.add_argument("slot", nargs="?", default=None, help="slot name when not reusing --lease")
     parser.add_argument("--holder", default=None)
     parser.add_argument("--lease", default=None, help="reuse a lease an earlier `acquire` returned")
     parser.add_argument("--wait", type=float, default=0.0)
@@ -492,12 +432,12 @@ def _cmd_group_args(parser: argparse.ArgumentParser) -> None:
     _redis_conn_args(send)
 
     status = sub.add_parser("status", help="look up one command's result")
-    status.add_argument("id")
+    status.add_argument("id", help="command id returned by `cmd send`")
     status.add_argument("--json", action="store_true")
     _redis_conn_args(status)
 
     queue = sub.add_parser("queue", help="list a machine's pending commands")
-    queue.add_argument("machine")
+    queue.add_argument("machine", help="machine whose pending commands to list")
     queue.add_argument("--json", action="store_true")
     _redis_conn_args(queue)
 
@@ -523,7 +463,7 @@ def _wait_arg(parser: argparse.ArgumentParser) -> None:
 
 
 def _stop_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("repo")
+    parser.add_argument("repo", help="repository whose loop to stop")
     parser.add_argument("--machine", default=None, help="skip resolving which machine runs repo's loop")
     parser.add_argument(
         "--force", action="store_true",
@@ -536,8 +476,8 @@ def _stop_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _peek_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("repo")
-    parser.add_argument("lines", nargs="?", type=int, default=60)
+    parser.add_argument("repo", help="repository whose loop output to show")
+    parser.add_argument("lines", nargs="?", type=int, default=60, help="number of pane lines (default: 60)")
     parser.add_argument("--machine", default=None, help="skip resolving which machine runs repo's loop")
     parser.add_argument("--json", action="store_true")
     _wait_arg(parser)
@@ -546,7 +486,7 @@ def _peek_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _attach_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("repo")
+    parser.add_argument("repo", help="repository whose loop to attach to")
     parser.add_argument("--machine", default=None, help="skip resolving which machine runs repo's loop")
     parser.add_argument("--print", dest="print_only", action="store_true", help="print the argv, don't exec it")
     _fleet_connection_args(parser)
@@ -575,13 +515,13 @@ def _schedule_args(parser: argparse.ArgumentParser) -> None:
     _schedule_common_args(sub.add_parser("show", help="print the current cadence (default)"))
 
     first = sub.add_parser("first", help="set an anchored cadence: first <when> every <interval>")
-    first.add_argument("when")
-    first.add_argument("every_literal", metavar="every")
-    first.add_argument("interval")
+    first.add_argument("when", help="delay before the first run, such as +2h5m")
+    first.add_argument("every_literal", metavar="every", help="the literal keyword `every`")
+    first.add_argument("interval", help="repeat interval, such as 5h15m")
     _schedule_common_args(first)
 
     cal = sub.add_parser("cal", help='set a clock-aligned cadence: cal "<expr>"')
-    cal.add_argument("expr")
+    cal.add_argument("expr", help="calendar expression for the run cadence")
     _schedule_common_args(cal)
 
     _schedule_common_args(parser)
@@ -597,7 +537,12 @@ def _pause_resume_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="lupin", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="lupin",
+        description=__doc__,
+        epilog=ROOT_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
     _route_args(sub.add_parser("route", help="pick a {model, effort} for a (category, size) pair"))
     _classify_args(sub.add_parser("classify", help="sort an issue into (category, size)"))
@@ -632,7 +577,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _cmd_group_args(sub.add_parser("cmd", help="send, check, or list cross-machine commands"))
     _agent_args(sub.add_parser("agent", help="run the command-queue poll loop for this machine"))
     run_parser = sub.add_parser("run", help="start one loop or all enabled loops")
-    run_parser.add_argument("repo", nargs="?")
+    run_parser.add_argument("repo", nargs="?", help="repository to run (omit with --all)")
     run_parser.add_argument("--all", action="store_true")
     run_parser.add_argument("--platform", choices=("claude", "omp"))
     run_parser.add_argument("--provider", choices=("openai", "opencode-go"))
@@ -648,8 +593,8 @@ def _build_parser() -> argparse.ArgumentParser:
     fleet_run_parser.add_argument("--json", action="store_true")
     _fleet_connection_args(fleet_run_parser)
     once_parser = sub.add_parser("once", help="start now or schedule a one-off loop run")
-    once_parser.add_argument("when")
-    once_parser.add_argument("repos", nargs="*")
+    once_parser.add_argument("when", help="when to start or schedule the run")
+    once_parser.add_argument("repos", nargs="*", help="repositories to run (default: enabled repos)")
     once_parser.add_argument("--platform", choices=("claude", "omp"))
     once_parser.add_argument("--provider", choices=("openai", "opencode-go"))
     once_parser.add_argument("--model")
@@ -657,7 +602,7 @@ def _build_parser() -> argparse.ArgumentParser:
     once_parser.add_argument("--resume", action="store_true")
     once_parser.add_argument("--json", action="store_true")
     enable_parser = sub.add_parser("enable", help="add a repo to the loop schedule")
-    enable_parser.add_argument("repo")
+    enable_parser.add_argument("repo", help="repository to add to the loop schedule")
     enable_parser.add_argument("--platform", choices=("claude", "omp"), default="claude")
     enable_parser.add_argument(
         "--orchestrator",
@@ -670,16 +615,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="remove this repo's orchestrator profile",
     )
     disable_parser = sub.add_parser("disable", help="remove a repo from the loop schedule")
-    disable_parser.add_argument("repo")
+    disable_parser.add_argument("repo", help="repository to remove from the loop schedule")
     loops_parser = sub.add_parser("loops", help="show Herdr loop state")
-    loops_parser.add_argument("repo", nargs="?")
+    loops_parser.add_argument("repo", nargs="?", help="repository to inspect (default: all loops)")
     loops_parser.add_argument("--machine")
     loops_parser.add_argument("--json", action="store_true")
     _wait_arg(loops_parser)
     _signing_key_arg(loops_parser)
     _fleet_connection_args(loops_parser)
     loop_parser = sub.add_parser("loop", help=argparse.SUPPRESS)
-    loop_parser.add_argument("loop_args", nargs=argparse.REMAINDER)
+    loop_parser.add_argument("loop_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+    # Keep the internal compatibility alias parseable without advertising it in help.
+    sub._choices_actions = [action for action in sub._choices_actions if action.dest != "loop"]
     _stop_args(sub.add_parser("stop", help="stop a repo's loop, on whichever machine runs it"))
     _peek_args(sub.add_parser("peek", help="show recent pane output for a repo's loop"))
     _attach_args(sub.add_parser("attach", help="attach a terminal to a repo's loop session"))
@@ -1823,9 +1770,9 @@ def _exit_for_dispatch(result: dict) -> tuple[int, dict]:
     """Turn a `loops.dispatch_loop_action()` result into an exit code and
     a result dict. Shared by `stop`/`peek`/`schedule`/`pause`/`resume`.
 
-    See cli.py's module docstring for what 0, 1, and 4 mean. Exit code 5
-    (`AmbiguousMachine`) and `attach` are handled elsewhere, before
-    dispatch is even tried.
+    See the root help's exit-code section for what 0, 1, 4, and 5 mean.
+    `AmbiguousMachine` and `attach` are handled elsewhere, before dispatch
+    is even tried.
     """
     if result["mode"] == "local":
         rc = result["returncode"]

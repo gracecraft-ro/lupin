@@ -303,7 +303,9 @@ serializes local start and stop actions. Herdr keeps its own session and
 workspace state.
 The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 The same file also holds each checkout's repo identity, so a restart does
-not pay for `gh` again.
+not pay for `gh` again. If `gh` is missing, Lupin gets the GitHub owner
+and repo name from a standard `origin` URL. It uses that name for claim keys,
+even when the checkout folder has another name.
 
 `gh_cache.py` shares read-only `gh` results across the fleet through Redis.
 `LUPIN_GH_CANONICAL_FETCHER` names the one machine that runs `gh` on a cache
@@ -444,37 +446,35 @@ may name this repo.
 
 ## Pull requests, review, and handoff
 
-Every feature change goes through a pull request to upstream `release/next`.
-Upstream is the `origin` remote. The owner merges `release/next` into `main`
-when they choose. Policy changes go to upstream `main` for the owner to merge.
+Every code change goes through a pull request to upstream `main`. Upstream is
+the `origin` remote. The owner merges approved pull requests into `main`. The
+orchestrator can also merge, when all four conditions in step 2 are true.
 The loop policy is in `docs/delegation-loop.md`.
 
 1. Push the branch with `git push -u origin <branch>`. If your token cannot push
    to upstream, push to the existing fork with `git push -u fork <branch>`.
-   Never push `main` or `release/next`. Do not create a new fork. You may use
-   `/ship`. Check that it does not push `main` or `release/next`. Open the PR on
-   upstream. From a fork branch, add `--head FORK_OWNER:<branch>`:
+   Never push `main`. Do not create a new fork. You may use `/ship`. Check
+   that it does not push `main`. Open the PR on upstream. From a fork branch,
+   add `--head FORK_OWNER:<branch>`:
 
    <!-- markdownlint-disable MD013 -->
    ```sh
-   gh pr create --repo OWNER/REPO --base release/next --title "<title>" --body "Closes #N"
+   gh pr create --repo OWNER/REPO --base main --title "<title>" --body "Closes #N"
    ```
    <!-- markdownlint-enable MD013 -->
 
-   The PR body has `Closes #N`. The merge into `release/next` does not close
-   the issue. The orchestrator (the agent that dispatches and merges work)
-   closes it manually right after the merge into `release/next`.
-   If the push fails, report the branch name and commit range. Do not merge
-   that branch. If the PR opens, report its number to the orchestrator. The
-   orchestrator dispatches `/code-review`.
+   The PR body has `Closes #N`. GitHub closes the issue when the PR merges
+   into the default branch, `main`. If the push fails, report the branch name
+   and commit range. Do not merge that branch. If the PR opens, report its
+   number to the orchestrator. The orchestrator dispatches `/code-review`.
 2. Do not merge your own work. A reviewer who is not the author runs
    `/code-review`. The orchestrator (the agent that dispatches and merges
-   work) merges into `release/next` only when all four are true:
-   1. The PR is open on upstream, `OWNER/REPO`, with base `release/next`.
+   work) merges into `main` only when all four are true:
+   1. The PR is open on upstream, `OWNER/REPO`, with base `main`.
    2. A reviewer approves the current head SHA. The head SHA is the newest
       commit ID on the branch.
-   3. The PR branch contains the current `release/next`. The ancestor check
-      asks git whether one branch contains another. The check is in the
+   3. The PR branch contains the current `main`. The ancestor check asks git
+      whether one branch contains another. The check is in the
       `delegation-loop` skill.
    4. The repo's full gate, as its `AGENTS.md` defines it, passes.
 
@@ -486,7 +486,7 @@ The loop policy is in `docs/delegation-loop.md`.
 
 ### Preview server
 
-This repo has a runnable dashboard. Its preview serves `release/next`.
+This repo has a runnable dashboard. Its preview serves `main`.
 
 - Worktree: `.claude/worktrees/preview`. The skill gives the setup commands.
 - Start command. Run it from the preview worktree:

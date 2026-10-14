@@ -40,7 +40,7 @@ import time
 import redis
 
 from .slots import CoordinatorUnreachable
-from .slots_redis import _auth_failed, _call_with_retry, _client
+from .slots_redis import SCAN_COUNT, _auth_failed, _call_with_retry, _client
 
 PREFIX = "lupin:v1:"
 DEFAULT_TTL = 600.0  # 10 minutes, per docs/redis-schema.md
@@ -257,7 +257,9 @@ def claims_for(
         client = _client(redis_host, redis_port, redis_username, redis_password)
     prefix = f"{PREFIX}claim:"
     try:
-        keys = _call_with_retry(lambda: list(client.scan_iter(match=f"{prefix}*")))
+        keys = _call_with_retry(
+            lambda: list(client.scan_iter(match=f"{prefix}*", count=SCAN_COUNT))
+        )
         wanted = []
         for key in keys:
             target = key[len(prefix) :]

@@ -543,6 +543,19 @@ class PackagedTiersTests(unittest.TestCase):
 
                 self.assertEqual(probes - seen, set())
 
+    def test_packaged_tiers_never_list_fable(self):
+        # Fable needs the user's approval (delegation-loop SKILL.md). No
+        # packaged tier may list it, so no route can pick it. Issue #114.
+        packaged = json.loads(
+            resources.files("lupin").joinpath("model-tiers.json").read_text(encoding="utf-8")
+        )
+        for category, row in packaged.items():
+            if category.startswith("_"):
+                continue
+            for tier_name, entries in row["tiers"].items():
+                for entry in entries:
+                    self.assertNotEqual(entry["model"], "fable", f"{category} {tier_name}")
+
 
 if __name__ == "__main__":
     unittest.main()

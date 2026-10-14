@@ -60,6 +60,29 @@ class BuildRoadmapTests(unittest.TestCase):
             patch.start()
             self.addCleanup(patch.stop)
 
+    def test_claim_uses_canonical_slug_for_enabled_alias_checkout(self):
+        alias = "local-widgets"
+        canonical = "acme/widgets-service"
+        with tempfile.TemporaryDirectory() as code_dir:
+            os.mkdir(os.path.join(code_dir, alias))
+            self._patch(
+                {alias: [_issue(7, "alias issue")]},
+                {"repos": {alias: [{"number": 7, "blockedBy": [], "blocking": []}]},
+                 "cycles": [], "warnings": {}},
+                identity=lambda _path: ("acme", "widgets-service", None),
+            )
+            claims_lookup = mock.Mock(
+                return_value={f"{canonical}#7": {"session": "other-loop#1"}}
+            )
+
+            model = roadmap_cli.build_roadmap(
+                [alias], code_dir=code_dir, claims_lookup=claims_lookup
+            )
+
+        claims_lookup.assert_called_once_with([canonical])
+        self.assertEqual(model["repos"][alias][0]["status"], "claimed")
+        self.assertEqual(model["repos"][alias][0]["claimedBy"], "other-loop#1")
+
     def test_plain_list_marks_ready_blocked_and_claimed(self):
         open_issues = {
             "api-gateway": [

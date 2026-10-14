@@ -46,7 +46,7 @@ class _FakeClient:
         self.values = values
         self.commands = []
 
-    def scan_iter(self, match):
+    def scan_iter(self, match, count=None):
         self.commands.append("SCAN")
         return iter(self.values)
 

@@ -576,7 +576,7 @@ def test_cli_place_json_output(redis_port, flush_redis, tmp_path, capsys, clean_
 
 def test_cli_place_json_no_pick_exits_2(redis_port, flush_redis, tmp_path, capsys, clean_fleet_env):
     """Same "try again later" contract as plain/--explain output (see
-    cli.py's exit-code docstring) -- --json must not silently report 0
+    the root help's exit-code section) -- --json must not silently report 0
     just because it always has a body to print.
     """
     common = [
