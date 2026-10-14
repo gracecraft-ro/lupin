@@ -94,6 +94,7 @@ def test_local_loops_marks_a_missing_running_workspace_for_attention(monkeypatch
         encoding="utf-8",
     )
     monkeypatch.setattr(loop_runtime, "LOOPS_DIR", loops_dir)
+    monkeypatch.setattr(loop_runtime, "_agents", lambda session: [])
     monkeypatch.setattr(loop_runtime, "_server_running", lambda session: True)
     monkeypatch.setattr(loop_runtime, "_find_workspace", lambda session, metadata: None)
 
@@ -104,6 +105,109 @@ def test_local_loops_marks_a_missing_running_workspace_for_attention(monkeypatch
     assert loops[0]["workspace_id"] == "workspace-1"
     assert loops[0]["pane_id"] == "pane-1"
     assert json.loads(path.read_text(encoding="utf-8"))["state"] == "needs_attention"
+
+
+def test_local_loops_groups_herdr_agents_without_metadata(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "missing")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", Path("/code"))
+    monkeypatch.setattr(
+        loop_runtime,
+        "_agents",
+        lambda session: [
+            {
+                "cwd": "/code/bodysmith",
+                "workspace_id": "workspace-1",
+                "pane_id": "w1:p1",
+                "agent_status": "working",
+                "agent": "omp",
+            },
+            {
+                "cwd": "/code/bodysmith",
+                "workspace_id": "workspace-2",
+                "pane_id": "w2:p1",
+                "agent_status": "blocked",
+                "agent": "claude",
+            },
+            {
+                "cwd": "/code/lupin",
+                "workspace_id": "workspace-3",
+                "pane_id": "w3:p1",
+                "agent_status": "idle",
+                "agent": "omp",
+            },
+        ],
+    )
+
+    loops = loop_runtime.local_loops()
+
+    assert [row["repo"] for row in loops] == ["bodysmith", "lupin"]
+    assert loops[0]["state"] == "needs_attention"
+    assert loops[0]["platform"] == "omp"
+    assert [pane["pane_id"] for pane in loops[0]["panes"]] == ["w1:p1", "w2:p1"]
+    assert loops[0]["panes"][0]["agent"] == "omp"
+    assert loops[1]["state"] == "running"
+
+
+
+def test_agent_repo_uses_origin_for_worktree_paths(tmp_path: Path):
+    checkout = tmp_path / "arbitrary-worktree-name"
+    checkout.mkdir()
+    subprocess.run(["git", "init", str(checkout)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(checkout), "remote", "add", "origin", "git@github.com:owner/widgets.git"],
+        check=True,
+        capture_output=True,
+    )
+
+    assert loop_runtime._agent_repo({"cwd": str(checkout)}) == "widgets"
+
+
+def test_local_loops_adds_external_panes_to_saved_loop(monkeypatch, tmp_path: Path):
+    loops_dir = tmp_path / "herdr-loops"
+    loops_dir.mkdir()
+    (loops_dir / "widgets.json").write_text(
+        '{"repo":"widgets","platform":"omp","session":"lupin-loops",'
+        '"state":"running","started_at":"2026-01-01T00:00:00Z"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", loops_dir)
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", Path("/code"))
+    monkeypatch.setattr(
+        loop_runtime,
+        "loop_state",
+        lambda repo: {"repo": repo, "state": "working", "workspace_id": "saved", "pane_id": "saved:p1"},
+    )
+    monkeypatch.setattr(loop_runtime, "_agents", lambda session: [
+        {
+            "cwd": "/code/widgets",
+            "workspace_id": "external",
+            "pane_id": "external:p1",
+            "agent_status": "idle",
+            "agent": "omp",
+        }
+    ])
+
+    loops = loop_runtime.local_loops()
+
+    assert len(loops) == 1
+    assert loops[0]["state"] == "running"
+    assert loops[0]["panes"][0]["pane_id"] == "external:p1"
+
+
+def test_peek_finds_an_external_herdr_agent(monkeypatch):
+    calls = []
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", Path("/code"))
+    monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: None)
+    monkeypatch.setattr(loop_runtime, "_agents", lambda session: [
+        {"cwd": "/code/bodysmith", "pane_id": "w1:p1", "agent_status": "working"}
+    ])
+    monkeypatch.setattr(loop_runtime, "_herdr", lambda session, *args: calls.append((session, args)) or "output")
+
+    assert loop_runtime.peek_loop("bodysmith") == "output"
+    assert calls == [(
+        loop_runtime.SESSION_NAME,
+        ("pane", "read", "w1:p1", "--source", "recent", "--lines", "60", "--format", "text"),
+    )]
 
 
 
@@ -171,6 +275,11 @@ def test_local_loops_keeps_unknown_state_when_herdr_is_down(monkeypatch, tmp_pat
         "loop_state",
         lambda repo: {"repo": repo, "backend": "herdr", "state": "unknown", "session": "lupin-widgets-abc123"},
     )
+
+    def herdr_down(session):
+        raise loop_runtime.HerdrError("Herdr is down")
+
+    monkeypatch.setattr(loop_runtime, "_agents", herdr_down)
 
     assert loop_runtime.local_loops() == [
         {
@@ -1824,6 +1933,7 @@ def test_start_loop_runs_a_second_loop_on_the_same_repo(monkeypatch, tmp_path: P
     assert first["worktree"] != second["worktree"]
     assert Path(second["worktree"]).parent.name == "widgets~2"
     assert launches[1][1][launches[1][1].index("--repo") + 1] == "widgets~2"
+    monkeypatch.setattr(loop_runtime, "_agents", lambda session: [])
     assert sorted(row["repo"] for row in loop_runtime.local_loops()) == ["widgets", "widgets~2"]
     # Removing the second loop's worktree leaves the first loop's alone.
     second_worktree = Path(second["worktree"])

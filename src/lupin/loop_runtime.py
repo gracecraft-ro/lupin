@@ -1516,9 +1516,24 @@ def peek_loop(repo: str, lines: int = 60) -> str:
     if not isinstance(lines, int) or lines < 1 or lines > 5000:
         raise LoopError("lines must be between 1 and 5000")
     metadata = _read_metadata(repo)
+    session = metadata.get("session") if metadata else session_name(repo)
     if not metadata:
-        raise LoopError(f"no Lupin loop state for {repo}")
-    session = metadata.get("session") or session_name(repo)
+        agent = next(
+            (
+                row for row in _agents(session)
+                if _agent_repo(row) == base_repo(repo)
+                and isinstance(row.get("pane_id"), str)
+                and row["pane_id"]
+            ),
+            None,
+        )
+        if agent is None:
+            raise LoopError(f"no Lupin or Herdr agent found for {repo}")
+        pane = agent["pane_id"]
+        return _herdr(
+            session, "pane", "read", pane, "--source", "recent",
+            "--lines", str(lines), "--format", "text",
+        )
     if not _server_running(session):
         raise LoopError(f"Herdr session for {repo} is not running")
     workspace = _find_workspace(session, metadata)
@@ -1602,43 +1617,130 @@ def loop_state(repo: str) -> dict:
     }
 
 
-def local_loops() -> list[dict]:
-    if not LOOPS_DIR.is_dir():
-        return []
-    result = []
-    for path in sorted(LOOPS_DIR.glob("*.json")):
+def _agent_repo(agent: dict) -> str | None:
+    cwd = agent.get("cwd")
+    if not isinstance(cwd, str):
+        return None
+    path = Path(cwd)
+    try:
+        relative = path.relative_to(CODE_DIR)
+    except ValueError:
         try:
-            metadata = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if not isinstance(metadata, dict):
-            continue
-        repo = metadata.get("repo")
-        session = metadata.get("session")
-        if (
-            metadata.get("state") not in {"running", "starting", "needs_attention"}
-            or not isinstance(repo, str)
-            or not isinstance(session, str)
-        ):
-            continue
-        try:
-            state = loop_state(repo)
-        except LoopError:
-            state = {"repo": repo, "backend": "herdr", "state": "unknown", "session": session}
-        if state.get("state") == "stopped":
-            continue
-        result.append({
-            "repo": repo,
-            "platform": metadata.get("platform", "claude"),
-            "state": state.get("state", "unknown"),
-            "since": metadata.get("started_at"),
-            "backend": "herdr",
-            "session": session,
-            "workspace_id": state.get("workspace_id"),
-            "pane_id": state.get("pane_id"),
-        })
-    return result
+            remote = subprocess.run(
+                ["git", "-C", cwd, "remote", "get-url", "origin"],
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if remote.returncode != 0 or not remote.stdout.strip():
+            return None
+        remote_url = remote.stdout.strip()
+        remote_path = remote_url.rsplit(":", 1)[-1] if "://" not in remote_url else remote_url
+        repo = Path(remote_path).name.removesuffix(".git")
+    else:
+        if not relative.parts:
+            return None
+        repo = relative.parts[0]
+    try:
+        return base_repo(validate_repo(repo))
+    except LoopError:
+        return None
 
+
+def _reported_agent_state(status: object) -> str:
+    if not isinstance(status, str):
+        return "unknown"
+    if status in {"idle", "working"}:
+        return "running"
+    if status == "blocked":
+        return "needs_attention"
+    if status == "done":
+        return "done"
+    return "unknown"
+
+
+def local_loops() -> list[dict]:
+    result = []
+    if LOOPS_DIR.is_dir():
+        for path in sorted(LOOPS_DIR.glob("*.json")):
+            try:
+                metadata = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(metadata, dict):
+                continue
+            repo = metadata.get("repo")
+            session = metadata.get("session")
+            if (
+                metadata.get("state") not in {"running", "starting", "needs_attention"}
+                or not isinstance(repo, str)
+                or not isinstance(session, str)
+            ):
+                continue
+            try:
+                state = loop_state(repo)
+            except LoopError:
+                state = {"repo": repo, "backend": "herdr", "state": "unknown", "session": session}
+            if state.get("state") == "stopped":
+                continue
+            result.append({
+                "repo": repo,
+                "platform": metadata.get("platform", "claude"),
+                "state": state.get("state", "unknown"),
+                "since": metadata.get("started_at"),
+                "backend": "herdr",
+                "session": session,
+                "workspace_id": state.get("workspace_id"),
+                "pane_id": state.get("pane_id"),
+            })
+
+    try:
+        agents = _agents(SESSION_NAME)
+    except LoopError:
+        agents = []
+    groups: dict[str, list[dict]] = {}
+    for agent in agents:
+        repo = _agent_repo(agent)
+        if repo:
+            groups.setdefault(repo, []).append(agent)
+
+    for repo, agents_for_repo in groups.items():
+        panes = [
+            {
+                "workspace_id": agent.get("workspace_id"),
+                "pane_id": agent.get("pane_id"),
+                "agent_status": agent.get("agent_status", "unknown"),
+                "agent": agent.get("agent"),
+            }
+            for agent in agents_for_repo
+        ]
+        state = max(
+            (_reported_agent_state(agent.get("agent_status")) for agent in agents_for_repo),
+            key=lambda item: {"needs_attention": 3, "running": 2, "done": 1, "unknown": 0}[item],
+        )
+        existing_rows = [row for row in result if loop_repo(row["repo"]) == repo]
+        if not existing_rows:
+            first = agents_for_repo[0]
+            result.append({
+                "repo": repo,
+                "platform": first.get("agent"),
+                "state": state,
+                "since": first.get("started_at"),
+                "backend": "herdr",
+                "session": SESSION_NAME,
+                "workspace_id": first.get("workspace_id"),
+                "pane_id": first.get("pane_id"),
+                "panes": panes,
+            })
+        else:
+            for existing in existing_rows:
+                existing["panes"] = panes
+                if state != "unknown":
+                    existing["state"] = state
+    return result
 
 def attach_argv(repo: str, machine: str, local_host: str, ssh_target: str | None) -> list[str]:
     repo = validate_repo(repo)
