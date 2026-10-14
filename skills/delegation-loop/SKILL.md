@@ -307,14 +307,16 @@ After the PR opens, report its number to the orchestrator.
 For a visual change, check that the PR has screenshots before you dispatch the
 reviewer. A PR has screenshots when a comment on it shows images from
 `user-attachments`. A `./evidence/` path does not count. A worker whose token
-cannot upload reports the path of each file and its machine. Copy the files
+cannot upload reports the path of each file and its machine. Copy the images
 before you run `lupin stop`, because stop deletes the worktree and `evidence/`
 with it. To copy from another machine, run `mkdir -p ./evidence/<issue-number>`.
 Then run `scp <target>:<absolute path> ./evidence/<issue-number>/`. Take
-`<target>` from `~/.config/lupin/ssh-targets`. Open each file and check it, as
-in step 2 of "Attach screenshots to the PR" in the `ship` skill. Then attach the
-files yourself, with your own token. Write your own `report.md` in the same
+`<target>` from `~/.config/lupin/ssh-targets`. Open each image and check it, as
+in step 2 of "Attach screenshots to the PR" in the `ship` skill. Then attach
+the files yourself, with your own token. Write your own `report.md` in the same
 folder. Use the command in "Attach screenshots to the PR" in the `ship` skill.
+If the upload fails, post the report as a PR comment before `lupin stop`.
+Do not leave it only in the ignored `evidence/<issue-number>/report.md`.
 Do not dispatch the reviewer on a visual PR with no screenshots.
 
 If the worker says it could not capture a screenshot, the PR is blocked on an
@@ -336,8 +338,9 @@ it costs more.
 
 If the review finds a problem, dispatch a `fix` worker with the exact finding.
 Tell it to push with `git push origin <branch>`, as in AGENTS.md item 1, and
-update the same PR. If the finding is about a visual change, tell the worker to
-capture new screenshots. It attaches them after it pushes. See "Attach
+update the same PR. If the fix changes anything a person can see, tell the
+worker to capture fresh screenshots. Do this even when the finding was not
+labeled visual. The worker attaches them after it pushes. See "Attach
 screenshots to the PR" in the `ship` skill. Review the latest PR commit.
 Repeat until the reviewer approves the current head SHA. The head SHA is the
 newest commit ID on the branch.

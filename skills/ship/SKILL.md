@@ -164,13 +164,14 @@ screenshots, follow it. Otherwise follow this section.
    `gh pr view --json number,url --jq '.number, .url'`. The URL is
    `https://github.com/<owner>/<repo>/pull/<number>`. Use that `<owner>/<repo>`.
    Do not use the fork name unless the PR is on the fork.
-2. Open each file. Look for a secret, a token, a private address, and personal
-   data. A public repo shows the image to everyone. If you find one, crop the
-   image or capture it again. Then write the comment in
-   `evidence/<issue-number>/report.md`. Show before and after. For a new
-   screen with no before, show the new screen. Say what the reader should look
-   at. Use the same path in the body and in `--attach`:
-
+2. Open each screenshot. Look for a secret, token, private address, or personal
+   data. If you crop or recapture an image, reopen the final image.
+   Check it again for secrets, tokens, private addresses, and personal data
+   before upload.
+   A public repo shows the image to everyone. Write the comment in
+   `evidence/<issue-number>/report.md`. Show before and after. For a new screen
+   with no before, show the new screen. Say what the reader should look at. Use
+   the same path in the body and in `--attach`:
    ```md
    Before: ![before](./evidence/123/before.png)
    After: ![after](./evidence/123/after.png)
@@ -197,11 +198,13 @@ screenshots, follow it. Otherwise follow this section.
 An upload needs write access to the repo that holds the PR. If the command
 fails with `attaching files requires write access to the repository`, your
 token cannot upload there. A token for a fork can post a plain comment on an
-upstream PR, but it cannot upload. Do not skip the screenshots. Keep the files
-in `evidence/<issue-number>/`. In your report, say that the upload failed. Give
-the PR number, the machine, and the absolute path of each file. The orchestrator
-attaches them with its own token. Lupin deletes `evidence/` when it stops the
-loop, so the orchestrator copies the files first.
+upstream PR, but it cannot upload. Do not skip the screenshots. Keep the image
+files in `evidence/<issue-number>/`. In your report, say that the upload failed.
+Post that report as a PR comment before `lupin stop`; do not leave it only in
+`evidence/<issue-number>/report.md`, which the stop deletes with the worktree.
+Include the PR number, machine, and absolute path of each image so the
+orchestrator can copy and attach the files with its own token. The orchestrator
+must copy the image files before stopping the loop.
 
 GitHub CLI 2.99.0 and newer has `--attach`. Run `gh --version` if the option is
 missing. Upgrade, or report that you cannot attach. Do not skip it silently.
@@ -210,8 +213,10 @@ Attach only a screenshot you opened and checked.
 If you could not capture a screenshot, post a PR comment that says so and why.
 Say so in your report too. The orchestrator then treats the PR as blocked.
 
-Do not attach a file that is not an image, such as a 3D model file. In the PR
-comment, say where it is kept: a link, or the machine and the absolute path.
+Do not attach a non-image file, such as a 3D model. Before `lupin stop`, copy
+it to a durable location outside the worktree. Do not leave its only copy
+under an ignored worktree path. In the PR comment, give the machine and the
+absolute path of the durable copy.
 
 ## Report and release
 
