@@ -11,6 +11,17 @@ compatibility: Requires GitHub CLI, a pull request, and access to the repository
 Review the pull request, not only the issue or a local diff. Read the repo's
 `AGENTS.md`, the linked issue, and the latest PR comments and reviews.
 
+## Name the target
+
+Your brief names the repo, the PR number, and the claim. Pass the repo to every
+command as `--repo OWNER/REPO`. Never use a bare PR number from another repo,
+because two repos can each have a PR with the same number.
+
+The orchestrator holds a Lupin claim on `OWNER/REPO#N` for the length of your
+review. It takes the claim before it dispatches you. Do not claim the PR
+yourself. If the brief names no claim, stop and ask the orchestrator before you
+read the diff.
+
 Use Lupin for issue context when it is configured:
 
 ```sh
@@ -98,7 +109,9 @@ Use very simple English: short sentences and everyday words. Explain each
 technical term the first time you use it. The reader may never have seen this
 code.
 
-Start with `What this change does:`. Write two or three sentences after it.
+Start with a target line: `Target: OWNER/REPO PR #N at head SHA.` Use the full
+repo name and the full head SHA. Then start the next line with `What this change does:`.
+Write two or three sentences after it.
 
 Then list the findings in three groups. Skip an empty group:
 
@@ -127,4 +140,7 @@ End with these lines:
 
 If nothing is found, write `What this change does:`, then `Looks good. Ship.`, then one line on what you checked.
 
-The orchestrator posts the verdict and findings on the PR. It dispatches fixes and runs this review again on the new PR head. It merges only after approval and required checks pass.
+The orchestrator posts the verdict and findings on the PR. It releases the PR
+claim after it posts the verdict. It dispatches fixes and runs this review again
+on the new PR head, with a new claim. It merges only after approval and required
+checks pass.

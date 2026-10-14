@@ -197,13 +197,29 @@ from the local machine, so the two results may differ.
 
 ## Claim and label work
 
-Use the same issue and holder to claim, renew, and release work:
+Use the same target and holder to claim, renew, and release work. The target is
+always `OWNER/REPO#N` with the full repo name. Never pass a bare number. Two
+repos can each have a PR `#599`, and the claim key needs the repo to tell them
+apart.
+
+Issues and pull requests share one number count within a repo. So `#599` names
+one item in that repo. The brief and the ledger still say which kind it is:
+`issue` or `PR`.
+
+Claim an issue when a worker starts its implementation. For a PR, the
+orchestrator claims it before it dispatches a reviewer or a fix worker. It
+releases the claim when that worker's result is posted or the worker stops.
 
 ```sh
-lupin claim OWNER/REPO#123 --holder SESSION
-lupin renew-claim OWNER/REPO#123 --holder SESSION
-lupin release-claim OWNER/REPO#123 --holder SESSION
+lupin claim OWNER/REPO#123 --holder SESSION         # issue 123
+lupin claim OWNER/REPO#599 --holder SESSION         # PR 599, same repo
+lupin renew-claim OWNER/REPO#599 --holder SESSION
+lupin release-claim OWNER/REPO#599 --holder SESSION
 ```
+
+Exit code 2 from `claim` means another holder has the item. Read the holder in
+the error text. Do not dispatch on that item. Exit code 3 means Redis is not
+reachable. Do not dispatch on the item until it is reachable.
 
 By default, Lupin expires a claim after 10 minutes. Use `--ttl SECONDS` to
 change this limit. Renew every 2 minutes while work continues. Each renewal
@@ -211,6 +227,9 @@ starts the timer again. If the claim is not renewed, Redis removes it when the
 timer ends. `lupin reconcile` runs once per call. It releases claims with no
 renewal for 10 minutes, even when `--ttl` is longer. Its schedule sets the
 cleanup delay.
+
+The label and comment steps below apply to issue claims only. A PR claim has no
+label. Record it in the ledger and in the PR verdict.
 
 Lupin does not yet sync claims to GitHub. Issue #43 tracks automatic
 `claimed` label updates. Until it ships, the claim owner must update the issue
