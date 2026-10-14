@@ -940,7 +940,19 @@ def test_route_unknown_category_or_size_is_a_usage_error_not_a_traceback(capsys)
     assert "size-m" in err
 
 
-def test_route_does_not_hide_a_value_error_from_inside_route():
-    with mock.patch.object(cli.route_mod, "route", side_effect=ValueError("bad tiers file")):
-        with pytest.raises(ValueError, match="bad tiers file"):
-            cli.main(["route", "coding", "size-m"])
+def test_route_reports_a_bad_model_tier_file(monkeypatch, tmp_path, capsys):
+    path = tmp_path / "tiers.json"
+    path.write_text(
+        json.dumps({"coding": {"tiers": {"tier1": [{"model": "custom"}]}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LUPIN_MODEL_TIERS", str(path))
+
+    assert cli.main(["route", "coding", "size-m"]) == 2
+
+    error = capsys.readouterr().err
+    assert len(error.splitlines()) == 1
+    assert str(path) in error
+    assert "needs an effort" in error
+
+

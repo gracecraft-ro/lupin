@@ -35,9 +35,7 @@ class DispatchPlanTests(unittest.TestCase):
 
 class DecideTests(unittest.TestCase):
     def test_small_coding_issue_has_model_effort_and_plan(self):
-        # No injected tiers dict -- decide() goes through route.route(),
-        # which falls back to the real model-tiers.json, same as
-        # test_route.py's test_loads_the_real_model_tiers_json.
+        # No injected tiers dict -- decide() uses the configured model-tier file.
         result = review_dispatch.decide("coding", "size-xs")
         self.assertIn("model", result)
         self.assertIn("effort", result)

@@ -401,6 +401,8 @@ per-machine limit or add controls that the current code cannot support.
   for the `/usage` page to add across the fleet.
 - `src/lupin/model_fetch.py` — `fetch-models`: a daily snapshot of model
   IDs and prices per subscription.
+- `src/lupin/model_tiers.py` — loads and validates the configured model-tier
+  file for routing, the Models page, and benchmark fallback.
 - `src/lupin/claims.py` — `claim`/`renew-claim`/`release-claim`: one GitHub
   issue claimed by one host at a time.
 - `src/lupin/ledger.py` — appends and reads shared repository events in Redis.

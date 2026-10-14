@@ -610,7 +610,7 @@ class ModelTierTests(unittest.TestCase):
             "prose": {
                 "source": "LMArena <b>Creative</b> Writing",
                 "last_verified": "2026-10-03",
-                "tiers": {"tier2": [{"model": "a<b", "effort": "x'high"}]},
+                "tiers": {"tier2": [{"model": "a<b", "effort": "high"}]},
                 "note": 'Opus leads both, at "5.5"',
             },
         })
@@ -618,24 +618,30 @@ class ModelTierTests(unittest.TestCase):
 
         self.assertIn("LMArena &lt;b&gt;Creative&lt;/b&gt; Writing", page)
         self.assertIn("a&lt;b", page)
-        self.assertIn("x&#x27;high", page)
         self.assertIn("Opus leads both, at &quot;5.5&quot;", page)
         self.assertNotIn("<b>Creative</b>", page)
 
-    def test_missing_or_malformed_file_reports_instead_of_crashing(self):
-        with mock.patch.object(serve, "MODEL_TIERS_PATH", self.tiers_path + ".missing"):
+    def test_missing_or_bad_model_tier_file_shows_a_clear_error(self):
+        missing = self.tiers_path + ".missing"
+        with mock.patch.object(serve, "MODEL_TIERS_PATH", missing):
             page = serve.render_model_tiers().decode()
-        self.assertIn("unavailable (FileNotFoundError)", page)
-        self.assertIn(self.tiers_path, page)
+        self.assertIn(missing, page)
+        self.assertIn("cannot read model tiers file", page)
 
         self.write_tiers(None, raw="{")
-        self.assertIn("unavailable (JSONDecodeError)", self.render())
+        self.assertIn("cannot read model tiers file", self.render())
 
-        # Valid JSON that is not an object of categories.
         self.write_tiers(None, raw="[1, 2, 3]")
-        self.assertIn("no categories in the file", self.render())
+        page = self.render()
+        self.assertIn("expected a JSON object of categories", page)
+        self.assertIn(self.tiers_path, page)
 
         self.write_tiers({"coding": {"tiers": {"tier0": [{"model": "opus"}]}}})
+        page = self.render()
+        self.assertIn("needs an effort", page)
+        self.assertIn(self.tiers_path, page)
+
+        self.write_tiers({"coding": {"tiers": {"tier0": [{"model": "opus", "effort": "high"}]}}})
         page = self.render()
         self.assertIn("verified -", page)
         self.assertIn("not recorded", page)
@@ -653,6 +659,21 @@ class ModelTierTests(unittest.TestCase):
         )
         for category in categories:
             self.assertIn(f"<h3>{category}</h3>", page)
+
+    def test_custom_model_tiers_path_is_used_and_shown(self):
+        self.write_tiers({
+            "coding": {"tiers": {"tier1": [{"model": "opencode-go/custom", "effort": "high"}]}}
+        })
+        with (
+            mock.patch.dict(os.environ, {"LUPIN_MODEL_TIERS": self.tiers_path}),
+            mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.tiers_path + ".snapshot-missing"),
+            mock.patch.object(serve.model_fetch, "read_shared_snapshot", return_value=None),
+            mock.patch.object(serve.benchmark_fetch, "read_snapshot", return_value=None),
+        ):
+            page = serve.render_model_tiers().decode()
+
+        self.assertIn(f"<code>{self.tiers_path}</code>", page)
+        self.assertIn("opencode-go/custom", page)
 
     def test_model_tiers_route_and_dashboard_link(self):
         state = {"loops": [], "enabled": [], "timers": [], "timer_active": False, "repos": []}
@@ -854,7 +875,7 @@ class AllModelsTableTests(unittest.TestCase):
             return serve.render_model_tiers(sent=sent).decode()
 
     def test_render_uses_fleet_snapshot_timestamp_and_models(self):
-        self.write_tiers({"coding": {"tiers": {}}})
+        self.write_tiers({"coding": {"tiers": {"tier1": [{"model": "sonnet", "effort": "high"}]}}})
         shared = {
             "fetched_at": "2026-10-07T00:00:00+00:00",
             "subscriptions": {
@@ -897,7 +918,7 @@ class AllModelsTableTests(unittest.TestCase):
         self.assertNotIn("no live data", page)
 
     def test_all_models_table_lists_every_subscription_model(self):
-        self.write_tiers({"coding": {"tiers": {}}})
+        self.write_tiers({"coding": {"tiers": {"tier1": [{"model": "sonnet", "effort": "high"}]}}})
         self.write_snapshot({
             "fetched_at": "2026-10-07T00:00:00+00:00",
             "subscriptions": {
@@ -921,7 +942,7 @@ class AllModelsTableTests(unittest.TestCase):
         self.assertIn("Empty cells mean no verified public score is available", page)
 
     def test_model_matrix_uses_category_sources_and_normalizes_perf(self):
-        self.write_tiers({"coding": {"tiers": {}}})
+        self.write_tiers({"coding": {"tiers": {"tier1": [{"model": "sonnet", "effort": "high"}]}}})
         self.write_snapshot({
             "fetched_at": "2026-10-07T00:00:00+00:00",
             "subscriptions": {
@@ -963,7 +984,7 @@ class AllModelsTableTests(unittest.TestCase):
 
 
     def test_missing_benchmark_snapshot_keeps_matrix_blank(self):
-        self.write_tiers({"coding": {"tiers": {}}})
+        self.write_tiers({"coding": {"tiers": {"tier1": [{"model": "sonnet", "effort": "high"}]}}})
         self.write_snapshot({
             "fetched_at": "2026-10-07T00:00:00+00:00",
             "subscriptions": {

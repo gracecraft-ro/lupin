@@ -71,15 +71,14 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from importlib import resources
 
 import redis
 
 from . import model_fetch, slots_redis
+from . import model_tiers as tiers_config
 
 CoordinatorUnreachable = slots_redis.CoordinatorUnreachable
 
-_FALLBACK_TIERS_PATH = str(resources.files("lupin").joinpath("model-tiers.json"))
 REDIS_KEY = f"{slots_redis.PREFIX}benchmark-snapshot"
 LOCK_SLOT = "benchmark-fetch"
 
@@ -169,12 +168,10 @@ def model_ids_for_scoring() -> list[str]:
     if not ids:
         tiers = _read_model_tiers_fallback()
         for category, entry in (tiers or {}).items():
-            if category.startswith("_") or not isinstance(entry, dict):
+            if category.startswith("_"):
                 continue
-            for picks in (entry.get("tiers") or {}).values():
-                for pick in picks if isinstance(picks, list) else []:
-                    if isinstance(pick, dict) and pick.get("model"):
-                        ids.append(pick["model"])
+            for picks in entry["tiers"].values():
+                ids.extend(pick["model"] for pick in picks)
 
     seen: set[str] = set()
     deduped = []
@@ -187,9 +184,8 @@ def model_ids_for_scoring() -> list[str]:
 
 def _read_model_tiers_fallback() -> dict | None:
     try:
-        with open(_FALLBACK_TIERS_PATH, encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, ValueError):
+        return tiers_config.load()
+    except tiers_config.ModelTiersError:
         return None
 
 

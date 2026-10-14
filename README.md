@@ -74,8 +74,30 @@ command stops:
 lupin hold demo --holder me --wait 5 -- echo inside-lease
 ```
 
-The route categories are: `coding`, `general`, `frontend-ui`, `translation`,
-`prose`, `cad-spatial`. They come from `src/lupin/model-tiers.json`.
+The route categories are `coding`, `general`, `frontend-ui`, `translation`,
+`prose`, and `cad-spatial`. If `LUPIN_MODEL_TIERS` is not set, Lupin uses
+the bundled `src/lupin/model-tiers.json` file.
+
+Set `LUPIN_MODEL_TIERS` to a JSON file to use your own model tiers. The
+category selected by `route` must exist in the file. Each category has a
+`tiers` object with one or more of `tier0`, `tier1`, and `tier2`. Each tier
+is a list of ordered `{model, effort}` choices. The first choice is tried
+first. Effort must be `low`, `medium`, `high`, or `xhigh`. You can omit a
+tier. If a route needs it, Lupin uses the next higher tier. Optional fields
+are `source`, `last_verified`, and `note`. A top-level key that starts with
+`_` is ignored. The Models page shows the file path.
+
+```json
+{
+  "coding": {
+    "tiers": {
+      "tier1": [
+        {"model": "opencode-go/glm-5.3", "effort": "high"}
+      ]
+    }
+  }
+}
+```
 
 ## Fleet setup
 
@@ -191,8 +213,6 @@ approve it. `AGENTS.md` gives the full rules.
 
 - There is no license file yet. Until there is one, you have no right to
   copy or change this code.
-- `src/lupin/model-tiers.json` names private hosts of the owner's fleet
-  (for example `bmo`). You cannot replace it without a code change.
 - Some defaults name the owner's machines and user name.
 - Lupin is tested only on Linux. The flake builds for macOS, but loop
   workers need systemd.
