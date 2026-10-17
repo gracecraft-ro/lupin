@@ -1511,6 +1511,16 @@ def write_due_periodic_debriefs(now: datetime | None = None) -> None:
                 print(f"lupin agent: no {period} debrief for {repo}: {exc}", file=sys.stderr)
 
 
+def publish_debrief_digests() -> None:
+    """Write a digest for each new debrief and put both in Redis. A failure only prints a warning."""
+    # Local import: digest -> debrief -> roadmap -> loop_runtime is a cycle.
+    from . import debrief, digest
+
+    host, port, username, password = debrief._redis_connection()
+    connection = dict(redis_host=host, redis_port=port, redis_username=username, redis_password=password)
+    digest.sync(STATE_DIR, connection)
+
+
 def peek_loop(repo: str, lines: int = 60) -> str:
     repo = validate_repo(repo)
     if not isinstance(lines, int) or lines < 1 or lines > 5000:

@@ -4139,3 +4139,65 @@ def test_remove_panel_names_the_real_code_dir(monkeypatch):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _publish_entry(redis_port, machine, repo, name, *, digest_text=None, raw="# Raw\n"):
+    from lupin import digest as digest_mod
+
+    client = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    client.set(
+        digest_mod._key(machine, repo, name),
+        json.dumps({"machine": machine, "repo": repo, "name": name, "raw": raw, "digest": digest_text, "model": "sonnet", "error": None}),
+    )
+
+
+def test_debrief_index_lists_a_debrief_published_by_a_worker(tmp_path, monkeypatch, redis_port, flush_redis):
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(serve.socket, "gethostname", lambda: "pihome")
+    _publish_entry(redis_port, "jesus", "widgets", "20261002-090000.md", digest_text="## Summary\n\nOk.")
+    _publish_entry(redis_port, "ralpha", "gadgets", "20261001-090000.md")
+
+    handler = _get_handler("/debrief", {"redis_host": "127.0.0.1", "redis_port": redis_port})
+    handler.do_GET()
+
+    body = handler.reply.call_args.args[0].decode()
+    assert "href='/debrief?machine=jesus&amp;repo=widgets&amp;file=20261002-090000.md'" in body
+    assert "href='/debrief?machine=ralpha&amp;repo=gadgets&amp;file=20261001-090000.md'" in body
+    assert body.count("no digest") == 1  # Only ralpha's has none.
+
+
+def test_debrief_index_shows_a_local_debrief_once_when_it_is_also_published(tmp_path, monkeypatch, redis_port, flush_redis):
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(serve.socket, "gethostname", lambda: "jesus")
+    _write_debrief_file(tmp_path, "widgets", "20261002-090000.md", "# local\n")
+    _publish_entry(redis_port, "jesus", "widgets", "20261002-090000.md", digest_text="## Summary\n\nOk.")
+
+    handler = _get_handler("/debrief", {"redis_host": "127.0.0.1", "redis_port": redis_port})
+    handler.do_GET()
+
+    body = handler.reply.call_args.args[0].decode()
+    assert body.count("20261002-090000.md") == 1
+    assert "machine=" not in body and "no digest" not in body
+
+
+def test_debrief_page_for_a_worker_debrief_shows_the_digest_above_the_full_text(tmp_path, monkeypatch, redis_port, flush_redis):
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(serve.socket, "gethostname", lambda: "pihome")
+    _publish_entry(redis_port, "jesus", "widgets", "20261002-090000.md", digest_text="## Summary\n\nShipped <b>two</b> fixes.", raw="# Full\n\n- detail\n")
+
+    handler = _get_handler("/debrief?machine=jesus&repo=widgets&file=20261002-090000.md", {"redis_host": "127.0.0.1", "redis_port": redis_port})
+    handler.do_GET()
+
+    body = handler.reply.call_args.args[0].decode()
+    assert body.index("Shipped &lt;b&gt;two&lt;/b&gt; fixes.") < body.index("<h1>Full</h1>")
+    assert "Written on jesus" in body
+
+
+def test_debrief_page_for_a_worker_debrief_that_is_not_published_is_404(tmp_path, monkeypatch, redis_port, flush_redis):
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(serve.socket, "gethostname", lambda: "pihome")
+
+    handler = _get_handler("/debrief?machine=jesus&repo=widgets&file=20261002-090000.md", {"redis_host": "127.0.0.1", "redis_port": redis_port})
+    handler.do_GET()
+
+    assert handler.reply.call_args.args[1] == 404

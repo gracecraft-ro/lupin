@@ -23,6 +23,7 @@ This is the data model `lupin` uses once the `redis` backend exists
 | `gh-cache:<owner>/<repo>:<cache-key>` | string (JSON: `{"data": ...}`), with a TTL | one read-only `gh` lookup's cached result — see Fleet keys below | each machine's own direct `gh` call for the same lookup |
 | `quota-snapshot` | string (JSON), with a TTL | one fleet-wide quota reading per provider — see Fleet keys below | nothing today |
 | `usage-snapshot:<machine>` | string (JSON), with a TTL | one machine's 7-day usage rows — see Fleet keys below | nothing today |
+| `debrief-digest:<machine>:<repo>:<file>` | string (JSON), with a TTL | one debrief's text and its model-written digest — see Fleet keys below | each machine shows only its own debrief files |
 These are new keys for the fleet CLI (issues #6–#14, split from #2) and the
 cross-machine command queue (issue #28, split from #27). They stay under
 `v1`: `v1` is the shape of each key, not the whole file, and adding a key
@@ -366,6 +367,25 @@ The `/usage` page reads all snapshots and adds token and cost totals by
 provider. It shows the publish age and marks a snapshot stale after 5 minutes.
 Each key expires after 24 hours. A missing snapshot is not shown as zero.
 
+### `debrief-digest:<machine>:<repo>:<file>`
+
+`lupin agent` on a worker writes one key for each debrief file. The key holds
+the machine, repo, file name, the debrief text, the digest, the model that wrote
+it, an error text, a try count, and the publish time. Screenshot links in the
+text are replaced with plain words. Redis holds no images.
+
+A model call writes the digest. `lupin route prose size-s` picks the model.
+The agent's digest thread runs this every 5 minutes. It makes at most 3 digests
+in one run, newest debrief first. A debrief past that limit is stored with no
+digest and gets one in a later run. A failed model call adds 1 to the try
+count. After 3 tries the agent stops. A blocked model (no quota) does not add
+to the count. The debrief text is stored in all cases.
+
+The Debriefs page (`/debrief`) reads all keys with `SCAN` and `GET`. A machine
+without a loop, such as PiHome, shows the debriefs of every worker. Each key
+expires after 30 days. The file on the worker stays. The keys need no new ACL
+command.
+
 ## Command queue keys
 
 These back the cross-machine command queue (`lupin cmd send|status|queue`,
@@ -654,6 +674,7 @@ numbers.
 | GitHub data cache (`gh-cache:...`) | n/a — not renewed | 5 min |
 | GitHub fetch lock (`slot:gh-fetch/<owner>/<repo>`) | n/a — held only for one fetch | 2 min |
 | `quota-snapshot` | n/a — not renewed | 24 hours (retention only; freshness is per-provider, 5 min, see above) |
+| `debrief-digest:...` | n/a — written once, rewritten only to add a digest | 30 days |
 | Quota fetch lock (`slot:quota-fetch/<provider>`) | n/a — held only for one fetch, no wait | 1 min |
 
 A command's Redis retention (1h) is not the same thing as how long it's

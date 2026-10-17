@@ -53,6 +53,7 @@ from .slots_redis import CONNECT_TIMEOUT, DEBRIEF_TIMEOUT_S, _call_with_retry, _
 DEFAULT_BATCH = 20  # design: "ZRANGE the oldest 20"
 DEFAULT_POLL_INTERVAL = 2.0
 PERIODIC_CHECK_S = 300.0  # Seconds between checks for due periodic debriefs.
+DIGEST_CHECK_S = 300.0  # Seconds between checks for debriefs that have no digest in Redis.
 EXEC_TIMEOUT_S = 120.0
 # Budget for loop.stop, in seconds. The stop subprocess gets what is left
 # after the command read and the Redis calls after it. See docs/redis-schema.md.
@@ -562,6 +563,12 @@ def run_forever(
     threading.Thread(
         target=_run_periodic_debriefs,
         args=(loop_runtime.write_due_periodic_debriefs, PERIODIC_CHECK_S),
+        daemon=True,
+    ).start()
+    # Digests use a model and can take minutes. They get their own thread so debriefs are not late.
+    threading.Thread(
+        target=_run_periodic_debriefs,
+        args=(loop_runtime.publish_debrief_digests, DIGEST_CHECK_S),
         daemon=True,
     ).start()
     while True:
