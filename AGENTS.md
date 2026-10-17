@@ -238,6 +238,15 @@ fail instead of guessing a hostname.
 To also use these machines in Herdr itself, run `herdr machine add <target>`
 for each one. `herdr machine list` shows the saved machines.
 
+Debriefs stay as files on the worker that wrote them. The agent also puts each
+debrief in Redis with a digest. The digest is a short summary that a model
+writes (`src/lupin/digest.py`). `lupin route prose size-s` picks the model. A
+digest says when data is missing. It does not call missing data an empty
+result. The Debriefs page (`/debrief`) shows the debriefs of all workers, so
+PiHome shows them too. Redis holds text only. A screenshot stays on its worker.
+If no model can run, the debrief shows with no digest and the agent tries again
+(3 tries at most).
+
 `fetch-benchmarks` gets public benchmark scores. It does not run models.
 The lookup worker is a free opencode-go model (`step-5-preview-free`) run
 through `omp -p` with maximum thinking. It reads each model's own
@@ -409,6 +418,8 @@ per-machine limit or add controls that the current code cannot support.
   file for routing, the Models page, and benchmark fallback.
 - `src/lupin/claims.py` — `claim`/`renew-claim`/`release-claim`: one GitHub
   issue claimed by one host at a time.
+- `src/lupin/digest.py` — writes a digest for each debrief and shares both
+  through Redis.
 - `src/lupin/ledger.py` — appends and reads shared repository events in Redis.
 - `src/lupin/machines.py` — `join`/`heartbeat`/`drain`/`undrain`/`machines`:
   the fleet's machine registry.
