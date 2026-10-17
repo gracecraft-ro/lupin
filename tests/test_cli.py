@@ -286,6 +286,7 @@ def test_fleet_run_queues_signed_run_to_worker(redis_port, flush_redis, monkeypa
 
 
 def test_future_once_defaults_to_enabled_repos(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.setenv("LUPIN_LOOP_USER", "loops")
     monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
     monkeypatch.setattr(
         loop_runtime,

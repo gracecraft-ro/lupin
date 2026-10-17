@@ -18,6 +18,7 @@ from lupin.quota import QuotaDuration
 
 
 def test_systemd_run_uses_nixos_sudo_wrapper_when_not_on_path(monkeypatch, tmp_path):
+    monkeypatch.setenv("LUPIN_LOOP_USER", "loops")
     wrapper = tmp_path / "sudo"
     wrapper.touch()
     wrapper.chmod(0o755)
@@ -975,6 +976,7 @@ def test_agent_lookup_matches_lupin_agents_in_the_workspace_only(monkeypatch):
 
 
 def test_machine_server_unit_is_not_named_for_a_repo(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("LUPIN_LOOP_USER", "loops")
     monkeypatch.setattr(loop_runtime, "CODE_DIR", tmp_path)
     launched = []
     monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: launched.append(argv) or (0, ""))
