@@ -1182,3 +1182,35 @@ def test_zrem_error_on_expiry_is_retried_and_command_never_runs(redis_port, flus
     assert raw.zrange("lupin:v1:cmdq:jesus", 0, -1) == []
     audit = [f for _, f in raw.xrange("lupin:v1:cmdlog") if f.get("id") == "expired2" and "state" in f]
     assert [f["state"] for f in audit] == ["expired"]
+
+
+def test_run_forever_starts_a_separate_thread_for_digests(monkeypatch):
+    class Stop(Exception):
+        pass
+
+    names = {}
+    both_started = threading.Event()
+
+    def mark(label):
+        def check():
+            names[label] = threading.current_thread()
+            if len(names) == 2:
+                both_started.set()
+            threading.Event().wait(10)  # A slow check. The other thread must still start.
+
+        return check
+
+    def poll_once(machine, key, **kwargs):
+        # Wait here until both checks are running. A shared thread would never start the second one.
+        assert both_started.wait(10)
+        raise Stop()
+
+    monkeypatch.setattr(agent, "startup_scan", lambda machine, **kwargs: [])
+    monkeypatch.setattr(agent, "poll_once", poll_once)
+    monkeypatch.setattr(loop_runtime, "write_due_periodic_debriefs", mark("debriefs"))
+    monkeypatch.setattr(loop_runtime, "publish_debrief_digests", mark("digests"))
+
+    with pytest.raises(Stop):
+        agent.run_forever("jesus", KEY, poll_interval=0)
+
+    assert names["debriefs"] is not names["digests"]

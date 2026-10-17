@@ -374,7 +374,8 @@ the machine, repo, file name, the debrief text, the digest, the model that wrote
 it, an error text, a try count, and the publish time. Screenshot links in the
 text are replaced with plain words. Redis holds no images.
 
-A model call writes the digest. `lupin route prose size-s` picks the model.
+A model call writes the digest. The model gets no tools and no MCP servers, because the
+text can hold PR titles that other people wrote. `lupin route prose size-s` picks the model.
 The agent's digest thread runs this every 5 minutes. It makes at most 3 digests
 in one run, newest debrief first. A debrief past that limit is stored with no
 digest and gets one in a later run. A failed model call adds 1 to the try
@@ -383,7 +384,9 @@ to the count. The debrief text is stored in all cases.
 
 The Debriefs page (`/debrief`) reads all keys with `SCAN` and `GET`. A machine
 without a loop, such as PiHome, shows the debriefs of every worker. Each key
-expires after 30 days. The file on the worker stays. The keys need no new ACL
+expires after 30 days. The file on the worker stays. The agent skips a debrief
+older than 29 days, so an expired key does not start a new model call.
+The page waits 1 second at most for Redis and shows local debriefs if Redis fails. The keys need no new ACL
 command.
 
 ## Command queue keys
