@@ -182,10 +182,14 @@ Herdr. Only worker machines (for example `jesus` and `ralpha`) run loops.
 Use the dashboard to see all machines. Use Herdr on a worker to see its
 loops.
 
-`loops` reads state from the Herdr API. It reports the agent state, backend,
-session, workspace and pane IDs. It does not infer state from pane text.
-Each machine has one Herdr session, `lupin-loops`, and one Herdr server for
-it. Each run has one workspace in that session. Each workspace gets its
+`loops` reads Herdr's agent list and Lupin's saved loop state. Saved state
+remains visible if Herdr is unavailable. It groups agents by repo and reports
+their panes. `idle` and `working` mean `running`; `blocked` means
+`needs_attention`. `peek` can read a discovered agent pane. The command
+reports backend, session, workspace and pane IDs. It does not infer state
+from pane text.
+Each machine has one Herdr session, `lupin-loops`, and one Herdr server.
+Each run has one workspace in that session. Each workspace gets its
 repo's GitHub token as `GH_TOKEN`. `stop` closes the workspace and leaves
 the session running. The loops on a machine share the server's memory.
 Loops that started before this change keep their own session until you
