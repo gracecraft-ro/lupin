@@ -2,9 +2,8 @@
 
 Moved from ghostbook.nix's hosts/jesus/loopgui/route.py (issue #203, part of
 #198's plan) at source commit 12c007705e63b08c363062487195c8003d5347d3.
-Only the tiers-file lookup changed, from a path relative to this file's
-location in a Nix store checkout, to a packaged resource (see `_load_tiers`
-below) -- the routing logic itself is unchanged.
+The tiers file comes from `LUPIN_MODEL_TIERS` when set. Otherwise, Lupin
+uses the bundled resource.
 
 `category`/`size` come from classify.classify() (issue #183). This looks up
 the matching row in model-tiers.json (issue #182), turns size into a tier,
@@ -30,11 +29,10 @@ itself.
 
 from __future__ import annotations
 
-import json
 import time
-from importlib import resources
 
 from . import pace
+from . import model_tiers as tiers_config
 from . import quota as quota_mod
 
 # Size -> tier. size-xs and size-s: tier0. size-m: tier1. size-l, size-xl
@@ -49,11 +47,11 @@ _SIZE_TO_TIER = {
     "size-?": "tier2",
 }
 
-_TIER_ORDER = ("tier0", "tier1", "tier2")
+_TIER_ORDER = tiers_config.TIER_ORDER
 
 
 class RouteInputError(ValueError):
-    """`route()` got a category or size it does not know."""
+    """Invalid route input or model-tier configuration."""
 
 
 # route()'s models, mapped to the quota-tracked provider that serves them.
@@ -94,9 +92,11 @@ def provider_for_model(model: str) -> str:
     return _PROVIDER_BY_MODEL.get(model, model)
 
 
-def _load_tiers() -> dict:
-    data = resources.files("lupin").joinpath("model-tiers.json").read_text(encoding="utf-8")
-    return json.loads(data)
+def _load_tiers(source: str | None = None) -> dict:
+    try:
+        return tiers_config.load(source)
+    except tiers_config.ModelTiersError as error:
+        raise RouteInputError(str(error)) from error
 
 
 def _resolve_tier(tiers: dict, tier: str) -> str:
@@ -231,24 +231,36 @@ def route(
     function's tier/bmo logic undisturbed by live quota). See
     `_apply_pacing` for what a real `quota_rows` list does to the pick.
 
-    Raises `RouteInputError` for a category or size it does not know.
+    Raises `RouteInputError` for a bad route input or model-tier file.
     """
-    all_tiers = tiers if tiers is not None else _load_tiers()
+    source = tiers_config.path() if tiers is None else None
+    all_tiers = tiers if tiers is not None else _load_tiers(source)
     # Keys that start with "_" (like "_comment") are notes, not categories.
     valid = sorted(key for key in all_tiers if not key.startswith("_"))
     if category not in valid:
-        raise RouteInputError(f"unknown category {category!r}; valid: {', '.join(valid)}")
+        location = f" in {source!r}" if source is not None else ""
+        raise RouteInputError(
+            f"unknown category {category!r}{location}; valid: {', '.join(valid)}"
+        )
     if size not in _SIZE_TO_TIER:
         raise RouteInputError(f"unknown size {size!r}; valid: {', '.join(_SIZE_TO_TIER)}")
     row = all_tiers[category]["tiers"]
 
-    tier = _resolve_tier(row, _SIZE_TO_TIER[size])
-    if (
-        tier == "tier0"
-        and not bmo_available
-        and any(entry["model"].startswith("bmo:") for entry in row["tier0"])
-    ):
-        tier = _resolve_tier(row, "tier1")
+    needed_tier = _SIZE_TO_TIER[size]
+    try:
+        tier = _resolve_tier(row, needed_tier)
+        if (
+            tier == "tier0"
+            and not bmo_available
+            and any(entry["model"].startswith("bmo:") for entry in row["tier0"])
+        ):
+            needed_tier = "tier1"
+            tier = _resolve_tier(row, needed_tier)
+    except KeyError as error:
+        location = f" in {source!r}" if source is not None else ""
+        raise RouteInputError(
+            f"category {category!r}{location} has no tier at or above {needed_tier!r}"
+        ) from error
 
     live_quota_rows = quota_mod.quota_usage() if quota_rows is None else quota_rows
     return _apply_pacing(row, tier, live_quota_rows)

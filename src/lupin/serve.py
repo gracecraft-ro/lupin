@@ -26,7 +26,6 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
@@ -34,6 +33,7 @@ from urllib.parse import parse_qs, quote, urlparse, urlsplit
 import redis
 
 from . import benchmark_catalog, benchmark_fetch, claims, commands, debrief, loop_runtime, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
+from . import model_tiers as tiers_config
 from . import usage_cache
 from .slots import CoordinatorUnreachable
 from .quota import (
@@ -136,12 +136,13 @@ def bind_allowed(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Loopback, or a tailnet address -- see TAILNET_RANGE above."""
     return addr.is_loopback or (addr.version == 4 and addr in TAILNET_RANGE)
 
-# model-tiers.json -- the same file route.py routes a (category, size) pair
-# with. It ships as package data, so read it the same way route.py does.
-MODEL_TIERS_PATH = str(resources.files("lupin").joinpath("model-tiers.json"))
-# The tier keys the data file uses, cheapest first. A category may be
-# missing any of them; route.py escalates a missing tier to the next one up.
-MODEL_TIER_ORDER = ("tier0", "tier1", "tier2")
+# The bundled file is the default. `LUPIN_MODEL_TIERS` can select another file.
+MODEL_TIERS_PATH = tiers_config.default_path()
+MODEL_TIER_ORDER = tiers_config.TIER_ORDER
+
+
+def _model_tiers_path() -> str:
+    return tiers_config.path(MODEL_TIERS_PATH)
 
 # --------------------------------------------------------------------------
 # running read-only probes
@@ -1614,33 +1615,27 @@ def render_usage(*, connection: dict | None = None) -> bytes:
     )
 
 
-def unavailable_tiers(error: Exception) -> list[dict]:
-    return [{
-        "error": f"unavailable ({type(error).__name__})",
-        "source": MODEL_TIERS_PATH,
-    }]
+def unavailable_tiers(error: Exception, source: str) -> list[dict]:
+    return [{"error": str(error), "source": source or tiers_config.SETTING}]
 
 
 def model_tiers() -> list[dict]:
-    """Read MODEL_TIERS_PATH, one row per task category."""
+    """Read and validate the selected model-tier file."""
+    source = _model_tiers_path()
     try:
-        with open(MODEL_TIERS_PATH, encoding="utf-8") as handle:
-            raw = json.load(handle)
-    except (OSError, ValueError) as error:
-        return unavailable_tiers(error)
-    if not isinstance(raw, dict):
-        return [{"error": "no categories in the file", "source": MODEL_TIERS_PATH}]
+        raw = tiers_config.load(source)
+    except tiers_config.ModelTiersError as error:
+        return unavailable_tiers(error, source)
     rows = []
     for category, entry in raw.items():
-        # Keys starting with "_" are file comments, not categories.
-        if category.startswith("_") or not isinstance(entry, dict):
+        # Keys starting with "_" (like "_comment") are notes, not categories.
+        if category.startswith("_"):
             continue
-        tiers = entry.get("tiers")
         rows.append({
             "category": category,
             "source": entry.get("source", "not recorded"),
             "last_verified": entry.get("last_verified", "-"),
-            "tiers": tiers if isinstance(tiers, dict) else {},
+            "tiers": entry["tiers"],
             "note": entry.get("note", ""),
         })
     return rows
@@ -1933,7 +1928,7 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
     body.extend([
         "<h2>Routing by task category</h2>",
         "<p class=dim>Read from <code>"
-        f"{esc(MODEL_TIERS_PATH)}</code>. Each tier is an ordered fallback "
+        f"{esc(_model_tiers_path())}</code>. Each tier is an ordered fallback "
         "chain: the first entry is tried first, then the next. A category "
         "with no entry for a tier escalates to the next tier up. The "
         "&middot; note after each pick is today's live match (issue #16's "

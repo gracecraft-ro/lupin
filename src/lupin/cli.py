@@ -2045,14 +2045,15 @@ def _cmd_resume(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run `_main`. A Redis refusal or ACL denial that no command caught
-    prints one line and exits 3. It never prints a traceback.
-    """
+    """Run `_main`; report Redis and tier-routing errors without tracebacks."""
     try:
         return _main(argv)
     except _REDIS_REFUSED as exc:
         _print_auth_failed(exc, "a Redis step in this command", fleet=True)
         return 3
+    except route_mod.RouteInputError as exc:
+        print(f"lupin: {exc}", file=sys.stderr)
+        return 2
 
 
 def _main(argv: list[str] | None = None) -> int:

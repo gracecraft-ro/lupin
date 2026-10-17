@@ -65,8 +65,7 @@ def decide(
     mode: str = "same-unit",
 ) -> dict:
     """Route a (category, size) pair and attach its dispatch plan."""
-    # route.route() reads model-tiers.json as packaged data, so there is no
-    # tiers path to pass here.
+    # `route.route()` reads the configured model-tier file.
     choice = route.route(
         category,
         size,

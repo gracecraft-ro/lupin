@@ -72,14 +72,14 @@ class ModelIdsForScoringTests(unittest.TestCase):
                 "_comment": "not a category",
                 "coding": {
                     "tiers": {
-                        "tier0": [{"model": "bmo:qwen"}],
-                        "tier1": [{"model": "sonnet"}, {"model": "sonnet"}],
+                        "tier0": [{"model": "bmo:qwen", "effort": "low"}],
+                        "tier1": [{"model": "sonnet", "effort": "medium"}, {"model": "sonnet", "effort": "high"}],
                     }
                 },
             }, handle)
         with (
             mock.patch.object(model_fetch, "SNAPSHOT_FILE", os.path.join(self.tempdir.name, "missing.json")),
-            mock.patch.object(benchmark_fetch, "_FALLBACK_TIERS_PATH", self.tiers_path),
+            mock.patch.dict(os.environ, {"LUPIN_MODEL_TIERS": self.tiers_path}),
         ):
             ids = benchmark_fetch.model_ids_for_scoring()
         self.assertEqual(ids, ["bmo:qwen", "sonnet"])
@@ -94,10 +94,10 @@ class ModelIdsForScoringTests(unittest.TestCase):
         with open(self.snapshot_path, "w", encoding="utf-8") as handle:
             handle.write("{not json")
         with open(self.tiers_path, "w", encoding="utf-8") as handle:
-            json.dump({"coding": {"tiers": {"tier1": [{"model": "opus"}]}}}, handle)
+            json.dump({"coding": {"tiers": {"tier1": [{"model": "opus", "effort": "high"}]}}}, handle)
         with (
             mock.patch.object(model_fetch, "SNAPSHOT_FILE", self.snapshot_path),
-            mock.patch.object(benchmark_fetch, "_FALLBACK_TIERS_PATH", self.tiers_path),
+            mock.patch.dict(os.environ, {"LUPIN_MODEL_TIERS": self.tiers_path}),
         ):
             ids = benchmark_fetch.model_ids_for_scoring()
         self.assertEqual(ids, ["opus"])
@@ -106,7 +106,7 @@ class ModelIdsForScoringTests(unittest.TestCase):
         missing = os.path.join(self.tempdir.name, "missing.json")
         with (
             mock.patch.object(model_fetch, "SNAPSHOT_FILE", missing),
-            mock.patch.object(benchmark_fetch, "_FALLBACK_TIERS_PATH", missing),
+            mock.patch.dict(os.environ, {"LUPIN_MODEL_TIERS": missing}),
         ):
             self.assertEqual(benchmark_fetch.model_ids_for_scoring(), [])
 
