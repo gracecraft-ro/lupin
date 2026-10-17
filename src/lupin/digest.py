@@ -111,7 +111,11 @@ def pick_model() -> tuple[str, str]:
 
 
 def _argv(model: str, effort: str, prompt: str) -> list[str]:
-    """A `provider/model` selector runs with `omp`. A bare name is a Claude alias. No tools are allowed."""
+    """A `provider/model` selector runs with `omp`. A bare name is a Claude alias. No tools are allowed.
+
+    `claude --tools` takes a list. A flag must follow `--tools ""`, or `claude`
+    reads the prompt as a tool name and fails with "Input must be provided".
+    """
     if "/" in model:
         return [
             "omp", "-p", "--model", model, "--thinking", effort, "--tools", "",
