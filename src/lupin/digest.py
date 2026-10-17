@@ -1,0 +1,330 @@
+"""Readable digest of each debrief, shared through Redis (issue #105).
+
+A worker writes a debrief file (`debrief.py`). The files stay on that worker.
+This module does two jobs:
+
+1. A model reads one debrief and writes a short digest. `lupin route` picks
+   the model. The worker runs it (`claude -p` or `omp -p`).
+2. The worker puts the debrief text and its digest in Redis. Any machine that
+   runs `lupin serve`, PiHome included, reads them from there.
+
+`sync` does both jobs for each local debrief that Redis does not have yet.
+The agent calls it on a timer. A failure never stops the agent.
+
+Screenshots are not copied. Redis holds text only. The copy of a debrief in
+Redis names each screenshot and says which machine keeps it.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+import redis
+
+from . import debrief, route, slots_redis
+
+KEY_PREFIX = f"{slots_redis.PREFIX}debrief-digest:"
+KEY_TTL_S = 30 * 24 * 60 * 60  # Redis drops an entry after 30 days. The file on the worker stays.
+# `sync` ignores a debrief older than this. Its Redis entry may have expired, and a
+# missing entry would start a new model call every 30 days for every old debrief.
+SYNC_MAX_AGE_S = KEY_TTL_S - 24 * 60 * 60
+CATEGORY = "prose"  # `lupin route` category. Prose is what a digest is.
+SIZE = "size-s"
+LLM_TIMEOUT_S = 300.0
+RAW_MAX_BYTES = 60_000  # More UTF-8 bytes than this are cut. One argument may be 128 KB on Linux.
+MAX_NEW_PER_SYNC = 3  # Model calls in one `sync`. The rest wait for the next one.
+MAX_TRIES = 3  # After this many failed model calls, `sync` stops trying for that debrief.
+
+_REDIS_ERRORS = (redis.exceptions.RedisError,)  # Includes an ACL denial, which is not a ConnectionError.
+MACHINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_FENCE_RE = re.compile(r"^```[a-z]*\n(.*)\n```$", re.DOTALL)
+
+PROMPT = """\
+You write a short digest of one software project debrief. A person with no
+time reads your digest. The debrief is below between the lines BEGIN and END.
+
+Rules:
+- Use only facts that are in the debrief. Do not add facts.
+- A section may say that data was not collected, timed out, or failed. Then
+  say in the digest that the data is missing. Do not say that nothing
+  happened. Missing data is not an empty result.
+- Write short, plain sentences. Do not use jargon.
+- Output markdown with only these parts: `# ` for the title, `## ` for
+  headings, `- ` for list items, and plain paragraphs. No tables, no links,
+  no images, no code fences.
+- Use these headings, in this order. Leave out a heading that has no content:
+  `## Summary` (two or three sentences), `## Shipped`, `## Needs attention`,
+  `## Next`.
+
+Debrief for repo `{repo}`, file `{name}`:
+
+BEGIN
+{raw}
+END
+"""
+
+
+class DigestError(Exception):
+    """The model could not write a digest. The debrief is still published."""
+
+
+class DigestBlocked(DigestError):
+    """No model has quota now. This does not count as a failed try."""
+
+
+def _client(connection: dict):
+    """Redis client from a connection dict. A missing key means the default: localhost, no login.
+
+    It waits 1 second at most and does not retry, so a page does not hang when Redis is down.
+    """
+    return slots_redis.debrief_client(
+        connection.get("redis_host"),
+        connection.get("redis_port"),
+        connection.get("redis_username"),
+        connection.get("redis_password"),
+    )
+
+
+def _key(machine: str, repo: str, name: str) -> str:
+    return f"{KEY_PREFIX}{machine}:{repo}:{name}"
+
+
+def strip_images(text: str, machine: str) -> str:
+    """Replace each image link with plain text. The image file stays on `machine`."""
+    return debrief.IMAGE_LINK_RE.sub(
+        lambda m: f"({m.group(1) or 'screenshot'}: kept on {machine})", text
+    )
+
+
+def pick_model() -> tuple[str, str]:
+    """Return (model, effort) from `lupin route`. Raise `DigestError` if none can run."""
+    try:
+        choice = route.route(CATEGORY, SIZE)
+    except Exception as exc:  # route reads live quota. Any failure there is not fatal.
+        raise DigestError(f"route failed: {exc}") from exc
+    if "wait_seconds" in choice:
+        raise DigestBlocked("every model for digests is out of quota")
+    model = choice["model"]
+    if model.startswith(("bmo:", "local:")):
+        raise DigestError(f"model {model} cannot run a digest here")
+    return model, choice["effort"]
+
+
+def _argv(model: str, effort: str, prompt: str) -> list[str]:
+    """A `provider/model` selector runs with `omp`. A bare name is a Claude alias.
+
+    The prompt holds text that other people wrote (PR titles, commit messages). So the
+    model gets no tools: no built-in tools, no MCP servers, no extensions, no skills.
+    `--auto-approve` is not used, because no tool call should happen.
+    `omp` has no flag that turns MCP off. It may still connect MCP servers, but with
+    no `--auto-approve` a tool call has no one to approve it. `route` gives a Claude
+    alias for this category today, so the `omp` branch is not used yet.
+
+    `claude --tools` takes a list. A flag must follow `--tools ""`, or `claude`
+    reads the prompt as a tool name and fails with "Input must be provided".
+    """
+    if "/" in model:
+        return [
+            "omp", "-p", "--model", model, "--thinking", effort, "--no-tools",
+            "--no-extensions", "--no-skills", "--no-rules", "--no-session",
+            "--max-time", str(int(LLM_TIMEOUT_S)), prompt,
+        ]
+    return [
+        "claude", "-p", "--model", model, "--effort", effort, "--tools", "",
+        "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", prompt,
+    ]
+
+
+def make_digest(repo: str, name: str, raw: str) -> tuple[str, str]:
+    """Return (digest markdown, model). Raise `DigestError` on any failure."""
+    model, effort = pick_model()
+    cut = raw.encode("utf-8")[:RAW_MAX_BYTES].decode("utf-8", errors="ignore")
+    prompt = PROMPT.format(repo=repo, name=name, raw=cut)
+    argv = _argv(model, effort, prompt)
+    try:
+        with tempfile.TemporaryDirectory() as cwd:
+            proc = subprocess.run(
+                argv, capture_output=True, text=True, timeout=LLM_TIMEOUT_S, cwd=cwd
+            )
+    except FileNotFoundError:
+        raise DigestError(f"{argv[0]} not found") from None
+    except subprocess.TimeoutExpired:
+        raise DigestError(f"{argv[0]} timed out after {LLM_TIMEOUT_S:.0f}s") from None
+    except (OSError, ValueError) as exc:  # No permission, argument too long, a NUL byte in the prompt.
+        raise DigestError(f"{argv[0]} could not start: {exc}") from None
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[:300]
+        raise DigestError(f"{argv[0]} exited {proc.returncode}: {detail}")
+    text = proc.stdout.strip()
+    fenced = _FENCE_RE.match(text)
+    if fenced:
+        text = fenced.group(1).strip()
+    if not text:
+        raise DigestError(f"{argv[0]} gave no text")
+    return text, model
+
+
+def _publish(client, machine: str, repo: str, name: str, raw: str, **fields) -> dict:
+    entry = {
+        "machine": machine,
+        "repo": repo,
+        "name": name,
+        "raw": strip_images(raw, machine),
+        "digest": None,
+        "model": None,
+        "error": None,
+        "tries": 0,
+        "published_at": datetime.now(timezone.utc).isoformat(),
+        **fields,
+    }
+    if entry["digest"]:
+        entry["digest"] = strip_images(entry["digest"], machine)
+    slots_redis._call_with_retry(
+        lambda: client.set(_key(machine, repo, name), json.dumps(entry), ex=KEY_TTL_S)
+    )
+    return entry
+
+
+def _valid(entry) -> bool:
+    """True if `entry` is a well-formed stored entry. Redis is shared, so check every field."""
+    if not isinstance(entry, dict):
+        return False
+    texts = all(isinstance(entry.get(f), str) for f in ("machine", "repo", "name", "raw"))
+    optional = all(entry.get(f) is None or isinstance(entry[f], str) for f in ("digest", "model", "error"))
+    tries = entry.get("tries", 0)
+    return bool(
+        texts
+        and optional
+        and isinstance(tries, int)
+        and not isinstance(tries, bool)
+        and tries >= 0
+        and MACHINE_RE.fullmatch(entry["machine"])
+        and debrief.REPO_RE.fullmatch(entry["repo"])
+        and debrief.FILE_RE.fullmatch(entry["name"])
+    )
+
+
+def _parse(raw) -> dict | None:
+    if raw is None:
+        return None
+    try:
+        entry = json.loads(raw)
+    except ValueError:
+        return None
+    return entry if _valid(entry) else None
+
+
+def _get(client, key: str) -> dict | None:
+    return _parse(slots_redis._call_with_retry(lambda: client.get(key)))
+
+
+def _too_old(name: str, now: datetime) -> bool:
+    """True if the debrief is too old to publish. Its Redis entry would expire and come back."""
+    try:
+        when = datetime.strptime(name[:15], debrief.STAMP_FORMAT).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return True
+    return (now - when).total_seconds() > SYNC_MAX_AGE_S
+
+
+def sync(
+    root: Path,
+    connection: dict,
+    *,
+    machine: str | None = None,
+    limit: int = MAX_NEW_PER_SYNC,
+    make=None,
+    now: datetime | None = None,
+) -> int:
+    """Publish each local debrief that Redis lacks, or that has no digest yet.
+
+    Newest debriefs go first. At most `limit` model calls run. A debrief past
+    that limit is published without a digest and gets one in a later call.
+    A debrief older than `SYNC_MAX_AGE_S` is skipped. A problem with one debrief
+    is printed and does not stop the others. A Redis problem ends the call.
+    Returns the number of digests written.
+    """
+    machine = machine or socket.gethostname()
+    make = make or make_digest  # Looked up here, not in the signature, so a test can replace it.
+    now = now or datetime.now(timezone.utc)
+    written = 0
+    calls = 0
+    blocked = False
+    try:
+        client = _client(connection)
+        for repo, name in debrief.list_debriefs(root):
+            if _too_old(name, now):
+                continue
+            key = _key(machine, repo, name)
+            try:
+                current = _get(client, key)
+                if current and (current.get("digest") or current.get("tries", 0) >= MAX_TRIES):
+                    continue
+                raw = debrief.read_debrief(root, repo, name)
+                tries = current.get("tries", 0) if current else 0
+                if blocked or calls >= limit:
+                    if current is None:
+                        _publish(client, machine, repo, name, raw)
+                    continue
+                calls += 1
+                try:
+                    text, model = make(repo, name, raw)
+                except DigestBlocked as exc:
+                    blocked = True  # Every other call would be blocked too.
+                    _publish(client, machine, repo, name, raw, error=str(exc), tries=tries)
+                except DigestError as exc:
+                    _publish(client, machine, repo, name, raw, error=str(exc), tries=tries + 1)
+                else:
+                    _publish(client, machine, repo, name, raw, digest=text, model=model, tries=tries + 1)
+                    written += 1
+            except _REDIS_ERRORS:
+                raise
+            except Exception as exc:  # One bad debrief must not stop the older ones.
+                print(f"lupin digest: skipped {repo}/{name}: {exc}", file=sys.stderr)
+    except _REDIS_ERRORS as exc:
+        print(f"lupin digest: Redis problem: {exc}", file=sys.stderr)
+    return written
+
+
+def read_all(**connection) -> list[dict]:
+    """Return every published entry, newest first. Return an empty list if Redis fails."""
+    try:
+        client = _client(connection)
+        keys = slots_redis._call_with_retry(
+            lambda: list(client.scan_iter(match=f"{KEY_PREFIX}*", count=slots_redis.SCAN_COUNT))
+        )
+        if not keys:
+            return []
+
+        def fetch():
+            pipe = client.pipeline(transaction=False)  # One round trip for all keys.
+            for key in keys:
+                pipe.get(key)
+            return pipe.execute()
+
+        values = slots_redis._call_with_retry(fetch)
+    except _REDIS_ERRORS:
+        return []
+    entries = [entry for entry in map(_parse, values) if entry]
+    return sorted(entries, key=lambda e: (debrief._newest_first((e["repo"], e["name"])), e["machine"]), reverse=True)
+
+
+def read_one(machine: str, repo: str, name: str, **connection) -> dict | None:
+    """Return one published entry, or None."""
+    if not (
+        MACHINE_RE.fullmatch(machine or "")
+        and debrief.REPO_RE.fullmatch(repo or "")
+        and debrief.FILE_RE.fullmatch(name or "")
+    ):
+        return None
+    try:
+        return _get(_client(connection), _key(machine, repo, name))
+    except _REDIS_ERRORS:
+        return None

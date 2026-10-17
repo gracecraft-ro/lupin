@@ -32,7 +32,7 @@ from urllib.parse import parse_qs, quote, urlparse, urlsplit
 
 import redis
 
-from . import benchmark_catalog, benchmark_fetch, claims, commands, debrief, loop_runtime, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
+from . import benchmark_catalog, benchmark_fetch, claims, commands, debrief, digest, loop_runtime, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
 from . import model_tiers as tiers_config
 from . import usage_cache
 from .slots import CoordinatorUnreachable
@@ -2808,11 +2808,42 @@ def render_loop_fullscreen(entry: dict, tail: str | None, lines: int, group: str
     ).encode("utf-8")
 
 
-def render_debrief_index(items: list[tuple[str, str]]) -> bytes:
+def debrief_items(root: Path, connection: dict) -> list[dict]:
+    """List local debriefs and debriefs that workers published to Redis, newest first.
+
+    A debrief that is both local and published shows once, as local.
+    `has_digest` is True when a model wrote a digest for it.
+    """
+    here = socket.gethostname()
+    published = digest.read_all(**connection)
+    digested = {(e["machine"], e["repo"], e["name"]) for e in published if e.get("digest")}
+    items = [
+        {"repo": repo, "name": name, "machine": None, "has_digest": (here, repo, name) in digested}
+        for repo, name in debrief.list_debriefs(root)
+    ]
+    local = {(i["repo"], i["name"]) for i in items}
+    for entry in published:
+        if entry["machine"] == here and (entry["repo"], entry["name"]) in local:
+            continue
+        items.append(
+            {"repo": entry["repo"], "name": entry["name"], "machine": entry["machine"], "has_digest": bool(entry.get("digest"))}
+        )
+    return sorted(items, key=lambda i: (debrief._newest_first((i["repo"], i["name"])), i["machine"] or ""), reverse=True)
+
+
+def render_debrief_index(items: list[dict]) -> bytes:
+    def link(item: dict) -> str:
+        query = f"repo={quote(item['repo'], safe='')}&amp;file={quote(item['name'], safe='')}"
+        if item["machine"]:
+            query = f"machine={quote(item['machine'], safe='')}&amp;{query}"
+        return f"/debrief?{query}"
+
     rows = "".join(
-        f"<li><a href='/debrief?repo={quote(repo, safe='')}&amp;file={quote(name, safe='')}'>"
-        f"{esc(repo)}</a> <span class=dim>{esc(_debrief_stamp(name))}</span></li>"
-        for repo, name in items
+        f"<li><a href='{link(item)}'>{esc(item['repo'])}</a> "
+        f"<span class=dim>{esc(_debrief_stamp(item['name']))}"
+        f"{' &middot; ' + esc(item['machine']) if item['machine'] else ''}"
+        f"{'' if item['has_digest'] else ' &middot; no digest'}</span></li>"
+        for item in items
     )
     listing = f"<ul>{rows}</ul>" if rows else "<p class=dim>No debriefs yet.</p>"
     return page(
@@ -3139,22 +3170,43 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_debrief(self, query: dict) -> None:
         root = Path(STATE_DIR)
+        connection = self.fleet_connection
         repo = (query.get("repo") or "").strip()
         name = (query.get("file") or "").strip()
         if not repo and not name:
-            self.reply(render_debrief_index(debrief.list_debriefs(root)))
+            self.reply(render_debrief_index(debrief_items(root, connection)))
             return
-        try:
-            markdown = debrief.read_debrief(root, repo, name)
-        except debrief.DebriefError:
+        here = socket.gethostname()
+        machine = (query.get("machine") or "").strip() or here
+        entry = digest.read_one(machine, repo, name, **connection)
+        markdown = None
+        if machine == here:
+            try:
+                markdown = debrief.read_debrief(root, repo, name)
+            except debrief.DebriefError:
+                pass
+        if markdown is None and entry:
+            markdown = entry["raw"]
+        if markdown is None:
             self.reply(render_error("no such debrief"), 404)
             return
+        summary = ""
+        if entry and entry.get("digest"):
+            summary = (
+                f"<div class=debrief>{debrief.render_html(entry['digest'], repo)}</div>"
+                f"<p class=dim>Digest by {esc(str(entry.get('model') or 'a model'))}. "
+                "The full debrief is below.</p><hr>"
+            )
+        elif entry and entry.get("error"):
+            summary = f"<p class=dim>No digest: {esc(str(entry['error']))}</p>"
+        remote_note = f"<p class=dim>Written on {esc(machine)}. Screenshots stay on that machine.</p>" if machine != here else ""
         self.reply(
             page(
                 f"Debrief {repo}",
                 "<header><h1>Debrief</h1><span class=sp></span>"
                 "<a href='/debrief'>all debriefs</a></header>"
-                f"<div class=card><div class=debrief>{debrief.render_html(markdown, repo)}</div></div>",
+                f"<div class=card>{remote_note}{summary}"
+                f"<div class=debrief>{debrief.render_html(markdown, repo)}</div></div>",
                 debrief.CSS,
                 active="debriefs",
             )
