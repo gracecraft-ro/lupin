@@ -278,6 +278,9 @@ Give each worker a short brief with:
 - Claim or quest ID.
 - Machine, absolute worktree path, and branch.
 - Required tests and smoke checks.
+- For a visual change: attach before and after screenshots to the PR. For a new
+  screen, attach the new screen. See "Attach screenshots to the PR" in the
+  `ship` skill.
 
 Tell implementation workers to follow `AGENTS.md`, rule 1 under "Pull requests,
 review, and handoff". Do not repeat the `/ship` implementation checklist.
@@ -389,7 +392,9 @@ lupin resume --machine MACHINE
 ```
 
 `peek` reads output. `attach` opens the loop terminal. The other commands
-control the loop or its schedule.
+control the loop or its schedule. Before you run `lupin stop` on a loop whose PR
+has screenshots to copy, copy its `evidence/` files first. See "Review and merge
+each pull request".
 
 `herdr --machine MACHINE` must come before the subcommand on every command,
 including the discovery command. It cannot be used with `--session` or
@@ -431,6 +436,25 @@ branch.
 
 After the PR opens, report its number to the orchestrator.
 
+For a visual change, check that the PR has screenshots before you dispatch the
+reviewer. A PR has screenshots when a comment on it shows images from
+`user-attachments`. A `./evidence/` path does not count. A worker whose token
+cannot upload reports the path of each file and its machine. Copy the images
+before you run `lupin stop`, because stop deletes the worktree and `evidence/`
+with it. To copy from another machine, run `mkdir -p ./evidence/<issue-number>`.
+Then run `scp <target>:<absolute path> ./evidence/<issue-number>/`. Take
+`<target>` from `~/.config/lupin/ssh-targets`. Open each image and check it, as
+in step 2 of "Attach screenshots to the PR" in the `ship` skill. Then attach
+the files yourself, with your own token. Write your own `report.md` in the same
+folder. Use the command in "Attach screenshots to the PR" in the `ship` skill.
+If the upload fails, post the report as a PR comment before `lupin stop`.
+Do not leave it only in the ignored `evidence/<issue-number>/report.md`.
+Do not dispatch the reviewer on a visual PR with no screenshots.
+
+If the worker says it could not capture a screenshot, the PR is blocked on an
+owner decision. Report the PR number and the reason in the handoff. Ask the
+owner how to go on.
+
 Use `lupin review-route --category CATEGORY --size SIZE --mode separate` for
 a reviewer recommendation. Compare it with the issue's implementation route
 and the worker's model tier.
@@ -445,8 +469,7 @@ Never dispatch Fable without the user's approval. Use Opus sparingly because
 it costs more.
 
 If the review finds a problem, dispatch a `fix` worker with the exact finding.
-Tell it to push as in "Pull requests come first", and update the same PR.
-Review the latest PR commit.
+Tell it to push as in "Pull requests come first", and update the same PR. If the fix changes anything a person can see, tell the worker to capture fresh screenshots. Do this even when the finding was not labeled visual. The worker attaches them after it pushes. See "Attach screenshots to the PR" in the `ship` skill. Review the latest PR commit.
 Repeat until the reviewer approves the current head SHA. The head SHA is the
 newest commit ID on the branch.
 The orchestrator (the agent that dispatches and merges work) posts the verdict
@@ -609,9 +632,10 @@ Use `.loop/loop-state.json` only when a ledger command exits 3. The
 and that file.
 
 A worker's task ends when its issue is merged into `main`. A task also
-ends when it is blocked on an owner decision. A pull request that waits for
-review is not blocked. The orchestrator dispatches the review and any fix. The
-fix goes on the same branch.
+ends when it is blocked on an owner decision. A visual PR that cannot get
+screenshots is blocked. A pull request that waits for review is not blocked.
+The orchestrator dispatches the review and any fix. The fix goes on the same
+branch.
 
 "Blocked" means an owner decision is needed. An example is a model-routing
 policy change.
