@@ -242,8 +242,11 @@ Debriefs stay as files on the worker that wrote them. The agent also puts each
 debrief in Redis with a digest. The digest is a short summary that a model
 writes (`src/lupin/digest.py`). `lupin route prose size-s` picks the model. A
 digest says when data is missing. It does not call missing data an empty
-result. The Debriefs page (`/debrief`) shows the debriefs of all workers, so
-PiHome shows them too. Redis holds text only. A screenshot stays on its worker.
+result. A period with no change gets no digest (the page says "no changes").
+A digest is a short story with up to 3 pictures, not a list of pull requests.
+The Debriefs page (`/debrief`) shows the debriefs of all workers, so
+PiHome shows them too. Redis holds text only. A screenshot file stays on its
+worker. A GitHub attachment image is shown through the dashboard.
 If no model can run, the debrief shows with no digest and the agent tries again
 (3 tries at most).
 

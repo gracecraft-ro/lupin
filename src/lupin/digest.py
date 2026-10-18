@@ -28,7 +28,7 @@ from pathlib import Path
 
 import redis
 
-from . import debrief, route, slots_redis
+from . import debrief, roadmap, route, slots_redis
 
 KEY_PREFIX = f"{slots_redis.PREFIX}debrief-digest:"
 KEY_TTL_S = 30 * 24 * 60 * 60  # Redis drops an entry after 30 days. The file on the worker stays.
@@ -41,27 +41,47 @@ LLM_TIMEOUT_S = 300.0
 RAW_MAX_BYTES = 60_000  # More UTF-8 bytes than this are cut. One argument may be 128 KB on Linux.
 MAX_NEW_PER_SYNC = 3  # Model calls in one `sync`. The rest wait for the next one.
 MAX_TRIES = 3  # After this many failed model calls, `sync` stops trying for that debrief.
+# A debrief with only `- None.` in all of these sections shows a period with no change.
+# `build_markdown` writes `- None.` only when it collected that data. A gap is never "None".
+QUIET_SECTIONS = ("Shipped", "Follow-up tasks", "Risk", "Evidence")
 
 _REDIS_ERRORS = (redis.exceptions.RedisError,)  # Includes an ACL denial, which is not a ConnectionError.
 MACHINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _FENCE_RE = re.compile(r"^```[a-z]*\n(.*)\n```$", re.DOTALL)
 
-PROMPT = """\
-You write a short digest of one software project debrief. A person with no
-time reads your digest. The debrief is below between the lines BEGIN and END.
+MAX_IMAGES = 3  # Most images in one digest.
 
-Rules:
+PROMPT = """\
+You write a short digest of one software project debrief for the project owner.
+The owner has no time. They do not want a list of pull requests. They can read
+the debrief for that. They want the story: what changed, and why it matters.
+
+Facts counted by a program (trust these numbers): {counts}
+
+How to write it:
+- Start with a title line (`# `) that says the main thing that happened in
+  plain words. Make it specific and lively. Do not start it with "Digest".
+- Then write one or two short paragraphs, 80 to 120 words in all (not counting the "Heads up:" line). Put the
+  work into two to four themes (for example "PDF export fixes", "test
+  repairs"). Say what each theme means for the product or the people who use it.
+- Do not list pull requests or issues one by one. Do not copy their titles.
+  Name at most four pull request or issue numbers in the whole text, and only
+  for the work that matters most.
+- Use short, plain sentences in the active voice. No jargon. No emoji. No hype.
 - Use only facts that are in the debrief. Do not add facts.
-- A section may say that data was not collected, timed out, or failed. Then
-  say in the digest that the data is missing. Do not say that nothing
-  happened. Missing data is not an empty result.
-- Write short, plain sentences. Do not use jargon.
-- Output markdown with only these parts: `# ` for the title, `## ` for
-  headings, `- ` for list items, and plain paragraphs. No tables, no links,
-  no images, no code fences.
-- Use these headings, in this order. Leave out a heading that has no content:
-  `## Summary` (two or three sentences), `## Shipped`, `## Needs attention`,
-  `## Next`.
+- Pictures: the debrief may have image lines like `![alt](https://...)`.
+  Each picture belongs to the issue or pull request named before it. Choose up
+  to {max_images} pictures that fit your story. Copy each one exactly as it is
+  written in the debrief. Put it on its own line after the paragraph it
+  supports. Never write an image link that is not in the debrief. If there
+  is no fitting picture, use none.
+- A section may say that data was not collected, timed out, or failed. Missing
+  data is not an empty result. Close with one short line that starts with
+  "Heads up:" and says in plain words what is missing. If nothing is missing,
+  leave that line out.
+- Output markdown with only these parts: `# ` for the title, plain
+  paragraphs, picture lines, and at most three `- ` list items. No tables,
+  no links, no code fences, no other headings.
 
 Debrief for repo `{repo}`, file `{name}`:
 
@@ -97,10 +117,60 @@ def _key(machine: str, repo: str, name: str) -> str:
 
 
 def strip_images(text: str, machine: str) -> str:
-    """Replace each image link with plain text. The image file stays on `machine`."""
-    return debrief.IMAGE_LINK_RE.sub(
-        lambda m: f"({m.group(1) or 'screenshot'}: kept on {machine})", text
-    )
+    """Replace each image the page cannot show with plain text.
+
+    A GitHub attachment image stays: the dashboard fetches it by its id. A screenshot
+    file stays on `machine`, so its link becomes text.
+    """
+
+    def swap(match) -> str:
+        if roadmap.github_attachment_id(match.group(2)):
+            return match.group(0)
+        return f"({match.group(1) or 'screenshot'}: kept on {machine})"
+
+    return debrief.IMAGE_LINK_RE.sub(swap, text)
+
+
+def limit_images(text: str, raw: str) -> str:
+    """Keep only images that the debrief itself has, and at most `MAX_IMAGES`. A model must not invent a URL."""
+    allowed = {m.group(2) for m in debrief.IMAGE_LINK_RE.finditer(raw) if roadmap.github_attachment_id(m.group(2))}
+    kept = 0
+
+    def swap(match) -> str:
+        nonlocal kept
+        if match.group(2) in allowed and kept < MAX_IMAGES:
+            kept += 1
+            return match.group(0)
+        return ""
+
+    return debrief.IMAGE_LINK_RE.sub(swap, text)
+
+
+def count_shipped(raw: str) -> str:
+    """Count the items in the Shipped section, for the prompt. A program counts better than a model."""
+    prs = issues = commits = 0
+    in_shipped = False
+    for line in raw.splitlines():
+        if line.startswith("## "):
+            in_shipped = line[3:].strip() == "Shipped"
+        elif in_shipped:
+            prs += line.startswith("- PR #")
+            issues += line.startswith("- Issue #")
+            commits += line.startswith("- Commit ")
+    return f"{prs} pull requests merged, {issues} issues closed, {commits} other commits"
+
+
+def is_quiet(raw: str) -> bool:
+    """True if the debrief shows a period with no change and no missing data."""
+    bullets: dict[str, list[str]] = {}
+    section = None
+    for line in raw.splitlines():
+        if line.startswith("## "):
+            section = line[3:].strip()
+            bullets[section] = []
+        elif section is not None and line.startswith("- "):
+            bullets[section].append(line.rstrip())
+    return all(bullets.get(name) == ["- None."] for name in QUIET_SECTIONS)
 
 
 def pick_model() -> tuple[str, str]:
@@ -146,7 +216,9 @@ def make_digest(repo: str, name: str, raw: str) -> tuple[str, str]:
     """Return (digest markdown, model). Raise `DigestError` on any failure."""
     model, effort = pick_model()
     cut = raw.encode("utf-8")[:RAW_MAX_BYTES].decode("utf-8", errors="ignore")
-    prompt = PROMPT.format(repo=repo, name=name, raw=cut)
+    prompt = PROMPT.format(
+        repo=repo, name=name, raw=cut, counts=count_shipped(raw), max_images=MAX_IMAGES
+    )
     argv = _argv(model, effort, prompt)
     try:
         with tempfile.TemporaryDirectory() as cwd:
@@ -168,7 +240,7 @@ def make_digest(repo: str, name: str, raw: str) -> tuple[str, str]:
         text = fenced.group(1).strip()
     if not text:
         raise DigestError(f"{argv[0]} gave no text")
-    return text, model
+    return limit_images(text, raw), model
 
 
 def _publish(client, machine: str, repo: str, name: str, raw: str, **fields) -> dict:
@@ -180,6 +252,7 @@ def _publish(client, machine: str, repo: str, name: str, raw: str, **fields) -> 
         "digest": None,
         "model": None,
         "error": None,
+        "quiet": False,
         "tries": 0,
         "published_at": datetime.now(timezone.utc).isoformat(),
         **fields,
@@ -202,6 +275,7 @@ def _valid(entry) -> bool:
     return bool(
         texts
         and optional
+        and isinstance(entry.get("quiet", False), bool)
         and isinstance(tries, int)
         and not isinstance(tries, bool)
         and tries >= 0
@@ -247,6 +321,7 @@ def sync(
 
     Newest debriefs go first. At most `limit` model calls run. A debrief past
     that limit is published without a digest and gets one in a later call.
+    A quiet debrief (`is_quiet`) is published with no digest and takes no model call.
     A debrief older than `SYNC_MAX_AGE_S` is skipped. A problem with one debrief
     is printed and does not stop the others. A Redis problem ends the call.
     Returns the number of digests written.
@@ -265,10 +340,13 @@ def sync(
             key = _key(machine, repo, name)
             try:
                 current = _get(client, key)
-                if current and (current.get("digest") or current.get("tries", 0) >= MAX_TRIES):
+                if current and (current.get("digest") or current.get("quiet") or current.get("tries", 0) >= MAX_TRIES):
                     continue
                 raw = debrief.read_debrief(root, repo, name)
                 tries = current.get("tries", 0) if current else 0
+                if is_quiet(raw):  # Nothing changed. No model call and no digest.
+                    _publish(client, machine, repo, name, raw, quiet=True)
+                    continue
                 if blocked or calls >= limit:
                     if current is None:
                         _publish(client, machine, repo, name, raw)

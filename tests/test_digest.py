@@ -60,7 +60,7 @@ def test_argv_uses_omp_for_a_provider_model_and_claude_for_a_bare_name():
 
 
 def test_prompt_tells_the_model_that_missing_data_is_not_an_empty_result():
-    assert "Missing data is not an empty result" in digest.PROMPT
+    assert "Missing data is not an empty result" in " ".join(digest.PROMPT.split())
 
 
 def _run_returning(monkeypatch, *, stdout="", returncode=0, stderr="", raises=None):
@@ -322,3 +322,155 @@ def test_publish_debrief_digests_reads_the_agents_redis_settings_and_state_dir(t
 
     entry = digest.read_one("jesus", "widgets", "20261010-120000.md", **_kw(redis_port))
     assert entry and entry["digest"].startswith("## Summary")
+
+
+QUIET = """# Debrief: o/r
+
+## Window
+- From: 2026-10-10T00:00:00Z
+- To: 2026-10-10T06:00:00Z
+- Period: 6h
+
+## Shipped
+- None.
+
+## Follow-up tasks
+- None.
+
+## Risk
+Derived from GitHub facts and ledger decisions. Not checked against real ledger rows.
+- None.
+
+## Opportunities
+- Issue #5: a ready issue
+
+## Evidence
+- None.
+"""
+
+
+def _real_debrief(monkeypatch, listing):
+    """Build a debrief with the real generator. `listing` is what every gh list call returns."""
+    from lupin import debrief
+
+    monkeypatch.setattr(debrief, "_list", lambda time_limit, args: listing)
+    start = datetime(2026, 10, 10, tzinfo=timezone.utc)
+    return debrief.build_markdown("o/r", start, start + timedelta(hours=6), events=[], claimed=set(), period="6h")
+
+
+def test_is_quiet_is_true_for_a_period_with_nothing_in_it():
+    assert digest.is_quiet(QUIET)
+
+
+def test_is_quiet_is_true_for_what_the_real_generator_writes_for_an_empty_period(monkeypatch):
+    assert digest.is_quiet(_real_debrief(monkeypatch, ([], "")))
+
+
+def test_is_quiet_is_false_when_the_generator_could_not_collect_the_data(monkeypatch):
+    # A gh time-out says nothing about what shipped. It must not read as "nothing changed".
+    assert not digest.is_quiet(_real_debrief(monkeypatch, (None, "gh time limit reached")))
+
+
+@pytest.mark.parametrize(
+    "old, new",
+    [
+        ("## Shipped\n- None.", "## Shipped\n- PR #1: a fix (merged 2026-10-10T01:00:00Z, commit abc1234)"),
+        ("## Shipped\n- None.", "## Shipped\n- None.\n- Not collected: gh time limit. Shipped: merged PR."),
+        ("## Follow-up tasks\n- None.", "## Follow-up tasks\n- #4: write the tests"),
+        ("## Follow-up tasks\n- None.", "## Follow-up tasks\n- Error 111 connecting to localhost:6379."),
+        ("## Risk\nDerived from GitHub facts and ledger decisions. Not checked against real ledger rows.\n- None.",
+         "## Risk\nDerived from GitHub facts and ledger decisions. Not checked against real ledger rows.\n- Decision: ship it"),
+        ("## Evidence\n- None.", "## Evidence\n- PR #3: ![PR 3 image](https://github.com/user-attachments/assets/x)"),
+    ],
+)
+def test_is_quiet_is_false_when_anything_changed_or_is_missing(old, new):
+    assert old in QUIET
+    assert not digest.is_quiet(QUIET.replace(old, new))
+
+
+def test_is_quiet_is_false_for_text_with_no_sections():
+    assert not digest.is_quiet("# Just a note\n\nSome text.\n")
+
+
+def test_sync_publishes_a_quiet_debrief_without_a_model_call_or_a_digest(tmp_path, redis_port, flush_redis):
+    _write(tmp_path, "widgets", "20261010-120000-6h.md", QUIET)
+    calls = []
+
+    written = digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_make(calls), now=NOW)
+    again = digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_make(calls), now=NOW)
+
+    entry = digest.read_one("jesus", "widgets", "20261010-120000-6h.md", **_kw(redis_port))
+    assert (written, again, calls) == (0, 0, [])
+    assert entry["quiet"] is True and entry["digest"] is None and entry["tries"] == 0
+    assert entry["raw"]  # The debrief is still there.
+
+
+def test_a_quiet_debrief_does_not_use_up_the_model_call_limit(tmp_path, redis_port, flush_redis):
+    _write(tmp_path, "widgets", "20261012-120000-6h.md", QUIET)  # newest
+    _write(tmp_path, "widgets", "20261011-120000-6h.md")
+    calls = []
+
+    digest.sync(tmp_path, _kw(redis_port), machine="jesus", limit=1, make=_fake_make(calls), now=NOW)
+
+    assert calls == [("widgets", "20261011-120000-6h.md")]
+
+
+def test_a_quiet_entry_is_not_rewritten_on_every_cycle(tmp_path, redis_port, flush_redis):
+    _write(tmp_path, "widgets", "20261010-120000-6h.md", QUIET)
+    digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_make([]), now=NOW)
+    key = digest._key("jesus", "widgets", "20261010-120000-6h.md")
+    client = _raw_client(redis_port)
+    client.expire(key, 1000)
+
+    digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_make([]), now=NOW)
+
+    assert client.ttl(key) <= 1000  # A rewrite would reset it to 30 days.
+
+
+def test_read_refuses_an_entry_whose_quiet_flag_is_not_a_boolean(redis_port, flush_redis):
+    entry = {"machine": "jesus", "repo": "widgets", "name": "20261010-120000.md", "raw": "# x", "quiet": "yes"}
+    _raw_client(redis_port).set(digest._key("jesus", "widgets", "20261010-120000.md"), json.dumps(entry))
+
+    assert digest.read_one("jesus", "widgets", "20261010-120000.md", **_kw(redis_port)) is None
+
+
+ATTACH = "https://github.com/user-attachments/assets/eba1e250-ae34-481a-9f8c-98503030f83e"
+OTHER = "https://github.com/user-attachments/assets/07d1bea3-3b20-4677-9dd0-ad2dc901f3e8"
+
+
+def test_strip_images_keeps_a_github_attachment_the_dashboard_can_fetch_and_replaces_the_rest():
+    text = f"![a]({ATTACH})\n![b](20261010-120000-6h-screenshots/a.png)\n![c](https://example.com/x.png)\n"
+
+    out = digest.strip_images(text, "jesus")
+
+    assert f"![a]({ATTACH})" in out
+    assert "(b: kept on jesus)" in out
+    assert "(c: kept on jesus)" in out  # Only GitHub attachments are served by the dashboard.
+
+
+def test_limit_images_drops_a_link_the_debrief_does_not_have_and_caps_the_count(monkeypatch):
+    raw = f"- Issue #1: ![i]({ATTACH})\n- Issue #2: ![j]({OTHER})\n"
+    invented = "https://github.com/user-attachments/assets/11111111-1111-1111-1111-111111111111"
+    text = f"# T\n\n![a]({ATTACH})\n![x]({invented})\n![b]({OTHER})\n"
+
+    out = digest.limit_images(text, raw)
+
+    assert ATTACH in out and OTHER in out and invented not in out
+    monkeypatch.setattr(digest, "MAX_IMAGES", 1)
+    assert digest.limit_images(text, raw).count("![") == 1
+
+
+def test_count_shipped_counts_only_the_shipped_section():
+    raw = "## Shipped\n- PR #1: a\n- PR #2: b\n- Issue #3: c\n- Commit abc1234: d\n\n## Evidence\n- PR #9: not counted\n"
+
+    assert digest.count_shipped(raw) == "2 pull requests merged, 1 issues closed, 1 other commits"
+
+
+def test_make_digest_puts_the_counts_in_the_prompt_and_removes_an_invented_image(monkeypatch):
+    seen = _run_returning(monkeypatch, stdout=f"# Story\n\n![x](https://github.com/user-attachments/assets/11111111-1111-1111-1111-111111111111)\n![a]({ATTACH})\n")
+    raw = f"## Shipped\n- PR #1: a\n\n## Evidence\n- Issue #1: ![i]({ATTACH})\n"
+
+    text, _model = digest.make_digest("widgets", "20261010-120000.md", raw)
+
+    assert "1 pull requests merged" in seen["argv"][-1]
+    assert ATTACH in text and "11111111" not in text

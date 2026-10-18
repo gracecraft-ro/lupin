@@ -4222,3 +4222,23 @@ def test_debrief_page_for_a_worker_debrief_that_is_not_published_is_404(tmp_path
     handler.do_GET()
 
     assert handler.reply.call_args.args[1] == 404
+
+
+def test_debrief_index_labels_a_quiet_debrief_as_no_changes_not_as_missing_a_digest(tmp_path, monkeypatch, redis_port, flush_redis):
+    from lupin import digest as digest_mod
+
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(serve.socket, "gethostname", lambda: "pihome")
+    client = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    entry = {"machine": "jesus", "repo": "widgets", "name": "20261002-090000-6h.md", "raw": "# Raw\n", "digest": None, "quiet": True}
+    client.set(digest_mod._key("jesus", "widgets", "20261002-090000-6h.md"), json.dumps(entry))
+
+    index = _get_handler("/debrief", {"redis_host": "127.0.0.1", "redis_port": redis_port})
+    index.do_GET()
+    page = _get_handler("/debrief?machine=jesus&repo=widgets&file=20261002-090000-6h.md", {"redis_host": "127.0.0.1", "redis_port": redis_port})
+    page.do_GET()
+
+    index_body = index.reply.call_args.args[0].decode()
+    page_body = page.reply.call_args.args[0].decode()
+    assert "no changes" in index_body and "no digest" not in index_body
+    assert "Nothing changed in this period" in page_body
