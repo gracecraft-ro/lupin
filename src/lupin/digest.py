@@ -17,6 +17,8 @@ Redis names each screenshot and says which machine keeps it.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 import socket
@@ -50,6 +52,10 @@ MACHINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _FENCE_RE = re.compile(r"^```[a-z]*\n(.*)\n```$", re.DOTALL)
 
 MAX_IMAGES = 3  # Most images in one digest.
+IMAGE_KEY_PREFIX = f"{slots_redis.PREFIX}debrief-image:"
+IMAGE_MAX_BYTES = 1_500_000  # A bigger image is not copied to Redis.
+IMAGE_RETRY_S = 3600  # After a failed copy, wait this long before another try.
+IMAGE_TYPES = {"image/gif", "image/jpeg", "image/png", "image/webp"}  # Same as serve.IMAGE_TYPES.
 
 PROMPT = """\
 You write a short digest of one software project debrief for the project owner.
@@ -322,6 +328,66 @@ def _get(client, key: str) -> dict | None:
     return _parse(slots_redis._call_with_retry(lambda: client.get(key)))
 
 
+def _image_ids(text: str) -> list[str]:
+    """GitHub attachment ids in the image links of `text`, in order, with no repeats."""
+    ids: list[str] = []
+    for match in debrief.IMAGE_LINK_RE.finditer(text):
+        attachment_id = roadmap.github_attachment_id(match.group(2))
+        if attachment_id and attachment_id.lower() not in ids:
+            ids.append(attachment_id.lower())
+    return ids
+
+
+def _fetch_image(attachment_id: str):
+    """Fetch an image from GitHub with this machine's `gh` login. Return (bytes, type) or None."""
+    from . import serve  # Local import: serve imports this module.
+
+    return serve.github_attachment(attachment_id)
+
+
+def store_images(client, text: str) -> None:
+    """Copy each image of a digest to Redis, so a machine without GitHub access can show it.
+
+    A private repo's image needs the worker's `gh` login. PiHome has none for it. An image that
+    is already stored is skipped. A failed or too big copy leaves a marker for `IMAGE_RETRY_S`.
+    """
+    for attachment_id in _image_ids(text):
+        key = IMAGE_KEY_PREFIX + attachment_id
+        if slots_redis._call_with_retry(lambda: client.ttl(key)) != -2:  # -2: no such key.
+            continue
+        try:
+            got = _fetch_image(attachment_id)
+        except Exception as exc:  # A bad image must not stop the others.
+            print(f"lupin digest: image {attachment_id}: {exc}", file=sys.stderr)
+            got = None
+        if got and got[1] in IMAGE_TYPES and len(got[0]) <= IMAGE_MAX_BYTES:
+            payload = {"type": got[1], "data": base64.b64encode(got[0]).decode("ascii")}
+            ttl = KEY_TTL_S
+        else:
+            payload, ttl = {"missing": True}, IMAGE_RETRY_S
+        slots_redis._call_with_retry(lambda: client.set(key, json.dumps(payload), ex=ttl))
+
+
+def read_image(attachment_id: str, **connection) -> tuple[bytes, str] | None:
+    """Return (bytes, content type) of a copied image, or None. Redis is shared, so check it all."""
+    if not roadmap.ATTACHMENT_ID.fullmatch(attachment_id or ""):
+        return None
+    try:
+        raw = slots_redis._call_with_retry(
+            lambda: _client(connection).get(IMAGE_KEY_PREFIX + attachment_id.lower())
+        )
+    except _REDIS_ERRORS:
+        return None
+    try:
+        payload = json.loads(raw) if raw else None
+        if not isinstance(payload, dict) or payload.get("type") not in IMAGE_TYPES:
+            return None
+        data = base64.b64decode(payload.get("data") or "", validate=True)
+    except (ValueError, TypeError, binascii.Error):
+        return None
+    return (data, payload["type"]) if data and len(data) <= IMAGE_MAX_BYTES else None
+
+
 def _too_old(name: str, now: datetime) -> bool:
     """True if the debrief is too old to publish. Its Redis entry would expire and come back."""
     try:
@@ -363,7 +429,10 @@ def sync(
             key = _key(machine, repo, name)
             try:
                 current = _get(client, key)
-                if current and (current.get("digest") or current.get("quiet") or current.get("tries", 0) >= MAX_TRIES):
+                if current and current.get("digest"):
+                    store_images(client, current["digest"])  # Also fills in digests made before this existed.
+                    continue
+                if current and (current.get("quiet") or current.get("tries", 0) >= MAX_TRIES):
                     continue
                 raw = debrief.read_debrief(root, repo, name)
                 tries = current.get("tries", 0) if current else 0
@@ -383,8 +452,9 @@ def sync(
                 except DigestError as exc:
                     _publish(client, machine, repo, name, raw, error=str(exc), tries=tries + 1)
                 else:
-                    _publish(client, machine, repo, name, raw, digest=text, model=model, tries=tries + 1)
+                    entry = _publish(client, machine, repo, name, raw, digest=text, model=model, tries=tries + 1)
                     written += 1
+                    store_images(client, entry["digest"])
             except _REDIS_ERRORS:
                 raise
             except Exception as exc:  # One bad debrief must not stop the older ones.

@@ -4242,3 +4242,50 @@ def test_debrief_index_labels_a_quiet_debrief_as_no_changes_not_as_missing_a_dig
     page_body = page.reply.call_args.args[0].decode()
     assert "no changes" in index_body and "no digest" not in index_body
     assert "Nothing changed in this period" in page_body
+
+
+def test_image_route_serves_a_picture_a_worker_copied_to_redis_without_asking_github(monkeypatch, redis_port, flush_redis):
+    import base64
+    import io
+
+    from lupin import digest as digest_mod
+
+    attachment_id = "eba1e250-ae34-481a-9f8c-98503030f83e"
+    png = b"\x89PNG\r\n\x1a\n-test-image"
+    redis_lib.Redis(host="127.0.0.1", port=redis_port).set(
+        digest_mod.IMAGE_KEY_PREFIX + attachment_id,
+        json.dumps({"type": "image/png", "data": base64.b64encode(png).decode()}),
+    )
+
+    def never(_id):
+        raise AssertionError("GitHub must not be asked")
+
+    monkeypatch.setattr(serve, "github_attachment", never)
+    handler = _get_handler("/image", {"redis_host": "127.0.0.1", "redis_port": redis_port})
+    handler.send_response = mock.Mock()
+    handler.send_header = mock.Mock()
+    handler.end_headers = mock.Mock()
+    handler.wfile = io.BytesIO()
+
+    handler.do_image({"id": attachment_id})
+
+    handler.send_response.assert_called_once_with(200)
+    assert handler.wfile.getvalue() == png
+    assert mock.call("Content-Type", "image/png") in handler.send_header.call_args_list
+    assert mock.call("X-Content-Type-Options", "nosniff") in handler.send_header.call_args_list
+
+
+def test_image_route_falls_back_to_github_when_redis_has_no_copy(monkeypatch, redis_port, flush_redis):
+    import io
+
+    asked = []
+    monkeypatch.setattr(serve, "github_attachment", lambda attachment_id: asked.append(attachment_id) or (b"gh-bytes", "image/png"))
+    handler = _get_handler("/image", {"redis_host": "127.0.0.1", "redis_port": redis_port})
+    handler.send_response = mock.Mock()
+    handler.send_header = mock.Mock()
+    handler.end_headers = mock.Mock()
+    handler.wfile = io.BytesIO()
+
+    handler.do_image({"id": "eba1e250-ae34-481a-9f8c-98503030f83e"})
+
+    assert asked == ["eba1e250-ae34-481a-9f8c-98503030f83e"] and handler.wfile.getvalue() == b"gh-bytes"
