@@ -3157,7 +3157,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             return
-        image = github_attachment(attachment_id)
+        # A worker may hold a copy in Redis. A machine with no GitHub access to the repo needs it.
+        image = digest.read_image(attachment_id, **self.fleet_connection) or github_attachment(attachment_id)
         if image is None:
             self.send_response(404)
             self.send_header("Content-Length", "0")

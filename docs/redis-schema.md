@@ -24,6 +24,8 @@ This is the data model `lupin` uses once the `redis` backend exists
 | `quota-snapshot` | string (JSON), with a TTL | one fleet-wide quota reading per provider — see Fleet keys below | nothing today |
 | `usage-snapshot:<machine>` | string (JSON), with a TTL | one machine's 7-day usage rows — see Fleet keys below | nothing today |
 | `debrief-digest:<machine>:<repo>:<file>` | string (JSON), with a TTL | one debrief's text and its model-written digest — see Fleet keys below | each machine shows only its own debrief files |
+| `debrief-image:<attachment-id>` | string (JSON), with a TTL | a picture from a digest, as base64 — see Fleet keys below | the dashboard asks GitHub with its own login |
+| `debrief-image-miss:<machine>:<attachment-id>` | string, with a TTL | one machine's marker for a failed or too big copy | nothing |
 These are new keys for the fleet CLI (issues #6–#14, split from #2) and the
 cross-machine command queue (issue #28, split from #27). They stay under
 `v1`: `v1` is the shape of each key, not the whole file, and adding a key
@@ -396,6 +398,23 @@ older than 29 days, so an expired key does not start a new model call.
 The page waits 1 second at most for Redis and shows local debriefs if Redis fails. The keys need no new ACL
 command.
 
+### `debrief-image:<attachment-id>` and `debrief-image-miss:<machine>:<attachment-id>`
+
+A digest can show pictures from the debrief (GitHub attachments). A private repo's
+pictures need the worker's `gh` login, and PiHome has none for that repo. So the agent
+copies each picture of a digest to Redis: `{"type": "image/png", "data": "<base64>"}`.
+`GET /image?id=<attachment-id>` reads this key first and asks GitHub only if there is no copy.
+
+- A copy lives 7 days. The agent copies pictures only for a debrief younger than 7 days.
+- At most 3 pictures per digest, and each must be in the debrief's own text.
+- One `sync` makes at most 6 downloads. The rest wait for the next cycle.
+- An image over 1.5 MB is not copied. A failed copy is not stored either.
+  Instead the machine writes a marker, `debrief-image-miss:<machine>:<id>`: 1 day for
+  "too big", 1 hour for a failure. The marker is per machine. A machine with no access to
+  the repo cannot stop a machine that has access.
+- The agent checks with `TTL` (a missing key gives -2), so it needs no `EXISTS`.
+- The page accepts only `image/gif`, `image/jpeg`, `image/png` and `image/webp`.
+
 ## Command queue keys
 
 These back the cross-machine command queue (`lupin cmd send|status|queue`,
@@ -685,6 +704,8 @@ numbers.
 | GitHub fetch lock (`slot:gh-fetch/<owner>/<repo>`) | n/a — held only for one fetch | 2 min |
 | `quota-snapshot` | n/a — not renewed | 24 hours (retention only; freshness is per-provider, 5 min, see above) |
 | `debrief-digest:...` | n/a — written once, rewritten only to add a digest | 30 days |
+| `debrief-image:...` | n/a — written once | 7 days |
+| `debrief-image-miss:...` | n/a — written once | 1 hour (failed) or 1 day (too big) |
 | Quota fetch lock (`slot:quota-fetch/<provider>`) | n/a — held only for one fetch, no wait | 1 min |
 
 A command's Redis retention (1h) is not the same thing as how long it's
@@ -699,8 +720,8 @@ Each host gets its own Redis user (`lupin-jesus`, `lupin-ralpha`,
 `lupin-mac`), limited to keys under `~lupin:*` and these commands:
 
 ```
-PING GET SET DEL PEXPIRE ZADD ZREM ZCARD ZRANGE ZREMRANGEBYSCORE
-XADD XRANGE XREVRANGE SCAN EVAL EVALSHA SCRIPT|LOAD
+PING GET SET DEL EXPIRE PEXPIRE TTL ZADD ZREM ZSCORE ZCARD ZRANGE
+ZREMRANGEBYSCORE XADD XRANGE XREVRANGE SCAN EVAL EVALSHA SCRIPT|LOAD SCRIPT|EXISTS
 ```
 
 ## Fallback when Redis is unreachable
