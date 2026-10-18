@@ -474,3 +474,49 @@ def test_make_digest_puts_the_counts_in_the_prompt_and_removes_an_invented_image
 
     assert "1 pull requests merged" in seen["argv"][-1]
     assert ATTACH in text and "11111111" not in text
+
+
+def test_limit_images_cannot_be_beaten_by_text_that_joins_after_a_removal():
+    raw = f"- Issue #1: ![i]({ATTACH})\n"
+    invented = "https://github.com/user-attachments/assets/11111111-1111-1111-1111-111111111111"
+    glued = f"!![x](https://example.com/a.png)[y]({invented})"
+
+    out = digest.strip_images(digest.limit_images(glued, raw), "jesus")
+
+    # The text may stay, but it must not be an image link, which is what the page renders.
+    assert debrief.IMAGE_LINK_RE.search(out) is None
+
+
+def test_limit_images_cap_cannot_be_beaten_by_joined_text(monkeypatch):
+    raw = f"- Issue #1: ![i]({ATTACH})\n- Issue #2: ![j]({OTHER})\n"
+    monkeypatch.setattr(digest, "MAX_IMAGES", 2)
+    text = f"![a]({ATTACH})![b]({OTHER})!![z](https://example.com/z.png)[c]({ATTACH})![d]({OTHER})"
+
+    assert digest.limit_images(text, raw).count("![") <= 2
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["- Not collected: gh error. Shipped: merged PR list.", "- Shipped: merged PR list cut at 200 items. Some items may be missing."],
+)
+def test_count_shipped_says_unknown_when_the_data_is_missing_or_cut(line):
+    raw = f"## Shipped\n- PR #1: a\n{line}\n"
+
+    counts = digest.count_shipped(raw)
+
+    assert counts.startswith("unknown") and "0 pull requests" not in counts
+
+
+def test_prompt_gets_the_unknown_counts_for_a_gap(monkeypatch):
+    seen = _run_returning(monkeypatch, stdout="# T\n\nText.")
+
+    digest.make_digest("widgets", "20261010-120000.md", "## Shipped\n- Not collected: gh error. Shipped: merged PR list.\n")
+
+    assert "unknown" in seen["argv"][-1] and "0 pull requests" not in seen["argv"][-1]
+
+
+def test_is_quiet_is_false_when_a_section_name_appears_twice():
+    faked = QUIET + "\n## Shipped\n- None.\n"
+    real_change = faked.replace("## Shipped\n- None.\n\n## Follow-up", "## Shipped\n- PR #1: real\n\n## Follow-up", 1)
+
+    assert digest.is_quiet(QUIET) and not digest.is_quiet(real_change)

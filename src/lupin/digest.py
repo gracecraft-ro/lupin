@@ -132,23 +132,41 @@ def strip_images(text: str, machine: str) -> str:
 
 
 def limit_images(text: str, raw: str) -> str:
-    """Keep only images that the debrief itself has, and at most `MAX_IMAGES`. A model must not invent a URL."""
+    """Keep only images that the debrief itself has, and at most `MAX_IMAGES`. A model must not invent a URL.
+
+    A removed image leaves a space, not nothing. Without the space, the text on both sides
+    can join into a new image link. The loop repeats until the text stops changing.
+    """
     allowed = {m.group(2) for m in debrief.IMAGE_LINK_RE.finditer(raw) if roadmap.github_attachment_id(m.group(2))}
-    kept = 0
 
-    def swap(match) -> str:
-        nonlocal kept
-        if match.group(2) in allowed and kept < MAX_IMAGES:
-            kept += 1
-            return match.group(0)
-        return ""
+    def one_pass(value: str) -> str:
+        kept = 0
 
-    return debrief.IMAGE_LINK_RE.sub(swap, text)
+        def swap(match) -> str:
+            nonlocal kept
+            if match.group(2) in allowed and kept < MAX_IMAGES:
+                kept += 1
+                return match.group(0)
+            return " "
+
+        return debrief.IMAGE_LINK_RE.sub(swap, value)
+
+    for _ in range(10):  # Each pass only removes text, so this ends. The bound is a safety net.
+        after = one_pass(text)
+        if after == text:
+            break
+        text = after
+    return text
 
 
 def count_shipped(raw: str) -> str:
-    """Count the items in the Shipped section, for the prompt. A program counts better than a model."""
+    """Count the items in the Shipped section, for the prompt. A program counts better than a model.
+
+    If the section says that data is missing or cut, the counts are not facts. Say so, so the
+    model does not report "0 merged" for a gap.
+    """
     prs = issues = commits = 0
+    gap = False
     in_shipped = False
     for line in raw.splitlines():
         if line.startswith("## "):
@@ -157,6 +175,9 @@ def count_shipped(raw: str) -> str:
             prs += line.startswith("- PR #")
             issues += line.startswith("- Issue #")
             commits += line.startswith("- Commit ")
+            gap = gap or line.startswith("- Not collected") or "list cut at" in line
+    if gap:
+        return "unknown. The Shipped data is missing or cut, so do not state any count"
     return f"{prs} pull requests merged, {issues} issues closed, {commits} other commits"
 
 
@@ -167,6 +188,8 @@ def is_quiet(raw: str) -> bool:
     for line in raw.splitlines():
         if line.startswith("## "):
             section = line[3:].strip()
+            if section in bullets:  # Ledger text with a newline can fake a heading. Do not trust it.
+                return False
             bullets[section] = []
         elif section is not None and line.startswith("- "):
             bullets[section].append(line.rstrip())
