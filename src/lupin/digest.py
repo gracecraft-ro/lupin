@@ -43,6 +43,9 @@ LLM_TIMEOUT_S = 300.0
 RAW_MAX_BYTES = 60_000  # More UTF-8 bytes than this are cut. One argument may be 128 KB on Linux.
 MAX_NEW_PER_SYNC = 3  # Model calls in one `sync`. The rest wait for the next one.
 MAX_TRIES = 3  # After this many failed model calls, `sync` stops trying for that debrief.
+# Only these windows get a digest: one for each repo, for the whole fleet. Other debriefs
+# (6h, 24h, loop stops, backfill days) are published as records, with no model call.
+DIGEST_PERIODS = ("12h", "7d")
 # A debrief with only `- None.` in all of these sections shows a period with no change.
 # `build_markdown` writes `- None.` only when it collected that data. A gap is never "None".
 QUIET_SECTIONS = ("Shipped", "Follow-up tasks", "Risk", "Evidence")
@@ -67,7 +70,7 @@ You write a short digest of one software project debrief for the project owner.
 The owner has no time. They do not want a list of pull requests. They can read
 the debrief for that. They want the story: what changed, and why it matters.
 
-Facts counted by a program (trust these numbers): {counts}
+{window}Facts counted by a program (trust these numbers): {counts}
 
 How to write it:
 - Start with a title line (`# `) that says the main thing that happened in
@@ -192,6 +195,34 @@ def count_shipped(raw: str) -> str:
     return f"{prs} pull requests merged, {issues} issues closed, {commits} other commits"
 
 
+def period_of(name: str) -> str:
+    """The period in a debrief file name: `12h`, `7d`, ... It is empty for a loop stop file."""
+    return name[16:-3]
+
+
+def window_label(raw: str) -> str:
+    """A prompt line that names the window in Los Angeles time. Empty if the debrief has no window."""
+    found = {}
+    for key in ("From", "To"):
+        match = re.search(rf"^- {key}: (\S+)$", raw, re.MULTILINE)
+        found[key] = debrief._parse(match.group(1)) if match else None
+    if not found["From"] or not found["To"]:
+        return ""
+    start, end = (found[k].astimezone(debrief.CLOCK) for k in ("From", "To"))
+    return (
+        f"This debrief covers {start:%A %d %B %H:%M} to {end:%A %d %B %H:%M} Los Angeles time. "
+        "When you name a day or a time of day, use that clock.\n\n"
+    )
+
+
+def _claim_digest(client, repo: str, name: str, machine: str) -> bool:
+    """True if this machine may write the digest of this window. One machine does it for the fleet."""
+    key = f"{slots_redis.PREFIX}debrief-digest-claim:{repo}:{name}"
+    if slots_redis._call_with_retry(lambda: client.set(key, machine, nx=True, ex=KEY_TTL_S)):
+        return True
+    return slots_redis._call_with_retry(lambda: client.get(key)) == machine  # A retry by the same machine.
+
+
 def is_quiet(raw: str) -> bool:
     """True if the debrief shows a period with no change and no missing data."""
     bullets: dict[str, list[str]] = {}
@@ -251,7 +282,8 @@ def make_digest(repo: str, name: str, raw: str) -> tuple[str, str]:
     model, effort = pick_model()
     cut = raw.encode("utf-8")[:RAW_MAX_BYTES].decode("utf-8", errors="ignore")
     prompt = PROMPT.format(
-        repo=repo, name=name, raw=cut, counts=count_shipped(raw), max_images=MAX_IMAGES
+        repo=repo, name=name, raw=cut, counts=count_shipped(raw), max_images=MAX_IMAGES,
+        window=window_label(raw),
     )
     argv = _argv(model, effort, prompt)
     try:
@@ -287,6 +319,7 @@ def _publish(client, machine: str, repo: str, name: str, raw: str, **fields) -> 
         "model": None,
         "error": None,
         "quiet": False,
+        "record_only": False,
         "tries": 0,
         "published_at": datetime.now(timezone.utc).isoformat(),
         **fields,
@@ -310,6 +343,7 @@ def _valid(entry) -> bool:
         texts
         and optional
         and isinstance(entry.get("quiet", False), bool)
+        and isinstance(entry.get("record_only", False), bool)
         and isinstance(tries, int)
         and not isinstance(tries, bool)
         and tries >= 0
@@ -438,6 +472,7 @@ def sync(
     Newest debriefs go first. At most `limit` model calls run. A debrief past
     that limit is published without a digest and gets one in a later call.
     A quiet debrief (`is_quiet`) is published with no digest and takes no model call.
+    So is a debrief whose period is not in `DIGEST_PERIODS`: it is a record only.
     A debrief older than `SYNC_MAX_AGE_S` is skipped. A problem with one debrief
     is printed and does not stop the others. A Redis problem ends the call.
     Returns the number of digests written.
@@ -464,10 +499,13 @@ def sync(
                             client, current["digest"], raw=current["raw"], machine=machine, budget=image_budget
                         )
                     continue
-                if current and (current.get("quiet") or current.get("tries", 0) >= MAX_TRIES):
+                if current and (current.get("quiet") or current.get("record_only") or current.get("tries", 0) >= MAX_TRIES):
                     continue
                 raw = debrief.read_debrief(root, repo, name)
                 tries = current.get("tries", 0) if current else 0
+                if period_of(name) not in DIGEST_PERIODS:  # A record only. No model call.
+                    _publish(client, machine, repo, name, raw, record_only=True)
+                    continue
                 if is_quiet(raw):  # Nothing changed. No model call and no digest.
                     _publish(client, machine, repo, name, raw, quiet=True)
                     continue
@@ -475,6 +513,8 @@ def sync(
                     if current is None:
                         _publish(client, machine, repo, name, raw)
                     continue
+                if not _claim_digest(client, repo, name, machine):
+                    continue  # Another machine writes the digest of this window.
                 calls += 1
                 try:
                     text, model = make(repo, name, raw)

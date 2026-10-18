@@ -244,6 +244,11 @@ writes (`src/lupin/digest.py`). `lupin route prose size-s` picks the model. A
 digest says when data is missing. It does not call missing data an empty
 result. A period with no change gets no digest (the page says "no changes").
 A digest is a short story with up to 3 pictures, not a list of pull requests.
+Periodic debriefs use fixed windows on the Los Angeles clock, so every machine
+computes the same window. One machine in the fleet writes each window: the first
+to claim it in Redis. Only the 12-hour and 7-day windows get a digest, so a repo
+has one digest per window, not one per machine. The other debriefs (6h, 24h,
+loop stops) are records.
 The Debriefs page (`/debrief`) shows the debriefs of all workers, so
 PiHome shows them too. Redis holds text only. A screenshot file stays on its
 worker. A GitHub attachment image is shown through the dashboard.
