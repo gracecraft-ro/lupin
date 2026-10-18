@@ -53,8 +53,13 @@ _FENCE_RE = re.compile(r"^```[a-z]*\n(.*)\n```$", re.DOTALL)
 
 MAX_IMAGES = 3  # Most images in one digest.
 IMAGE_KEY_PREFIX = f"{slots_redis.PREFIX}debrief-image:"
+# One marker per machine, so a machine with no access to the repo cannot block one that has it.
+IMAGE_MISS_PREFIX = f"{slots_redis.PREFIX}debrief-image-miss:"
 IMAGE_MAX_BYTES = 1_500_000  # A bigger image is not copied to Redis.
+IMAGE_TTL_S = 7 * 24 * 60 * 60  # A copy lives 7 days. The Redis is shared, so keep it small.
 IMAGE_RETRY_S = 3600  # After a failed copy, wait this long before another try.
+IMAGE_BIG_RETRY_S = 24 * 60 * 60  # After "too big", wait longer. The size does not change.
+MAX_IMAGE_COPIES_PER_SYNC = 6  # Image downloads in one `sync`. Each can wait 40 seconds.
 IMAGE_TYPES = {"image/gif", "image/jpeg", "image/png", "image/webp"}  # Same as serve.IMAGE_TYPES.
 
 PROMPT = """\
@@ -345,27 +350,40 @@ def _fetch_image(attachment_id: str):
     return serve.github_attachment(attachment_id)
 
 
-def store_images(client, text: str) -> None:
+def store_images(client, text: str, *, raw: str, machine: str, budget: int) -> int:
     """Copy each image of a digest to Redis, so a machine without GitHub access can show it.
 
-    A private repo's image needs the worker's `gh` login. PiHome has none for it. An image that
-    is already stored is skipped. A failed or too big copy leaves a marker for `IMAGE_RETRY_S`.
+    A private repo's image needs the worker's `gh` login. PiHome has none for it. At most
+    `MAX_IMAGES` images are used, and each must be in the debrief's own text `raw`. An image
+    that is already stored is skipped. A failed or too big copy leaves a marker for this machine
+    only. At most `budget` downloads are made. Returns the number made.
     """
-    for attachment_id in _image_ids(text):
+    allowed = set(_image_ids(raw))
+    downloads = 0
+    for attachment_id in _image_ids(text)[:MAX_IMAGES]:
+        if attachment_id not in allowed:
+            continue
         key = IMAGE_KEY_PREFIX + attachment_id
+        miss = f"{IMAGE_MISS_PREFIX}{machine}:{attachment_id}"
         if slots_redis._call_with_retry(lambda: client.ttl(key)) != -2:  # -2: no such key.
             continue
+        if slots_redis._call_with_retry(lambda: client.ttl(miss)) != -2:
+            continue
+        if downloads >= budget:
+            break
+        downloads += 1
         try:
             got = _fetch_image(attachment_id)
         except Exception as exc:  # A bad image must not stop the others.
             print(f"lupin digest: image {attachment_id}: {exc}", file=sys.stderr)
             got = None
         if got and got[1] in IMAGE_TYPES and len(got[0]) <= IMAGE_MAX_BYTES:
-            payload = {"type": got[1], "data": base64.b64encode(got[0]).decode("ascii")}
-            ttl = KEY_TTL_S
+            payload = json.dumps({"type": got[1], "data": base64.b64encode(got[0]).decode("ascii")})
+            slots_redis._call_with_retry(lambda: client.set(key, payload, ex=IMAGE_TTL_S))
         else:
-            payload, ttl = {"missing": True}, IMAGE_RETRY_S
-        slots_redis._call_with_retry(lambda: client.set(key, json.dumps(payload), ex=ttl))
+            wait = IMAGE_BIG_RETRY_S if got and len(got[0]) > IMAGE_MAX_BYTES else IMAGE_RETRY_S
+            slots_redis._call_with_retry(lambda: client.set(miss, "1", ex=wait))
+    return downloads
 
 
 def read_image(attachment_id: str, **connection) -> tuple[bytes, str] | None:
@@ -382,19 +400,28 @@ def read_image(attachment_id: str, **connection) -> tuple[bytes, str] | None:
         payload = json.loads(raw) if raw else None
         if not isinstance(payload, dict) or payload.get("type") not in IMAGE_TYPES:
             return None
-        data = base64.b64decode(payload.get("data") or "", validate=True)
+        encoded = payload.get("data") or ""
+        if not isinstance(encoded, str) or len(encoded) > IMAGE_MAX_BYTES * 4 // 3 + 8:
+            return None  # Too big. Do not even decode it.
+        data = base64.b64decode(encoded, validate=True)
     except (ValueError, TypeError, binascii.Error):
         return None
     return (data, payload["type"]) if data and len(data) <= IMAGE_MAX_BYTES else None
 
 
-def _too_old(name: str, now: datetime) -> bool:
-    """True if the debrief is too old to publish. Its Redis entry would expire and come back."""
+def _age_s(name: str, now: datetime) -> float | None:
+    """Seconds since the time in the debrief's file name. None if the name has no valid time."""
     try:
         when = datetime.strptime(name[:15], debrief.STAMP_FORMAT).replace(tzinfo=timezone.utc)
     except ValueError:
-        return True
-    return (now - when).total_seconds() > SYNC_MAX_AGE_S
+        return None
+    return (now - when).total_seconds()
+
+
+def _too_old(name: str, now: datetime) -> bool:
+    """True if the debrief is too old to publish. Its Redis entry would expire and come back."""
+    age = _age_s(name, now)
+    return age is None or age > SYNC_MAX_AGE_S
 
 
 def sync(
@@ -421,6 +448,7 @@ def sync(
     written = 0
     calls = 0
     blocked = False
+    image_budget = MAX_IMAGE_COPIES_PER_SYNC
     try:
         client = _client(connection)
         for repo, name in debrief.list_debriefs(root):
@@ -429,8 +457,12 @@ def sync(
             key = _key(machine, repo, name)
             try:
                 current = _get(client, key)
+                recent = (_age_s(name, now) or 0) <= IMAGE_TTL_S  # An older copy would expire at once.
                 if current and current.get("digest"):
-                    store_images(client, current["digest"])  # Also fills in digests made before this existed.
+                    if recent and image_budget > 0:  # Also fills in digests made before this existed.
+                        image_budget -= store_images(
+                            client, current["digest"], raw=current["raw"], machine=machine, budget=image_budget
+                        )
                     continue
                 if current and (current.get("quiet") or current.get("tries", 0) >= MAX_TRIES):
                     continue
@@ -454,7 +486,10 @@ def sync(
                 else:
                     entry = _publish(client, machine, repo, name, raw, digest=text, model=model, tries=tries + 1)
                     written += 1
-                    store_images(client, entry["digest"])
+                    if recent and image_budget > 0:
+                        image_budget -= store_images(
+                            client, entry["digest"], raw=raw, machine=machine, budget=image_budget
+                        )
             except _REDIS_ERRORS:
                 raise
             except Exception as exc:  # One bad debrief must not stop the older ones.

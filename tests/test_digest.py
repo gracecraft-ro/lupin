@@ -526,6 +526,7 @@ PNG = b"\x89PNG\r\n\x1a\n-test-image"
 WITH_IMAGE = f"## Evidence\n- Issue #1: ![i]({ATTACH})\n" + RAW
 ATTACH_ID = "eba1e250-ae34-481a-9f8c-98503030f83e"
 STORY = f"# Story\n\nText.\n![i]({ATTACH})\n"
+RECENT = "20261015-120000.md"  # Two days before NOW. Pictures are copied for a debrief this young.
 
 
 def _fake_story(calls):
@@ -549,6 +550,10 @@ def _fetcher(monkeypatch, result):
     return fetched
 
 
+def _miss_key(machine="jesus"):
+    return f"{digest.IMAGE_MISS_PREFIX}{machine}:{ATTACH_ID}"
+
+
 def test_image_types_match_the_dashboards():
     from lupin import serve
 
@@ -556,7 +561,7 @@ def test_image_types_match_the_dashboards():
 
 
 def test_sync_copies_the_pictures_of_a_new_digest_to_redis(tmp_path, redis_port, flush_redis, monkeypatch):
-    _write(tmp_path, "widgets", "20261010-120000.md", WITH_IMAGE)
+    _write(tmp_path, "widgets", RECENT, WITH_IMAGE)
     fetched = _fetcher(monkeypatch, (PNG, "image/png"))
 
     digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_story([]), now=NOW)
@@ -564,11 +569,12 @@ def test_sync_copies_the_pictures_of_a_new_digest_to_redis(tmp_path, redis_port,
     assert fetched == [ATTACH_ID]
     assert digest.read_image(ATTACH_ID, **_kw(redis_port)) == (PNG, "image/png")
     assert digest.read_image(ATTACH_ID.upper(), **_kw(redis_port)) == (PNG, "image/png")
-    assert _raw_client(redis_port).ttl(digest.IMAGE_KEY_PREFIX + ATTACH_ID) > 0
+    ttl = _raw_client(redis_port).ttl(digest.IMAGE_KEY_PREFIX + ATTACH_ID)
+    assert 0 < ttl <= digest.IMAGE_TTL_S < digest.KEY_TTL_S
 
 
 def test_a_copied_picture_is_not_fetched_again(tmp_path, redis_port, flush_redis, monkeypatch):
-    _write(tmp_path, "widgets", "20261010-120000.md", WITH_IMAGE)
+    _write(tmp_path, "widgets", RECENT, WITH_IMAGE)
     fetched = _fetcher(monkeypatch, (PNG, "image/png"))
 
     for _ in range(3):
@@ -578,33 +584,58 @@ def test_a_copied_picture_is_not_fetched_again(tmp_path, redis_port, flush_redis
 
 
 def test_a_failed_copy_leaves_a_marker_and_is_not_retried_at_once(tmp_path, redis_port, flush_redis, monkeypatch, capsys):
-    _write(tmp_path, "widgets", "20261010-120000.md", WITH_IMAGE)
+    _write(tmp_path, "widgets", RECENT, WITH_IMAGE)
     fetched = _fetcher(monkeypatch, RuntimeError("gh broke"))
+    client = _raw_client(redis_port)
 
     digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_story([]), now=NOW)
     digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_story([]), now=NOW)
 
     assert fetched == [ATTACH_ID]  # The marker stops a second try.
-    assert digest.read_image(ATTACH_ID, **_kw(redis_port)) is None
-    assert 0 < _raw_client(redis_port).ttl(digest.IMAGE_KEY_PREFIX + ATTACH_ID) <= digest.IMAGE_RETRY_S
+    assert client.exists(digest.IMAGE_KEY_PREFIX + ATTACH_ID) == 0
+    assert 0 < client.ttl(_miss_key()) <= digest.IMAGE_RETRY_S
     assert "gh broke" in capsys.readouterr().err
-    assert digest.read_one("jesus", "widgets", "20261010-120000.md", **_kw(redis_port))["digest"]  # The digest is kept.
+    assert digest.read_one("jesus", "widgets", RECENT, **_kw(redis_port))["digest"]  # The digest is kept.
 
 
-def test_a_picture_that_is_too_big_is_not_copied(tmp_path, redis_port, flush_redis, monkeypatch):
-    _write(tmp_path, "widgets", "20261010-120000.md", WITH_IMAGE)
+def test_a_picture_that_is_too_big_is_not_stored_and_waits_a_day_before_another_try(tmp_path, redis_port, flush_redis, monkeypatch):
+    _write(tmp_path, "widgets", RECENT, WITH_IMAGE)
     _fetcher(monkeypatch, (b"x" * (digest.IMAGE_MAX_BYTES + 1), "image/png"))
+    client = _raw_client(redis_port)
 
     digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_story([]), now=NOW)
 
-    assert digest.read_image(ATTACH_ID, **_kw(redis_port)) is None
+    assert client.exists(digest.IMAGE_KEY_PREFIX + ATTACH_ID) == 0  # The size check on the store side.
+    assert digest.IMAGE_RETRY_S < client.ttl(_miss_key()) <= digest.IMAGE_BIG_RETRY_S
+
+
+def test_a_marker_from_a_machine_without_access_does_not_block_a_machine_with_access(tmp_path, redis_port, flush_redis, monkeypatch):
+    _write(tmp_path, "widgets", RECENT, WITH_IMAGE)
+    _fetcher(monkeypatch, RuntimeError("no access"))
+    digest.sync(tmp_path, _kw(redis_port), machine="ralpha", make=_fake_story([]), now=NOW)
+    fetched = _fetcher(monkeypatch, (PNG, "image/png"))
+
+    digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_story([]), now=NOW)
+
+    assert fetched == [ATTACH_ID]
+    assert digest.read_image(ATTACH_ID, **_kw(redis_port)) == (PNG, "image/png")
+
+
+def test_a_debrief_older_than_the_picture_lifetime_gets_no_picture_copies(tmp_path, redis_port, flush_redis, monkeypatch):
+    _write(tmp_path, "widgets", "20261005-120000.md", WITH_IMAGE)  # 12 days before NOW.
+    fetched = _fetcher(monkeypatch, (PNG, "image/png"))
+
+    digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_story([]), now=NOW)
+
+    assert fetched == []
+    assert digest.read_one("jesus", "widgets", "20261005-120000.md", **_kw(redis_port))["digest"]
 
 
 def test_sync_fills_in_the_pictures_of_a_digest_made_before_pictures_were_copied(tmp_path, redis_port, flush_redis, monkeypatch):
-    _write(tmp_path, "widgets", "20261010-120000.md", WITH_IMAGE)
+    _write(tmp_path, "widgets", RECENT, WITH_IMAGE)
     _fetcher(monkeypatch, RuntimeError("down"))
     digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_story([]), now=NOW)
-    _raw_client(redis_port).delete(digest.IMAGE_KEY_PREFIX + ATTACH_ID)  # As if the copy never happened.
+    _raw_client(redis_port).delete(_miss_key())  # As if the copy never happened.
     fetched = _fetcher(monkeypatch, (PNG, "image/png"))
 
     calls = []
@@ -613,6 +644,36 @@ def test_sync_fills_in_the_pictures_of_a_digest_made_before_pictures_were_copied
     assert calls == []  # No new model call. The digest exists.
     assert fetched == [ATTACH_ID]
     assert digest.read_image(ATTACH_ID, **_kw(redis_port)) == (PNG, "image/png")
+
+
+def _ids(n):
+    return [f"{i:08x}-0000-0000-0000-000000000000" for i in range(1, n + 1)]
+
+
+def _page_with(ids):
+    return "".join(f"![p](https://github.com/user-attachments/assets/{i})\n" for i in ids)
+
+
+def test_store_images_uses_at_most_max_images_and_only_images_the_debrief_has(redis_port, flush_redis, monkeypatch):
+    ids = _ids(5)
+    fetched = _fetcher(monkeypatch, (PNG, "image/png"))
+    client = digest._client(_kw(redis_port))
+    other = _ids(6)[5]  # In the digest but not in the debrief.
+
+    digest.store_images(client, _page_with([other, *ids]), raw=_page_with(ids), machine="jesus", budget=10)
+
+    # The first 3 ids of the digest are `other`, ids[0] and ids[1]. `other` is not in the debrief, so it is skipped.
+    assert fetched == ids[:2]
+
+
+def test_store_images_stops_at_the_download_budget(redis_port, flush_redis, monkeypatch):
+    ids = _ids(3)
+    fetched = _fetcher(monkeypatch, (PNG, "image/png"))
+    client = digest._client(_kw(redis_port))
+
+    made = digest.store_images(client, _page_with(ids), raw=_page_with(ids), machine="jesus", budget=2)
+
+    assert made == 2 and fetched == ids[:2]
 
 
 @pytest.mark.parametrize(
@@ -624,11 +685,22 @@ def test_sync_fills_in_the_pictures_of_a_digest_made_before_pictures_were_copied
         json.dumps({"type": "image/png", "data": "***not base64***"}),
         json.dumps({"type": "image/png", "data": ""}),
         json.dumps({"type": "image/png"}),
+        json.dumps({"type": "image/png", "data": ["AAAA"]}),
+        json.dumps({"type": ["image/png"], "data": "AAAA"}),
         json.dumps(["image/png", "AAAA"]),
     ],
 )
 def test_read_image_refuses_anything_that_is_not_a_well_formed_picture(redis_port, flush_redis, stored):
     _raw_client(redis_port).set(digest.IMAGE_KEY_PREFIX + ATTACH_ID, stored)
+
+    assert digest.read_image(ATTACH_ID, **_kw(redis_port)) is None
+
+
+def test_read_image_refuses_a_value_over_the_size_limit_that_a_bad_writer_stored(redis_port, flush_redis):
+    import base64
+
+    big = base64.b64encode(b"x" * (digest.IMAGE_MAX_BYTES + 1)).decode()
+    _raw_client(redis_port).set(digest.IMAGE_KEY_PREFIX + ATTACH_ID, json.dumps({"type": "image/png", "data": big}))
 
     assert digest.read_image(ATTACH_ID, **_kw(redis_port)) is None
 
