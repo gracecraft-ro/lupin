@@ -374,7 +374,14 @@ the machine, repo, file name, the debrief text, the digest, the model that wrote
 it, an error text, a try count, and the publish time. Screenshot links in the
 text are replaced with plain words. Redis holds no images.
 
-A model call writes the digest. The model gets no tools and no MCP servers, because the
+A quiet debrief gets no digest. A debrief is quiet when Shipped, Follow-up tasks,
+Risk and Evidence each hold only `- None.`. The debrief writer puts `- None.` only
+when it collected that data, so missing data never counts as quiet. The entry has
+`quiet: true`, no model call is made, and the Debriefs page shows "no changes".
+
+A model call writes the digest. It is a short story with a title, a few themes and
+up to 3 pictures. It is not a list of pull requests. A picture must be a GitHub
+attachment that the debrief itself holds. The page shows it through `/image`. The model gets no tools and no MCP servers, because the
 text can hold PR titles that other people wrote. `lupin route prose size-s` picks the model.
 The agent's digest thread runs this every 5 minutes. It makes at most 3 digests
 in one run, newest debrief first. A debrief past that limit is stored with no

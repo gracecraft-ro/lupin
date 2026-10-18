@@ -2817,8 +2817,12 @@ def debrief_items(root: Path, connection: dict) -> list[dict]:
     here = socket.gethostname()
     published = digest.read_all(**connection)
     digested = {(e["machine"], e["repo"], e["name"]) for e in published if e.get("digest")}
+    quiet = {(e["machine"], e["repo"], e["name"]) for e in published if e.get("quiet")}
     items = [
-        {"repo": repo, "name": name, "machine": None, "has_digest": (here, repo, name) in digested}
+        {
+            "repo": repo, "name": name, "machine": None,
+            "has_digest": (here, repo, name) in digested, "quiet": (here, repo, name) in quiet,
+        }
         for repo, name in debrief.list_debriefs(root)
     ]
     local = {(i["repo"], i["name"]) for i in items}
@@ -2826,7 +2830,10 @@ def debrief_items(root: Path, connection: dict) -> list[dict]:
         if entry["machine"] == here and (entry["repo"], entry["name"]) in local:
             continue
         items.append(
-            {"repo": entry["repo"], "name": entry["name"], "machine": entry["machine"], "has_digest": bool(entry.get("digest"))}
+            {
+                "repo": entry["repo"], "name": entry["name"], "machine": entry["machine"],
+                "has_digest": bool(entry.get("digest")), "quiet": bool(entry.get("quiet")),
+            }
         )
     return sorted(items, key=lambda i: (debrief._newest_first((i["repo"], i["name"])), i["machine"] or ""), reverse=True)
 
@@ -2842,7 +2849,7 @@ def render_debrief_index(items: list[dict]) -> bytes:
         f"<li><a href='{link(item)}'>{esc(item['repo'])}</a> "
         f"<span class=dim>{esc(_debrief_stamp(item['name']))}"
         f"{' &middot; ' + esc(item['machine']) if item['machine'] else ''}"
-        f"{'' if item['has_digest'] else ' &middot; no digest'}</span></li>"
+        f"{' &middot; no changes' if item['quiet'] else '' if item['has_digest'] else ' &middot; no digest'}</span></li>"
         for item in items
     )
     listing = f"<ul>{rows}</ul>" if rows else "<p class=dim>No debriefs yet.</p>"
@@ -3197,6 +3204,8 @@ class Handler(BaseHTTPRequestHandler):
                 f"<p class=dim>Digest by {esc(str(entry.get('model') or 'a model'))}. "
                 "The full debrief is below.</p><hr>"
             )
+        elif entry and entry.get("quiet"):
+            summary = "<p class=dim>Nothing changed in this period, so no digest was written.</p>"
         elif entry and entry.get("error"):
             summary = f"<p class=dim>No digest: {esc(str(entry['error']))}</p>"
         remote_note = f"<p class=dim>Written on {esc(machine)}. Screenshots stay on that machine.</p>" if machine != here else ""
