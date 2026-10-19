@@ -5,14 +5,17 @@ pattern for the credential files and `urlopen` calls this module reuses.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 
-from lupin import cli, model_fetch
+from lupin import cli, model_fetch, quota
 
 
 
@@ -153,6 +156,160 @@ class OpencodeGoModelsTests(unittest.TestCase):
             result = model_fetch.opencode_go_models(CATALOG)
         self.assertFalse(result["live"])
         self.assertEqual(result["models"], [])
+
+
+REAL_OMP_TOKEN = quota._omp_token  # `conftest.py` replaces it for each test
+SECRET_KEY = "sk-test-SECRET-0123456789"
+EXPIRED_ERROR = "OpenCode Go API key expired -- get a new key in the OpenCode Console"
+NO_KEY_ERROR = "no OpenCode Go API key available"
+
+
+def _http_error(code: int, body: str) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        model_fetch.OPENCODE_GO_MODELS_URL, code, "error", {}, io.BytesIO(body.encode())
+    )
+
+
+class OpencodeGoKeyTests(unittest.TestCase):
+    """Where `opencode_go_models()` finds its key, and what it says when the
+    key fails. The HTTP call and `omp` are always mocked: these tests never
+    contact opencode.ai and never run the real `omp token`.
+    """
+
+    def setUp(self):
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        self.auth_path = os.path.join(tempdir.name, "auth.json")  # absent by default
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(model_fetch, "OPENCODE_GO_AUTH_FILE", self.auth_path).start()
+        mock.patch.dict(os.environ, {"OPENCODE_API_KEY": ""}).start()
+        mock.patch.object(quota, "_omp_token", REAL_OMP_TOKEN).start()
+        # `omp` is missing unless a test says otherwise.
+        self.omp = mock.patch.object(
+            quota.subprocess, "run", side_effect=FileNotFoundError("omp")
+        ).start()
+        self.fetch = mock.patch.object(
+            model_fetch.urllib.request,
+            "urlopen",
+            side_effect=lambda *args, **kwargs: io.BytesIO(
+                json.dumps({"data": [{"id": "deepseek-v4-flash"}]}).encode()
+            ),
+        ).start()
+
+    def write_auth_file(self, key):
+        with open(self.auth_path, "w", encoding="utf-8") as auth_file:
+            json.dump({"opencode-go": {"type": "api", "key": key}}, auth_file)
+
+    def sent_key(self):
+        header = self.fetch.call_args.args[0].get_header("Authorization")
+        return header.removeprefix("Bearer ")
+
+    def omp_prints(self, stdout, returncode=0, stderr=""):
+        self.omp.side_effect = None
+        self.omp.return_value = subprocess.CompletedProcess(
+            ["omp", "token", "opencode-go"], returncode, stdout, stderr
+        )
+
+    def fetch_quietly(self):
+        """Run the fetch. Check the key is in no output and not in the result."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            result = model_fetch.opencode_go_models(CATALOG)
+        self.assertNotIn(SECRET_KEY, out.getvalue())
+        self.assertNotIn(SECRET_KEY, err.getvalue())
+        self.assertNotIn(SECRET_KEY, json.dumps(result))
+        return result
+
+    def assert_no_key_row(self, result):
+        self.assertFalse(result["live"])
+        self.assertEqual(result["error"], NO_KEY_ERROR)
+        self.assertEqual(result["models"], [])
+        self.fetch.assert_not_called()
+
+    def test_key_from_auth_file_wins_and_omp_is_not_run(self):
+        self.write_auth_file(SECRET_KEY)
+        with mock.patch.dict(os.environ, {"OPENCODE_API_KEY": "env-key"}):
+            result = self.fetch_quietly()
+        self.assertTrue(result["live"])
+        self.assertEqual(self.sent_key(), SECRET_KEY)
+        self.omp.assert_not_called()
+
+    def test_key_from_env_when_no_auth_file(self):
+        with mock.patch.dict(os.environ, {"OPENCODE_API_KEY": f" {SECRET_KEY} "}):
+            result = self.fetch_quietly()
+        self.assertTrue(result["live"])
+        self.assertEqual(self.sent_key(), SECRET_KEY)
+        self.omp.assert_not_called()
+
+    def test_key_only_from_omp_token(self):
+        self.omp_prints(SECRET_KEY + "\n")
+        result = self.fetch_quietly()
+        self.assertTrue(result["live"])
+        self.assertEqual([model["id"] for model in result["models"]], ["deepseek-v4-flash"])
+        self.assertEqual(self.sent_key(), SECRET_KEY)
+        self.assertEqual(self.omp.call_args.args[0], ["omp", "token", "opencode-go"])
+        self.assertEqual(self.omp.call_args.kwargs["timeout"], 10)
+        self.assertFalse(self.omp.call_args.kwargs.get("shell", False))
+
+    def test_omp_missing_gives_no_key_row(self):
+        self.assert_no_key_row(self.fetch_quietly())
+
+    def test_omp_timeout_gives_no_key_row(self):
+        self.omp.side_effect = subprocess.TimeoutExpired(["omp", "token"], 10)
+        self.assert_no_key_row(self.fetch_quietly())
+
+    def test_omp_non_zero_exit_gives_no_key_row(self):
+        self.omp_prints(SECRET_KEY + "\n", returncode=1)
+        self.assert_no_key_row(self.fetch_quietly())
+
+    def test_omp_empty_output_gives_no_key_row(self):
+        for stdout in ("", " \n"):
+            with self.subTest(stdout=stdout):
+                self.omp_prints(stdout)
+                self.assert_no_key_row(self.fetch_quietly())
+
+    def test_omp_output_not_one_word_gives_no_key_row(self):
+        self.omp_prints(f"error: not logged in {SECRET_KEY}\n")
+        self.assert_no_key_row(self.fetch_quietly())
+
+    def test_expired_key_gives_the_expired_error(self):
+        self.write_auth_file(SECRET_KEY)
+        body = json.dumps({"error": {"code": "api_key_expired", "message": f"key {SECRET_KEY} expired"}})
+        self.fetch.side_effect = _http_error(401, body)
+        result = self.fetch_quietly()
+        self.assertEqual(
+            result,
+            {"subscription": "opencode-go", "live": False, "error": EXPIRED_ERROR, "models": []},
+        )
+        self.assertEqual(result["error"], quota.OPENCODE_GO_KEY_EXPIRED)
+
+    def test_expired_key_from_omp_gives_the_expired_error(self):
+        self.omp_prints(SECRET_KEY + "\n")
+        self.fetch.side_effect = _http_error(401, '{"error": {"code": "api_key_expired"}}')
+        self.assertEqual(self.fetch_quietly()["error"], EXPIRED_ERROR)
+
+    def test_other_http_errors_keep_the_old_error(self):
+        cases = [
+            (401, '{"error": {"code": "invalid_api_key"}}'),
+            (401, ""),
+            (403, '{"error": {"code": "api_key_expired"}}'),
+            (500, "oops"),
+        ]
+        for code, body in cases:
+            with self.subTest(code=code, body=body):
+                self.write_auth_file(SECRET_KEY)
+                self.fetch.side_effect = _http_error(code, body)
+                result = self.fetch_quietly()
+                self.assertEqual(
+                    result,
+                    {"subscription": "opencode-go", "live": False, "error": "unavailable (HTTPError)", "models": []},
+                )
+
+    def test_network_error_keeps_the_old_error(self):
+        self.write_auth_file(SECRET_KEY)
+        self.fetch.side_effect = urllib.error.URLError(f"cannot reach host {SECRET_KEY}")
+        result = self.fetch_quietly()
+        self.assertEqual(result["error"], "unavailable (URLError)")
 
 
 class CodexModelsTests(unittest.TestCase):
