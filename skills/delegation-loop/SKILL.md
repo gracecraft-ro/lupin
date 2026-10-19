@@ -208,8 +208,10 @@ Tiers are the keys `tier0`, `tier1`, and `tier2` of a category row in
    the same finding or check stays for 3 more rounds, the PR is blocked on an
    owner decision. A fix worker at `tier2` cannot go higher. Its PR is blocked
    after 3 rounds with the same finding or check.
-5. Use the model that `lupin route` gives. A raise to `tier2` usually gives
-   Opus. Never use Fable without the user's approval.
+5. Use the model that `lupin route` gives for the tier. A raise to `tier2`
+   usually gives Opus. This is the one case where the stall rule asks for
+   Opus; Opus stays sparing everywhere else. Never use Fable without the
+   user's approval.
 
 ## Install skills on loop hosts
 
@@ -542,9 +544,9 @@ changes alone. Keep visual or 3D reviews to one or two PRs per dispatch.
 
 The reviewer must be capable of doing the issue and must not be below the
 worker's model tier. This includes a fix worker that the fix cycle moved one
-tier higher. Prefer a reviewer one tier higher when quota allows. Use the
-model that `lupin route` gives. A raise to `tier2` usually gives Opus. Never
-use Fable without the user's approval.
+tier higher. Prefer a reviewer one tier higher when quota allows.
+Never dispatch Fable without the user's approval. Use Opus sparingly because
+it costs more.
 
 If the review finds a problem, the reviewer runs the fix cycle. See "Run the
 fix cycle" in the `code-review` skill. The fix worker pushes as in "Pull
