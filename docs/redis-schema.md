@@ -548,7 +548,8 @@ This is the worst case, not a measured time.
 The debrief runs inside the stop subprocess, after the repo lock is released.
 The debrief has these waits:
 
-- All `gh` calls share one time limit of 10 seconds (`DEBRIEF_TIME_LIMIT_S`).
+- All `gh` calls of a stop debrief share one time limit of 10 seconds (`DEBRIEF_TIME_LIMIT_S`).
+  A periodic window shares 120 seconds (`PERIODIC_TIME_LIMIT_S`), because nobody waits for it.
   A call that hits the limit leaves a `Not collected` note in the debrief.
 - Three Redis calls, each up to 14 seconds (`DEBRIEF_CALL_WORST_S`):
   - A ledger read (one `XRANGE`).

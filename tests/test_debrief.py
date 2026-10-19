@@ -1707,14 +1707,17 @@ def test_a_window_is_not_due_until_the_grace_after_its_end_has_passed(tmp_path: 
 
 def test_a_machine_with_a_fast_clock_does_not_claim_or_write_a_window_early(tmp_path: Path, monkeypatch, redis_port, flush_redis):
     state = _fleet_machine(tmp_path, monkeypatch, redis_port, "fast")
-    two_minutes_early = END_6H - timedelta(minutes=2)  # The clock says 06:58 when it is really 06:56.
+    # The fast clock says 07:01Z. The window ended at 07:00Z, which is less than the grace ago.
+    fast_clock_now = END_6H + timedelta(minutes=1)
 
-    loop_runtime.write_due_periodic_debriefs(now=two_minutes_early)
+    loop_runtime.write_due_periodic_debriefs(now=fast_clock_now)
 
     names = _window_files(state)
-    assert "20261010-070000-6h.md" not in names  # The 07:00 window is not over yet.
+    assert "20261010-070000-6h.md" not in names  # Too early: the window has not been over for the grace.
+    assert "20261010-010000-6h.md" in names      # The window before it is the newest one that is over.
     raw = redis.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
     assert raw.get(debrief._window_key("widgets", "6h", END_6H)) is None
+    assert raw.get(debrief._window_key("widgets", "6h", _utc(2026, 10, 10, 1))) == "fast:done"
 
 
 def test_write_window_uses_the_newest_window_that_is_over_by_the_grace(tmp_path: Path, monkeypatch):
@@ -1794,3 +1797,52 @@ def test_a_failing_repo_does_not_stop_the_others_and_a_repo_without_a_checkout_i
     assert raw.keys("*debrief-window:gone:*") == []
     assert raw.keys("*debrief-window:broken:*") == []
     assert len(raw.keys("*debrief-window:widgets:*")) == 4
+
+
+# --- a periodic window may take longer than a stop debrief ---
+
+def test_a_periodic_window_collects_every_section_when_gh_takes_three_seconds_a_call(tmp_path: Path, monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+    timeouts = _timed_gh(monkeypatch, clock, per_call=3.0)
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    monkeypatch.setattr(debrief.ledger, "read_events", lambda repo, **kw: [])
+    monkeypatch.setattr(debrief.claims, "claims_for", lambda repos, **kw: {})
+    monkeypatch.setattr(debrief, "_screenshots", lambda root, repo, path: "")
+
+    path = debrief.write_window(tmp_path, "widgets", checkout, "12h", now=NOW)
+
+    text = path.read_text(encoding="utf-8")
+    assert "Not collected" not in text and "time limit" not in text
+    assert len(timeouts) > 4 and clock.now > debrief.DEBRIEF_TIME_LIMIT_S  # The stop limit would have cut it.
+    assert clock.now < debrief.PERIODIC_TIME_LIMIT_S
+
+
+def test_the_same_slow_gh_still_cuts_a_stop_debrief_at_ten_seconds(tmp_path: Path, monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+    _timed_gh(monkeypatch, clock, per_call=3.0)
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    monkeypatch.setattr(debrief.ledger, "read_events", lambda repo, **kw: [])
+    monkeypatch.setattr(debrief.claims, "claims_for", lambda repos, **kw: {})
+
+    path = debrief.write_debrief(tmp_path, "widgets", checkout, "2026-10-02T09:00:00Z")
+
+    assert "time limit reached" in path.read_text(encoding="utf-8")
+    assert clock.now == debrief.DEBRIEF_TIME_LIMIT_S
+
+
+def test_a_periodic_window_still_stops_at_its_own_limit(tmp_path: Path, monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+    _timed_gh(monkeypatch, clock, per_call=3.0)
+    monkeypatch.setattr(debrief, "PERIODIC_TIME_LIMIT_S", 10.0)
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    monkeypatch.setattr(debrief.ledger, "read_events", lambda repo, **kw: [])
+    monkeypatch.setattr(debrief.claims, "claims_for", lambda repos, **kw: {})
+    monkeypatch.setattr(debrief, "_screenshots", lambda root, repo, path: "")
+
+    path = debrief.write_window(tmp_path, "widgets", checkout, "12h", now=NOW)
+
+    assert "time limit reached" in path.read_text(encoding="utf-8")
+    assert clock.now == 10.0
