@@ -75,11 +75,9 @@ Do not replace a PR review with a review of an unsubmitted branch.
   no before: the new screen is enough. See "Attach screenshots to the PR" in the
   `ship` skill for what a visual change is.
 - For 3D changes, inspect the contact sheet and compare useful views.
-- An owner comment on the PR that names a problem is a finding. Every comment
-  the loop posts starts with `Loop:`. An owner comment has
-  `author_association` `OWNER` or `MEMBER` and does not start with `Loop:`. A
-  review that the loop posts is not an owner comment. A PR comment is never an
-  approval.
+- An owner comment on the PR that names a problem is a finding. The
+  `delegation-loop` skill defines an owner comment and the `Loop:` prefix. A
+  PR comment is never an approval.
 - Do not edit files, run linters, or merge the PR. A fix worker makes the
   changes. See "Run the fix cycle".
 
@@ -118,8 +116,9 @@ Use very simple English: short sentences and everyday words. Explain each
 technical term the first time you use it. The reader may never have seen this
 code.
 
-Start with a target line: `Target: OWNER/REPO PR #<number> at head SHA.` Use the full
-repo name and the full head SHA. Then start the next line with `What this change does:`.
+Start with `Round N. LEVEL: size-m. Target: OWNER/REPO PR #<number> at head
+SHA.` Use the full repo name and the full head SHA. Then start the next line
+with `What this change does:`.
 Write two or three sentences after it.
 
 Then list the findings in three groups. Skip an empty group:
@@ -154,27 +153,28 @@ If nothing is found, write `What this change does:`, then `Looks good. Ship.`, t
 You post each verdict and its findings on the PR, as a review. Use the API
 command in "Pull requests come first" in the `delegation-loop` skill, with the
 head SHA that you read. `Ship` is `APPROVE`. A blocking finding is
-`REQUEST_CHANGES`. GitHub refuses an approval or a change request from the PR's
-author. If your login opened the PR, use `COMMENT`. If your verdict is `Ship`,
-ask the owner in a `Loop:` PR comment to approve or merge the PR.
+`REQUEST_CHANGES`. If your login opened the PR, follow the `COMMENT` rule in
+the same section of that skill.
 
 Run the fix cycle only when your brief says that the loop owns the PR. For any
 other PR, post the verdict, report it to the orchestrator, and stop. Do not
 dispatch a fix worker for it.
 
-Pick each fix worker's model with "Fix worker models" in the
-`delegation-loop` skill. The first line of every verdict review is
-`Round N. LEVEL: size-m.` (or `size-l`), then the target line on the same
-line. N is 1 more than the N in the latest review on the PR that starts with
-`Round`, or 1 if there is none. Take LEVEL from that review, or from your
-brief.
+In the first line, N is 1 more than the N in the latest `Round` review on
+the PR, or 1. LEVEL (`size-m` or `size-l`) is the LEVEL for the next fix
+worker. "Fix worker models" in the `delegation-loop` skill picks its model.
+Check the stall rule before you post. If it raises LEVEL, write
+`LEVEL: size-l.` in this verdict.
+
+If your brief says that the latest `Round` review is at the current head SHA,
+do not review again. Start the fix worker with those findings.
 
 The fix cycle:
 
-1. After `Verdict: fix N first`, start a fix worker. Use your runner's agent
-   tool, or run `herdr agent start` in a new pane. See "Talk to an agent in a
-   Herdr pane" in the `delegation-loop` skill. If you cannot start an agent,
-   post the verdict, tell the orchestrator, and stop.
+1. After a verdict with a blocking finding, start a fix worker. Use your
+   runner's agent tool, or run `herdr agent start` in a new pane. See "Talk to
+   an agent in a Herdr pane" in the `delegation-loop` skill. If you cannot
+   start an agent, post the verdict, tell the orchestrator, and stop.
 2. Give the fix worker a brief with the PR, the branch, the remote, the
    numbered findings, and the failing gate output. It makes its worktree and
    pushes as "Pull requests come first" in the `delegation-loop` skill says.
@@ -184,13 +184,14 @@ The fix cycle:
 4. Wait for the push. Every 60 seconds, run
    `gh pr view <number> --repo OWNER/REPO --json headRefOid -q .headRefOid`.
    Stop waiting when the output differs from the SHA that you reviewed, or
-   when the fix worker ends.
-5. If the SHA changed, review the new head SHA. If the SHA did not change when
-   the fix worker ended, start the next fix worker with the same findings and
-   the new gate output. Either case ends a round.
-6. Repeat until `Verdict: Ship`. There is no round limit. Do not report, ask,
-   or stop between rounds. Items 1, 7, and 8, and step 2 of "Fix worker
-   models" in the `delegation-loop` skill, are the only exceptions.
+   when the fix worker ends. If there is no push 30 minutes after the fix
+   worker starts, follow `AGENTS.md` rule 5 for it.
+5. If the SHA changed, review the new head SHA. That review is the next
+   round. If the fix worker ended with no push, that counts as one round with
+   the same findings. Start the next fix worker with them and the new gate
+   output.
+6. Repeat until `Verdict: Ship`. Do not stop between rounds, except as
+   items 1, 7, and 8 and step 2 of "Fix worker models" say.
 7. Stall rule: follow step 3 of "Fix worker models" in the `delegation-loop`
    skill. For a blocked PR, post the reason and the head SHA as a `Loop:` PR
    comment. Then report it to the orchestrator.

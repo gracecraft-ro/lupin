@@ -85,33 +85,31 @@ For each PR that is not a draft, do the first step that applies:
    dispatch a worker to sync it. A sync changes the head SHA, so get a new
    approval. If the sync stops on conflicts, the worker did not fail. Dispatch
    a fix worker to resolve them. Do not repeat that sync.
-3. The PR has findings or a failed repo gate at its current head SHA:
-   dispatch a reviewer. The repo gate is the set of checks that `AGENTS.md`
-   defines. Give the reviewer the findings and the gate output. The reviewer
-   runs the fix cycle and starts the fix worker. See "Run the fix cycle" in
-   the `code-review` skill.
-   - A loop verdict with findings is at the head, and no reviewer or fix
-     worker runs (for example, the reviewer could not start an agent): start
-     a fix worker, as "Fix worker models" says. Skip this
-     when the reviewer asked for a higher LEVEL. Also skip it when the latest
-     `Loop:` comment says the PR is blocked at this head SHA and no owner
-     comment came after it.
-   - A fix worker cannot start, or `lupin route` fails or gives a `null`
+3. The PR has findings or a failed repo gate at its current head SHA. The
+   repo gate is the set of checks that `AGENTS.md` defines. Skip the PR when
+   the latest `Loop:` comment says it is blocked at this head SHA and no owner
+   comment came after it. If a loop verdict with findings is at the head and
+   nothing runs, start a fix worker, as "Fix worker models" says. Otherwise
+   (the findings come from an owner comment or the gate), dispatch a reviewer.
+   Give it the findings and the gate output. The reviewer runs the fix cycle
+   and starts the fix worker. See "Run the fix cycle" in the `code-review`
+   skill.
+   - A fix worker cannot start, or `lupin route` fails or gives
      `wait_seconds`: post a `Loop:` PR comment with the reason and the head
-     SHA, unless the reviewer posted it. Take the next item. Step 3 applies
-     again next cycle.
-   - The reviewer reports that the fix worker's LEVEL is above its own: run
+     SHA, unless the reviewer posted it. Take the next item. Retry next cycle.
+   - The reviewer reports that the fix worker's LEVEL is above its own: do not
+     start a fix worker. Dispatch a reviewer from
      `lupin review-route --category CATEGORY --size size-l --mode separate`.
-     Dispatch that reviewer.
+     Its brief has LEVEL `size-l` and N.
 4. The PR has no review at its current head SHA: dispatch a reviewer. Do not
    wait for the worker to request a review.
 5. The PR waits for a gate that is still running: wait for the result.
 
 Each reviewer brief says whether the loop owns the PR. The reviewer runs the
 fix cycle only for a PR that the loop owns. The brief also gives the
-findings, N, and LEVEL, from the latest review on the PR that starts with
-`Round`. A reviewer that has posted a verdict has a result for the 30-minute
-check on workers.
+findings and the head SHA, N, and LEVEL of the latest `Round` review. With no
+such review, LEVEL comes from step 2 of "Fix worker models". A reviewer that
+posted a verdict in the last 30 minutes has a result for `AGENTS.md` rule 5.
 
 A worker is a fix worker, a sync worker, or a reviewer. Do not dispatch a
 worker for a PR that already has one running. A reviewer in a fix cycle is
@@ -156,9 +154,9 @@ an approval or a change request from the PR's author. If your login opened the
 PR, post the verdict with `-f event=COMMENT`. If your verdict is `Ship`, ask
 the owner in a `Loop:` PR comment to approve or merge the PR.
 
-Every comment the loop posts starts with `Loop:`. An owner comment has
-`author_association` `OWNER` or `MEMBER` and does not start with `Loop:`. A
-review that the loop posts is not an owner comment.
+Every comment that the loop or its workers post starts with `Loop:`. An
+owner comment has `author_association` `OWNER` or `MEMBER` and does not start
+with `Loop:`. A review that the loop posts is not an owner comment.
 
 In each cycle, read the new comments on each PR that the loop owns:
 
@@ -167,13 +165,12 @@ gh api --paginate repos/OWNER/REPO/issues/<number>/comments
 gh api --paginate repos/OWNER/REPO/pulls/<number>/comments
 ```
 
-The first command reads the PR comments. The second reads the review comments
-on lines of the diff. An owner comment that names a problem is a finding. It
-starts a fix cycle, as in step 3. A PR comment is never an approval.
+An owner comment that names a problem is a finding. It starts a fix cycle, as
+in step 3. A PR comment is never an approval.
 
 A review with findings is not an end state. The fix cycle repeats until the PR
-is ready for production. It has no round limit. Do not report, ask, or stop
-between rounds.
+is ready for production. A round is one verdict. There is no round limit. Do
+not report, ask, or stop between rounds.
 
 A PR is blocked on an owner decision when one of these is true:
 
@@ -193,17 +190,20 @@ issue. Work that is already running continues.
 
 ### Fix worker models
 
-1. Get the category and the size with `lupin classify --issue-json FILE`. Use
-   the linked issue's JSON, or the PR's JSON if no issue is linked.
-2. Run `lupin route CATEGORY LEVEL --no-bmo --json`. LEVEL is `size-l` for a
-   `size-l` or `size-xl` PR. For every other PR, LEVEL is `size-m`. Use the
-   `model` and `effort` that it gives. If `wait_seconds` is a number, wait
-   that long and run it again. If the command fails or `wait_seconds` is
-   `null`, stop and report it.
+1. Make FILE with `gh issue view <number> --repo OWNER/REPO --json
+   title,body,labels > FILE` for the linked issue, or `gh pr view` with the
+   same flags if no issue is linked. Run `lupin classify --issue-json FILE`.
+   If it fails, use category `coding` and LEVEL `size-m`.
+2. LEVEL is `size-l` for a `size-l` or `size-xl` PR. For every other PR,
+   LEVEL is `size-m`. Run `lupin route CATEGORY LEVEL --no-bmo --json`. Use the
+   `model` and `effort` that it gives. If the command fails, or the output has
+   `wait_seconds`, the fix worker cannot start now. Stop and report it.
 3. Stall rule ("raise the fix worker one model tier"): if the same finding or
    failing check is in 3 verdicts in a row, change LEVEL from `size-m` to
-   `size-l` one time. If it stays for 3 more verdicts, or LEVEL was already
-   `size-l`, the PR is blocked on an owner decision.
+   `size-l` one time. If it stays for 3 more verdicts after the first `Round`
+   line that says `size-l`, or LEVEL was already `size-l`, the PR is blocked on
+   an owner decision. A fix worker that ends with no push counts as one
+   verdict with the same findings.
 4. `size-l` usually gives Opus. That is allowed here. Never use Fable without
    the user's approval.
 

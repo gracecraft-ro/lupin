@@ -113,10 +113,7 @@ repo:
 4. If the review finds a problem and the loop owns the PR, the reviewer starts
    the fix worker and runs the fix cycle until the PR is ready for production.
    See "Run the fix cycle" in the `code-review` skill.
-5. The reviewer posts each verdict on the PR. Every comment the loop posts
-   starts with `Loop:`. An owner comment has `author_association` `OWNER` or
-   `MEMBER` and does not start with `Loop:`. A review that the loop posts is
-   not an owner comment.
+5. The reviewer posts each verdict on the PR.
 6. The orchestrator merges into `main` only when all four are true:
    1. The PR is open on `OWNER/REPO`, with base `main`.
    2. A reviewer approves the current head SHA.
