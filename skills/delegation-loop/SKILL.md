@@ -60,8 +60,8 @@ only for a PR that the loop owns. The loop owns a PR when both are true:
   owner of the `fork` remote), or the ledger has a dispatch event for its
   branch.
 - No other holder has a live claim on it. Run `lupin claim` for the PR:
-  - Exit 0: you own the claim. If you dispatch nothing for the PR, release
-    the claim.
+  - Exit 0: you hold the claim. If you dispatch nothing and no worker of
+    yours runs on the PR, release the claim.
   - Exit 2: another holder has the PR.
   - Exit 3: Redis is not reachable. Do not dispatch on the PR.
 
@@ -91,16 +91,17 @@ For each PR that is not a draft, do the first step that applies:
    defines. Give the reviewer the findings and the gate output. The reviewer
    runs the fix cycle. See "Run the fix cycle" in the `code-review` skill.
    - If the reviewer cannot start an agent, it reports the verdict to you.
-     Then dispatch the fix worker, and after its push, a new reviewer.
+     Then dispatch a fix worker. When it pushes, dispatch a new reviewer. You
+     count the rounds.
    - If the reviewer reports that the fix worker needs a tier above the
-     reviewer's, dispatch a reviewer at that tier. Give it the findings, the
-     round count, and the fix worker's tier.
+     reviewer's, dispatch a reviewer at that tier.
 4. The PR has no review at its current head SHA: dispatch a reviewer. Do not
    wait for the worker to request a review.
-
-The reviewer's brief says whether the loop owns the PR. The reviewer runs the
-fix cycle only for a PR that the loop owns.
 5. The PR waits for a gate that is still running: wait for the result.
+
+Each reviewer brief says whether the loop owns the PR. The reviewer runs the
+fix cycle only for a PR that the loop owns. The brief also gives the
+findings, the reviewer's own tier, the fix worker's tier, and the round count.
 
 A worker is a fix worker, a sync worker, or a reviewer. Do not dispatch a
 worker for a PR that already has one running. A reviewer in a fix cycle is
@@ -140,7 +141,13 @@ gh api repos/OWNER/REPO/pulls/<number>/reviews \
   -f event=APPROVE -f commit_id=<full SHA> -F body=@verdict.md
 ```
 
-Use `-f event=REQUEST_CHANGES` when the review asks for changes.
+Use `-f event=REQUEST_CHANGES` when the review asks for changes. GitHub refuses
+an approval from the PR's author. If your login opened the PR, post the verdict
+with `-f event=COMMENT`. Then ask the owner in a `Loop:` PR comment to approve
+or merge the PR.
+
+Every comment the loop posts starts with `Loop:`. An owner comment has
+`author_association` `OWNER` or `MEMBER` and does not start with `Loop:`.
 
 In each cycle, read the new comments on each PR that the loop owns:
 
@@ -150,37 +157,53 @@ gh api --paginate repos/OWNER/REPO/pulls/<number>/comments
 ```
 
 The first command reads the PR comments. The second reads the review comments
-on lines of the diff. An owner comment is a comment whose `author_association`
-is `OWNER` or `MEMBER`. An owner comment that names a problem is a finding. It
+on lines of the diff. An owner comment that names a problem is a finding. It
 starts a fix cycle, as in step 3. A PR comment is never an approval.
 
 A review with findings is not an end state. The fix cycle repeats until the PR
 is ready for production. It has no round limit. Do not report, ask, or stop
 between rounds.
 
-Tiers are the keys `tier0`, `tier1`, and `tier2` of the issue's category row
-in `src/lupin/model-tiers.json`. `tier2` is the highest. Stall rule: after 3
-rounds in a row with the same finding or the same failing check, the next fix
-worker is one tier higher, one time only. If the same finding or check stays
-for 3 more rounds, or the fix worker is already at the highest tier that the
-row lists, the PR is blocked on an owner decision. Use Opus sparingly. Never
-use Fable without the user's approval.
-
 A PR is blocked on an owner decision when one of these is true:
 
 - It needs a sync or a fix, and the loop does not own it.
-- Its fix cycle is stalled, as the stall rule says.
+- Its fix cycle is stalled, as the stall rule in "Fix worker tiers" says.
 - A worker for it stops to ask the owner.
 - Its merge fails.
 
-Post the reason and the head SHA as a PR comment on each blocked PR. Then take
-the next item. In each cycle, read the new comments on each blocked PR. Retry
-the PR when its head SHA changes or the owner answers in a comment. List the
-blocked PRs in the handoff.
+Post the reason and the head SHA as a `Loop:` comment on each blocked PR. Then
+take the next item. In each cycle, read the new comments on each blocked PR.
+Retry the PR when its head SHA changes or the owner answers in a comment. List
+the blocked PRs in the handoff.
 
 In each cycle, dispatch merges, syncs, and reviews first. Then use the free
 worker slots for new issues. A PR in a fix cycle does not stop work on a new
 issue. Work that is already running continues.
+
+### Fix worker tiers
+
+Tiers are the keys `tier0`, `tier1`, and `tier2` of a category row in
+`src/lupin/model-tiers.json`. `tier2` is the highest. Every row has `tier2`.
+
+1. Get the category and the size with `lupin classify --issue-json FILE`. Use
+   the JSON of the linked issue. For a PR with no linked issue, use the PR's
+   JSON. If no other category matches, `classify` returns `coding`.
+2. The first fix worker uses the tier of the size: `tier0` for `size-xs` and
+   `size-s`, `tier1` for `size-m`, and `tier2` for `size-l`, `size-xl`, and
+   `size-?`.
+3. To pick the model for a tier, run `lupin route CATEGORY SIZE`. Use `size-s`
+   for `tier0`, `size-m` for `tier1`, and `size-l` for `tier2`. If the row has
+   no `tier0`, `route` uses `tier1`. Quota and the `bmo` slot can also change
+   the pick.
+4. Stall rule: after 3 rounds in a row with the same finding or the same
+   failing check, the next fix worker is one tier higher, one time only. If
+   the same finding or check stays for 3 more rounds, the PR is blocked on an
+   owner decision. A fix worker at `tier2` cannot go higher. Its PR is blocked
+   after 3 rounds with the same finding or check.
+5. In `model-tiers.json`, the first `tier2` pick in every row is `opus:high`.
+   So a raise to `tier2` usually starts Opus. Use Opus only when no other model in the tier
+   can do the work. A stall raise to `tier2` is such a case. Never use Fable
+   without the user's approval.
 
 ## Install skills on loop hosts
 
@@ -254,7 +277,8 @@ one item in that repo. The brief and the ledger still say which kind it is:
 Claim an issue when a worker starts its implementation. For a PR, the
 orchestrator claims it before it dispatches a reviewer or a fix worker. It
 renews the claim every 2 minutes during the fix cycle. It releases the claim
-only when the reviewer reports the final verdict or the worker stops.
+only when no worker of its own runs on the PR: the reviewer reported the final
+verdict, or the worker stopped.
 
 ```sh
 lupin claim OWNER/REPO#123 --holder SESSION         # issue 123
@@ -286,7 +310,7 @@ missing. Include the machine, worktree, branch, and holder:
 ```sh
 gh issue edit 123 --repo OWNER/REPO --add-label claimed
 gh issue comment 123 --repo OWNER/REPO \
-  --body "Claimed: machine=HOST; worktree=PATH; branch=BRANCH; holder=SESSION"
+  --body "Loop: Claimed: machine=HOST; worktree=PATH; branch=BRANCH; holder=SESSION"
 ```
 
 When the claim ends, remove the label and post the result, including the PR
@@ -294,7 +318,7 @@ number or reason the work stopped:
 
 ```sh
 gh issue edit 123 --repo OWNER/REPO --remove-label claimed
-gh issue comment 123 --repo OWNER/REPO --body "Released: PR #123"
+gh issue comment 123 --repo OWNER/REPO --body "Loop: Released: PR #123"
 ```
 
 The claim owner makes these updates; workers must not post duplicate claim
@@ -498,8 +522,8 @@ Do not leave it only in the ignored `evidence/<issue-number>/report.md`.
 Do not dispatch the reviewer on a visual PR with no screenshots.
 
 If the worker says it could not capture a screenshot, the PR is blocked on an
-owner decision. Ask the owner how to go on in a PR comment. Then take the next
-item.
+owner decision. Ask the owner how to go on in a `Loop:` PR comment. Then take
+the next item.
 
 Use `lupin review-route --category CATEGORY --size SIZE --mode separate` for
 a reviewer recommendation. Compare it with the issue's implementation route
@@ -691,7 +715,7 @@ screenshots is blocked.
 
 "Blocked" means an owner decision is needed. An example is a model-routing
 policy change. Waiting for the owner does not end the queue. Write the question
-as an issue comment or a PR comment. Then take the next item.
+as a `Loop:` comment on the issue or the PR. Then take the next item.
 
 Policy changes to this skill go to upstream `main` as a pull request, which the
 owner merges.

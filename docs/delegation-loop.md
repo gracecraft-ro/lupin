@@ -113,15 +113,11 @@ repo:
    the fix worker's.
 4. If the review finds a problem and the loop owns the PR, the reviewer runs
    the fix cycle until the PR is ready for production. See "Run the fix cycle"
-   in the `code-review` skill. Tiers are the keys `tier0`, `tier1`, and
-   `tier2` of the issue's category row in `src/lupin/model-tiers.json`.
-   `tier2` is the highest. Stall rule: after 3 rounds in a row with the same
-   finding or the same failing check, the next fix worker is one tier higher,
-   one time only. If the same finding or check stays for 3 more rounds, or the
-   fix worker is already at the highest tier that the row lists, the PR is
-   blocked on an owner decision. Use Opus sparingly. Never use Fable without
-   the user's approval.
-5. The reviewer posts each verdict on the PR.
+   in the `code-review` skill and "Fix worker tiers" in the `delegation-loop`
+   skill.
+5. The reviewer posts each verdict on the PR. Every comment the loop posts
+   starts with `Loop:`. An owner comment has `author_association` `OWNER` or
+   `MEMBER` and does not start with `Loop:`.
 6. The orchestrator merges into `main` only when all four are true:
    1. The PR is open on `OWNER/REPO`, with base `main`.
    2. A reviewer approves the current head SHA.

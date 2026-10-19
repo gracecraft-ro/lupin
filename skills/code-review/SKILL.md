@@ -75,9 +75,10 @@ Do not replace a PR review with a review of an unsubmitted branch.
   no before: the new screen is enough. See "Attach screenshots to the PR" in the
   `ship` skill for what a visual change is.
 - For 3D changes, inspect the contact sheet and compare useful views.
-- An owner comment on the PR that names a problem is a finding. An owner
-  comment is a comment whose `author_association` is `OWNER` or `MEMBER`. A PR
-  comment is never an approval.
+- An owner comment on the PR that names a problem is a finding. Every comment
+  the loop posts starts with `Loop:`. An owner comment has
+  `author_association` `OWNER` or `MEMBER` and does not start with `Loop:`. A
+  PR comment is never an approval.
 - Do not edit files, run linters, or merge the PR. A fix worker makes the
   changes. See "Run the fix cycle".
 
@@ -152,14 +153,17 @@ If nothing is found, write `What this change does:`, then `Looks good. Ship.`, t
 You post each verdict and its findings on the PR, as a review. Use the API
 command in "Pull requests come first" in the `delegation-loop` skill, with the
 head SHA that you read. `Ship` is `APPROVE`. A blocking finding is
-`REQUEST_CHANGES`.
+`REQUEST_CHANGES`. GitHub refuses an approval from the PR's author. If your
+login opened the PR, use `COMMENT`. Then ask the owner in a `Loop:` PR comment
+to approve or merge the PR.
 
 Run the fix cycle only when your brief says that the loop owns the PR. For any
 other PR, post the verdict, report it to the orchestrator, and stop. Do not
 dispatch a fix worker for it.
 
-Tiers are the keys `tier0`, `tier1`, and `tier2` of the issue's category row
-in `src/lupin/model-tiers.json`. `tier2` is the highest.
+Your brief gives your own tier, the fix worker's tier, and the round count.
+"Fix worker tiers" in the `delegation-loop` skill says how to get the category
+and size, which tier a fix worker starts at, and how to pick its model.
 
 The fix cycle:
 
@@ -174,21 +178,24 @@ The fix cycle:
    The fix goes on the same branch.
 3. You never edit files yourself. The fix worker is a different agent, so the
    review stays independent.
-4. Wait for the push. Run
-   `gh pr view N --repo OWNER/REPO --json headRefOid -q .headRefOid` until the
-   output differs from the SHA that you reviewed, or until the fix worker
-   ends.
-5. Review the new head SHA. A fix worker that ends with no push, or with a
-   failing gate, also ends a round.
+4. Wait for the push. Every 60 seconds, run
+   `gh pr view N --repo OWNER/REPO --json headRefOid -q .headRefOid`. Stop
+   waiting when the output differs from the SHA that you reviewed, or when the
+   fix worker ends.
+5. If the SHA changed, review the new head SHA. If the SHA did not change when
+   the fix worker ended, start the next fix worker with the same findings and
+   the new gate output. Either case ends a round.
 6. Repeat until `Verdict: Ship`. There is no round limit. Do not report, ask,
    or stop between rounds. Items 1, 7, and 8 are the only exceptions.
 7. Stall rule: after 3 rounds in a row with the same finding or the same
    failing check, the next fix worker is one tier higher, one time only. If
-   the same finding or check stays for 3 more rounds, or the fix worker is
-   already at the highest tier that the row lists, the PR is blocked on an
-   owner decision. Use Opus sparingly. Never use Fable without the user's
-   approval. For a blocked PR, post the reason and the head SHA as a PR
-   comment. Then report it to the orchestrator.
+   the same finding or check stays for 3 more rounds, the PR is blocked on an
+   owner decision. A fix worker at `tier2` cannot go higher. Its PR is blocked
+   after 3 rounds with the same finding or check. Use Opus only when no other
+   model in the tier can do the work. A stall raise to `tier2` is such a case.
+   Never use Fable without the user's approval. For a blocked PR, post the
+   reason and the head SHA as a `Loop:` PR comment. Then report it to the
+   orchestrator.
 8. Your tier must be at or above the fix worker's tier. If the raised tier is
    above yours, stop the cycle. Report three things to the orchestrator: the
    findings, the round count, and the fix worker's tier.
