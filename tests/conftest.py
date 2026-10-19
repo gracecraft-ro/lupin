@@ -72,7 +72,7 @@ def no_real_omp_token(monkeypatch):
 
     A test of `_omp_token` itself mocks `subprocess.run` instead.
     """
-    monkeypatch.setattr(quota, "_omp_token", lambda provider: "")
+    monkeypatch.setattr(quota, "_omp_token", lambda provider: "", raising=False)
 
 
 @pytest.fixture

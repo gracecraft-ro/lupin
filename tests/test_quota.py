@@ -386,7 +386,9 @@ class OpencodeGoQuotaTests(UsageReaderFixtures):
         )
 
 
-REAL_OMP_TOKEN = quota._omp_token  # `conftest.py` replaces it for each test
+# `conftest.py` replaces `_omp_token` for each test. `getattr` lets this file load
+# on old source that has no `_omp_token`.
+REAL_OMP_TOKEN = getattr(quota, "_omp_token", None)
 SECRET_KEY = "sk-test-SECRET-0123456789"
 EXPIRED_NOTE = "OpenCode Go API key expired -- get a new key in the OpenCode Console"
 USAGE_PAYLOAD = {"usage": {"rolling": {"percent": 12, "resetsAt": "2030-01-01T00:00:00Z"}}}
@@ -411,7 +413,7 @@ class OpencodeGoKeyTests(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(quota, "OPENCODE_GO_AUTH_FILE", self.auth_path).start()
         mock.patch.dict(os.environ, {"OPENCODE_API_KEY": ""}).start()
-        mock.patch.object(quota, "_omp_token", REAL_OMP_TOKEN).start()
+        mock.patch.object(quota, "_omp_token", REAL_OMP_TOKEN, create=True).start()
         # `omp` is missing unless a test says otherwise.
         self.omp = mock.patch.object(
             quota.subprocess, "run", side_effect=FileNotFoundError("omp")
@@ -530,6 +532,20 @@ class OpencodeGoKeyTests(unittest.TestCase):
             quota.opencode_go_quota(),
             [{"provider": "opencode-go", "note": "quota unavailable (URLError)"}],
         )
+
+
+class OmpTokenOutputTests(unittest.TestCase):
+    """`_omp_token` with a fake `omp` program on PATH. No real `omp` runs."""
+
+    @unittest.skipIf(REAL_OMP_TOKEN is None, "old source has no _omp_token")
+    def test_output_that_is_not_utf8_gives_no_key(self):
+        with tempfile.TemporaryDirectory() as bin_dir:
+            fake = os.path.join(bin_dir, "omp")
+            with open(fake, "w", encoding="utf-8") as script:
+                script.write("#!/bin/sh\nprintf '\\377\\376abc'\n")
+            os.chmod(fake, 0o700)
+            with mock.patch.dict(os.environ, {"PATH": bin_dir}):
+                self.assertEqual(REAL_OMP_TOKEN("opencode-go"), "")
 
 
 class ClaudeOauthQuotaTests(unittest.TestCase):
