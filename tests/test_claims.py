@@ -342,3 +342,64 @@ def test_cli_claim_unreachable_redis_exits_3(closed_port, capsys):
     captured = capsys.readouterr()
     assert code == 3
     assert "cannot reach the redis coordinator" in captured.err
+
+
+# Issue #156: a loop renews its own claims by holder.
+
+
+def test_renew_holder_claims_renews_only_that_holders_claims(redis_port, flush_redis):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    claims.claim("acme/repo#1", "loop-a", ttl=1.0, **kw)
+    claims.claim("acme/repo#2", "loop-b", ttl=1.0, **kw)
+
+    renewed = claims.renew_holder_claims("loop-a", ttl=60.0, **kw)
+
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port)
+    assert renewed == ["acme/repo#1"]
+    assert raw.pttl(f"{claims.PREFIX}claim:acme/repo#1") > 50_000
+    assert raw.pttl(f"{claims.PREFIX}claim:acme/repo#2") <= 1_000
+
+
+def test_renew_holder_claims_works_with_only_the_fleet_acl_commands(auth_redis_port):
+    """The fleet user has only the commands in docs/redis-schema.md: no MULTI, no WATCH."""
+    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
+    admin.flushall()
+    fleet = (
+        "PING GET SET DEL EXPIRE PEXPIRE TTL ZADD ZREM ZSCORE ZCARD ZRANGE ZREMRANGEBYSCORE "
+        "XADD XRANGE XREVRANGE SCAN EVAL EVALSHA SCRIPT|LOAD SCRIPT|EXISTS"
+    ).split()
+    admin.execute_command(
+        "ACL", "SETUSER", "fleet", "reset", "on", ">fleet-pw", "~lupin:*",
+        *[f"+{name.lower()}" for name in fleet],
+    )
+    kw = {
+        "redis_host": "127.0.0.1", "redis_port": auth_redis_port,
+        "redis_username": "fleet", "redis_password": "fleet-pw",
+    }
+    try:
+        claims.claim("acme/repo#3", "loop-a", ttl=1.0, **kw)
+        assert claims.renew_holder_claims("loop-a", ttl=60.0, **kw) == ["acme/repo#3"]
+        assert admin.pttl(f"{claims.PREFIX}claim:acme/repo#3") > 50_000
+    finally:
+        admin.execute_command("ACL", "DELUSER", "fleet")
+        admin.flushall()
+
+
+def test_claim_commands_take_the_holder_from_lupin_claim_holder(
+    redis_port, flush_redis, monkeypatch
+):
+    monkeypatch.setenv("LUPIN_CLAIM_HOLDER", "loop-a")
+    common = ["--redis-host", "127.0.0.1", "--redis-port", str(redis_port)]
+
+    assert cli.main(["claim", "acme/repo#4", *common]) == 0
+    held = claims.claims_for(["acme/repo"], redis_host="127.0.0.1", redis_port=redis_port)
+    assert held["acme/repo#4"]["session"] == "loop-a"
+    assert cli.main(["renew-claim", "acme/repo#4", *common]) == 0
+    assert cli.main(["release-claim", "acme/repo#4", *common]) == 0
+
+
+def test_claim_without_holder_or_lupin_claim_holder_is_a_usage_error(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["claim", "acme/repo#4"])
+    assert exc.value.code == 2
+    assert "--holder" in capsys.readouterr().err

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from lupin import loop_runtime
+from lupin import claims, loop_runtime
 from lupin.quota import QuotaDuration
 
 
@@ -2169,3 +2169,143 @@ def test_select_orchestrator_skips_a_provider_when_every_account_is_blocked():
     choice = loop_runtime.select_orchestrator(["openai/gpt-5", "claude"], snapshot, now=now)
 
     assert choice["platform"] == "claude"
+
+
+# Issue #156: the monitor renews the loop's own claims while the agent runs.
+
+_CLAIM_TTL = 0.5
+
+
+def _renew_harness(
+    monkeypatch, tmp_path: Path, port: int, hold, herdr_calls: list | None = None, **redis_env
+) -> None:
+    """Set up `_monitor_loop` with a fake Herdr, a fake agent (`hold`) and a short claim TTL.
+
+    The fake Herdr adds each call to `herdr_calls`.
+    """
+    monkeypatch.setenv("LUPIN_REDIS_HOST", "127.0.0.1")
+    monkeypatch.setenv("LUPIN_REDIS_PORT", str(port))
+    for name, value in redis_env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(claims, "DEFAULT_TTL", _CLAIM_TTL)
+    monkeypatch.setattr(loop_runtime, "CLAIM_RENEW_INTERVAL", 0.1)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    loop_runtime._write_metadata("widgets", {
+        "version": 1, "repo": "widgets", "session": loop_runtime.SESSION_NAME,
+        "state": "starting", "worktree": str(worktree), "branch": "lupin-loop/20261019-000000",
+    })
+    calls = herdr_calls if herdr_calls is not None else []
+
+    def herdr_json(session, *args, **kwargs):
+        calls.append(args)
+        return {"workspace": {"id": "w1"}, "root_pane": {"workspace_id": "w1", "pane_id": "p1"}}
+
+    monkeypatch.setattr(loop_runtime, "_ensure_server", lambda *args: None)
+    monkeypatch.setattr(loop_runtime, "_server_running", lambda session: True)
+    monkeypatch.setattr(loop_runtime, "_find_workspace", lambda session, metadata: None)
+    monkeypatch.setattr(loop_runtime, "_workspace_by_id", lambda session, workspace_id: None)
+    monkeypatch.setattr(loop_runtime, "_runtime_paths", lambda repo: {})
+    monkeypatch.setattr(loop_runtime, "_herdr_json", herdr_json)
+    monkeypatch.setattr(loop_runtime.slots, "hold", hold)
+
+
+def _agent_holder(herdr_calls: list) -> str | None:
+    """The LUPIN_CLAIM_HOLDER that the monitor gave the agent's workspace."""
+    create = next(call for call in herdr_calls if call[:2] == ("workspace", "create"))
+    values = [create[i + 1] for i, arg in enumerate(create) if arg == "--env"]
+    env = dict(value.split("=", 1) for value in values)
+    return env.get("LUPIN_CLAIM_HOLDER")
+
+
+def test_monitor_renews_only_its_own_claims_while_the_agent_runs(
+    monkeypatch, tmp_path: Path, redis_port, flush_redis
+):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    seen: dict = {}
+    herdr_calls: list = []
+
+    def agent(*args, **kwargs):
+        # The agent claims two issues: one with the loop's holder, one with another holder.
+        seen["holder"] = _agent_holder(herdr_calls) or "no holder given to the agent"
+        claims.claim("acme/repo#1", seen["holder"], ttl=_CLAIM_TTL, **kw)
+        claims.claim("acme/repo#2", "another-loop", ttl=_CLAIM_TTL, **kw)
+        time.sleep(3 * _CLAIM_TTL)  # No renew-claim call while the agent runs.
+        held = claims.claims_for(["acme/repo"], **kw)
+        seen["held"] = sorted(held)
+        return 0
+
+    _renew_harness(monkeypatch, tmp_path, redis_port, agent, herdr_calls)
+
+    rc = loop_runtime._monitor_loop("widgets", "claude", loop_runtime.SESSION_NAME, "prompt.md", False)
+
+    assert rc == 0
+    assert seen["held"] == ["acme/repo#1"], "the loop's claim is held past one TTL; the other expired"
+    assert _agent_holder(herdr_calls), "the agent's workspace gets LUPIN_CLAIM_HOLDER"
+
+
+def test_monitor_stops_renewing_when_the_agent_exits(
+    monkeypatch, tmp_path: Path, redis_port, flush_redis
+):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    herdr_calls: list = []
+    seen: dict = {}
+
+    def agent(*args, **kwargs):
+        holder = _agent_holder(herdr_calls) or "no holder given to the agent"
+        claims.claim("acme/repo#1", holder, ttl=_CLAIM_TTL, **kw)
+        time.sleep(3 * _CLAIM_TTL)
+        seen["held_while_alive"] = sorted(claims.claims_for(["acme/repo"], **kw))
+        return 0
+
+    _renew_harness(monkeypatch, tmp_path, redis_port, agent, herdr_calls)
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "claude", loop_runtime.SESSION_NAME, "prompt.md", False
+    ) == 0
+    time.sleep(_CLAIM_TTL + 0.3)
+
+    assert seen["held_while_alive"] == ["acme/repo#1"]
+    assert claims.claims_for(["acme/repo"], **kw) == {}
+
+
+def test_monitor_reports_a_renew_error_once_and_keeps_the_loop_alive(
+    monkeypatch, tmp_path: Path, closed_port, no_client_retry, capsys
+):
+    def agent(*args, **kwargs):
+        time.sleep(0.6)
+        return 0
+
+    # `claims` imports `_client` by name, so give it the client without retries too.
+    monkeypatch.setattr(claims, "_client", loop_runtime.slots_redis._client)
+    _renew_harness(monkeypatch, tmp_path, closed_port, agent)
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "claude", loop_runtime.SESSION_NAME, "prompt.md", False
+    ) == 0
+    lines = [line for line in capsys.readouterr().err.splitlines() if "renew" in line]
+    assert len(lines) == 1, lines
+    assert "cannot reach the redis coordinator" in lines[0]
+
+
+def test_monitor_reports_an_acl_denial_once_without_the_password(
+    monkeypatch, tmp_path: Path, auth_redis_port, no_eval_kw, no_client_retry, capsys
+):
+    def agent(*args, **kwargs):
+        time.sleep(0.6)
+        return 0
+
+    _renew_harness(
+        monkeypatch, tmp_path, auth_redis_port, agent,
+        LUPIN_REDIS_USERNAME=no_eval_kw["redis_username"],
+        LUPIN_REDIS_PASSWORD=no_eval_kw["redis_password"],
+    )
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "claude", loop_runtime.SESSION_NAME, "prompt.md", False
+    ) == 0
+    err = capsys.readouterr().err
+    lines = [line for line in err.splitlines() if "denied" in line]
+    assert len(lines) == 1, err
+    assert "ACL" in lines[0]
+    assert no_eval_kw["redis_password"] not in err
