@@ -110,6 +110,10 @@ def test_refresh_publishes_real_rows_only(redis_port, flush_redis):
     rows = [
         {"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 10, "resets_at": 1},
         {"provider": "openai", "note": "no credentials"},
+        {"provider": "opencode-go", "account": "free", "duration": quota.QuotaDuration.MONTHLY,
+         "used_pct": 100, "resets_at": 2},
+        {"provider": "opencode-go", "account": "plus", "duration": quota.QuotaDuration.FIVE_HOURS,
+         "used_pct": 1, "resets_at": 1},
     ]
     with mock.patch.object(quota, "quota_usage", return_value=rows):
         result = quota_cache.refresh_snapshot(**_kw(redis_port))
@@ -120,11 +124,51 @@ def test_refresh_publishes_real_rows_only(redis_port, flush_redis):
     assert result["claude"]["fetched_by"]
     stored = json.loads(_raw_client(redis_port).get(quota_cache.REDIS_KEY))
     assert "claude" in stored
+    # Account labels and durations come back unchanged.
+    read_back = quota_cache.read_snapshot(**_kw(redis_port))["opencode-go"]["rows"]
+    assert [(row["account"], row["duration"]) for row in read_back] == [
+        ("free", quota.QuotaDuration.MONTHLY),
+        ("plus", quota.QuotaDuration.FIVE_HOURS),
+    ]
     # The lock is released afterward -- nothing still holds it.
     assert slots_redis.status(**_kw(redis_port))["quota-fetch/claude"]["holders"] == 0
 
 
-def test_account_labels_survive_publish_and_read(redis_port, flush_redis):
+# The key that `lupin` versions before issue #169 read and write.
+OLD_KEY = f"{slots_redis.PREFIX}quota-snapshot"
+
+
+def test_new_reader_does_not_trust_rows_from_an_old_writer(redis_port, flush_redis):
+    """Issue #169, case 2. An old writer has two logins but writes no labels.
+    The rows look like one login that is blocked. A new reader must not use
+    them to choose an orchestrator.
+    """
+    later = 4_102_444_800_000  # 2100-01-01
+    old_entry = {
+        "openai": {
+            "rows": [
+                {"provider": "openai", "duration": "P30D", "used_pct": 100, "resets_at": later},
+                {"provider": "openai", "duration": "PT5H", "used_pct": 1, "resets_at": later},
+                {"provider": "openai", "duration": "P7D", "used_pct": 0, "resets_at": later},
+            ],
+            "fetched_at": quota_cache._now_iso(),
+            "fetched_by": "old-machine",
+        }
+    }
+    _raw_client(redis_port).set(OLD_KEY, json.dumps(old_entry))
+
+    snapshot = quota_cache.read_snapshot(**_kw(redis_port))
+
+    # The old rows are still there to show on the /usage page.
+    assert snapshot["openai"]["fetched_by"] == "old-machine"
+    # But they are never fresh, so a loop start does not use them.
+    assert not quota_cache.is_fresh(snapshot["openai"])
+
+
+def test_new_writer_does_not_write_labeled_rows_where_an_old_reader_looks(redis_port, flush_redis):
+    """Issue #169, case 2, other direction. An old reader treats all rows of a
+    provider as one login. It must never see labeled rows.
+    """
     rows = [
         {"provider": "openai", "account": "free", "duration": quota.QuotaDuration.MONTHLY,
          "used_pct": 100, "resets_at": 2},
@@ -134,12 +178,46 @@ def test_account_labels_survive_publish_and_read(redis_port, flush_redis):
     with mock.patch.object(quota, "quota_usage", return_value=rows):
         quota_cache.refresh_snapshot(**_kw(redis_port))
 
-    read_back = quota_cache.read_snapshot(**_kw(redis_port))["openai"]["rows"]
+    old_view = _raw_client(redis_port).get(OLD_KEY)
+    assert old_view is None or '"account"' not in old_view
 
-    assert [(row["account"], row["duration"]) for row in read_back] == [
-        ("free", quota.QuotaDuration.MONTHLY),
-        ("plus", quota.QuotaDuration.FIVE_HOURS),
-    ]
+
+def test_new_writer_does_not_copy_old_rows_into_its_key(redis_port, flush_redis):
+    old_entry = {
+        "claude": {
+            "rows": [{"provider": "claude", "duration": "PT5H", "used_pct": 5, "resets_at": 1}],
+            "fetched_at": quota_cache._now_iso(),
+            "fetched_by": "old-machine",
+        }
+    }
+    _raw_client(redis_port).set(OLD_KEY, json.dumps(old_entry))
+    rows = [{"provider": "openai", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 20, "resets_at": 2}]
+
+    with mock.patch.object(quota, "quota_usage", return_value=rows):
+        result = quota_cache.refresh_snapshot(**_kw(redis_port))
+
+    assert result["claude"]["fetched_by"] == "old-machine"
+    assert not quota_cache.is_fresh(result["claude"])
+    stored = json.loads(_raw_client(redis_port).get(quota_cache.REDIS_KEY))
+    assert list(stored) == ["openai"]
+
+
+def test_cli_quota_wrong_password_exits_3_and_names_the_setting(auth_redis_port, capsys):
+    """Issue #169, item 5. A refused login is not hidden behind local rows."""
+    rows = [{"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 10, "resets_at": 1}]
+    with (
+        mock.patch.object(quota, "quota_usage", return_value=rows),
+        mock.patch.object(usage_cache, "refresh_snapshot"),
+    ):
+        code = cli.main([
+            "quota", "--redis-host", "127.0.0.1", "--redis-port", str(auth_redis_port),
+            "--redis-password", "wrong-secret",
+        ])
+
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "password" in err.lower()
+    assert "wrong-secret" not in err
 
 
 def test_refresh_does_not_republish_a_fresh_provider(redis_port, flush_redis):

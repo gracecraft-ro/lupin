@@ -292,13 +292,22 @@ snapshot stale after five minutes. Each snapshot expires after 24 hours.
 Systemd runs `lupin quota` every five minutes on Jesus and Ralpha.
 
 A provider can have more than one login, for example a free and a paid
-OpenAI account. `omp usage` reports each login. Lupin labels each row with
-the plan name (`free`, `plus`). The `/usage` page and `lupin quota` show
-the label. Lupin never shows an email or account ID. `omp` chooses the
-login for each session. So a provider is blocked only when all of its
-logins are blocked. The most quota left is the best open login. A machine
-that publishes a provider replaces the whole entry for that provider, so
-each machine that publishes it needs every login for it.
+OpenAI account. `omp usage` reports each login. Lupin adds an account
+label when a provider has more than one login. The label is the plan name
+(`free`, `plus`). When two logins have the same plan, the label also has a
+short hash of the email and the account ID. The `/usage` page and
+`lupin quota` show the label. Lupin never shows an email or account ID.
+`omp` chooses the login for each session. So a provider is blocked only
+when all of its logins are blocked. Lupin does not select a blocked login.
+It selects the open login with the most quota left. A machine that
+publishes a provider replaces the whole entry for that provider, so each
+machine that publishes it needs every login for it.
+
+Lupin versions before issue #169 write quota rows with no labels to a
+different Redis key. Lupin shows those rows on the `/usage` page as
+stale. A loop start does not use them. Update every machine that runs
+`lupin quota`. Until you do, a loop start can refuse a provider that only
+an old machine publishes.
 
 ## How a slot's limit (`max`) works
 
