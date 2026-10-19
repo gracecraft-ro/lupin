@@ -980,3 +980,23 @@ def test_place_reports_a_missing_model_category(monkeypatch, tmp_path, capsys):
 
 
 
+
+
+def test_supervise_parses_every_and_passes_flags(monkeypatch):
+    parser = cli._build_parser()
+    assert parser.parse_args(["supervise"]).every is None
+    assert parser.parse_args(["supervise", "--every"]).every == 3600
+    assert parser.parse_args(["supervise", "--every", "60"]).every == 60
+    assert cli.main(["supervise", "--every", "0"]) == 2
+
+    seen = {}
+
+    def fake_supervise(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    from lupin import supervise
+    monkeypatch.setattr(supervise, "supervise", fake_supervise)
+    assert cli.main(["supervise", "--dry-run", "--json", "--redis-host", "127.0.0.1"]) == 0
+    assert seen["dry_run"] is True and seen["every"] is None
+    assert set(supervise.real_sources({})) <= set(seen)

@@ -17,7 +17,7 @@
    `heartbeat`, `drain`, `undrain`, `machines`, `place`, `quest`, `reconcile`,
    `roadmap`, `ledger`, `fleet-run`.
    Loop lifecycle: `run`, `once`, `enable`, `disable`, `loops`, `stop`, `peek`,
-   `attach`, `schedule`, `pause`, `resume`.
+   `attach`, `schedule`, `pause`, `resume`, `supervise`.
 
 One program, `lupin`, with subcommands. Run `lupin --help` for the full list.
 
@@ -43,6 +43,7 @@ lupin serve [--bind 127.0.0.1] [--port 8788] [--roadmap REPO]
 lupin agent [--machine M] [--batch N] [--poll-interval S]
 lupin run <repo> [--machine M] [--platform claude|omp] [--provider P] [--model M] [--note TEXT] [--resume]
 lupin fleet-run [--json]
+lupin supervise [--every [SECONDS]] [--dry-run] [--json]
 lupin once <when> [repo ...] [--platform claude|omp] [--provider P] [--model M] [--note TEXT] [--resume]
 lupin enable <repo> [--platform claude|omp] [--orchestrator SELECTOR ...] [--clear-orchestrators]
 lupin disable <repo>
@@ -176,6 +177,38 @@ files from `LUPIN_CMD_SIGNING_KEYS_DIR`, or from systemd's
 `CREDENTIALS_DIRECTORY` when the first variable is unset. Each file name is
 the worker name. Each worker needs `lupin agent` and its matching key. The
 command queues runs but does not wait for them to start.
+
+`supervise` checks the Lupin loops on this machine. It uses fixed rules and
+no model. For each loop, it reads the Herdr state, the systemd unit, the last
+20 pane lines and the newest handoff. It gives each loop one verdict:
+
+- `repeated`: the last 3 ledger events (not `supervise`) have one issue and
+  one status. It flags the loop.
+- `busywork`: the state is `working` and the pane text is the same as in the
+  last pass. It flags the loop.
+- `stopped`: work is left, and the unit is not active, or Herdr says
+  `blocked`, or the pane or handoff asks "if you want me to". It flags the
+  loop and sends the nudge.
+- `idle`: work is left and Herdr says `idle` or `done`. It sends the nudge.
+- `ok`: none of the above.
+
+Work left is the count of `ready` issues from `lupin roadmap`: open, not
+claimed, not blocked. Open pull requests are not counted. If Redis refuses the
+claim read, each issue counts as not claimed. If the count is not
+known, the supervisor gives no `idle` or `stopped` verdict, and it does not
+stop. The nudge is a fixed text that starts with `Supervisor:`. Lupin sends it
+with `herdr agent prompt`. The supervisor writes one `supervise` event to the
+ledger for each repo. The event has no pane text. The supervisor never merges,
+never pushes, and never edits a commit. It keeps only a hash of each pane in
+`~/.local/state/lupin/supervise.json`.
+
+Without `--every`, it makes one pass. With `--every`, it makes a pass every
+SECONDS (default 3600) and stops on the first pass with no work left. With no
+loops on the machine, it prints "no loops on this machine" and exits 0.
+`--dry-run` sends no nudge and writes no ledger event or hash. It still reads
+Redis for claims and the ledger. Exit code 3 means a ledger event was not
+written because Redis is unavailable. This repo has no timer for it. A host
+timer runs `lupin supervise` once an hour.
 
 On PiHome, the systemd timer runs `fleet-run` every 5h15m. The dashboard can
 start or stop that timer.
@@ -453,6 +486,8 @@ per-machine limit or add controls that the current code cannot support.
   issues worked together on one machine.
 - `src/lupin/place.py` — `place`: picks which fleet machine should run a
   task.
+- `src/lupin/supervise.py` — `supervise`: checks this machine's loops with
+  fixed rules and nudges idle loops.
 - `src/lupin/reconcile.py` — `reconcile`: applies the automatic claim/
   focus/quest release rules.
 - `src/lupin/roadmap_cli.py` — the `roadmap` subcommand's own CLI surface
