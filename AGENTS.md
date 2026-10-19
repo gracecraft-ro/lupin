@@ -69,8 +69,11 @@ Use `--limit N` to choose another positive count. `_decode` in
 `src/lupin/ledger.py` turns one entry's ID and decoded fields into a dict.
 `read_events` decodes each entry on its own. It skips an entry when a
 field is not valid UTF-8. It also skips an entry when `_decode` raises
-KeyError, ValueError, or RecursionError. It reports each skipped entry on
-stderr. A skipped entry still counts toward the limit. Both commands exit 3
+KeyError, ValueError, or RecursionError. `_decode` raises ValueError when
+a list field nests brackets more than 8 levels deep. A real field has 1 level.
+The check does not use the C stack, so all platforms give the same result.
+It reports each skipped entry on stderr. A skipped entry still counts toward
+the limit. Both commands exit 3
 if Redis is unavailable. When Redis is unavailable, the roadmap shows no
 ledger annotations and a warning. It ignores `.loop/loop-state.json`.
 
