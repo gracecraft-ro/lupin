@@ -345,6 +345,20 @@ def test_refresh_returns_a_note_only_provider_but_never_publishes_it(redis_port,
     assert _raw_client(redis_port).get(quota_cache.REDIS_KEY) is None
 
 
+def test_refresh_publishes_a_mixed_provider_with_its_notes_and_skips_a_note_only_one(redis_port, flush_redis):
+    real = {"provider": "openai", "account": "plus", "duration": quota.QuotaDuration.FIVE_HOURS,
+            "used_pct": 10, "resets_at": 1}
+    note = {"provider": "openai", "account": "free", "note": "free login has no quota data"}
+    only_note = {"provider": "opencode-go", "note": "key expired"}
+    with mock.patch.object(quota, "quota_usage", return_value=[real, note, only_note]):
+        quota_cache.refresh_snapshot(**_kw(redis_port))
+
+    stored = json.loads(_raw_client(redis_port).get(quota_cache.REDIS_KEY))
+    assert [row.get("note") for row in stored["openai"]["rows"]] == [None, note["note"]]
+    assert stored["openai"]["rows"][0]["used_pct"] == 10
+    assert "opencode-go" not in stored
+
+
 def test_refresh_keeps_the_cached_reading_over_a_local_note(redis_port, flush_redis):
     cached = {"opencode-go": {
         "rows": [{"provider": "opencode-go", "duration": "PT5H", "used_pct": 5, "resets_at": 1}],

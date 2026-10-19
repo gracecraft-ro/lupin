@@ -346,7 +346,8 @@ def _omp_token(provider: str) -> str:
     """The key that `omp` holds for `provider`, or "" if `omp` gives none.
 
     Only stdout counts. A failed command gives no key. Output that is not
-    one word is an error message, not a key. The key is never logged.
+    one word is an error message, not a key. Output that is not UTF-8 gives
+    no key. The key is never logged.
     """
     try:
         proc = subprocess.run(
@@ -356,7 +357,7 @@ def _omp_token(provider: str) -> str:
             text=True,
             timeout=10,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError):
         return ""
     words = proc.stdout.split()
     return words[0] if proc.returncode == 0 and len(words) == 1 else ""
