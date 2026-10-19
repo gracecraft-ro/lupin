@@ -117,7 +117,7 @@ Use very simple English: short sentences and everyday words. Explain each
 technical term the first time you use it. The reader may never have seen this
 code.
 
-Start with `Round N. LEVEL: size-m. Target: OWNER/REPO PR #<number> at head
+Start with `Round N. LEVEL: <LEVEL>. Target: OWNER/REPO PR #<number> at head
 SHA.` Use the full repo name and the full head SHA. Then start the next line
 with `What this change does:`.
 Write two or three sentences after it.
@@ -147,7 +147,7 @@ End with these lines:
 - `Lean: -<N> lines possible.` Add this line when lean findings exist.
 - `Not checked:` one line. Add it if something mattered and you could not check it.
 
-If nothing is found, write `What this change does:`, then `Looks good. Ship.`, then one line on what you checked.
+If nothing is found, write the `Round N. LEVEL: <LEVEL>. Target: ...` line, then `What this change does:`, then `Looks good. Ship.`, then one line on what you checked.
 
 ## Run the fix cycle
 
@@ -167,11 +167,12 @@ the fix worker with its findings.
 
 The fix cycle:
 
-1. After a verdict with a blocking finding, start a fix worker. If LEVEL is
-   `size-l` and you are `size-m`, do not start it. Stop and report. Use your
-   runner's agent tool, or run `herdr agent start` in a new pane. See "Talk to
-   an agent in a Herdr pane" in the `delegation-loop` skill. If you cannot
-   start an agent, post the verdict, tell the orchestrator, and stop.
+1. If the stall rule says the PR is blocked, do not start a fix worker. Do
+   item 6. After a verdict with a blocking finding, start a fix worker. If
+   LEVEL is `size-l` and you are `size-m`, do not start it. Stop and report.
+   Use your runner's agent tool, or run `herdr agent start` in a new pane. See
+   "Talk to an agent in a Herdr pane" in the `delegation-loop` skill. If you
+   cannot start an agent, post the verdict, tell the orchestrator, and stop.
 2. Give the fix worker a brief with the PR, the branch, the remote, the
    numbered findings, and the failing gate output. It makes its worktree and
    pushes as "Pull requests come first" in the `delegation-loop` skill says.
@@ -186,8 +187,7 @@ The fix cycle:
 5. Repeat until `Verdict: Ship`. Do not stop between rounds, except as items
    1 and 6 and step 2 of "Fix worker models" say.
 6. Stall rule: follow step 3 of "Fix worker models". For a blocked PR, post
-   the reason and the head SHA as a `Loop:` PR comment. Then report it to the
-   orchestrator.
+   its `Loop:` comment there, then report it to the orchestrator.
 
 Report the final verdict to the orchestrator. The orchestrator releases the PR
 claim and merges only after approval and required checks pass. You never merge.

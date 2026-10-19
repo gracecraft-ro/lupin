@@ -605,6 +605,6 @@ These rules keep a loop moving when no person is present.
 8. **Work the queue until nothing is left.** Nothing is left when all of these
    are true. No open issue that you may take is unclaimed. Every pull request
    you own is ready for production. No pull request waits for a review. No
-   research, docs, or triage item is left. Waiting for the owner is not the end. Write
-   the question as a comment on the issue. Start it with `Loop:`. Then take
-   the next item. Never write "tell me if you want me to continue".
+   research, docs, or triage item is left. Waiting for the owner is not the
+   end. Write the question as a comment on the issue. Start it with `Loop:`.
+   Then take the next item. Never write "tell me if you want me to continue".

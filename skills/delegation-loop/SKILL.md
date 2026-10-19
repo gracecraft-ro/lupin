@@ -168,7 +168,7 @@ in step 3. A PR comment is never an approval.
 
 A review with findings is not an end state. The fix cycle repeats until the PR
 is ready for production. A round is one verdict. There is no round limit. Do
-not report, ask, or stop between rounds.
+not report, ask, or stop between rounds, except as "Run the fix cycle" says.
 
 A PR is blocked on an owner decision when one of these is true:
 
@@ -199,17 +199,20 @@ issue. Work that is already running continues.
    `wait_seconds`, the fix worker cannot start now. Stop and report it.
 3. Stall rule ("raise the fix worker one model tier"). At LEVEL `size-m`: when
    the same finding or failing check is in 3 verdicts in a row, change LEVEL
-   to `size-l`. At LEVEL `size-l`: count only the verdicts after the first
-   `Round` line that says `size-l`, or all verdicts if the PR started at
-   `size-l`. When that count reaches 3, the PR is blocked on an owner
-   decision.
+   to `size-l`. At LEVEL `size-l`: when the same finding or failing check is
+   in 3 verdicts in a row, the PR is blocked on an owner decision. Count only
+   verdicts after the first `Round` line that says `size-l`, or all verdicts
+   if the PR started at `size-l`. Do not start a fix worker on a blocked PR.
+   Post the reason and the head SHA as a `Loop:` PR comment.
 4. If there is no push 30 minutes after the fix worker starts, ask it for the
    result (Herdr: `herdr agent prompt NAME "report the result" --wait
-   --timeout 120000`). If it has none, stop it (Herdr: `herdr pane close
-   <pane_id>`).
+   --timeout 120000`, with the agent name or its pane ID). If it has none,
+   stop it (Herdr: `herdr pane close <pane_id>`).
 5. If the fix worker ended with no push, whoever started it posts a
    `Round N.` verdict review at the same head SHA, with the same findings and
-   the line `The fix worker did not push.` That is the next round.
+   the line `The fix worker did not push.` Its first line is
+   `Round N. LEVEL: <LEVEL>.`, as in "Output format" in `code-review`. Check
+   the stall rule (step 3) before you post. That is the next round.
 6. `size-l` usually gives Opus. That is allowed here. Never use Fable without
    the user's approval.
 
@@ -544,7 +547,7 @@ changes alone. Keep visual or 3D reviews to one or two PRs per dispatch.
 
 The reviewer must be capable of doing the issue and must not be below the
 worker's model tier. On a PR the loop owns, the reviewer uses `--size LEVEL`
-with the fix worker's LEVEL or higher. For a small PR, that is `size-m`.
+with the fix worker's LEVEL or higher.
 Prefer a reviewer one tier higher when quota allows.
 Never dispatch Fable without the user's approval. Use Opus sparingly because
 it costs more.
