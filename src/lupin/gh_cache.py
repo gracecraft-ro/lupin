@@ -4,19 +4,18 @@ kind of data -- issue state, body, labels, dependency links. Every machine
 doing that independently means duplicate rate-limit pressure and different
 machines seeing different snapshots of the same repo at the same moment.
 
-Grace's correction on the first design: the fetcher is not "whichever
-machine wins a lock race" -- it is one named machine, pinned by hostname.
-`LUPIN_GH_CANONICAL_FETCHER` holds that name. Every other machine reads the cache
-while that fetcher is alive; on a miss it returns an honest "no data yet"
-error instead of calling `gh` itself. When the pinned fetcher is not
-maintaining the cache (draining, offline, or never joined), the pin has no
-holder, so the next machine reads the fleet registry, sees that, and fetches
-live itself -- publishing through the same shared lock, so the first
-machine to get there still answers for the whole fleet. A machine never
-calls `gh` on its own when Redis is down and it is not the canonical
-fetcher. The `slots_redis` lock below serializes fetchers; with more than
-one machine able to fetch, that lock is what keeps the "one snapshot" part
-of the design true.
+One named machine runs `gh` for the fleet. `LUPIN_GH_CANONICAL_FETCHER`
+holds its hostname. Every other machine reads the cache while that
+machine is online. On a miss, it returns a "no data yet" error and does
+not call `gh`. If the named machine is draining, offline, or never
+joined, the next machine reads the fleet registry, sees this, and
+fetches. It publishes through the same shared lock, so the first machine
+to get the lock answers for the whole fleet. If Redis is down, a machine
+that is not the named machine never calls `gh`.
+
+If the variable is unset or empty, no machine is named. A miss then takes
+the lock. One machine fetches. A machine that cannot get the lock does not
+fetch (see `cached_gh_json`).
 
 Risk, stated rather than papered over: the setting is compared against
 `machines.hostname()` (`socket.gethostname()`) with a plain `==`.
@@ -34,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import uuid
 from typing import Any, Callable
 
@@ -48,17 +48,28 @@ PREFIX = slots_redis.PREFIX
 # within that window shares one fetch instead of each paying for their own.
 CACHE_TTL = 300
 
-# The lock only guards the canonical fetcher against itself (two `lupin`
-# invocations on the same machine racing), so a short wait is enough --
-# contention here is rare and brief. The TTL is generous (2 min) because a
+# The lock picks which caller fetches one cache key. When no machine is
+# named, a caller that loses waits LOCK_WAIT seconds, then gets the
+# "in progress" error. The TTL is generous (2 min) because a
 # paginated GraphQL fetch (comments, dependency links) can run several
 # `gh api graphql` calls in a row; if a fetch ever runs past this, the lock
 # just expires and a second fetch may start -- a harmless duplicate read,
 # not a correctness problem.
 LOCK_WAIT = 2.0
 LOCK_TTL = 120.0
+LOCK_POLL = 0.05
 
 _REDIS_ERRORS = (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)
+
+# KEYS[1] = lock key, ARGV[1] = holder. Delete the key only when it still
+# holds this holder, so a lock that another caller took after our TTL ended
+# stays. One EVAL: MULTI and WATCH are not on the fleet ACL list.
+_RELEASE_SCRIPT = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
 
 
 def canonical_fetcher() -> str | None:
@@ -127,62 +138,63 @@ def _fetch_and_publish(
     cache_key: str,
     fetch_fn: Callable[[], tuple[Any, str | None]],
     client,
-    connection: dict,
+    *,
+    single_flight: bool = False,
 ) -> tuple[Any, str | None]:
-    """Run `fetch_fn` under the shared `gh-fetch` lock and publish the
+    """Run `fetch_fn` under the shared `gh-lock` key and publish the
     result. Only one machine fetches a given repo's key at a time, so the
     first one to win answers for the whole fleet and everyone else reads
     its answer from the cache instead of paying for a second `gh` call.
+
+    When the lock is full and the cache is still empty, the caller fetches
+    anyway. With `single_flight`, it returns a "fetch in progress" error
+    instead, so no second `gh` call runs.
     """
     key = f"{PREFIX}gh-cache:{owner}/{name}:{cache_key}"
-    # A unique holder per call, not just `cache_key`: `slots_redis.acquire`
-    # treats a second acquire from the *same* holder as a renew, not
-    # contention (see `_ACQUIRE_SCRIPT` -- same holder means no wait at
-    # all). Two real concurrent calls for the same cache_key need distinct
-    # holders to actually serialize against each other; `cache_key` alone
-    # would make them look like the same caller renewing its own lease.
-    holder = f"{cache_key}:{uuid.uuid4().hex[:8]}"
+    # One lock for each cache key, so a fetch of one key never blocks
+    # another key of the same repo. The lock is a plain key with a TTL, not
+    # a slot: a slot keeps a `:max` key for ever, one for each issue number.
+    lock_key = f"{PREFIX}gh-lock:{owner}/{name}:{cache_key}"
+    # A new holder for each call. Two calls in one process must not have
+    # the same holder, or one call can release the lock of the other.
+    holder = uuid.uuid4().hex
 
-    # No colon in the slot name: `_lease_runtime.split_lease` rebuilds
-    # `(slot, holder)` from the lease string `f"{slot}:{holder}"` by
-    # splitting on the *first* colon only, so a colon inside `slot` itself
-    # (e.g. "gh-fetch:acme/repo") makes it parse the wrong slot and
-    # `release()`/`renew()` silently act on a key that was never acquired
-    # -- the real lock then never clears until LOCK_TTL expires. "/" has
-    # the same job without that trap.
-    lease = None
+    locked = False
+    deadline = time.monotonic() + LOCK_WAIT
     try:
-        lease = slots_redis.acquire(
-            f"gh-fetch/{owner}/{name}",
-            holder=holder,
-            wait=LOCK_WAIT,
-            ttl=LOCK_TTL,
-            redis_host=connection.get("redis_host"),
-            redis_port=connection.get("redis_port"),
-            redis_username=connection.get("redis_username"),
-            redis_password=connection.get("redis_password"),
-        )
-    except slots_redis.SlotFull:
-        # Another fetch for this repo is already in flight -- on the
-        # canonical fetcher this is another `lupin` process on the same
-        # machine, in the fallback case it is another machine. Check once
-        # more in case it just finished, otherwise fetch anyway. A
-        # duplicate read is wasted work, not a bug.
-        hit, cached, _redis_ok = _read_cache(client, key)
-        if hit:
-            return cached, None
-    except slots_redis.CoordinatorUnreachable:
+        while True:
+            locked = bool(
+                slots_redis._call_with_retry(
+                    lambda: client.set(lock_key, holder, nx=True, px=int(LOCK_TTL * 1000))
+                )
+            )
+            if locked or time.monotonic() >= deadline:
+                break
+            time.sleep(LOCK_POLL)
+            # The other fetch can finish while we wait. Use its result at once.
+            hit, cached, _redis_ok = _read_cache(client, key)
+            if hit:
+                return cached, None
+    except _REDIS_ERRORS:
         return fetch_fn()
-    else:
-        # We got the lock, possibly after waiting on LOCK_WAIT -- the
-        # holder we were waiting behind may have already finished and
-        # published the result. Check before paying for a second live
-        # fetch; without this, every caller that waits (the normal case,
-        # not just SlotFull) double-fetches `gh`.
-        hit, cached, _redis_ok = _read_cache(client, key)
-        if hit:
-            _release(lease, connection)
-            return cached, None
+
+    # Read the cache again: the fetch we waited for may have just finished.
+    # Without this, every caller that waits fetches `gh` a second time.
+    hit, cached, _redis_ok = _read_cache(client, key)
+    if hit:
+        if locked:
+            _release(client, lock_key, holder)
+        return cached, None
+    if not locked and single_flight:
+        # Another fetch for this cache key is still running -- on the
+        # canonical fetcher this is another `lupin` process on the same
+        # machine, in the fallback case it is another machine. Without
+        # `single_flight`, fetch anyway (a duplicate read is wasted work,
+        # not a bug).
+        return None, (
+            f"a GitHub fetch for {cache_key} ({owner}/{name}) is in progress "
+            "elsewhere; try again soon"
+        )
 
     try:
         data, error = fetch_fn()
@@ -191,8 +203,8 @@ def _fetch_and_publish(
         _write_cache(client, key, data)
         return data, None
     finally:
-        if lease:
-            _release(lease, connection)
+        if locked:
+            _release(client, lock_key, holder)
 
 
 def cached_gh_json(
@@ -210,6 +222,11 @@ def cached_gh_json(
     this machine fetches too, and publishes, so the fleet still gets one
     shared snapshot. A machine never fetches when Redis is down and it is
     not the canonical fetcher.
+
+    When `LUPIN_GH_CANONICAL_FETCHER` is unset or empty, a miss takes the
+    per-key lock. The machine that gets the lock fetches. A machine that
+    cannot get the lock reads the cache once more. If the cache is still
+    empty, it returns a "fetch in progress" error and does not fetch.
 
     `fetch_fn` takes no arguments and returns `(data, error)`, the same
     shape every `gh`-calling function in this codebase already uses --
@@ -250,20 +267,19 @@ def cached_gh_json(
         # command over a cache-layer outage.
         return fetch_fn()
 
-    return _fetch_and_publish(owner, name, cache_key, fetch_fn, client, connection)
+    # Reached when this machine is pinned, or when the pinned machine is not
+    # live, or when no machine is pinned. The lock lets one caller fetch.
+    # Only with no pinned machine does a loser get an error, not a fetch.
+    return _fetch_and_publish(
+        owner, name, cache_key, fetch_fn, client, single_flight=pinned is None
+    )
 
 
-def _release(lease, connection: dict) -> None:
+def _release(client, lock_key: str, holder: str) -> None:
     try:
-        slots_redis.release(
-            lease,
-            redis_host=connection.get("redis_host"),
-            redis_port=connection.get("redis_port"),
-            redis_username=connection.get("redis_username"),
-            redis_password=connection.get("redis_password"),
-        )
-    except slots_redis.CoordinatorUnreachable:
-        pass
+        slots_redis._call_with_retry(lambda: client.eval(_RELEASE_SCRIPT, 1, lock_key, holder))
+    except _REDIS_ERRORS:
+        pass  # The key expires after LOCK_TTL.
 
 
 def _read_cache(client, key: str) -> tuple[bool, Any, bool]:

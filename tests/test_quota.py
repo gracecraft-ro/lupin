@@ -10,10 +10,11 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 import tempfile
 import time
 import unittest
-from contextlib import closing
+from contextlib import closing, redirect_stderr, redirect_stdout
 from datetime import date, timedelta
 from unittest import mock
 
@@ -396,6 +397,152 @@ class OpencodeGoQuotaTests(UsageReaderFixtures):
         self.assertTrue(all(isinstance(row["resets_at"], int) for row in rows))
         self.assertEqual(
             fetch.call_args.args[0].get_header("Authorization"), "Bearer test-key"
+        )
+
+
+REAL_OMP_TOKEN = quota._omp_token  # `conftest.py` replaces it for each test
+SECRET_KEY = "sk-test-SECRET-0123456789"
+EXPIRED_NOTE = "OpenCode Go API key expired -- get a new key in the OpenCode Console"
+USAGE_PAYLOAD = {"usage": {"rolling": {"percent": 12, "resetsAt": "2030-01-01T00:00:00Z"}}}
+
+
+def _http_error(code: int, body: str) -> quota.urllib.error.HTTPError:
+    return quota.urllib.error.HTTPError(
+        quota.OPENCODE_GO_USAGE_URL, code, "error", {}, io.BytesIO(body.encode())
+    )
+
+
+class OpencodeGoKeyTests(unittest.TestCase):
+    """Where `opencode_go_quota()` finds its key, and what it says when the
+    key fails. The HTTP call and `omp` are always mocked: these tests never
+    contact opencode.ai and never run the real `omp token`.
+    """
+
+    def setUp(self):
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        self.auth_path = os.path.join(tempdir.name, "auth.json")  # absent by default
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(quota, "OPENCODE_GO_AUTH_FILE", self.auth_path).start()
+        mock.patch.dict(os.environ, {"OPENCODE_API_KEY": ""}).start()
+        mock.patch.object(quota, "_omp_token", REAL_OMP_TOKEN).start()
+        # `omp` is missing unless a test says otherwise.
+        self.omp = mock.patch.object(
+            quota.subprocess, "run", side_effect=FileNotFoundError("omp")
+        ).start()
+        self.fetch = mock.patch.object(
+            quota.urllib.request,
+            "urlopen",
+            side_effect=lambda *args, **kwargs: io.BytesIO(json.dumps(USAGE_PAYLOAD).encode()),
+        ).start()
+
+    def write_auth_file(self, key):
+        with open(self.auth_path, "w", encoding="utf-8") as auth_file:
+            json.dump({"opencode-go": {"type": "api", "key": key}}, auth_file)
+
+    def sent_key(self):
+        header = self.fetch.call_args.args[0].get_header("Authorization")
+        return header.removeprefix("Bearer ")
+
+    def omp_prints(self, stdout, returncode=0, stderr=""):
+        self.omp.side_effect = None
+        self.omp.return_value = subprocess.CompletedProcess(
+            ["omp", "token", "opencode-go"], returncode, stdout, stderr
+        )
+
+    def assert_no_key_note(self, rows):
+        self.assertEqual(rows, [{"provider": "opencode-go", "note": quota.NO_OPENCODE_GO_KEY}])
+        self.fetch.assert_not_called()
+
+    def test_key_from_auth_file_wins_and_omp_is_not_run(self):
+        self.write_auth_file(SECRET_KEY)
+        with mock.patch.dict(os.environ, {"OPENCODE_API_KEY": "env-key"}):
+            rows = quota.opencode_go_quota()
+        self.assertEqual(self.sent_key(), SECRET_KEY)
+        self.assertEqual(rows[0]["used_pct"], 12)
+        self.omp.assert_not_called()
+
+    def test_key_from_env_when_no_auth_file(self):
+        with mock.patch.dict(os.environ, {"OPENCODE_API_KEY": f" {SECRET_KEY} "}):
+            rows = quota.opencode_go_quota()
+        self.assertEqual(self.sent_key(), SECRET_KEY)
+        self.assertEqual(rows[0]["used_pct"], 12)
+        self.omp.assert_not_called()
+
+    def test_key_only_from_omp_token(self):
+        self.omp_prints(SECRET_KEY + "\n")
+        rows = quota.opencode_go_quota()
+        self.assertEqual(self.sent_key(), SECRET_KEY)
+        self.assertEqual(rows[0]["used_pct"], 12)
+        self.assertEqual(self.omp.call_args.args[0], ["omp", "token", "opencode-go"])
+        self.assertEqual(self.omp.call_args.kwargs["timeout"], 10)
+        self.assertFalse(self.omp.call_args.kwargs.get("shell", False))
+
+    def test_omp_stderr_is_not_part_of_the_key(self):
+        self.omp_prints(SECRET_KEY + "\n", stderr="warning: update available\n")
+        quota.opencode_go_quota()
+        self.assertEqual(self.sent_key(), SECRET_KEY)
+
+    def test_omp_missing_gives_the_no_key_note(self):
+        self.assert_no_key_note(quota.opencode_go_quota())
+
+    def test_omp_timeout_gives_the_no_key_note_without_the_key(self):
+        self.omp.side_effect = subprocess.TimeoutExpired(
+            ["omp", "token", "opencode-go"], 10, output=SECRET_KEY.encode()
+        )
+        rows = quota.opencode_go_quota()
+        self.assert_no_key_note(rows)
+        self.assertNotIn(SECRET_KEY, repr(rows))
+
+    def test_omp_nonzero_exit_gives_the_no_key_note(self):
+        # Even if it printed something, a failed command gives no key.
+        self.omp_prints(SECRET_KEY, returncode=1, stderr="not logged in")
+        self.assert_no_key_note(quota.opencode_go_quota())
+
+    def test_omp_prints_nothing_gives_the_no_key_note(self):
+        for label, stdout in (("empty", ""), ("blank", "  \n")):
+            with self.subTest(label):
+                self.omp_prints(stdout)
+                self.assert_no_key_note(quota.opencode_go_quota())
+
+    def test_omp_output_that_is_not_one_word_is_not_used_as_a_key(self):
+        self.omp_prints("error: no such provider\n")
+        self.assert_no_key_note(quota.opencode_go_quota())
+
+    def test_expired_key_gives_a_note_and_the_key_stays_secret(self):
+        self.omp_prints(SECRET_KEY)
+        body = json.dumps({"error": {"code": "api_key_expired", "message": "API key expired"}})
+        self.fetch.side_effect = _http_error(401, body)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rows = quota.opencode_go_quota()
+        self.assertEqual(rows, [{"provider": "opencode-go", "note": EXPIRED_NOTE}])
+        for text in (out.getvalue(), err.getvalue(), repr(rows)):
+            self.assertNotIn(SECRET_KEY, text)
+
+    def test_other_http_errors_keep_the_unavailable_note(self):
+        self.write_auth_file(SECRET_KEY)
+        cases = [
+            ("401 other code", 401, '{"error": {"code": "invalid_api_key"}}'),
+            ("401 no body", 401, ""),
+            ("403", 403, '{"error": {"code": "api_key_expired"}}'),
+            ("500", 500, "oops"),
+        ]
+        for label, code, body in cases:
+            with self.subTest(label):
+                self.fetch.side_effect = _http_error(code, body)
+                rows = quota.opencode_go_quota()
+                self.assertEqual(
+                    rows, [{"provider": "opencode-go", "note": "quota unavailable (HTTPError)"}]
+                )
+                self.assertNotIn(SECRET_KEY, repr(rows))
+
+    def test_network_error_keeps_the_unavailable_note(self):
+        self.write_auth_file(SECRET_KEY)
+        self.fetch.side_effect = quota.urllib.error.URLError("no route")
+        self.assertEqual(
+            quota.opencode_go_quota(),
+            [{"provider": "opencode-go", "note": "quota unavailable (URLError)"}],
         )
 
 

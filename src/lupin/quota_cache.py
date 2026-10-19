@@ -233,8 +233,14 @@ def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connec
     updated = dict(cached)
     changed = False
     hostname = socket.gethostname()
+    # A provider with only `note` rows and no cached entry goes in the result,
+    # so the caller can show why it has no data. It is never published.
+    notes = {}
     for provider, rows in local_rows.items():
         if not _has_real_data(rows):
+            note_rows = [row for row in rows if row.get("note")]
+            if note_rows:
+                notes[provider] = {"rows": note_rows, "fetched_at": _now_iso(), "fetched_by": hostname}
             continue
         if not force and is_fresh(cached.get(provider)):
             # Someone else's reading for this provider is still fresh --
@@ -285,4 +291,4 @@ def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connec
         except _REDIS_ERRORS:
             pass  # best effort -- this machine's own caller still gets `updated` back
 
-    return updated
+    return {**notes, **updated}
