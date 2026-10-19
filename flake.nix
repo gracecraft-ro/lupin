@@ -52,6 +52,7 @@
           meta = {
             description = "Model routing and slot leases for multi-machine delegation loops";
             mainProgram = "lupin";
+            license = nixpkgs.lib.licenses.fsl11Mit;
           };
         };
     in
@@ -59,7 +60,11 @@
       packages = forEachSystem (
         system:
         let
-          pkgs = nixpkgs.legacyPackages.${system};
+          # nixpkgs counts FSL-1.1-MIT as unfree. Allow `lupin` and nothing else.
+          pkgs = import nixpkgs {
+            inherit system;
+            config.allowUnfreePredicate = pkg: nixpkgs.lib.getName pkg == "lupin";
+          };
         in
         {
           default = mkLupin pkgs true;

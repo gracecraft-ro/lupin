@@ -210,10 +210,26 @@ requests into `main`. The loop orchestrator can also merge, when the four
 conditions in `AGENTS.md` are true. A reviewer who did not write the change must
 approve it. `AGENTS.md` gives the full rules.
 
+By opening a pull request, you agree that the owner may license your change
+under the terms in `LICENSE` and under other terms.
+
+## License
+
+Lupin uses the Functional Source License, Version 1.1, MIT Future License
+(`FSL-1.1-MIT`). The full text is in `LICENSE`.
+
+- You may use, copy, change, and share Lupin for any purpose, except a
+  competing use. A competing use is a commercial product or service that
+  replaces Lupin or does the same job.
+- Running Lupin for your own work is always allowed.
+- Two years after a version is released, that version also becomes available
+  under the MIT license.
+
+`THIRD_PARTY_NOTICES.md` lists text from other projects. Those projects keep
+their own licenses.
+
 ## Known limits
 
-- There is no license file yet. Until there is one, you have no right to
-  copy or change this code.
 - Some defaults name the owner's machines and user name.
 - Lupin is tested only on Linux. The flake builds for macOS, but loop
   workers need systemd.
