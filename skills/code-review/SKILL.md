@@ -75,8 +75,9 @@ Do not replace a PR review with a review of an unsubmitted branch.
   no before: the new screen is enough. See "Attach screenshots to the PR" in the
   `ship` skill for what a visual change is.
 - For 3D changes, inspect the contact sheet and compare useful views.
-- An owner comment on the PR that names a problem is a finding. A PR comment
-  is never an approval.
+- An owner comment on the PR that names a problem is a finding. An owner
+  comment is a comment whose `author_association` is `OWNER` or `MEMBER`. A PR
+  comment is never an approval.
 - Do not edit files, run linters, or merge the PR. A fix worker makes the
   changes. See "Run the fix cycle".
 
@@ -153,24 +154,44 @@ command in "Pull requests come first" in the `delegation-loop` skill, with the
 head SHA that you read. `Ship` is `APPROVE`. A blocking finding is
 `REQUEST_CHANGES`.
 
-After `Verdict: fix N first`, dispatch a fix worker. Dispatch it as the
-`delegation-loop` skill says for a fix worker. The brief has the PR, the
-branch, the remote, the numbered findings, and the failing gate output. The fix
-goes on the same branch. The fix worker is a different agent. You never edit
-files yourself.
+Run the fix cycle only when your brief says that the loop owns the PR. For any
+other PR, post the verdict, report it to the orchestrator, and stop. Do not
+dispatch a fix worker for it.
 
-When the fix worker pushes, review the new head SHA. A fix worker that ends
-with no push, or with a failing gate, also ends a round. Repeat until
-`Verdict: Ship`. There is no round limit. Do not report, ask, or stop between
-rounds.
+Tiers are the keys `tier0`, `tier1`, and `tier2` of the issue's category row
+in `src/lupin/model-tiers.json`. `tier2` is the highest.
 
-If the same finding or the same failing check stays for 3 rounds in a row,
-dispatch the next fix worker one model tier higher. Your tier must stay at or
-above the fix worker's tier. If the new tier is above yours, stop and tell the
-orchestrator. It dispatches a reviewer at that tier or higher. If the fix
-worker is already at the top tier that the loop may use, the cycle is stalled.
-The PR is then blocked on an owner decision. Never dispatch Fable without the
-user's approval.
+The fix cycle:
+
+1. After `Verdict: fix N first`, start a fix worker. Use your runner's agent
+   tool, or run `herdr agent start` in a new pane. See "Talk to an agent in a
+   Herdr pane" in the `delegation-loop` skill. If you cannot start an agent,
+   post the verdict, tell the orchestrator, and stop. The orchestrator then
+   dispatches the fix worker and the next review.
+2. Give the fix worker a brief with the PR, the branch, the remote, the
+   numbered findings, and the failing gate output. It makes its worktree and
+   pushes as "Pull requests come first" in the `delegation-loop` skill says.
+   The fix goes on the same branch.
+3. You never edit files yourself. The fix worker is a different agent, so the
+   review stays independent.
+4. Wait for the push. Run
+   `gh pr view N --repo OWNER/REPO --json headRefOid -q .headRefOid` until the
+   output differs from the SHA that you reviewed, or until the fix worker
+   ends.
+5. Review the new head SHA. A fix worker that ends with no push, or with a
+   failing gate, also ends a round.
+6. Repeat until `Verdict: Ship`. There is no round limit. Do not report, ask,
+   or stop between rounds. Items 1, 7, and 8 are the only exceptions.
+7. Stall rule: after 3 rounds in a row with the same finding or the same
+   failing check, the next fix worker is one tier higher, one time only. If
+   the same finding or check stays for 3 more rounds, or the fix worker is
+   already at the highest tier that the row lists, the PR is blocked on an
+   owner decision. Use Opus sparingly. Never use Fable without the user's
+   approval. For a blocked PR, post the reason and the head SHA as a PR
+   comment. Then report it to the orchestrator.
+8. Your tier must be at or above the fix worker's tier. If the raised tier is
+   above yours, stop the cycle. Report three things to the orchestrator: the
+   findings, the round count, and the fix worker's tier.
 
 Report the final verdict to the orchestrator. The orchestrator releases the PR
 claim and merges only after approval and required checks pass. You never merge.

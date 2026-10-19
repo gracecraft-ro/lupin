@@ -59,8 +59,11 @@ only for a PR that the loop owns. The loop owns a PR when both are true:
 - The owner of its head repo is the fleet fork account (`FORK_OWNER`, the
   owner of the `fork` remote), or the ledger has a dispatch event for its
   branch.
-- No other holder has a live claim on it. If `lupin claim` exits 2 for the PR,
-  another holder has it.
+- No other holder has a live claim on it. Run `lupin claim` for the PR:
+  - Exit 0: you own the claim. If you dispatch nothing for the PR, release
+    the claim.
+  - Exit 2: another holder has the PR.
+  - Exit 3: Redis is not reachable. Do not dispatch on the PR.
 
 `headRepositoryOwner.login` in "Continuous merge of approved PRs" gives the
 head repo owner. Read all the ledger events:
@@ -87,8 +90,16 @@ For each PR that is not a draft, do the first step that applies:
    dispatch a reviewer. The repo gate is the set of checks that `AGENTS.md`
    defines. Give the reviewer the findings and the gate output. The reviewer
    runs the fix cycle. See "Run the fix cycle" in the `code-review` skill.
+   - If the reviewer cannot start an agent, it reports the verdict to you.
+     Then dispatch the fix worker, and after its push, a new reviewer.
+   - If the reviewer reports that the fix worker needs a tier above the
+     reviewer's, dispatch a reviewer at that tier. Give it the findings, the
+     round count, and the fix worker's tier.
 4. The PR has no review at its current head SHA: dispatch a reviewer. Do not
    wait for the worker to request a review.
+
+The reviewer's brief says whether the loop owns the PR. The reviewer runs the
+fix cycle only for a PR that the loop owns.
 5. The PR waits for a gate that is still running: wait for the result.
 
 A worker is a fix worker, a sync worker, or a reviewer. Do not dispatch a
@@ -139,18 +150,26 @@ gh api --paginate repos/OWNER/REPO/pulls/<number>/comments
 ```
 
 The first command reads the PR comments. The second reads the review comments
-on lines of the diff. An owner comment that names a problem is a finding. It
+on lines of the diff. An owner comment is a comment whose `author_association`
+is `OWNER` or `MEMBER`. An owner comment that names a problem is a finding. It
 starts a fix cycle, as in step 3. A PR comment is never an approval.
 
 A review with findings is not an end state. The fix cycle repeats until the PR
 is ready for production. It has no round limit. Do not report, ask, or stop
 between rounds.
 
+Tiers are the keys `tier0`, `tier1`, and `tier2` of the issue's category row
+in `src/lupin/model-tiers.json`. `tier2` is the highest. Stall rule: after 3
+rounds in a row with the same finding or the same failing check, the next fix
+worker is one tier higher, one time only. If the same finding or check stays
+for 3 more rounds, or the fix worker is already at the highest tier that the
+row lists, the PR is blocked on an owner decision. Use Opus sparingly. Never
+use Fable without the user's approval.
+
 A PR is blocked on an owner decision when one of these is true:
 
 - It needs a sync or a fix, and the loop does not own it.
-- Its fix cycle is stalled at the top model tier that the loop may use. See
-  "Run the fix cycle" in the `code-review` skill.
+- Its fix cycle is stalled, as the stall rule says.
 - A worker for it stops to ask the owner.
 - Its merge fails.
 
@@ -234,7 +253,8 @@ one item in that repo. The brief and the ledger still say which kind it is:
 
 Claim an issue when a worker starts its implementation. For a PR, the
 orchestrator claims it before it dispatches a reviewer or a fix worker. It
-releases the claim when that worker's result is posted or the worker stops.
+renews the claim every 2 minutes during the fix cycle. It releases the claim
+only when the reviewer reports the final verdict or the worker stops.
 
 ```sh
 lupin claim OWNER/REPO#123 --holder SESSION         # issue 123
@@ -497,7 +517,10 @@ it costs more.
 
 If the review finds a problem, the reviewer runs the fix cycle. See "Run the
 fix cycle" in the `code-review` skill. The fix worker pushes as in "Pull
-requests come first", and updates the same PR. If the fix changes anything a person can see, the brief tells the fix worker to capture fresh screenshots. Do this even when the finding was not labeled visual. The worker attaches them after it pushes. See "Attach screenshots to the PR" in the `ship` skill.
+requests come first", and updates the same PR. If the fix changes anything a
+person can see, the brief tells the fix worker to capture new screenshots, even
+when the finding is not labeled visual. The fix worker attaches them after it
+pushes. See "Attach screenshots to the PR" in the `ship` skill.
 The reviewer posts each verdict and its findings on the PR.
 
 Before a branch is merged, it must contain the current `main`. Fetch
