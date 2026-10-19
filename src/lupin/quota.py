@@ -441,8 +441,10 @@ def _account_labels(reports: list[dict]) -> list[str | None]:
     """One label per `omp` report. `None` when the provider has one login.
 
     The label is the plan name (`free`, `plus`). Two logins on the same
-    plan get a short hash of the account ID too. The email and the account
-    ID never leave this function: the label goes to Redis and the dashboard.
+    plan also get a short hash of the user (email) and the workspace
+    (`accountId`). Two users can share one workspace, so the hash uses
+    both. The email and the account ID never leave this function: the
+    label goes to Redis and the dashboard.
     """
     by_provider: dict[str, list[int]] = {}
     for index, report in enumerate(reports):
@@ -461,7 +463,9 @@ def _account_labels(reports: list[dict]) -> list[str | None]:
             if plans.count(plan) == 1:
                 labels[index] = plan
             else:
-                identity = str(item.get("accountId") or index)
+                user = str(item.get("email") or "").strip().lower()
+                workspace = str(item.get("accountId") or "")
+                identity = f"{user}\0{workspace}" if user or workspace else str(index)
                 labels[index] = f"{plan}-{hashlib.sha256(identity.encode()).hexdigest()[:6]}"
     return labels
 
@@ -536,10 +540,17 @@ def snapshot() -> dict[str, dict]:
 
     With more than one account, this picks one row for each account as
     above. Then it keeps the row with the most quota left, because `omp`
-    sends work to an account that has quota.
+    sends work to an account that has quota. An account that is blocked on
+    any window (`pace.blocked`) is not used when another account is not
+    blocked.
     """
+    # `pace` imports this module, so import it here, not at the top.
+    from . import pace
+
+    rows = quota_usage()
+    now_ms = time.time() * 1000
     per_account: dict[tuple[str, str | None], dict] = {}
-    for row in quota_usage():
+    for row in rows:
         provider = row.get("provider")
         if not provider:
             continue
@@ -547,14 +558,28 @@ def snapshot() -> dict[str, dict]:
         if key not in per_account or row.get("duration") == QuotaDuration.FIVE_HOURS:
             per_account[key] = row
 
+    blocked_accounts = {
+        (provider, account) for provider, account in per_account
+        if pace.blocked(
+            [row for row in rows if row.get("provider") == provider and row.get("account") == account],
+            provider, now_ms,
+        )
+    }
+
     def _left(row: dict) -> float:
         used = row.get("used_pct")
         return max(0.0, 100 - used) if isinstance(used, (int, float)) else -1.0
 
-    chosen: dict[str, dict] = {}
-    for (provider, _), row in per_account.items():
-        if provider not in chosen or _left(row) > _left(chosen[provider]):
-            chosen[provider] = row
+    def _rank(key: tuple[str, str | None]) -> tuple[bool, float]:
+        # An open account comes before a blocked one. Then most quota left.
+        return (key not in blocked_accounts, _left(per_account[key]))
+
+    best: dict[str, tuple[str, str | None]] = {}
+    for key in per_account:
+        provider = key[0]
+        if provider not in best or _rank(key) > _rank(best[provider]):
+            best[provider] = key
+    chosen = {provider: per_account[key] for provider, key in best.items()}
 
     result = {}
     for provider, row in chosen.items():

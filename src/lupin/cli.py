@@ -732,7 +732,11 @@ def _ago(fetched_at: str | None) -> str:
 def _cmd_quota(args: argparse.Namespace) -> int:
     """Publish quota and this machine's 7-day totals, then print shared quota."""
     connection = _fleet_connection(args)
-    merged = quota_cache.refresh_snapshot(**connection)
+    try:
+        merged = quota_cache.refresh_snapshot(**connection)
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, "the quota refresh", fleet=True)
+        return 3
     usage_cache.refresh_snapshot(**connection)
     if args.json:
         print(json.dumps(merged))

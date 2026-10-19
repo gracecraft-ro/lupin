@@ -18,7 +18,7 @@ from contextlib import closing, redirect_stderr, redirect_stdout
 from datetime import date, timedelta
 from unittest import mock
 
-from lupin import quota
+from lupin import pace, quota
 
 
 class UsageReaderFixtures(unittest.TestCase):
@@ -307,6 +307,20 @@ class QuotaUsageTests(unittest.TestCase):
         self.assertTrue(first.startswith("plus-") and second.startswith("plus-"))
         # Same logins, same labels on the next read.
         self.assertEqual(first, self._omp_rows(*reports)[0]["account"])
+
+    def test_two_users_in_one_workspace_get_different_labels(self):
+        # Issue #169, case 1: two users share one workspace `accountId`.
+        reports = (
+            self._codex_report("plus", "shared-ws", [("5 hours", 18_000_000, 1.0)], email="a@example.com"),
+            self._codex_report("plus", "shared-ws", [("5 hours", 18_000_000, 0.01)], email="b@example.com"),
+        )
+        rows = self._omp_rows(*reports)
+
+        self.assertNotEqual(rows[0]["account"], rows[1]["account"])
+        self.assertFalse(pace.blocked(rows, "openai", now_ms=0))
+        text = json.dumps(rows, default=str)
+        for secret in ("a@example.com", "b@example.com", "shared-ws"):
+            self.assertNotIn(secret, text)
 
     def test_two_logins_with_no_metadata_still_get_different_labels(self):
         bare = {
@@ -619,6 +633,30 @@ class SnapshotTests(unittest.TestCase):
             result = quota.snapshot()
         self.assertEqual(result["openai"]["pct_left"], 99)
         self.assertEqual(result["openai"]["resets_at"], 7)
+
+    def test_skips_a_login_that_is_blocked_on_another_window(self):
+        # Issue #169, case 3: login "a" has room on 5 hours but none on 7 days.
+        later = int(time.time() * 1000) + 10 * 24 * 60 * 60 * 1000
+        rows = [
+            {"provider": "openai", "account": "a", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 1, "resets_at": later},
+            {"provider": "openai", "account": "a", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 100, "resets_at": later},
+            {"provider": "openai", "account": "b", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 50, "resets_at": later},
+            {"provider": "openai", "account": "b", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 20, "resets_at": later},
+        ]
+        with mock.patch.object(quota, "quota_usage", return_value=rows):
+            result = quota.snapshot()
+        self.assertEqual(result["openai"]["pct_left"], 50)
+
+    def test_one_blocked_login_still_reports_its_five_hour_row(self):
+        # One login: the result is the same as before issue #169.
+        later = int(time.time() * 1000) + 10 * 24 * 60 * 60 * 1000
+        rows = [
+            {"provider": "openai", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 1, "resets_at": later},
+            {"provider": "openai", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 100, "resets_at": later},
+        ]
+        with mock.patch.object(quota, "quota_usage", return_value=rows):
+            result = quota.snapshot()
+        self.assertEqual(result["openai"]["pct_left"], 99)
 
     def test_an_account_with_data_beats_an_account_with_only_a_note(self):
         rows = [
