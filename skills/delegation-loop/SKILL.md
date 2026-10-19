@@ -62,8 +62,10 @@ only for a PR that the loop owns. The loop owns a PR when both are true:
 - No other holder has a live claim on it. Run `lupin claim` for the PR:
   - Exit 0: you hold the claim. If you dispatch nothing and no worker of
     yours runs on the PR, release the claim.
+  - Exit 1: the target is not valid.
   - Exit 2: another holder has the PR.
-  - Exit 3: Redis is not reachable. Do not dispatch on the PR.
+  - Exit 3: Redis is not reachable or refused the login. Do not dispatch on
+    the PR.
 
 `headRepositoryOwner.login` in "Continuous merge of approved PRs" gives the
 head repo owner. Read all the ledger events:
@@ -91,23 +93,28 @@ For each PR that is not a draft, do the first step that applies:
    defines. Give the reviewer the findings and the gate output. The reviewer
    runs the fix cycle and starts the fix worker. See "Run the fix cycle" in
    the `code-review` skill.
-   - Fallback: the reviewer reports that it cannot start an agent. In
-     fallback, you start the fix worker and apply "Fix worker tiers"
-     yourself. When it pushes, dispatch a new reviewer. You count the rounds.
-     A PR with a posted verdict at its head and no fix worker running gets a
-     fix worker, not a reviewer.
-   - The reviewer reports that a fix worker cannot start: start it yourself
-     with the same brief. If you cannot, post a `Loop:` PR comment with the
-     reason and take the next item.
-   - The reviewer reports that the fix worker needs a tier above the
-     reviewer's: dispatch a reviewer at that tier.
+   - The reviewer reports that it cannot start an agent: start the fix
+     worker yourself and apply "Fix worker tiers". When it pushes, dispatch a
+     new reviewer.
+   - A PR with a posted loop verdict with findings at its head, and no
+     reviewer or fix worker running, gets a fix worker from you (apply "Fix
+     worker tiers"), unless the reviewer asked for a higher-tier reviewer.
+   - The reviewer reports that `lupin route` failed, that `wait_seconds` is
+     `null`, or that a fix worker cannot start: post a `Loop:` PR comment with
+     the reason and the head SHA. Then take the next item. Step 3 applies
+     again next cycle.
+   - The reviewer reports that the fix worker's tier is above its own:
+     dispatch a reviewer at that tier.
 4. The PR has no review at its current head SHA: dispatch a reviewer. Do not
    wait for the worker to request a review.
 5. The PR waits for a gate that is still running: wait for the result.
 
 Each reviewer brief says whether the loop owns the PR. The reviewer runs the
 fix cycle only for a PR that the loop owns. The brief also gives the
-findings, the reviewer's own tier, the fix worker's tier, and the round count.
+findings, the reviewer's own tier, and the fix worker's tier. Each verdict
+review starts with `Round N.` A new brief takes N from the latest loop verdict
+on the PR. A reviewer in a fix cycle that has posted a verdict has a result
+for the 30-minute check on workers.
 
 A worker is a fix worker, a sync worker, or a reviewer. Do not dispatch a
 worker for a PR that already has one running. A reviewer in a fix cycle is
@@ -189,37 +196,29 @@ issue. Work that is already running continues.
 
 ### Fix worker tiers
 
-Tiers are the keys `tier1` and `tier2` of a category row in
-`src/lupin/model-tiers.json`. `tier2` is the highest. Every row has both. A fix
-worker never uses `tier0`.
+A fix worker uses `tier1` or `tier2`. `tier2` is the highest.
 
 1. Get the category and the size with `lupin classify --issue-json FILE`. Use
-   the JSON of the linked issue. For a PR with no linked issue, use the PR's
-   JSON. If no other category matches, `classify` returns `coding`. If the
-   item has no size label, `classify` returns `size-?`.
+   the linked issue's JSON, or the PR's JSON if no issue is linked.
 2. `size-l` and `size-xl` start at `tier2`. Every other size, `size-?`
    included, starts at `tier1`.
-3. Run `lupin route CATEGORY SIZE --no-bmo --json`. For SIZE, use `size-m` for
-   `tier1` and `size-l` for `tier2`. `--no-bmo` is needed because a `bmo:`
-   model cannot run as an agent. The fix worker's tier is the tier that you
-   asked for. The output has `model` and `effort`.
-   - If the output has a number in `wait_seconds`, wait that long. Then run
-     `lupin route` again.
-   - If the output has `downgraded_from`, quota blocked the first pick. Find
-     the new `model` in the row in `model-tiers.json`. If it is not in the
-     tier that you asked for, the raise did not happen. Wait 5 minutes, then
-     run `lupin route` again.
-   - If `wait_seconds` is `null`, or `lupin route` fails, or a fix worker
-     cannot start, report it to the orchestrator and stop.
+3. Run `lupin route CATEGORY SIZE --no-bmo --json`. Use `size-m` for `tier1`
+   and `size-l` for `tier2`. Use the `model` and `effort` that it gives.
+   - If `wait_seconds` is a number, wait that long. Then run it again.
+   - If you asked for `tier2` and the output has `downgraded_from`, run
+     `lupin route CATEGORY size-m --no-bmo --json`. If it gives the same
+     `model`, the raise did not happen. Wait 5 minutes, then run
+     `lupin route CATEGORY size-l --no-bmo --json` again. Otherwise use the
+     model.
+   - If `wait_seconds` is `null`, `lupin route` fails, or a fix worker cannot
+     start, report it to the orchestrator and stop.
 4. Stall rule: after 3 rounds in a row with the same finding or the same
    failing check, the next fix worker is one tier higher, one time only. If
    the same finding or check stays for 3 more rounds, the PR is blocked on an
    owner decision. A fix worker at `tier2` cannot go higher. Its PR is blocked
    after 3 rounds with the same finding or check.
-5. Use the model that `lupin route` gives for the tier. A raise to `tier2`
-   usually gives Opus. This is the one case where the stall rule asks for
-   Opus. Opus stays sparing everywhere else. Never use Fable without the
-   user's approval.
+5. A raise to `tier2` usually gives Opus. That is allowed here. Never use
+   Fable without the user's approval.
 
 ## Install skills on loop hosts
 
@@ -552,7 +551,9 @@ changes alone. Keep visual or 3D reviews to one or two PRs per dispatch.
 
 The reviewer must be capable of doing the issue and must not be below the
 worker's model tier. This includes a fix worker that the fix cycle moved one
-tier higher. Prefer a reviewer one tier higher when quota allows.
+tier higher. A reviewer on a PR the loop owns is `tier1` or higher. For a
+`size-xs` or `size-s` PR, run `lupin review-route` with `--size size-m`.
+Prefer a reviewer one tier higher when quota allows.
 Never dispatch Fable without the user's approval. Use Opus sparingly because
 it costs more.
 

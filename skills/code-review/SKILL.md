@@ -162,17 +162,17 @@ Run the fix cycle only when your brief says that the loop owns the PR. For any
 other PR, post the verdict, report it to the orchestrator, and stop. Do not
 dispatch a fix worker for it.
 
-Your brief gives your own tier, the fix worker's tier, and the round count.
-"Fix worker tiers" in the `delegation-loop` skill says how to get the category
-and size, which tier a fix worker starts at, and how to pick its model.
+Your brief gives your own tier and the fix worker's tier. Pick each fix
+worker's model with "Fix worker tiers" in the `delegation-loop` skill. Start
+each verdict review with `Round N.` Take N from the latest loop verdict on the
+PR.
 
 The fix cycle:
 
 1. After `Verdict: fix N first`, start a fix worker. Use your runner's agent
    tool, or run `herdr agent start` in a new pane. See "Talk to an agent in a
    Herdr pane" in the `delegation-loop` skill. If you cannot start an agent,
-   post the verdict, tell the orchestrator, and stop. This is the fallback in
-   step 3 of "Pull requests come first" in the `delegation-loop` skill.
+   post the verdict, tell the orchestrator, and stop.
 2. Give the fix worker a brief with the PR, the branch, the remote, the
    numbered findings, and the failing gate output. It makes its worktree and
    pushes as "Pull requests come first" in the `delegation-loop` skill says.
@@ -192,9 +192,8 @@ The fix cycle:
 7. Stall rule: follow step 4 of "Fix worker tiers" in the `delegation-loop`
    skill. For a blocked PR, post the reason and the head SHA as a `Loop:` PR
    comment. Then report it to the orchestrator.
-8. Your tier must be at or above the fix worker's tier. If the raised tier is
-   above yours, stop the cycle. Report three things to the orchestrator: the
-   findings, the round count, and the fix worker's tier.
+8. If the fix worker's tier is above yours, stop the cycle and report the
+   findings and the fix worker's tier to the orchestrator.
 
 Report the final verdict to the orchestrator. The orchestrator releases the PR
 claim and merges only after approval and required checks pass. You never merge.
