@@ -181,7 +181,8 @@ command queues runs but does not wait for them to start.
 `supervise` checks the Lupin loops on this machine. It uses fixed rules and
 no model. For each loop, it reads the Herdr state of the loop's pane, the
 Lupin loop state, the systemd unit, the last 20 pane lines and the newest
-handoff from this run. It gives each loop one verdict. The first rule that
+handoff from this run. If Herdr does not list the loop's own pane, the Herdr
+state is `unknown`. It gives each loop one verdict. The first rule that
 matches gives the verdict:
 
 1. `stopped`, reason "waiting for the owner": Herdr says `blocked`, or the
@@ -214,8 +215,9 @@ The nudge is a fixed text that starts with `Supervisor:`. Lupin sends it to the
 loop's pane ID with `herdr agent prompt`. A loop with no pane ID gets no nudge.
 Before it sends, the supervisor takes the loop's lock without a wait. If
 `lupin stop` holds the lock, it skips the nudge (`nudge=busy`). Under the lock,
-it reads the loop state again. If the loop is not `running` in the same pane,
-it skips the nudge (`nudge=stale`). Only one pass runs at a time. A second pass
+it reads the loop state again and runs `herdr agent get` on the pane. If the
+loop is not `running` in the same pane, or the agent is not `idle` or `done`
+now, it skips the nudge (`nudge=stale`). Only one pass runs at a time. A second pass
 prints "another supervise pass is running" and exits 0. A `--dry-run` pass does
 not take this lock. A loop gets at most one nudge try in 3600 seconds. A failed
 try also counts. If the clock goes back, a stored time in the future counts as
@@ -223,8 +225,8 @@ recent while it is less than 3600 seconds ahead.
 
 The supervisor writes one `supervise` event to the ledger for each repo. The
 event has no pane or handoff text. The supervisor module
-itself calls only `systemctl is-active`, `herdr agent prompt` and, through the
-shared `gh` cache, `gh pr list`. A test checks this. It also uses Lupin's read
+itself calls only `systemctl is-active`, `herdr agent prompt`, `herdr agent
+get` and, through the shared `gh` cache, `gh pr list`. A test checks this. It also uses Lupin's read
 functions, which run read-only `herdr`, `gh` and `git` commands. It keeps a hash
 of each pane and the time of each nudge try in
 `$XDG_STATE_HOME/lupin/supervise.json` (default
@@ -234,7 +236,8 @@ Without `--every`, it makes one pass. With `--every`, it makes a pass every
 SECONDS (default 3600, minimum 600) and ends on the first pass with no work
 left. With no loops on the machine, it prints "no loops on this machine" and
 exits 0. `--dry-run` sends no nudge and writes no ledger event, state file or
-lock file. It still reads Redis for claims, the ledger and the `gh` cache. Exit
+lock file. It shows `nudge=would-be-stale` when the loop is not `running` in
+the same pane. It still reads Redis for claims, the ledger and the `gh` cache. Exit
 code 3 means a ledger event was not written because Redis is unavailable, or
 Redis refused the login. A host timer can
 run `lupin supervise` once an hour. This repo does not ship one.

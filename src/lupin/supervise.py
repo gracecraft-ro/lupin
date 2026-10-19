@@ -4,9 +4,11 @@ No model runs. For each Lupin loop, it reads the Herdr state, the systemd
 unit, the last pane lines and the newest handoff. It gives each loop one
 verdict (see `verdict`). It sends a fixed nudge to an idle loop with
 `herdr agent prompt`. It writes one `supervise` ledger event per repo.
-It writes only the nudge, the ledger event and its own state file.
-`loop_runtime.local_loops` can also update a loop's metadata file
-(`needs_attention` when its Herdr workspace is gone).
+It writes the nudge, the ledger event, its own state file and lock file.
+The read functions that it uses also write: `loop_runtime.local_loops` can
+update a loop's metadata file (`needs_attention` when its Herdr workspace is
+gone), `roadmap` writes its cache file (`lupin/cache.json`), and the shared
+`gh` cache in Redis gets the result of a read on a miss.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ import redis
 
 from . import claims, gh_cache, ledger, loop_runtime, roadmap, roadmap_cli
 from .slots import CoordinatorUnreachable
-from .slots_redis import CoordinatorAuthFailed
+from .slots_redis import CoordinatorAuthFailed, _auth_failed
 
 NUDGE_TEXT = (
     "Supervisor: Work the queue until nothing is left. Nothing is left when no "
@@ -137,8 +139,21 @@ def _save_state(path: Path, state: dict) -> None:
     os.replace(temporary, path)
 
 
-def _locked_send(loop: dict, lock_loop, read_metadata, send_nudge) -> str:
-    """Send the nudge under the loop's stop lock. Return the nudge result."""
+def _same_run(loop: dict, metadata: dict | None) -> bool:
+    """True when the loop metadata still shows this run, running in the same pane."""
+    return bool(
+        metadata
+        and metadata.get("state") == "running"
+        and metadata.get("pane_id") == loop["pane_id"]
+    )
+
+
+def _locked_send(loop: dict, lock_loop, read_metadata, read_agent, send_nudge) -> str:
+    """Send the nudge under the loop's stop lock. Return the nudge result.
+
+    Under the lock it reads the metadata and the Herdr agent state again,
+    because a pass can take minutes.
+    """
     try:
         release = lock_loop(loop["repo"])
     except OSError:
@@ -146,12 +161,9 @@ def _locked_send(loop: dict, lock_loop, read_metadata, send_nudge) -> str:
     if release is None:
         return "busy"
     try:
-        metadata = read_metadata(loop["repo"])
-        if (
-            not metadata
-            or metadata.get("state") != "running"
-            or metadata.get("pane_id") != loop["pane_id"]
-        ):
+        if not _same_run(loop, read_metadata(loop["repo"])):
+            return "stale"
+        if read_agent(loop) not in NUDGE_STATES:
             return "stale"
         send_nudge(loop, NUDGE_TEXT)
         return "sent"
@@ -172,6 +184,7 @@ def run_pass(
     send_nudge: Callable[[dict, str], None],
     lock_loop: Callable[[str], Callable[[], None] | None],
     read_metadata: Callable[[str], dict | None],
+    read_agent: Callable[[dict], str],
     append_event: Callable[[str, dict], None],
     state_path: Path = STATE_FILE,
     now: Callable[[], float] = time.time,
@@ -181,7 +194,8 @@ def run_pass(
 
     `work_left` returns (count or None, notes for the event).
     `lock_loop` returns a release function, or None when `lupin stop` holds the loop.
-    Under that lock, `read_metadata` must still show the loop running in the same pane.
+    Under that lock, `read_metadata` must still show the loop running in the same pane,
+    and `read_agent` (the Herdr state of the pane now) must be `idle` or `done`.
     """
     saved = _load_state(state_path)
     panes: dict[str, str] = {}
@@ -220,9 +234,10 @@ def run_pass(
             elif _recent(nudged.get(repo), now()):
                 nudge = "recent"
             elif dry_run:
-                nudge = "dry-run"
+                # The checks that need no lock, so the output matches a real run.
+                nudge = "dry-run" if _same_run(loop, read_metadata(repo)) else "would-be-stale"
             else:
-                nudge = _locked_send(loop, lock_loop, read_metadata, send_nudge)
+                nudge = _locked_send(loop, lock_loop, read_metadata, read_agent, send_nudge)
                 if nudge in {"sent", "failed"}:
                     # A failed send also counts, so a broken pane is not tried each pass.
                     nudged[repo] = now()
@@ -381,7 +396,8 @@ def _list_loops() -> list[dict]:
             (p for p in row.get("panes", []) if pane_id and p.get("pane_id") == pane_id),
             None,
         )
-        state = own.get("agent_status", "unknown") if own else row.get("state", "unknown")
+        # Not `row["state"]`: `local_loops` sets that from all agents of the repo.
+        state = own.get("agent_status", "unknown") if own else "unknown"
         if metadata.get("state") == "needs_attention":
             # Lupin's own state. Herdr does not report it.
             state = "needs_attention"
@@ -520,6 +536,22 @@ def _read_metadata(repo: str) -> dict | None:
     return loop_runtime._read_metadata(repo)
 
 
+def _read_agent(loop: dict) -> str:
+    """The Herdr state of the loop's pane now (`herdr agent get`), or "unknown"."""
+    try:
+        output = loop_runtime._herdr(
+            loop["session"], "agent", "get", loop["pane_id"],
+            timeout=loop_runtime.HERDR_TIMEOUT,
+        )
+        value = json.loads(output)
+    except (loop_runtime.LoopError, ValueError):
+        return "unknown"
+    result = value.get("result") if isinstance(value, dict) else None
+    agent = result.get("agent") if isinstance(result, dict) else None
+    status = agent.get("agent_status") if isinstance(agent, dict) else None
+    return status if isinstance(status, str) else "unknown"
+
+
 def _send_nudge(loop: dict, text: str) -> None:
     """Send `text` to the loop's pane ID."""
     loop_runtime._herdr(
@@ -529,7 +561,13 @@ def _send_nudge(loop: dict, text: str) -> None:
 
 
 def _append_event(connection: dict, full_name: str, event: dict) -> None:
-    ledger.append_event(full_name, event, **connection)
+    try:
+        ledger.append_event(full_name, event, **connection)
+    except CoordinatorUnreachable as exc:
+        # redis-py's refused login is a ConnectionError, so the ledger reports it as unreachable.
+        if isinstance(exc.__cause__, redis.exceptions.AuthenticationError):
+            raise _auth_failed(exc.__cause__) from exc
+        raise
 
 
 def real_sources(connection: dict) -> dict:
@@ -544,5 +582,6 @@ def real_sources(connection: dict) -> dict:
         send_nudge=_send_nudge,
         lock_loop=_lock_loop,
         read_metadata=_read_metadata,
+        read_agent=_read_agent,
         append_event=functools.partial(_append_event, connection),
     )

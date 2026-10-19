@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import functools
 import inspect
+import json
 
 import pytest
 import redis
@@ -52,6 +53,7 @@ class Fakes:
             send_nudge=lambda loop, text: self.nudges.append((loop["repo"], text)),
             lock_loop=self.lock,
             read_metadata=lambda repo: self.metadata.get(repo, {"state": "running", "pane_id": "w1:p1"}),
+            read_agent=lambda loop: loop["state"],
             append_event=lambda full_name, event: self.ledger.append((full_name, event)),
             state_path=self.state_path,
             now=lambda: self.clock,
@@ -428,18 +430,118 @@ def test_other_claim_errors_make_work_unknown(monkeypatch):
     assert supervise._work_left({}, "acme/widgets", "widgets") == (None, [])
 
 
+
+
+def test_loop_whose_own_pane_is_not_listed_has_unknown_state(tmp_path, monkeypatch):
+    """Real `local_loops` and `_list_loops`, only Herdr faked.
+
+    The loop runs in an old per-repo session and its own agent works. Another
+    agent of the same repo is `done` in the shared session.
+    """
+    lr = supervise.loop_runtime
+    code = tmp_path / "code"
+    loops_dir = tmp_path / "herdr-loops"
+    loops_dir.mkdir()
+    monkeypatch.setattr(lr, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(lr, "LOOPS_DIR", loops_dir)
+    monkeypatch.setattr(lr, "CODE_DIR", code)
+    meta = {"repo": "widgets", "session": "loop-widgets", "state": "running",
+            "workspace_id": "w2", "pane_id": "w2:p1", "started_at": "2026-10-19T00:00:00Z"}
+    (loops_dir / "widgets.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    def agents(session):
+        if session == "loop-widgets":
+            return [{"name": "lupin-loop", "workspace_id": "w2", "pane_id": "w2:p1",
+                     "agent_status": "working", "cwd": str(code / "widgets")}]
+        return [{"workspace_id": "w7", "pane_id": "w7:p1", "agent_status": "done",
+                 "cwd": str(code / "widgets"), "agent": "claude"}]
+
+    monkeypatch.setattr(lr, "_agents", agents)
+    monkeypatch.setattr(lr, "_server_running", lambda session: True)
+    monkeypatch.setattr(
+        lr, "_workspace_by_id",
+        lambda session, wid: {"workspace_id": wid, "root_pane": {
+            "workspace_id": wid, "pane_id": "w2:p1", "agent_status": "working"}} if wid == "w2" else None,
+    )
+    monkeypatch.setattr(supervise, "_unit_state", lambda repo: "active")
+
+    loops = supervise._list_loops()
+    assert [loop["state"] for loop in loops] == ["unknown"]
+
+    fakes = Fakes(tmp_path, loops)
+    fakes.metadata = {"widgets": meta}
+    report = supervise.run_pass(**fakes.kwargs())
+
+    assert (report["loops"][0]["verdict"], report["loops"][0]["nudge"]) == ("ok", "none")
+    assert fakes.nudges == []
+
+
+def test_agent_that_started_work_before_the_send_is_stale(tmp_path):
+    fakes = Fakes(tmp_path, [_loop(state="idle")])
+
+    report = supervise.run_pass(**fakes.kwargs(read_agent=lambda loop: "working"))
+
+    assert report["loops"][0]["nudge"] == "stale"
+    assert fakes.nudges == []
+
+
+def test_read_agent_uses_herdr_agent_get_on_the_pane(monkeypatch):
+    calls = []
+
+    def herdr(*args, **kw):
+        calls.append(args)
+        return json.dumps({"result": {"agent": {"agent_status": "done"}}})
+
+    monkeypatch.setattr(supervise.loop_runtime, "_herdr", herdr)
+    assert supervise._read_agent(_loop(pane_id="w2E:p1")) == "done"
+    assert calls == [("lupin-loops", "agent", "get", "w2E:p1")]
+
+    monkeypatch.setattr(supervise.loop_runtime, "_herdr", lambda *a, **kw: "not json")
+    assert supervise._read_agent(_loop()) == "unknown"
+
+
+def test_dry_run_shows_would_be_stale_for_a_loop_that_is_not_running(tmp_path):
+    fakes = Fakes(tmp_path, [_loop(state="idle")])
+    fakes.metadata = {"widgets": {"state": "starting", "pane_id": "w1:p1"}}
+
+    report = supervise.run_pass(**fakes.kwargs(), dry_run=True)
+
+    assert report["loops"][0]["nudge"] == "would-be-stale"
+    assert fakes.nudges == []
+
+
+def test_refused_login_during_the_ledger_write_is_an_auth_error(monkeypatch):
+    def refused(full_name, event, **kw):
+        raise supervise.CoordinatorUnreachable(full_name) from redis.exceptions.AuthenticationError("bad")
+
+    monkeypatch.setattr(supervise.ledger, "append_event", refused)
+    with pytest.raises(supervise.CoordinatorAuthFailed):
+        supervise._append_event({}, "acme/widgets", {"event": "supervise"})
+
+
 # (4) No merge action exists in the code path.
+# The exact text that goes to real agents. A change must change this copy too.
+NUDGE_TEXT = (
+    "Supervisor: Work the queue until nothing is left. Nothing is left when no "
+    "open issue that you may take is unclaimed, every pull request that you own "
+    "is ready for production, no pull request waits for a review, and no research "
+    "or docs item is left. Write each question for the owner as an issue comment "
+    "that starts with 'Loop:'. Then take the next item. Do not ask if you must "
+    "continue."
+)
 _FORBIDDEN = ("merge", "push", "--force", "commit", "--author", "reset", "rebase")
+# Each command, and the one function that may run it.
 _ALLOWED_COMMANDS = {
-    "_run": {("systemctl", "is-active")},
-    "_herdr": {("agent", "prompt")},
-    "_run_json": {("gh", "pr", "list")},
+    ("_unit_state", "_run", ("systemctl", "is-active")),
+    ("_send_nudge", "_herdr", ("agent", "prompt")),
+    ("_read_agent", "_herdr", ("agent", "get")),
+    ("_open_prs", "_run_json", ("gh", "pr", "list")),
 }
 _ALLOWED_IMPORTS = {
     "__future__", "fcntl", "functools", "hashlib", "json", "os", "time", "uuid",
     "datetime", "pathlib", "typing", "redis",
 }
-# The only names that the module may use from each Lupin module.
+# The only names that the module may use from each module.
 _ALLOWED_ATTRS = {
     "loop_runtime": {
         "local_loops", "peek_loop", "_read_metadata", "_lock_file", "base_repo", "unit_name",
@@ -451,15 +553,26 @@ _ALLOWED_ATTRS = {
     "gh_cache": {"cached_gh_json"},
     "claims": {"claims_for"},
     "ledger": {"read_events", "append_event"},
+    "redis": {"exceptions"},
+    "os": {"environ", "path", "replace"},
 }
-# A name that may be used only in one function.
+# A name that may be used only in these functions.
 _ONLY_IN = {
-    ("loop_runtime", "_herdr"): "_send_nudge",
-    ("loop_runtime", "_run"): "_unit_state",
-    ("roadmap", "_run_json"): "_open_prs",
-    ("ledger", "append_event"): "_append_event",
+    ("loop_runtime", "_herdr"): {"_send_nudge", "_read_agent"},
+    ("loop_runtime", "_run"): {"_unit_state"},
+    ("roadmap", "_run_json"): {"_open_prs"},
+    ("ledger", "append_event"): {"_append_event"},
+    ("gh_cache", "cached_gh_json"): {"_open_prs"},
 }
-_BANNED_NAMES = {"__import__", "eval", "exec", "compile", "getattr", "importlib", "globals", "vars"}
+_BANNED_NAMES = {
+    "__import__", "eval", "exec", "compile", "getattr", "importlib", "globals", "vars",
+    "shutil", "subprocess",
+}
+# Names that delete or stop something. The module uses none of them.
+_BANNED_ATTRS = {
+    "rmdir", "unlink", "delete", "remove", "rmtree", "truncate", "kill", "terminate",
+    "system", "popen", "flushall", "flushdb",
+}
 
 
 def _docstrings(tree) -> set[int]:
@@ -483,6 +596,20 @@ def check_no_merge_text(source: str) -> None:
         assert not [s for s in strings if word in s], word
 
 
+def check_nudge_text(text: str) -> None:
+    assert text == NUDGE_TEXT, "the nudge text changed"
+    for word in ("merge", "push", "force"):
+        assert word not in text.lower(), word
+
+
+def _functions(tree):
+    """(top-level function name, node) for each node inside a top-level function."""
+    for function in tree.body:
+        if isinstance(function, ast.FunctionDef):
+            for node in ast.walk(function):
+                yield function.name, node
+
+
 def check_only_allowlisted_commands(source: str) -> None:
     tree = ast.parse(source)
     for node in ast.walk(tree):
@@ -490,14 +617,11 @@ def check_only_allowlisted_commands(source: str) -> None:
             for alias in node.names:
                 assert alias.name in _ALLOWED_IMPORTS, alias.name
         elif isinstance(node, ast.ImportFrom) and node.level == 0:
-            assert node.module in _ALLOWED_IMPORTS - {"os"}, node.module
+            assert node.module in _ALLOWED_IMPORTS - {"os", "redis"}, node.module
         elif isinstance(node, ast.Name):
             assert node.id not in _BANNED_NAMES, node.id
-    os_attrs = {
-        node.attr for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "os"
-    }
-    assert os_attrs <= {"environ", "path", "replace"}, os_attrs
+        elif isinstance(node, ast.Attribute):
+            assert node.attr not in _BANNED_ATTRS, node.attr
     module_attrs = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
@@ -505,46 +629,54 @@ def check_only_allowlisted_commands(source: str) -> None:
             if node.value.id in _ALLOWED_ATTRS:
                 assert node.attr in _ALLOWED_ATTRS[node.value.id], f"{node.value.id}.{node.attr}"
     for node in ast.walk(tree):
-        # A Lupin module name only as `module.name`, so no alias can hide a call.
+        # A module name only as `module.name`, so no alias can hide a call.
         if isinstance(node, ast.Name) and node.id in _ALLOWED_ATTRS:
             assert id(node) in module_attrs, f"{node.id} is used without an attribute"
-    for function in ast.walk(tree):
-        if not isinstance(function, ast.FunctionDef):
-            continue
-        for node in ast.walk(function):
-            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-                owner = _ONLY_IN.get((node.value.id, node.attr))
-                assert owner in (None, function.name), f"{node.value.id}.{node.attr} in {function.name}"
-    top_level = [n for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.ClassDef))]
+    for name, node in _functions(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            owners = _ONLY_IN.get((node.value.id, node.attr))
+            assert owners is None or name in owners, f"{node.value.id}.{node.attr} in {name}"
+    top_level = [n for n in tree.body if not isinstance(n, ast.FunctionDef)]
     for statement in top_level:
         for node in ast.walk(statement):
             if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
                 assert (node.value.id, node.attr) not in _ONLY_IN, f"{node.value.id}.{node.attr}"
     called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
-    commands: dict[str, set] = {name: set() for name in _ALLOWED_COMMANDS}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and node.attr in _ALLOWED_COMMANDS:
+    commands = set()
+    for name, node in _functions(tree):
+        if isinstance(node, ast.Attribute) and node.attr in {"_run", "_run_json", "_herdr", "flock"}:
             # Only a direct call, so no alias or `partial` can hide the arguments.
             assert id(node) in called, f"{node.attr} is used without a direct call"
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
             continue
-        name = node.func.attr
-        if name == "_run" or name == "_run_json":
+        attr = node.func.attr
+        if attr in {"_run", "_run_json"}:
             argv = node.args[0]
-            assert isinstance(argv, ast.List), name
-            width = 3 if name == "_run_json" else 2
-            head = argv.elts[:width]
-        elif name == "_herdr":
+            assert isinstance(argv, ast.List), attr
+            head = argv.elts[:3 if attr == "_run_json" else 2]
+        elif attr == "_herdr":
             head = node.args[1:3]
+        elif attr == "cached_gh_json":
+            key = node.args[2]
+            assert isinstance(key, ast.Constant) and key.value == "open-prs", "gh cache key"
+            continue
+        elif attr == "flock":
+            flags = {n.attr for n in ast.walk(node.args[1]) if isinstance(n, ast.Attribute)}
+            assert "LOCK_NB" in flags, "a flock without LOCK_NB waits"
+            continue
         else:
             continue
-        assert all(isinstance(item, ast.Constant) for item in head), name
-        commands[name].add(tuple(item.value for item in head))
-    assert commands == _ALLOWED_COMMANDS
+        assert all(isinstance(item, ast.Constant) for item in head), attr
+        commands.add((name, attr, tuple(item.value for item in head)))
+    assert commands == _ALLOWED_COMMANDS, commands ^ _ALLOWED_COMMANDS
 
 
 def test_module_has_no_merge_push_force_or_author_text():
     check_no_merge_text(inspect.getsource(supervise))
+
+
+def test_nudge_text_is_the_fixed_text():
+    check_nudge_text(supervise.NUDGE_TEXT)
 
 
 def test_module_runs_only_allowlisted_commands():
