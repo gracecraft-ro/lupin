@@ -115,7 +115,7 @@ def test_refresh_publishes_real_rows_only(redis_port, flush_redis):
         result = quota_cache.refresh_snapshot(**_kw(redis_port))
 
     assert "claude" in result
-    assert "openai" not in result  # no real data -- never published
+    assert result["openai"]["rows"] == [rows[1]]  # note only: shown, never published
     assert result["claude"]["rows"] == [rows[0]]
     assert result["claude"]["fetched_by"]
     stored = json.loads(_raw_client(redis_port).get(quota_cache.REDIS_KEY))
@@ -257,6 +257,30 @@ def test_fetcher_publishes_then_credential_less_reader_sees_it(redis_port, flush
     assert passive["claude"]["rows"][0]["used_pct"] == 30
 
 
+def test_refresh_returns_a_note_only_provider_but_never_publishes_it(redis_port, flush_redis):
+    rows = [{"provider": "opencode-go", "note": "key expired"}]
+    with mock.patch.object(quota, "quota_usage", return_value=rows):
+        result = quota_cache.refresh_snapshot(**_kw(redis_port))
+
+    assert result["opencode-go"]["rows"] == rows
+    assert result["opencode-go"]["fetched_by"]
+    assert _raw_client(redis_port).get(quota_cache.REDIS_KEY) is None
+
+
+def test_refresh_keeps_the_cached_reading_over_a_local_note(redis_port, flush_redis):
+    cached = {"opencode-go": {
+        "rows": [{"provider": "opencode-go", "duration": "PT5H", "used_pct": 5, "resets_at": 1}],
+        "fetched_at": "2026-01-01T00:00:00+00:00", "fetched_by": "other-machine",
+    }}
+    _raw_client(redis_port).set(quota_cache.REDIS_KEY, json.dumps(cached))
+    rows = [{"provider": "opencode-go", "note": "key expired"}]
+    with mock.patch.object(quota, "quota_usage", return_value=rows):
+        result = quota_cache.refresh_snapshot(**_kw(redis_port))
+
+    assert result["opencode-go"]["fetched_by"] == "other-machine"
+    assert result["opencode-go"]["rows"][0]["used_pct"] == 5
+
+
 class CliQuotaTests(unittest.TestCase):
     def test_cli_json_prints_merged_snapshot(self):
         fixed = {"claude": {"rows": [{"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS,
@@ -299,6 +323,55 @@ class CliQuotaTests(unittest.TestCase):
         self.assertIn("5 hours", output)
         self.assertIn("60% left", output)
         self.assertIn("via jesus", output)
+
+    def _run_cli(self, merged, *argv):
+        import io
+        import contextlib
+
+        with (
+            mock.patch.object(quota_cache, "refresh_snapshot", return_value=merged),
+            mock.patch.object(usage_cache, "refresh_snapshot"),
+        ):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = cli.main(["quota", *argv])
+        self.assertEqual(code, 0)
+        return buf.getvalue()
+
+    @staticmethod
+    def _merged_with_a_note():
+        return {
+            "claude": {
+                "rows": [{"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS,
+                          "used_pct": 40, "resets_at": 99999999999999}],
+                "fetched_at": quota_cache._now_iso(), "fetched_by": "jesus",
+            },
+            "opencode-go": {
+                "rows": [{"provider": "opencode-go", "note": "OpenCode Go API key expired"}],
+                "fetched_at": quota_cache._now_iso(), "fetched_by": "ralpha",
+            },
+        }
+
+    def test_cli_plain_output_shows_the_note_of_a_provider_with_no_usage_rows(self):
+        output = self._run_cli(self._merged_with_a_note())
+        self.assertIn("opencode-go: OpenCode Go API key expired", output.splitlines())
+        # A provider with usage rows is shown as before.
+        self.assertTrue(any(
+            line.startswith("claude ") and "60% left" in line for line in output.splitlines()
+        ))
+        self.assertNotIn("no quota data cached yet", output)
+
+    def test_cli_json_output_shows_the_note_of_a_provider_with_no_usage_rows(self):
+        merged = json.loads(self._run_cli(self._merged_with_a_note(), "--json"))
+        self.assertEqual(
+            merged["opencode-go"]["rows"],
+            [{"provider": "opencode-go", "note": "OpenCode Go API key expired"}],
+        )
+        self.assertEqual(merged["claude"]["rows"][0]["used_pct"], 40)
+
+    def test_cli_provider_with_no_rows_and_no_note_keeps_the_cached_message(self):
+        merged = {"openai": {"rows": [], "fetched_at": None, "fetched_by": "h"}}
+        self.assertEqual(self._run_cli(merged).strip(), "openai: no quota data cached yet")
 
     def test_cli_no_data_is_a_clear_message_not_a_crash(self):
         import io

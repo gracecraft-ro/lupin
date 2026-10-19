@@ -744,7 +744,9 @@ def _cmd_quota(args: argparse.Namespace) -> int:
         entry = merged[provider]
         real_rows = [row for row in entry.get("rows", []) if isinstance(row.get("used_pct"), (int, float))]
         if not real_rows:
-            print(f"{provider}: no quota data cached yet")
+            notes = [row["note"] for row in entry.get("rows", []) if row.get("note")]
+            for note in notes or ["no quota data cached yet"]:
+                print(f"{provider}: {note}")
             continue
         age = _ago(entry.get("fetched_at"))
         fetched_by = entry.get("fetched_by", "-")
