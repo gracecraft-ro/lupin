@@ -69,7 +69,7 @@ head repo owner. Read all the ledger events:
 lupin ledger read OWNER/REPO --limit 100000 --json
 ```
 
-A PR is production ready when all three are true:
+A PR is ready for production when all three are true:
 
 - A reviewer approved its current head SHA.
 - The repo gate passes at that SHA.
@@ -143,8 +143,8 @@ on lines of the diff. An owner comment that names a problem is a finding. It
 starts a fix cycle, as in step 3. A PR comment is never an approval.
 
 A review with findings is not an end state. The fix cycle repeats until the PR
-is production ready. It has no round limit. Do not report, ask, or stop between
-rounds.
+is ready for production. It has no round limit. Do not report, ask, or stop
+between rounds.
 
 A PR is blocked on an owner decision when one of these is true:
 
@@ -677,7 +677,7 @@ Work the queue until nothing is left. Nothing is left when all of these are
 true:
 
 - No open issue that the loop may take is unclaimed.
-- Every PR that the loop owns is production ready.
+- Every PR that the loop owns is ready for production.
 - No PR waits for a review.
 - No research, docs, or triage item is open that a worker can do.
 

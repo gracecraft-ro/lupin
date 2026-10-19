@@ -112,7 +112,7 @@ repo:
    not the worker. The reviewer's model tier is not lower than the worker's or
    the fix worker's.
 4. If the review finds a problem, the reviewer runs the fix cycle until the PR
-   is production ready. See "Run the fix cycle" in the `code-review` skill.
+   is ready for production. See "Run the fix cycle" in the `code-review` skill.
 5. The reviewer posts each verdict on the PR.
 6. The orchestrator merges into `main` only when all four are true:
    1. The PR is open on `OWNER/REPO`, with base `main`.
