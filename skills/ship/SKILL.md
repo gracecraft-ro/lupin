@@ -11,6 +11,7 @@ compatibility: Requires the repository's tools and GitHub CLI. Lupin and Redis a
 
 Use this skill to implement an issue or fix a finding on an open pull request.
 Follow the repository's `AGENTS.md`, issue workflow, and release rules.
+Start every GitHub comment that you post with `Loop:`.
 
 ## Check the issue and checkout
 
@@ -133,7 +134,7 @@ branch to the fork. Open the PR on the fork. Then request review.
 
    ```sh
    gh pr comment <PR_NUMBER> --repo gracecraft-ro/<repo> \
-     --body "Review requested. Head: <sha>."
+     --body "Loop: Review requested. Head: <sha>."
    ```
 
    If it fails, report the error and the PR number. Then go to step 5.

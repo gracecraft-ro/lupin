@@ -142,12 +142,13 @@ gh api repos/OWNER/REPO/pulls/<number>/reviews \
 ```
 
 Use `-f event=REQUEST_CHANGES` when the review asks for changes. GitHub refuses
-an approval from the PR's author. If your login opened the PR, post the verdict
-with `-f event=COMMENT`. Then ask the owner in a `Loop:` PR comment to approve
-or merge the PR.
+an approval or a change request from the PR's author. If your login opened the
+PR, post the verdict with `-f event=COMMENT`. Then ask the owner in a `Loop:`
+PR comment to approve or merge the PR.
 
 Every comment the loop posts starts with `Loop:`. An owner comment has
-`author_association` `OWNER` or `MEMBER` and does not start with `Loop:`.
+`author_association` `OWNER` or `MEMBER` and does not start with `Loop:`. A
+review that the loop posts is not an owner comment.
 
 In each cycle, read the new comments on each PR that the loop owns:
 
@@ -190,20 +191,25 @@ Tiers are the keys `tier0`, `tier1`, and `tier2` of a category row in
    JSON. If no other category matches, `classify` returns `coding`.
 2. The first fix worker uses the tier of the size: `tier0` for `size-xs` and
    `size-s`, `tier1` for `size-m`, and `tier2` for `size-l`, `size-xl`, and
-   `size-?`.
-3. To pick the model for a tier, run `lupin route CATEGORY SIZE`. Use `size-s`
-   for `tier0`, `size-m` for `tier1`, and `size-l` for `tier2`. If the row has
-   no `tier0`, `route` uses `tier1`. Quota and the `bmo` slot can also change
-   the pick.
+   `size-?`. If the row has no `tier0`, the first fix worker uses `tier1`.
+   The `frontend-ui`, `translation`, and `prose` rows have no `tier0`.
+3. Run `lupin route CATEGORY SIZE --json`. For SIZE, use `size-s` for `tier0`,
+   `size-m` for `tier1`, and `size-l` for `tier2`. So on a row with no
+   `tier0`, a first fix worker of size `size-xs` or `size-s` asks for
+   `size-m`. The fix worker's tier is the tier that you asked for. The output
+   has `model` and `effort`.
+   - If the output has a number in `wait_seconds`, wait that long. Then run
+     `lupin route` again.
+   - If `wait_seconds` is `null`, or `lupin route` fails, report it to the
+     orchestrator.
+   - A fix worker that cannot start does not end a round.
 4. Stall rule: after 3 rounds in a row with the same finding or the same
    failing check, the next fix worker is one tier higher, one time only. If
    the same finding or check stays for 3 more rounds, the PR is blocked on an
    owner decision. A fix worker at `tier2` cannot go higher. Its PR is blocked
    after 3 rounds with the same finding or check.
-5. In `model-tiers.json`, the first `tier2` pick in every row is `opus:high`.
-   So a raise to `tier2` usually starts Opus. Use Opus only when no other model in the tier
-   can do the work. A stall raise to `tier2` is such a case. Never use Fable
-   without the user's approval.
+5. Use the model that `lupin route` gives. A raise to `tier2` usually gives
+   Opus. Never use Fable without the user's approval.
 
 ## Install skills on loop hosts
 
@@ -517,7 +523,8 @@ Then run `scp <target>:<absolute path> ./evidence/<issue-number>/`. Take
 in step 2 of "Attach screenshots to the PR" in the `ship` skill. Then attach
 the files yourself, with your own token. Write your own `report.md` in the same
 folder. Use the command in "Attach screenshots to the PR" in the `ship` skill.
-If the upload fails, post the report as a PR comment before `lupin stop`.
+If the upload fails, post the report as a `Loop:` PR comment before
+`lupin stop`.
 Do not leave it only in the ignored `evidence/<issue-number>/report.md`.
 Do not dispatch the reviewer on a visual PR with no screenshots.
 
@@ -535,9 +542,9 @@ changes alone. Keep visual or 3D reviews to one or two PRs per dispatch.
 
 The reviewer must be capable of doing the issue and must not be below the
 worker's model tier. This includes a fix worker that the fix cycle moved one
-tier higher. Prefer a reviewer one tier higher when quota allows.
-Never dispatch Fable without the user's approval. Use Opus sparingly because
-it costs more.
+tier higher. Prefer a reviewer one tier higher when quota allows. Use the
+model that `lupin route` gives. A raise to `tier2` usually gives Opus. Never
+use Fable without the user's approval.
 
 If the review finds a problem, the reviewer runs the fix cycle. See "Run the
 fix cycle" in the `code-review` skill. The fix worker pushes as in "Pull

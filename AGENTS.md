@@ -561,7 +561,7 @@ These rules keep a loop moving when no person is present.
 
 1. **Do not use the question menu.** The menu asks a person to choose. No
    person is there, so the loop waits forever. Write the question as a comment
-   on the issue. Then take the next item.
+   on the issue. Start it with `Loop:`. Then take the next item.
 2. **Do not stop while work exists.** An unmerged pull request is not a reason
    to stop. Reviews, research, and docs are work. Do them.
 3. **Use the fork login for fork pushes.** A fork is your own copy of a repo.
@@ -606,5 +606,5 @@ These rules keep a loop moving when no person is present.
    are true. No open issue that you may take is unclaimed. Every pull request
    you own is ready for production. No pull request waits for a review. No
    research or docs item is left. Waiting for the owner is not the end. Write
-   the question as a comment on the issue. Then take the next item. Never write
-   "tell me if you want me to continue".
+   the question as a comment on the issue. Start it with `Loop:`. Then take
+   the next item. Never write "tell me if you want me to continue".

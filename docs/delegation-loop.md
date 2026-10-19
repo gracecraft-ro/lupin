@@ -117,7 +117,8 @@ repo:
    skill.
 5. The reviewer posts each verdict on the PR. Every comment the loop posts
    starts with `Loop:`. An owner comment has `author_association` `OWNER` or
-   `MEMBER` and does not start with `Loop:`.
+   `MEMBER` and does not start with `Loop:`. A review that the loop posts is
+   not an owner comment.
 6. The orchestrator merges into `main` only when all four are true:
    1. The PR is open on `OWNER/REPO`, with base `main`.
    2. A reviewer approves the current head SHA.

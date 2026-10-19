@@ -78,7 +78,8 @@ Do not replace a PR review with a review of an unsubmitted branch.
 - An owner comment on the PR that names a problem is a finding. Every comment
   the loop posts starts with `Loop:`. An owner comment has
   `author_association` `OWNER` or `MEMBER` and does not start with `Loop:`. A
-  PR comment is never an approval.
+  review that the loop posts is not an owner comment. A PR comment is never an
+  approval.
 - Do not edit files, run linters, or merge the PR. A fix worker makes the
   changes. See "Run the fix cycle".
 
@@ -153,9 +154,9 @@ If nothing is found, write `What this change does:`, then `Looks good. Ship.`, t
 You post each verdict and its findings on the PR, as a review. Use the API
 command in "Pull requests come first" in the `delegation-loop` skill, with the
 head SHA that you read. `Ship` is `APPROVE`. A blocking finding is
-`REQUEST_CHANGES`. GitHub refuses an approval from the PR's author. If your
-login opened the PR, use `COMMENT`. Then ask the owner in a `Loop:` PR comment
-to approve or merge the PR.
+`REQUEST_CHANGES`. GitHub refuses an approval or a change request from the PR's
+author. If your login opened the PR, use `COMMENT`. Then ask the owner in a
+`Loop:` PR comment to approve or merge the PR.
 
 Run the fix cycle only when your brief says that the loop owns the PR. For any
 other PR, post the verdict, report it to the orchestrator, and stop. Do not
@@ -187,15 +188,9 @@ The fix cycle:
    the new gate output. Either case ends a round.
 6. Repeat until `Verdict: Ship`. There is no round limit. Do not report, ask,
    or stop between rounds. Items 1, 7, and 8 are the only exceptions.
-7. Stall rule: after 3 rounds in a row with the same finding or the same
-   failing check, the next fix worker is one tier higher, one time only. If
-   the same finding or check stays for 3 more rounds, the PR is blocked on an
-   owner decision. A fix worker at `tier2` cannot go higher. Its PR is blocked
-   after 3 rounds with the same finding or check. Use Opus only when no other
-   model in the tier can do the work. A stall raise to `tier2` is such a case.
-   Never use Fable without the user's approval. For a blocked PR, post the
-   reason and the head SHA as a `Loop:` PR comment. Then report it to the
-   orchestrator.
+7. Stall rule: follow step 4 of "Fix worker tiers" in the `delegation-loop`
+   skill. For a blocked PR, post the reason and the head SHA as a `Loop:` PR
+   comment. Then report it to the orchestrator.
 8. Your tier must be at or above the fix worker's tier. If the raised tier is
    above yours, stop the cycle. Report three things to the orchestrator: the
    findings, the round count, and the fix worker's tier.

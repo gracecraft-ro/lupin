@@ -98,6 +98,7 @@ A claim is stored in Redis. It does not add a GitHub label or comment, and it
 does not store the worktree path. After the claim succeeds, the claim owner
 adds the `claimed` label and comments with the machine, worktree, branch, and
 holder. When the claim ends, remove the label and comment with the result.
+Start each comment with `Loop:`.
 Do not mark an issue as claimed if the Redis claim fails. Lupin has no local
 claim fallback.
 
