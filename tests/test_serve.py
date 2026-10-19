@@ -4289,3 +4289,22 @@ def test_image_route_falls_back_to_github_when_redis_has_no_copy(monkeypatch, re
     handler.do_image({"id": "eba1e250-ae34-481a-9f8c-98503030f83e"})
 
     assert asked == ["eba1e250-ae34-481a-9f8c-98503030f83e"] and handler.wfile.getvalue() == b"gh-bytes"
+
+
+def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_the_page_says_it_is_a_record(tmp_path, monkeypatch, redis_port, flush_redis):
+    from lupin import digest as digest_mod
+
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(serve.socket, "gethostname", lambda: "pihome")
+    client = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    entry = {"machine": "jesus", "repo": "widgets", "name": "20261002-090000-6h.md", "raw": "# Raw\n", "digest": None, "record_only": True}
+    client.set(digest_mod._key("jesus", "widgets", "20261002-090000-6h.md"), json.dumps(entry))
+    conn = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+
+    index = _get_handler("/debrief", conn)
+    index.do_GET()
+    page = _get_handler("/debrief?machine=jesus&repo=widgets&file=20261002-090000-6h.md", conn)
+    page.do_GET()
+
+    assert "no digest" not in index.reply.call_args.args[0].decode()
+    assert "This is a record" in page.reply.call_args.args[0].decode()

@@ -24,6 +24,8 @@ This is the data model `lupin` uses once the `redis` backend exists
 | `quota-snapshot` | string (JSON), with a TTL | one fleet-wide quota reading per provider — see Fleet keys below | nothing today |
 | `usage-snapshot:<machine>` | string (JSON), with a TTL | one machine's 7-day usage rows — see Fleet keys below | nothing today |
 | `debrief-digest:<machine>:<repo>:<file>` | string (JSON), with a TTL | one debrief's text and its model-written digest — see Fleet keys below | each machine shows only its own debrief files |
+| `debrief-window:<repo>:<period>:<window end>` | string, with a TTL | the claim for one periodic debrief window: the machine that holds it writes the window for the whole fleet — see Fleet keys below | each machine writes its own |
+| `debrief-digest-claim:<repo>:<file>` | string, with a TTL | the machine that writes the digest of one window — see Fleet keys below | each machine writes its own |
 | `debrief-image:<attachment-id>` | string (JSON), with a TTL | a picture from a digest, as base64 — see Fleet keys below | the dashboard asks GitHub with its own login |
 | `debrief-image-miss:<machine>:<attachment-id>` | string, with a TTL | one machine's marker for a failed or too big copy | nothing |
 These are new keys for the fleet CLI (issues #6–#14, split from #2) and the
@@ -398,6 +400,40 @@ older than 29 days, so an expired key does not start a new model call.
 The page waits 1 second at most for Redis and shows local debriefs if Redis fails. The keys need no new ACL
 command.
 
+### `debrief-window:<repo>:<period>:<window end>`
+
+Periodic debriefs (6h, 12h, 24h, 7d) use fixed windows on the Los Angeles clock. A 6h window
+ends at 00:00, 06:00, 12:00 or 18:00. A 12h window ends at 00:00 or 12:00. A 24h window ends at
+00:00. A 7d window ends on Monday at 00:00. A day with a clock change is 23 or 25 hours long.
+Every machine computes the same window, and the file name is the window end (in UTC), so
+the same window has the same name on every machine.
+
+One machine writes each window for the whole fleet. The agent sets this key with `SET NX`
+before it writes:
+
+- The value is `<machine>:writing` with a TTL of 1 hour. A writer that crashes frees the window
+  after an hour.
+- After the write, the value is `<machine>:done` with a TTL of 8 days (longer than the longest window).
+- After a failed write, the agent deletes the key. Another machine can then try.
+- A machine with no checkout of the repo does not claim.
+- If Redis cannot be read, the agent writes anyway. A duplicate is better than a missing debrief.
+- A machine that already has the file for the newest window does not claim again.
+- A window is written 3 minutes after it ends (`WINDOW_GRACE_S`), so a clock that is a few minutes
+  fast does not cut the window for the whole fleet. Every machine needs NTP.
+- A machine can take back its own `:writing` claim, for example after an agent restart.
+- Right after a write, the agent publishes the new debriefs to Redis (no model call). The winner of
+  the claim is the only machine that has the file, so the text must not stay only on that machine.
+
+After a long downtime the agent writes only the newest window of each period. It does not catch up.
+
+### `debrief-digest-claim:<repo>:<file>`
+
+Only a 12h window and a 7d window get a digest. Every other debrief (6h, 24h, a loop stop, a
+backfill day) is published as a record: `record_only: true`, no model call. Normally one machine
+has the file of a window, so one machine writes the digest. If two machines have it (Redis was
+down when it was written), the first to set this key with `SET NX` writes the digest. The value is
+the machine name, and the TTL is 30 days. The same machine can retry after a failed model call.
+
 ### `debrief-image:<attachment-id>` and `debrief-image-miss:<machine>:<attachment-id>`
 
 A digest can show pictures from the debrief (GitHub attachments). A private repo's
@@ -527,8 +563,8 @@ to `localhost:6379` without auth. Issue #118 tracks this.
 
 Periodic debriefs run on a background thread of `lupin agent`, not in the stop
 subprocess. They do not block commands. They read the same Redis keys as stop
-debriefs. They add no new keys. Their file names end in `-6h`, `-24h`, or
-`-7d`. They have no time budget entry. The "Budget result" section and the
+debriefs. They add the keys `debrief-window:*` and `debrief-digest:*` (see
+Fleet keys). Their file names end in `-6h`, `-12h`, `-24h`, or `-7d`. They have no time budget entry. The "Budget result" section and the
 "Lock waits" section cover stop debriefs only. They connect to `localhost:6379`
 without auth, as stop debriefs do (issue #118).
 Each one also saves two screenshots in a folder named `<file name>-screenshots/`.
@@ -704,6 +740,8 @@ numbers.
 | GitHub fetch lock (`slot:gh-fetch/<owner>/<repo>`) | n/a — held only for one fetch | 2 min |
 | `quota-snapshot` | n/a — not renewed | 24 hours (retention only; freshness is per-provider, 5 min, see above) |
 | `debrief-digest:...` | n/a — written once, rewritten only to add a digest | 30 days |
+| `debrief-digest-claim:...` | n/a — written once | 30 days |
+| `debrief-window:...` | n/a — written twice (claim, then done) | 1 hour while writing, 8 days when done |
 | `debrief-image:...` | n/a — written once | 7 days |
 | `debrief-image-miss:...` | n/a — written once | 1 hour (failed) or 1 day (too big) |
 | Quota fetch lock (`slot:quota-fetch/<provider>`) | n/a — held only for one fetch, no wait | 1 min |

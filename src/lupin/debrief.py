@@ -5,7 +5,8 @@ periodic debriefs (`PERIODS`) on a timer. Facts come from GitHub (`gh`).
 The ledger lists shared repository events. A claim marks an issue that one loop
 is working on. A normal stop and a periodic debrief also read the ledger and
 issue claims in Redis. A forced stop does not. Files stay on the machine that
-wrote them. A periodic debrief also gets screenshots of its dashboard pages.
+wrote them. Periodic debriefs use fixed windows (`window_end`), and one machine in the
+fleet writes each window (`claim_window`). A periodic debrief also gets screenshots of its dashboard pages.
 A stop debrief does not.
 """
 
@@ -27,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import redis
 
@@ -47,8 +49,15 @@ PERIODS = {
     "24h": timedelta(hours=24),
     "7d": timedelta(days=7),
 }
+# Periodic windows end on a fixed grid of this clock (issue #125). Every machine computes the
+# same window for the same repo, so one machine can write it for the whole fleet.
+CLOCK = ZoneInfo("America/Los_Angeles")
+_HOUR_STEPS = {"6h": 6, "12h": 12, "24h": 24}
+WINDOW_GRACE_S = 180  # A window is written this long after it ends. A fast clock or a late GitHub search must not cut it.
+WINDOW_WRITING_S = 3600  # A claim not finished in this time is free again. The writer may have crashed.
+WINDOW_DONE_S = 8 * 24 * 60 * 60  # Longer than the longest window (7d), so a late machine does not repeat it.
 # A backfill file covers one UTC day. Its name ends in `-day.md`. `DAY` is not
-# in `PERIODS`, so `period_due` and `last_period_end` never see these files.
+# in `PERIODS`, so `window_due` never sees these files.
 DAY = "day"
 _PERIOD_NAMES = "|".join(map(re.escape, [*PERIODS, DAY]))
 # Stop files are `<file name time>.md`. Periodic files are `<file name time>-<period>.md`.
@@ -686,63 +695,103 @@ def _screenshots(root: Path, repo: str, path: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _period_ends(root: Path, repo: str, period: str) -> list[datetime]:
-    """Return the end time of each `period` debrief for `repo`."""
+def window_end(period: str, now: datetime) -> datetime:
+    """Return the newest window end that is not after `now`, in UTC.
+
+    Windows end on a fixed grid of the Los Angeles clock: every 6 hours (00, 06, 12, 18),
+    every 12 hours (00, 12), every day (00), and every Monday at 00 for `7d`.
+    """
     if period not in PERIODS:
         raise DebriefError(f"unknown period {period!r}")
+    local = now.astimezone(CLOCK)
+    if period == "7d":
+        monday = local.date() - timedelta(days=local.weekday())
+        boundary = datetime(monday.year, monday.month, monday.day, tzinfo=CLOCK)
+    else:
+        step = _HOUR_STEPS[period]
+        boundary = local.replace(hour=local.hour // step * step, minute=0, second=0, microsecond=0, fold=0)
+    return boundary.astimezone(timezone.utc)
+
+
+def window_start(period: str, end: datetime) -> datetime:
+    """Return the start of the window that ends at `end`, in UTC.
+
+    It steps back on the wall clock, so a day with a clock change is 23 or 25 hours long.
+    """
+    if period not in PERIODS:
+        raise DebriefError(f"unknown period {period!r}")
+    back = timedelta(days=7) if period == "7d" else timedelta(hours=_HOUR_STEPS[period])
+    wall = end.astimezone(CLOCK).replace(tzinfo=None) - back
+    return wall.replace(tzinfo=CLOCK).astimezone(timezone.utc)
+
+
+def finished_window_end(period: str, now: datetime) -> datetime:
+    """The end of the newest window that has been over for `WINDOW_GRACE_S`.
+
+    The grace keeps a machine with a clock a few minutes fast from writing a window too early.
+    The first claim wins for the whole fleet, so an early write would cut the window for everyone.
+    Run NTP on every machine. A larger clock error is not covered.
+    """
+    return window_end(period, now - timedelta(seconds=WINDOW_GRACE_S))
+
+
+def window_due(root: Path, repo: str, period: str, now: datetime) -> bool:
+    """Return True when this machine has no debrief for the newest finished window of `period`."""
     if not REPO_RE.fullmatch(repo or ""):
         raise DebriefError(f"invalid repo name {repo!r}")
-    ends = []
-    for path in (root / "debriefs" / repo).glob(f"*-{period}.md"):
-        if FILE_RE.fullmatch(path.name) and path.is_file():
-            stamp = path.name[:-len(f"-{period}.md")]
-            try:
-                ends.append(datetime.strptime(stamp, STAMP_FORMAT).replace(tzinfo=timezone.utc))
-            except ValueError:
-                pass  # Not a real date, such as month 13. Skip the file.
-    return ends
+    end = finished_window_end(period, now)
+    return not (root / "debriefs" / repo / f"{end.strftime(STAMP_FORMAT)}-{period}.md").exists()
 
 
-def last_period_end(root: Path, repo: str, period: str, now: datetime | None = None) -> datetime | None:
-    """Return the end time of the newest `period` debrief for `repo`.
+def _window_key(repo: str, period: str, end: datetime) -> str:
+    return f"{slots_redis.PREFIX}debrief-window:{repo}:{period}:{end.strftime(STAMP_FORMAT)}"
 
-    Skip files that end after `now`. A clock that stepped back can leave such files.
-    Return None when there is no such debrief.
+
+def claim_window(client, repo: str, period: str, end: datetime, machine: str) -> bool:
+    """Return True if this machine may write the window. Only one machine in the fleet gets True.
+
+    The claim is a Redis key set with NX. A machine can take back its own unfinished claim.
+    If Redis cannot be read, return True: a duplicate
+    debrief is better than a missing one. Call `finish_window` when the write ends.
     """
-    ends = _period_ends(root, repo, period)
-    if now is not None:
-        ends = [end for end in ends if end <= now]
-    return max(ends, default=None)
+    if client is None:
+        return True
+    key = _window_key(repo, period, end)
+    mine = f"{machine}:writing"
+    try:
+        if slots_redis._call_with_retry(lambda: client.set(key, mine, nx=True, ex=WINDOW_WRITING_S)):
+            return True
+        # This machine's own claim, left by a restart or a retried SET, is still this machine's.
+        return slots_redis._call_with_retry(lambda: client.get(key)) == mine
+    except redis.exceptions.RedisError:
+        return True
 
 
-def period_due(root: Path, repo: str, period: str, now: datetime) -> bool:
-    """Return True when a `period` debrief is due.
-
-    Return True also when one full period has passed since the last one.
-    Return False when a period file ends within seven days after `now`.
-    Such a file blocks the write until its end time has passed.
-    A clock that stepped back can delay a write by up to seven days.
-    """
-    ends = _period_ends(root, repo, period)
-    span = PERIODS[period]
-    horizon = max(PERIODS.values())
-    if any(now < end <= now + horizon for end in ends):
-        return False
-    last = last_period_end(root, repo, period, now)
-    return last is None or now - last >= span
+def finish_window(client, repo: str, period: str, end: datetime, machine: str, *, written: bool) -> None:
+    """Mark the claim done after a write, or free it after a failed write. A Redis error is ignored."""
+    if client is None:
+        return
+    key = _window_key(repo, period, end)
+    try:
+        if written:
+            slots_redis._call_with_retry(lambda: client.set(key, f"{machine}:done", ex=WINDOW_DONE_S))
+        else:
+            slots_redis._call_with_retry(lambda: client.delete(key))
+    except redis.exceptions.RedisError:
+        pass
 
 
-def write_period(
+def write_window(
     root: Path, repo: str, checkout: Path, period: str, *, now: datetime | None = None,
 ) -> Path:
-    """Write the `period` debrief for `repo` and return its path.
+    """Write the debrief for the newest finished window of `period` and return its path.
 
-    The window starts at the last `period` debrief. When there is none, the
-    window starts one period before `now`. The window ends at `now`.
+    The window is `[window_start, window_end]` on the fixed grid. The file name is the window
+    end, so every machine gives the same window the same name. Screenshots are added.
     """
-    end = datetime.now(timezone.utc) if now is None else now
-    last = last_period_end(root, repo, period, end)
-    start = end - PERIODS[period] if last is None else last
+    when = datetime.now(timezone.utc) if now is None else now
+    end = finished_window_end(period, when)
+    start = window_start(period, end)
     if not checkout.is_dir():
         raise DebriefError(f"no checkout at {checkout}")
     return _write(root, repo, checkout, start, end, forced=False, period=period)
@@ -752,7 +801,7 @@ def write_day(root: Path, repo: str, checkout: Path, day: datetime) -> Path:
     """Write the backfill debrief for one UTC day and return its path.
 
     `day` must be midnight UTC. The window is `[day, day + 1 day)`. The file
-    name is `<day + 1 day>-day.md`. `period_due` ignores such a file.
+    name is `<day + 1 day>-day.md`. `window_due` ignores such a file.
     The day must be over. Today is refused.
     """
     if day.tzinfo is None or day.utcoffset() != timedelta(0) or day != day.replace(

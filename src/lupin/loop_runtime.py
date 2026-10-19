@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1488,7 +1489,12 @@ def _write_debrief(repo: str, metadata: dict, *, forced: bool) -> None:
 
 
 def write_due_periodic_debriefs(now: datetime | None = None) -> None:
-    """Write each periodic debrief that is due. A failure only prints a warning."""
+    """Write each periodic debrief that is due. A failure only prints a warning.
+
+    The windows are on a fixed grid, so every machine sees the same window as due.
+    Only one machine in the fleet writes it: the first to claim it in Redis. A machine
+    that does not have the repo's checkout does not claim.
+    """
     # Local import: debrief -> roadmap -> loop_runtime is a cycle.
     from . import debrief
 
@@ -1499,16 +1505,50 @@ def write_due_periodic_debriefs(now: datetime | None = None) -> None:
         # enabled_repos writes the default file when it is missing. That write can raise OSError.
         print(f"lupin agent: no periodic debriefs: {exc} ({REPOS_FILE})", file=sys.stderr)
         return
+    client = None  # Made when the first window is due. None means Redis is not available.
+    client_tried = False
+    machine = socket.gethostname()
+    wrote = False
     for repo in repos:
         checkout = CODE_DIR / repo
         if not checkout.is_dir():
             continue
         for period in debrief.PERIODS:
             try:
-                if debrief.period_due(STATE_DIR, repo, period, now):
-                    debrief.write_period(STATE_DIR, repo, checkout, period, now=now)
+                if not debrief.window_due(STATE_DIR, repo, period, now):
+                    continue
+                if not client_tried:
+                    client_tried = True
+                    try:
+                        client = slots_redis.debrief_client(*debrief._redis_connection())
+                    except (ValueError, OSError) as exc:  # A fleet config file that cannot be read.
+                        print(f"lupin agent: debrief claims off: {exc}", file=sys.stderr)
+                end = debrief.finished_window_end(period, now)
+                if not debrief.claim_window(client, repo, period, end, machine):
+                    continue  # Another machine writes this window.
+                written = False
+                try:
+                    debrief.write_window(STATE_DIR, repo, checkout, period, now=now)
+                    written = wrote = True
+                finally:
+                    debrief.finish_window(client, repo, period, end, machine, written=written)
             except Exception as exc:
                 print(f"lupin agent: no {period} debrief for {repo}: {exc}", file=sys.stderr)
+    if wrote:
+        # The window is claimed for the whole fleet, so no other machine will write it. Put the text
+        # in Redis now, so it is not lost if this machine goes away before the digest thread runs.
+        # `limit=0`: no model call here. The digest thread writes the digest.
+        try:
+            from . import digest
+
+            host, port, username, password = debrief._redis_connection()
+            digest.sync(
+                STATE_DIR,
+                dict(redis_host=host, redis_port=port, redis_username=username, redis_password=password),
+                limit=0, now=now, images=False,
+            )
+        except Exception as exc:
+            print(f"lupin agent: could not publish the new debriefs: {exc}", file=sys.stderr)
 
 
 def publish_debrief_digests() -> None:
