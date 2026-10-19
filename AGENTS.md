@@ -540,3 +540,42 @@ sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
 - Do not use the start, stop, or run controls on this dashboard. New runs use
   the `lupin-loops` session. Older loops may use an old session until they
   stop.
+
+## Rules for unattended loops
+
+No person watches an unattended loop. These rules stop mistakes that earlier
+loops made.
+
+1. **Do not use the question menu.** No person sees it, so the loop waits
+   forever. Write the question as a comment on the issue. Then take the next
+   item.
+2. **Do not stop while work exists.** An unmerged pull request is not a reason
+   to stop. Reviews, research, and docs are work. Do them.
+3. **Use the fork login for fork pushes.** On ralpha, `GH_TOKEN` cannot push to
+   the fork. The saved `gracecraft-ro` login can. `FORK_OWNER` is
+   `gracecraft-ro` on ralpha. Remove `GH_TOKEN` for one command at a time. Do
+   not remove it for the whole shell:
+
+   <!-- markdownlint-disable MD013 -->
+   ```sh
+   env -u GH_TOKEN git push -u fork <branch>
+   env -u GH_TOKEN gh pr create --repo OWNER/REPO --base main --head FORK_OWNER:<branch> --title "<title>" --body-file <file>
+   ```
+   <!-- markdownlint-enable MD013 -->
+
+4. **Do not run `rm` with a glob.** A glob is a pattern such as `*`. It can
+   delete more files than you mean. Write to new file names instead.
+5. **Ask a silent worker for its result.** A worker with no result after 30
+   minutes: ask it for the result. If it has none, record that on the issue.
+   Then stop the worker. The `delegation-loop` skill shows how to ask and how
+   to stop.
+6. **Log environment problems in the ledger.** On ralpha, `lupin roadmap`
+   fails. The Redis user `lupin-ralpha` has no permission to run `MULTI`.
+   `MULTI` is a Redis command that groups steps. Also, `gh` cannot see
+   `gracecraft/nix`. That repo tracks environment problems. So do not file the
+   problem as an issue there. Write it to the ledger. `OWNER/REPO` is
+   `gracecraft/nix`:
+
+   ```sh
+   lupin ledger append OWNER/REPO --event env-friction --summary "<problem>"
+   ```
