@@ -272,8 +272,8 @@ unset or empty, no machine is named and the lock below picks one writer.
 Every other machine reads it while that fetcher is alive. When the pinned
 machine is not maintaining the cache — draining, offline, or never joined
 — a machine that needs the data fetches it and publishes through the same
-`gh-fetch/<owner>/<repo>` slot, so the first machine to win still answers
-for the fleet and no two machines fetch the same repo at once.
+`gh-fetch/<owner>/<repo>/<cache-key>` slot, so the first machine to win still
+answers for the fleet and no two machines fetch the same key at once.
 Read by every machine, the pinned machine included.
 The roadmap uses the dashboard's Redis connection for this cache.
 
@@ -298,10 +298,11 @@ different queries that must not share one cache entry: `issues:<state>`
 (`quest`'s issue-to-repo lookup).
 
 Guarded by the existing `slot:<name>` shape above, as
-`slot:gh-fetch/<owner>/<repo>` (max 1 holder, `/` not `:` -- a colon in the
-slot name breaks `release`/`renew`'s lease-id parsing, which splits on the
-first colon) — one holder fetches a repo at a time. The lock is used in
-three cases:
+`slot:gh-fetch/<owner>/<repo>/<cache-key>` (max 1 holder). In the slot name,
+each `:` of the cache key becomes `/`. A colon in the slot name breaks
+`release` and `renew`: they split the lease id at the first colon. One holder
+fetches one key of a repo at a time. Other keys of the same repo have their
+own locks. The lock is used in three cases:
 
 - The pinned machine takes it, so two `lupin` invocations there do not run
   the same fetch twice.
@@ -749,7 +750,7 @@ numbers.
 | `benchmark-snapshot` | n/a — not renewed | 7 days (retention only, see below) |
 | `model-snapshot` | n/a — not renewed | 7 days (retention only) |
 | GitHub data cache (`gh-cache:...`) | n/a — not renewed | 5 min |
-| GitHub fetch lock (`slot:gh-fetch/<owner>/<repo>`) | n/a — held only for one fetch | 2 min |
+| GitHub fetch lock (`slot:gh-fetch/<owner>/<repo>/<cache-key>`) | n/a — held only for one fetch | 2 min |
 | `quota-snapshot` | n/a — not renewed | 24 hours (retention only; freshness is per-provider, 5 min, see above) |
 | `debrief-digest:...` | n/a — written once, rewritten only to add a digest | 30 days |
 | `debrief-digest-claim:...` | n/a — written once | 30 days |

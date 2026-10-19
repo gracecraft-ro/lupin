@@ -47,9 +47,9 @@ PREFIX = slots_redis.PREFIX
 # within that window shares one fetch instead of each paying for their own.
 CACHE_TTL = 300
 
-# The lock only guards the canonical fetcher against itself (two `lupin`
-# invocations on the same machine racing), so a short wait is enough --
-# contention here is rare and brief. The TTL is generous (2 min) because a
+# The lock picks which caller fetches one cache key. When no machine is
+# named, a caller that loses waits LOCK_WAIT seconds, then gets the
+# "in progress" error. The TTL is generous (2 min) because a
 # paginated GraphQL fetch (comments, dependency links) can run several
 # `gh api graphql` calls in a row; if a fetch ever runs past this, the lock
 # just expires and a second fetch may start -- a harmless duplicate read,
@@ -148,17 +148,20 @@ def _fetch_and_publish(
     # would make them look like the same caller renewing its own lease.
     holder = f"{cache_key}:{uuid.uuid4().hex[:8]}"
 
+    # One lock for each cache key, so a fetch of one key never blocks
+    # another key of the same repo.
     # No colon in the slot name: `_lease_runtime.split_lease` rebuilds
     # `(slot, holder)` from the lease string `f"{slot}:{holder}"` by
     # splitting on the *first* colon only, so a colon inside `slot` itself
     # (e.g. "gh-fetch:acme/repo") makes it parse the wrong slot and
     # `release()`/`renew()` silently act on a key that was never acquired
     # -- the real lock then never clears until LOCK_TTL expires. "/" has
-    # the same job without that trap.
+    # the same job without that trap. Cache keys have colons
+    # (`issues:open`), so replace each one with "/".
     lease = None
     try:
         lease = slots_redis.acquire(
-            f"gh-fetch/{owner}/{name}",
+            f"gh-fetch/{owner}/{name}/{cache_key.replace(':', '/')}",
             holder=holder,
             wait=LOCK_WAIT,
             ttl=LOCK_TTL,
@@ -168,7 +171,7 @@ def _fetch_and_publish(
             redis_password=connection.get("redis_password"),
         )
     except slots_redis.SlotFull:
-        # Another fetch for this repo is already in flight -- on the
+        # Another fetch for this cache key is already in flight -- on the
         # canonical fetcher this is another `lupin` process on the same
         # machine, in the fallback case it is another machine. Check once
         # more in case it just finished. If the cache is still empty, fetch
@@ -180,7 +183,7 @@ def _fetch_and_publish(
         if single_flight:
             return None, (
                 f"a GitHub fetch for {cache_key} ({owner}/{name}) is in progress "
-                "on another machine; try again soon"
+                "elsewhere; try again soon"
             )
     except slots_redis.CoordinatorUnreachable:
         return fetch_fn()
@@ -223,7 +226,7 @@ def cached_gh_json(
     not the canonical fetcher.
 
     When `LUPIN_GH_CANONICAL_FETCHER` is unset or empty, a miss takes the
-    per-repo lock. The machine that gets the lock fetches. A machine that
+    per-key lock. The machine that gets the lock fetches. A machine that
     cannot get the lock reads the cache once more. If the cache is still
     empty, it returns a "fetch in progress" error and does not fetch.
 
@@ -266,7 +269,9 @@ def cached_gh_json(
         # command over a cache-layer outage.
         return fetch_fn()
 
-    # No machine is pinned: many machines may miss at once. Let one fetch.
+    # Reached when this machine is pinned, or when the pinned machine is not
+    # live, or when no machine is pinned. The lock lets one caller fetch.
+    # Only with no pinned machine does a loser get an error, not a fetch.
     return _fetch_and_publish(
         owner, name, cache_key, fetch_fn, client, connection, single_flight=pinned is None
     )

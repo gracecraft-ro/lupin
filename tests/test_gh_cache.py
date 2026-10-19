@@ -166,7 +166,7 @@ def test_fallback_fetcher_serializes_on_the_shared_lock(redis_port, flush_redis)
     the first's published result after waiting on the lock."""
     from lupin import slots_redis
 
-    held = slots_redis.acquire("gh-fetch/acme/repo", holder="other-machine", **_kw(redis_port))
+    held = slots_redis.acquire("gh-fetch/acme/repo/issues/open", holder="other-machine", **_kw(redis_port))
     try:
         _raw_client(redis_port).set(
             f"{gh_cache.PREFIX}gh-cache:acme/repo:issues:open",
@@ -232,7 +232,7 @@ def test_canonical_machine_lock_contention_rereads_cache_instead_of_refetching(
     """
     from lupin import slots_redis
 
-    held = slots_redis.acquire("gh-fetch/acme/repo", holder="other-caller", **_kw(redis_port))
+    held = slots_redis.acquire("gh-fetch/acme/repo/issues/open", holder="other-caller", **_kw(redis_port))
     try:
         _raw_client(redis_port).set(
             f"{gh_cache.PREFIX}gh-cache:acme/repo:issues:open",
@@ -260,7 +260,7 @@ def test_canonical_machine_fetches_anyway_if_lock_busy_and_cache_still_cold(
     """
     from lupin import slots_redis
 
-    held = slots_redis.acquire("gh-fetch/acme/repo", holder="other-caller", **_kw(redis_port))
+    held = slots_redis.acquire("gh-fetch/acme/repo/issues/open", holder="other-caller", **_kw(redis_port))
     try:
         fetch = mock.Mock(return_value=([{"number": 2}], None))
         with mock.patch.object(machines, "hostname", return_value=PINNED_FETCHER):
@@ -377,14 +377,19 @@ def test_unset_setting_pins_no_machine_so_a_miss_fetches_here(redis_port, flush_
     fetch.assert_called_once()
 
 
+@pytest.mark.parametrize("value", [None, ""])
 def test_unset_setting_three_callers_on_one_empty_key_fetch_once(
-    redis_port, flush_redis, monkeypatch
+    redis_port, flush_redis, monkeypatch, value
 ):
     """With no machine pinned, three callers miss the same key while one
     fetch runs for 3 seconds. Only one `gh` fetch may run. The other two
-    callers get an error, not a second fetch.
+    callers get an "in progress" error, not a second fetch. An empty value
+    means the same as an unset one.
     """
-    monkeypatch.delenv("LUPIN_GH_CANONICAL_FETCHER")
+    if value is None:
+        monkeypatch.delenv("LUPIN_GH_CANONICAL_FETCHER")
+    else:
+        monkeypatch.setenv("LUPIN_GH_CANONICAL_FETCHER", value)
     calls = []
 
     def slow_fetch():
@@ -402,15 +407,56 @@ def test_unset_setting_three_callers_on_one_empty_key_fetch_once(
         )
 
     with mock.patch.object(machines, "hostname", return_value="jesus"):
-        with mock.patch.object(machines, "machines", return_value=[_record("pihome")]):
-            threads = [threading.Thread(target=call) for _ in range(3)]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=15)
+        threads = [threading.Thread(target=call) for _ in range(3)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
 
     assert len(calls) == 1
     assert sorted(error is None for _data, error in results) == [False, False, True]
+    losers = [error for _data, error in results if error is not None]
+    assert all("in progress" in error for error in losers)
+
+
+def test_unset_setting_two_callers_on_different_keys_both_fetch(
+    redis_port, flush_redis, monkeypatch
+):
+    """With no machine pinned, one repo has a slow fetch for `issues:open`.
+    A caller for `dependencies` of the same repo must still fetch. It must
+    not get an "in progress" error because of the other key.
+    """
+    monkeypatch.delenv("LUPIN_GH_CANONICAL_FETCHER")
+    calls = []
+
+    def slow_fetch(label):
+        def fetch():
+            calls.append(label)
+            time.sleep(3)
+            return [{"label": label}], None
+
+        return fetch
+
+    results = {}
+
+    def call(cache_key):
+        results[cache_key] = gh_cache.cached_gh_json(
+            "acme", "repo", cache_key, slow_fetch(cache_key), connection=_kw(redis_port)
+        )
+
+    with mock.patch.object(machines, "hostname", return_value="jesus"):
+        threads = [
+            threading.Thread(target=call, args=(cache_key,))
+            for cache_key in ("issues:open", "dependencies")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+
+    assert sorted(calls) == ["dependencies", "issues:open"]
+    assert results["issues:open"] == ([{"label": "issues:open"}], None)
+    assert results["dependencies"] == ([{"label": "dependencies"}], None)
 
 
 def test_unset_setting_never_fetches_when_redis_is_down(closed_port, monkeypatch):
