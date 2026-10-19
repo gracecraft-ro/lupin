@@ -2244,7 +2244,88 @@ def test_monitor_renews_only_its_own_claims_while_the_agent_runs(
     assert _agent_holder(herdr_calls), "the agent's workspace gets LUPIN_CLAIM_HOLDER"
 
 
-def test_monitor_stops_renewing_when_the_agent_exits(
+def _done_agent_harness(monkeypatch, tmp_path: Path, redis_port: int, open_polls: int, end: str) -> dict:
+    """`hold` returns at once, as `_wait_agent` does when the agent is `done`.
+
+    The agent is then alive and waits for input. The workspace stays open for
+    `open_polls` polls of the monitor. Then `end` occurs: "close" (the
+    workspace closes) or "server" (the Herdr server stops). `seen["held"]`
+    gets the held claims at each open poll.
+    """
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    herdr_calls: list = []
+    seen: dict = {"polls": 0, "held": []}
+
+    def agent(*args, **kwargs):
+        holder = _agent_holder(herdr_calls) or "no holder given to the agent"
+        claims.claim("acme/repo#1", holder, ttl=_CLAIM_TTL, **kw)
+        return 0
+
+    _renew_harness(monkeypatch, tmp_path, redis_port, agent, herdr_calls)
+
+    def still_open() -> bool:
+        seen["polls"] += 1
+        if seen["polls"] > open_polls:
+            return False
+        seen["held"].append(sorted(claims.claims_for(["acme/repo"], **kw)))
+        return True
+
+    if end == "close":
+        monkeypatch.setattr(
+            loop_runtime, "_workspace_by_id",
+            lambda session, workspace_id: {"workspace_id": workspace_id} if still_open() else None,
+        )
+    else:
+        monkeypatch.setattr(loop_runtime, "_server_running", lambda session: still_open())
+        monkeypatch.setattr(
+            loop_runtime, "_workspace_by_id", lambda session, workspace_id: {"workspace_id": workspace_id}
+        )
+    return seen
+
+
+def test_monitor_renews_while_the_agent_is_done_and_its_workspace_is_open(
+    monkeypatch, tmp_path: Path, redis_port, flush_redis
+):
+    # The monitor polls each 2 s, so 3 open polls are more than 8 claim TTLs.
+    seen = _done_agent_harness(monkeypatch, tmp_path, redis_port, open_polls=3, end="close")
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "claude", loop_runtime.SESSION_NAME, "prompt.md", False
+    ) == 0
+    assert seen["held"] == [["acme/repo#1"]] * 3
+
+
+def test_monitor_stops_renewing_when_the_workspace_closes(
+    monkeypatch, tmp_path: Path, redis_port, flush_redis
+):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    seen = _done_agent_harness(monkeypatch, tmp_path, redis_port, open_polls=2, end="close")
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "claude", loop_runtime.SESSION_NAME, "prompt.md", False
+    ) == 0
+    time.sleep(_CLAIM_TTL + 0.3)
+
+    assert seen["held"][-1] == ["acme/repo#1"]
+    assert claims.claims_for(["acme/repo"], **kw) == {}
+
+
+def test_monitor_stops_renewing_when_the_herdr_server_stops(
+    monkeypatch, tmp_path: Path, redis_port, flush_redis
+):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    seen = _done_agent_harness(monkeypatch, tmp_path, redis_port, open_polls=2, end="server")
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "claude", loop_runtime.SESSION_NAME, "prompt.md", False
+    ) == 1
+    time.sleep(_CLAIM_TTL + 0.3)
+
+    assert seen["held"][-1] == ["acme/repo#1"]
+    assert claims.claims_for(["acme/repo"], **kw) == {}
+
+
+def test_monitor_stops_renewing_when_the_agent_exits_and_the_workspace_is_gone(
     monkeypatch, tmp_path: Path, redis_port, flush_redis
 ):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}

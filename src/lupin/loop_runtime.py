@@ -1300,46 +1300,52 @@ def _monitor_loop(
         if platform == "claude" else 1
     )
     wait_s = 0.0 if launch and platform == "claude" else 10800.0
-    # Renew the run's claims while the agent runs (issue #156).
+    # Renew the run's claims until the workspace closes or the Herdr server
+    # stops (issue #156). `hold` returns when the agent is `done`, but the
+    # agent is still alive then and waits for input.
     stop_renewing = threading.Event()
+    renewer = threading.Thread(target=_renew_claims, args=(holder, stop_renewing), daemon=True)
     if holder:
-        threading.Thread(target=_renew_claims, args=(holder, stop_renewing), daemon=True).start()
+        renewer.start()
     try:
-        rc = slots.hold(
-            command, slot=platform, holder=unit_name(repo), wait=wait_s,
-            ttl=LEASE_TTL, max_holders=max_holders,
-        )
-    except slots.SlotFull:
-        if launch:
-            _herdr_json(session, "workspace", "close", workspace_id)
-            metadata["state"] = "failed"
-            metadata["workspace_id"] = None
-            metadata["pane_id"] = None
-            removed_note = ""
-            try:
-                _, removed_note = _remove_worktree(repo, metadata)
-            except LoopError as exc:
-                removed_note = f"; {exc}"
-            _write_metadata(repo, metadata)
-            raise LoopError(f"{platform} slot is full{removed_note}")
-        raise LoopError(f"{platform} slot is full")
-    finally:
-        stop_renewing.set()
-    if rc:
-        metadata["state"] = "needs_attention"
-        _write_metadata(repo, metadata)
-        raise LoopError(f"Herdr agent for {repo} stopped with status {rc}")
-    while True:
-        if not _server_running(session):
+        try:
+            rc = slots.hold(
+                command, slot=platform, holder=unit_name(repo), wait=wait_s,
+                ttl=LEASE_TTL, max_holders=max_holders,
+            )
+        except slots.SlotFull:
+            if launch:
+                _herdr_json(session, "workspace", "close", workspace_id)
+                metadata["state"] = "failed"
+                metadata["workspace_id"] = None
+                metadata["pane_id"] = None
+                removed_note = ""
+                try:
+                    _, removed_note = _remove_worktree(repo, metadata)
+                except LoopError as exc:
+                    removed_note = f"; {exc}"
+                _write_metadata(repo, metadata)
+                raise LoopError(f"{platform} slot is full{removed_note}")
+            raise LoopError(f"{platform} slot is full")
+        if rc:
             metadata["state"] = "needs_attention"
             _write_metadata(repo, metadata)
-            return 1
-        if _workspace_by_id(session, workspace_id) is None:
-            metadata["state"] = "stopped"
-            metadata["stopped_at"] = _now()
-            _write_metadata(repo, metadata)
-            return 0
-        time.sleep(2)
+            raise LoopError(f"Herdr agent for {repo} stopped with status {rc}")
+        while True:
+            if not _server_running(session):
+                metadata["state"] = "needs_attention"
+                _write_metadata(repo, metadata)
+                return 1
+            if _workspace_by_id(session, workspace_id) is None:
+                metadata["state"] = "stopped"
+                metadata["stopped_at"] = _now()
+                _write_metadata(repo, metadata)
+                return 0
+            time.sleep(2)
+    finally:
+        stop_renewing.set()
+        if holder:
+            renewer.join(timeout=5)
 
 
 def worker(
