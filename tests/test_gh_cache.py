@@ -377,6 +377,42 @@ def test_unset_setting_pins_no_machine_so_a_miss_fetches_here(redis_port, flush_
     fetch.assert_called_once()
 
 
+def test_unset_setting_three_callers_on_one_empty_key_fetch_once(
+    redis_port, flush_redis, monkeypatch
+):
+    """With no machine pinned, three callers miss the same key while one
+    fetch runs for 3 seconds. Only one `gh` fetch may run. The other two
+    callers get an error, not a second fetch.
+    """
+    monkeypatch.delenv("LUPIN_GH_CANONICAL_FETCHER")
+    calls = []
+
+    def slow_fetch():
+        calls.append(1)
+        time.sleep(3)
+        return [{"number": 1}], None
+
+    results = []
+
+    def call():
+        results.append(
+            gh_cache.cached_gh_json(
+                "acme", "repo", "issues:open", slow_fetch, connection=_kw(redis_port)
+            )
+        )
+
+    with mock.patch.object(machines, "hostname", return_value="jesus"):
+        with mock.patch.object(machines, "machines", return_value=[_record("pihome")]):
+            threads = [threading.Thread(target=call) for _ in range(3)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=15)
+
+    assert len(calls) == 1
+    assert sorted(error is None for _data, error in results) == [False, False, True]
+
+
 def test_unset_setting_never_fetches_when_redis_is_down(closed_port, monkeypatch):
     monkeypatch.delenv("LUPIN_GH_CANONICAL_FETCHER")
     fetch = mock.Mock()

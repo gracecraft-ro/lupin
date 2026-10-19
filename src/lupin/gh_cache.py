@@ -4,19 +4,18 @@ kind of data -- issue state, body, labels, dependency links. Every machine
 doing that independently means duplicate rate-limit pressure and different
 machines seeing different snapshots of the same repo at the same moment.
 
-Grace's correction on the first design: the fetcher is not "whichever
-machine wins a lock race" -- it is one named machine, pinned by hostname.
-`LUPIN_GH_CANONICAL_FETCHER` holds that name. Every other machine reads the cache
-while that fetcher is alive; on a miss it returns an honest "no data yet"
-error instead of calling `gh` itself. When the pinned fetcher is not
-maintaining the cache (draining, offline, or never joined), the pin has no
-holder, so the next machine reads the fleet registry, sees that, and fetches
-live itself -- publishing through the same shared lock, so the first
-machine to get there still answers for the whole fleet. A machine never
-calls `gh` on its own when Redis is down and it is not the canonical
-fetcher. The `slots_redis` lock below serializes fetchers; with more than
-one machine able to fetch, that lock is what keeps the "one snapshot" part
-of the design true.
+One named machine runs `gh` for the fleet. `LUPIN_GH_CANONICAL_FETCHER`
+holds its hostname. Every other machine reads the cache while that
+machine is online. On a miss, it returns a "no data yet" error and does
+not call `gh`. If the named machine is draining, offline, or never
+joined, the next machine reads the fleet registry, sees this, and
+fetches. It publishes through the same shared lock, so the first machine
+to get the lock answers for the whole fleet. If Redis is down, a machine
+that is not the named machine never calls `gh`.
+
+If the variable is unset or empty, no machine is named. A miss then takes
+the lock. One machine fetches. A machine that cannot get the lock does not
+fetch (see `cached_gh_json`).
 
 Risk, stated rather than papered over: the setting is compared against
 `machines.hostname()` (`socket.gethostname()`) with a plain `==`.
@@ -128,11 +127,17 @@ def _fetch_and_publish(
     fetch_fn: Callable[[], tuple[Any, str | None]],
     client,
     connection: dict,
+    *,
+    single_flight: bool = False,
 ) -> tuple[Any, str | None]:
     """Run `fetch_fn` under the shared `gh-fetch` lock and publish the
     result. Only one machine fetches a given repo's key at a time, so the
     first one to win answers for the whole fleet and everyone else reads
     its answer from the cache instead of paying for a second `gh` call.
+
+    When the lock is full and the cache is still empty, the caller fetches
+    anyway. With `single_flight`, it returns a "fetch in progress" error
+    instead, so no second `gh` call runs.
     """
     key = f"{PREFIX}gh-cache:{owner}/{name}:{cache_key}"
     # A unique holder per call, not just `cache_key`: `slots_redis.acquire`
@@ -166,11 +171,17 @@ def _fetch_and_publish(
         # Another fetch for this repo is already in flight -- on the
         # canonical fetcher this is another `lupin` process on the same
         # machine, in the fallback case it is another machine. Check once
-        # more in case it just finished, otherwise fetch anyway. A
-        # duplicate read is wasted work, not a bug.
+        # more in case it just finished. If the cache is still empty, fetch
+        # anyway (a duplicate read is wasted work, not a bug), unless the
+        # caller asked for a single fetch.
         hit, cached, _redis_ok = _read_cache(client, key)
         if hit:
             return cached, None
+        if single_flight:
+            return None, (
+                f"a GitHub fetch for {cache_key} ({owner}/{name}) is in progress "
+                "on another machine; try again soon"
+            )
     except slots_redis.CoordinatorUnreachable:
         return fetch_fn()
     else:
@@ -211,6 +222,11 @@ def cached_gh_json(
     shared snapshot. A machine never fetches when Redis is down and it is
     not the canonical fetcher.
 
+    When `LUPIN_GH_CANONICAL_FETCHER` is unset or empty, a miss takes the
+    per-repo lock. The machine that gets the lock fetches. A machine that
+    cannot get the lock reads the cache once more. If the cache is still
+    empty, it returns a "fetch in progress" error and does not fetch.
+
     `fetch_fn` takes no arguments and returns `(data, error)`, the same
     shape every `gh`-calling function in this codebase already uses --
     callers wrap their real call in a closure. A result is cached only when
@@ -250,7 +266,10 @@ def cached_gh_json(
         # command over a cache-layer outage.
         return fetch_fn()
 
-    return _fetch_and_publish(owner, name, cache_key, fetch_fn, client, connection)
+    # No machine is pinned: many machines may miss at once. Let one fetch.
+    return _fetch_and_publish(
+        owner, name, cache_key, fetch_fn, client, connection, single_flight=pinned is None
+    )
 
 
 def _release(lease, connection: dict) -> None:

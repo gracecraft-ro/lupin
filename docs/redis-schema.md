@@ -267,7 +267,8 @@ A machine that finds the slot already held just reads whatever is in
 Backs `place`/`quest`/`roadmap`'s read-only `gh` lookups (issue #35):
 issue state, issue body/labels, quest-labeled issues, dependency links.
 Written by the machine named in `LUPIN_GH_CANONICAL_FETCHER`
-(a hard pin to one named machine, not a race any machine could win).
+(one named machine, not a race any machine could win). If the variable is
+unset or empty, no machine is named and the lock below picks one writer.
 Every other machine reads it while that fetcher is alive. When the pinned
 machine is not maintaining the cache — draining, offline, or never joined
 — a machine that needs the data fetches it and publishes through the same
@@ -299,10 +300,20 @@ different queries that must not share one cache entry: `issues:<state>`
 Guarded by the existing `slot:<name>` shape above, as
 `slot:gh-fetch/<owner>/<repo>` (max 1 holder, `/` not `:` -- a colon in the
 slot name breaks `release`/`renew`'s lease-id parsing, which splits on the
-first colon) — this only stops the pinned machine from running the same fetch
-twice if two `lupin` invocations there race each other. A machine that is
-not pinned never takes this lock and never calls `gh` for these lookups at all; on a
-miss it reports "no data yet" instead.
+first colon) — one holder fetches a repo at a time. The lock is used in
+three cases:
+
+- The pinned machine takes it, so two `lupin` invocations there do not run
+  the same fetch twice.
+- When the pinned machine is draining, offline, or never joined, any
+  machine that needs the data takes it.
+- When `LUPIN_GH_CANONICAL_FETCHER` is unset or empty, any machine that
+  misses the cache takes it. A machine that cannot get the lock reads the
+  cache again. If the cache is still empty, it reports "fetch in progress"
+  and does not call `gh`.
+
+While the pinned machine is online, no other machine takes the lock. On a
+miss, it reports "no data yet" and does not call `gh`.
 
 ### `quota-snapshot`
 
