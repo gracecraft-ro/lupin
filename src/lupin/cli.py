@@ -42,6 +42,7 @@ from . import route as route_mod
 from . import serve
 from . import slots
 from . import slots_redis
+from . import supervise as supervise_mod
 from . import loop_runtime
 
 DEFAULT_RESULT_WAIT_S = 20.0  # how long stop/peek/schedule/pause/resume
@@ -592,6 +593,18 @@ def _build_parser() -> argparse.ArgumentParser:
     fleet_run_parser = sub.add_parser("fleet-run", help="dispatch enabled loops to online fleet workers")
     fleet_run_parser.add_argument("--json", action="store_true")
     _fleet_connection_args(fleet_run_parser)
+    supervise_parser = sub.add_parser(
+        "supervise", help="check this machine's loops with fixed rules and nudge idle ones"
+    )
+    supervise_parser.add_argument(
+        "--every", type=int, nargs="?", const=3600, default=None, metavar="SECONDS",
+        help="repeat the check (default 3600 s, minimum 600 s); stop when no repo has work left",
+    )
+    supervise_parser.add_argument(
+        "--dry-run", action="store_true", help="report only: send no nudge, write no ledger event"
+    )
+    supervise_parser.add_argument("--json", action="store_true")
+    _fleet_connection_args(supervise_parser)
     once_parser = sub.add_parser("once", help="start now or schedule a one-off loop run")
     once_parser.add_argument("when", help="when to start or schedule the run")
     once_parser.add_argument("repos", nargs="*", help="repositories to run (default: enabled repos)")
@@ -1644,6 +1657,24 @@ def _cmd_fleet_run(args: argparse.Namespace) -> int:
     return 1 if any(not result["queued"] for result in results) else 0
 
 
+def _cmd_supervise(args: argparse.Namespace) -> int:
+    if args.every is not None and args.every < supervise_mod.MIN_EVERY_S:
+        print(f"--every must be at least {supervise_mod.MIN_EVERY_S} seconds", file=sys.stderr)
+        return 2
+    emit = (lambda report: print(json.dumps(report))) if args.json else supervise_mod._print_text
+    try:
+        code = supervise_mod.supervise(
+            every=args.every, emit=emit, dry_run=args.dry_run,
+            **supervise_mod.real_sources(_fleet_connection(args)),
+        )
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, "supervise", fleet=True)
+        return 3
+    if code == 3:
+        print("cannot reach the redis coordinator: a supervise event was not written", file=sys.stderr)
+    return code
+
+
 def _cmd_once(args: argparse.Namespace) -> int:
     try:
         if args.when == "now":
@@ -2131,6 +2162,8 @@ def _main(argv: list[str] | None = None) -> int:
         return _cmd_loop_internal(args)
     if args.cmd == "fleet-run":
         return _cmd_fleet_run(args)
+    if args.cmd == "supervise":
+        return _cmd_supervise(args)
     if args.cmd == "run":
         return _cmd_run(args)
     if args.cmd == "once":
