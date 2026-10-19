@@ -580,3 +580,17 @@ These rules keep a loop moving when no person is present.
    ```sh
    lupin ledger append OWNER/REPO --event env-friction --summary "<problem>"
    ```
+
+7. **Do not stop after a review.** A review with findings starts the next
+   round. Send the findings to a fix worker. Then get a new review at the new
+   head. Repeat until the pull request is ready for production. Ready for
+   production means three things. A reviewer approved the current head. The
+   full gate passes. The branch contains `main`. There is no limit on rounds.
+   If the same finding comes back for 3 rounds, give the fix worker a model
+   one tier higher.
+8. **Work the queue until nothing is left.** Nothing is left when all of these
+   are true. No open issue that you may take is unclaimed. Every pull request
+   you own is ready for production. No pull request waits for a review. No
+   research or docs item is left. Waiting for the owner is not the end. Write
+   the question as a comment on the issue. Then take the next item. Never write
+   "tell me if you want me to continue".
