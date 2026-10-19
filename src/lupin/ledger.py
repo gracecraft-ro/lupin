@@ -19,6 +19,9 @@ _EVENT_FIELDS = (
     "evidence", "decisions", "next", "children",
 )
 _LIST_FIELDS = {"highlights", "evidence", "decisions", "next", "children"}
+# A real list field is a flat list, so it has depth 1. We allow 8. The check
+# does not use the C stack, so every platform gives the same answer.
+_MAX_JSON_DEPTH = 8
 
 
 def _stream_key(repo: str) -> str:
@@ -80,6 +83,30 @@ def _encode(record: dict) -> dict[str, str]:
     return fields
 
 
+def _check_json_depth(text: str) -> None:
+    """Raise `ValueError` when `text` nests brackets deeper than the limit."""
+    depth = 0
+    in_string = escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > _MAX_JSON_DEPTH:
+                raise ValueError(
+                    f"JSON is nested deeper than {_MAX_JSON_DEPTH} levels"
+                )
+        elif char in "]}":
+            depth -= 1
+
+
 def _decode(stream_id: str, fields: dict[str, str]) -> dict:
     record = {
         "id": stream_id, "timestamp": fields["ts"], "host": fields["host"]
@@ -88,6 +115,7 @@ def _decode(stream_id: str, fields: dict[str, str]) -> dict:
         if key not in fields:
             continue
         if key in _LIST_FIELDS:
+            _check_json_depth(fields[key])
             record[key] = json.loads(fields[key])
         elif key == "issue":
             record[key] = int(fields[key])
@@ -140,6 +168,7 @@ def read_events(
     `CoordinatorUnreachable` when Redis cannot be reached.
     An entry is skipped when one of its fields is not valid UTF-8. An entry is
     also skipped when `_decode` raises KeyError, ValueError, or RecursionError.
+    A list field that nests deeper than `_MAX_JSON_DEPTH` (8) raises ValueError.
     The entry ID and the exception type and message go to stderr for each skipped
     entry. A skipped entry still counts toward `limit`.
     Pass `client` to use a ready client, as the debrief path does. Without it,
