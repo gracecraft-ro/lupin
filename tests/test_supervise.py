@@ -33,6 +33,7 @@ class Fakes:
         self.events = events or []
         self.clock = 1_000_000.0
         self.busy = False
+        self.metadata: dict = {}
         self.nudges: list[tuple[str, str]] = []
         self.ledger: list[tuple[str, dict]] = []
         self.state_path = tmp_path / "supervise.json"
@@ -50,6 +51,7 @@ class Fakes:
             recent_events=lambda full_name: self.events,
             send_nudge=lambda loop, text: self.nudges.append((loop["repo"], text)),
             lock_loop=self.lock,
+            read_metadata=lambda repo: self.metadata.get(repo, {"state": "running", "pane_id": "w1:p1"}),
             append_event=lambda full_name, event: self.ledger.append((full_name, event)),
             state_path=self.state_path,
             now=lambda: self.clock,
@@ -86,12 +88,67 @@ def test_nudge_goes_to_the_pane_id_not_an_agent_name(monkeypatch):
     monkeypatch.setattr(supervise.loop_runtime, "_herdr", lambda *args, **kw: calls.append(args))
 
     supervise._send_nudge(_loop(pane_id="w2E:p1"), "Supervisor: x")
-    supervise._send_nudge(_loop(pane_id=None, agent="lupin-widgets-1"), "Supervisor: y")
 
-    assert calls == [
-        ("lupin-loops", "agent", "prompt", "w2E:p1", "Supervisor: x"),
-        ("lupin-loops", "agent", "prompt", "lupin-widgets-1", "Supervisor: y"),
-    ]
+    assert calls == [("lupin-loops", "agent", "prompt", "w2E:p1", "Supervisor: x")]
+
+
+def test_loop_with_no_pane_id_gets_no_nudge(tmp_path):
+    fakes = Fakes(tmp_path, [_loop(state="idle", pane_id=None, agent="lupin-widgets-1")])
+
+    report = supervise.run_pass(**fakes.kwargs())
+
+    assert report["loops"][0]["nudge"] == "no-pane"
+    assert fakes.nudges == []
+
+
+def test_nudge_is_stale_when_metadata_changed_under_the_lock(tmp_path):
+    fakes = Fakes(tmp_path, [_loop(state="idle"), _loop(repo="gears", state="idle")])
+    fakes.metadata = {
+        "widgets": {"state": "running", "pane_id": "w9:p1"},  # a new run, other pane
+        "gears": {"state": "stopped", "pane_id": "w1:p1"},
+    }
+
+    report = supervise.run_pass(**fakes.kwargs())
+
+    assert [row["nudge"] for row in report["loops"]] == ["stale", "stale"]
+    assert fakes.nudges == []
+
+
+def test_send_error_that_is_not_a_loop_error_is_failed_and_time_is_kept(tmp_path):
+    fakes = Fakes(tmp_path, [_loop(state="idle")])
+
+    def broken(loop, text):
+        raise OSError("no space")
+
+    report = supervise.run_pass(**fakes.kwargs(send_nudge=broken))
+
+    assert report["loops"][0]["nudge"] == "failed"
+    assert "widgets" in supervise._load_state(fakes.state_path)["nudged"]
+
+
+def test_future_nudge_time_is_recent_only_within_the_interval(tmp_path):
+    fakes = Fakes(tmp_path, [_loop(state="idle")])
+    supervise._save_state(fakes.state_path, {"panes": {}, "nudged": {"widgets": fakes.clock + 10}})
+    assert supervise.run_pass(**fakes.kwargs())["loops"][0]["nudge"] == "recent"
+
+    far = fakes.clock + supervise.NUDGE_INTERVAL_S + 1
+    supervise._save_state(fakes.state_path, {"panes": {}, "nudged": {"widgets": far}})
+    assert supervise.run_pass(**fakes.kwargs())["loops"][0]["nudge"] == "sent"
+
+
+def test_second_pass_while_one_runs_exits_zero_and_sends_nothing(tmp_path, capsys):
+    fakes = Fakes(tmp_path, [_loop(state="idle")])
+    release = supervise._lock_pass(fakes.state_path)
+    try:
+        code = supervise.supervise(**fakes.kwargs())
+    finally:
+        release()
+
+    assert code == 0
+    assert "another supervise pass is running" in capsys.readouterr().out
+    assert fakes.nudges == [] and fakes.ledger == []
+    assert supervise.supervise(emit=lambda r: None, **fakes.kwargs()) == 0
+    assert len(fakes.nudges) == 1
 
 
 def test_second_pass_within_the_interval_sends_no_nudge(tmp_path):
@@ -142,6 +199,33 @@ def test_dry_run_sends_nothing_and_writes_nothing(tmp_path):
     assert fakes.nudges == []
     assert fakes.ledger == []
     assert not fakes.state_path.exists()
+
+
+def test_working_loop_with_inactive_unit_is_flagged_not_nudged(tmp_path):
+    fakes = Fakes(tmp_path, [_loop(state="working", unit="inactive")], work=3)
+
+    report = supervise.run_pass(**fakes.kwargs())
+
+    assert (report["loops"][0]["verdict"], report["loops"][0]["nudge"]) == ("stopped", "none")
+    assert fakes.nudges == []
+
+
+def test_lupin_needs_attention_wins_over_a_working_pane(monkeypatch):
+    monkeypatch.setattr(supervise.loop_runtime, "local_loops", lambda: [{
+        "repo": "widgets", "session": "lupin-loops", "state": "running", "pane_id": "w1:p1",
+        "panes": [{"pane_id": "w1:p1", "agent_status": "working"}],
+    }])
+    monkeypatch.setattr(
+        supervise.loop_runtime, "_read_metadata",
+        lambda repo: {"repo": repo, "state": "needs_attention", "started_at": "2026-10-19T00:00:00Z"},
+    )
+    monkeypatch.setattr(supervise, "_unit_state", lambda repo: "active")
+
+    [loop] = supervise._list_loops()
+
+    assert loop["state"] == "needs_attention"
+    assert supervise.verdict(state=loop["state"], unit="active", work_left=3) == "stopped"
+    assert not supervise._may_nudge("stopped", loop["state"])
 
 
 @pytest.mark.parametrize("state", ["blocked", "needs_attention"])
@@ -231,7 +315,10 @@ def test_verdict_rules_table():
     assert v(state="working", unit="inactive", work_left=0) == "ok"
     assert not supervise._may_nudge("stopped", "blocked")
     assert not supervise._may_nudge("stopped", "needs_attention")
+    assert not supervise._may_nudge("stopped", "working")
+    assert not supervise._may_nudge("stopped", "unknown")
     assert supervise._may_nudge("stopped", "idle")
+    assert supervise._may_nudge("idle", "done")
 
 
 # (3) The supervisor stops when no work is left.
@@ -316,6 +403,19 @@ def test_claim_permission_refusal_counts_as_unclaimed_with_a_note(monkeypatch):
     assert supervise._work_left({}, "acme/widgets", "widgets") == (1, ["claims: unreadable"])
 
 
+def test_refused_redis_login_is_not_hidden(monkeypatch):
+    def refused(targets, **kwargs):
+        raise supervise.CoordinatorAuthFailed("login refused")
+
+    monkeypatch.setattr(supervise.claims, "claims_for", refused)
+    monkeypatch.setattr(
+        supervise.roadmap_cli, "build_roadmap",
+        lambda repos, claims_lookup, **kw: claims_lookup(["acme/widgets"]),
+    )
+    with pytest.raises(supervise.CoordinatorAuthFailed):
+        supervise._work_left({}, "acme/widgets", "widgets")
+
+
 def test_other_claim_errors_make_work_unknown(monkeypatch):
     def unreachable(targets, **kwargs):
         raise supervise.CoordinatorUnreachable("down")
@@ -339,10 +439,25 @@ _ALLOWED_IMPORTS = {
     "__future__", "fcntl", "functools", "hashlib", "json", "os", "time", "uuid",
     "datetime", "pathlib", "typing", "redis",
 }
-_ALLOWED_RUNTIME = {
-    "local_loops", "peek_loop", "_read_metadata", "_lock_file", "base_repo", "unit_name",
-    "_run", "_herdr", "LoopError", "STATE_DIR", "CODE_DIR",
-    "HERDR_TIMEOUT", "SYSTEMCTL_CHECK_TIMEOUT",
+# The only names that the module may use from each Lupin module.
+_ALLOWED_ATTRS = {
+    "loop_runtime": {
+        "local_loops", "peek_loop", "_read_metadata", "_lock_file", "base_repo", "unit_name",
+        "_run", "_herdr", "LoopError", "STATE_DIR", "CODE_DIR",
+        "HERDR_TIMEOUT", "SYSTEMCTL_CHECK_TIMEOUT",
+    },
+    "roadmap": {"_repo_identity", "_run_json"},
+    "roadmap_cli": {"build_roadmap"},
+    "gh_cache": {"cached_gh_json"},
+    "claims": {"claims_for"},
+    "ledger": {"read_events", "append_event"},
+}
+# A name that may be used only in one function.
+_ONLY_IN = {
+    ("loop_runtime", "_herdr"): "_send_nudge",
+    ("loop_runtime", "_run"): "_unit_state",
+    ("roadmap", "_run_json"): "_open_prs",
+    ("ledger", "append_event"): "_append_event",
 }
 _BANNED_NAMES = {"__import__", "eval", "exec", "compile", "getattr", "importlib", "globals", "vars"}
 
@@ -383,12 +498,28 @@ def check_only_allowlisted_commands(source: str) -> None:
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "os"
     }
     assert os_attrs <= {"environ", "path", "replace"}, os_attrs
-    used_runtime = {
-        node.attr for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name) and node.value.id == "loop_runtime"
-    }
-    assert used_runtime <= _ALLOWED_RUNTIME, used_runtime - _ALLOWED_RUNTIME
+    module_attrs = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            module_attrs.add(id(node.value))
+            if node.value.id in _ALLOWED_ATTRS:
+                assert node.attr in _ALLOWED_ATTRS[node.value.id], f"{node.value.id}.{node.attr}"
+    for node in ast.walk(tree):
+        # A Lupin module name only as `module.name`, so no alias can hide a call.
+        if isinstance(node, ast.Name) and node.id in _ALLOWED_ATTRS:
+            assert id(node) in module_attrs, f"{node.id} is used without an attribute"
+    for function in ast.walk(tree):
+        if not isinstance(function, ast.FunctionDef):
+            continue
+        for node in ast.walk(function):
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                owner = _ONLY_IN.get((node.value.id, node.attr))
+                assert owner in (None, function.name), f"{node.value.id}.{node.attr} in {function.name}"
+    top_level = [n for n in tree.body if not isinstance(n, (ast.FunctionDef, ast.ClassDef))]
+    for statement in top_level:
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+                assert (node.value.id, node.attr) not in _ONLY_IN, f"{node.value.id}.{node.attr}"
     called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
     commands: dict[str, set] = {name: set() for name in _ALLOWED_COMMANDS}
     for node in ast.walk(tree):

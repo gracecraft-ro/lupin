@@ -82,8 +82,21 @@ def verdict(
     return "ok"
 
 
+# Only an agent that waits for input gets a nudge. A working agent never gets one.
+NUDGE_STATES = {"idle", "done"}
+
+
 def _may_nudge(result: str, state: str) -> bool:
-    return result in {"idle", "stopped"} and state not in WAITING_STATES
+    return result in {"idle", "stopped"} and state in NUDGE_STATES
+
+
+def _recent(last: object, now: float) -> bool:
+    """True when the last nudge was less than NUDGE_INTERVAL_S ago.
+
+    If the clock went back, a stored time in the future counts as recent
+    only while it is less than NUDGE_INTERVAL_S ahead of now.
+    """
+    return isinstance(last, (int, float)) and abs(now - last) < NUDGE_INTERVAL_S
 
 
 def _tail_hash(text: str | None) -> str | None:
@@ -124,6 +137,30 @@ def _save_state(path: Path, state: dict) -> None:
     os.replace(temporary, path)
 
 
+def _locked_send(loop: dict, lock_loop, read_metadata, send_nudge) -> str:
+    """Send the nudge under the loop's stop lock. Return the nudge result."""
+    try:
+        release = lock_loop(loop["repo"])
+    except OSError:
+        return "failed"
+    if release is None:
+        return "busy"
+    try:
+        metadata = read_metadata(loop["repo"])
+        if (
+            not metadata
+            or metadata.get("state") != "running"
+            or metadata.get("pane_id") != loop["pane_id"]
+        ):
+            return "stale"
+        send_nudge(loop, NUDGE_TEXT)
+        return "sent"
+    except (loop_runtime.LoopError, OSError):
+        return "failed"
+    finally:
+        release()
+
+
 def run_pass(
     *,
     list_loops: Callable[[], list[dict]],
@@ -134,6 +171,7 @@ def run_pass(
     recent_events: Callable[[str], list[dict] | None],
     send_nudge: Callable[[dict, str], None],
     lock_loop: Callable[[str], Callable[[], None] | None],
+    read_metadata: Callable[[str], dict | None],
     append_event: Callable[[str, dict], None],
     state_path: Path = STATE_FILE,
     now: Callable[[], float] = time.time,
@@ -143,6 +181,7 @@ def run_pass(
 
     `work_left` returns (count or None, notes for the event).
     `lock_loop` returns a release function, or None when `lupin stop` holds the loop.
+    Under that lock, `read_metadata` must still show the loop running in the same pane.
     """
     saved = _load_state(state_path)
     panes: dict[str, str] = {}
@@ -176,26 +215,17 @@ def run_pass(
         )
         nudge = "none"
         if _may_nudge(result, state):
-            last = nudged.get(repo)
-            if not loop.get("pane_id") and not loop.get("agent"):
+            if not loop.get("pane_id"):
                 nudge = "no-pane"
-            elif isinstance(last, (int, float)) and now() - last < NUDGE_INTERVAL_S:
+            elif _recent(nudged.get(repo), now()):
                 nudge = "recent"
             elif dry_run:
                 nudge = "dry-run"
             else:
-                release = lock_loop(repo)
-                if release is None:
-                    nudge = "busy"
-                else:
-                    try:
-                        send_nudge(loop, NUDGE_TEXT)
-                        nudge = "sent"
-                        nudged[repo] = now()
-                    except loop_runtime.LoopError:
-                        nudge = "failed"
-                    finally:
-                        release()
+                nudge = _locked_send(loop, lock_loop, read_metadata, send_nudge)
+                if nudge in {"sent", "failed"}:
+                    # A failed send also counts, so a broken pane is not tried each pass.
+                    nudged[repo] = now()
         row = {
             "repo": repo, "base": base, "state": state,
             "unit": loop.get("unit", "unknown"), "verdict": result, "nudge": nudge,
@@ -204,6 +234,8 @@ def run_pass(
             row["reason"] = "waiting for the owner"
         rows.append(row)
 
+    if not dry_run:
+        _save_state(state_path, {"panes": panes, "nudged": nudged})
     repos = {}
     ledger_unreachable = False
     for base, full_name in names.items():
@@ -233,13 +265,13 @@ def run_pass(
             try:
                 append_event(full_name, event)
                 written = "written"
+            except CoordinatorAuthFailed:
+                raise
             except CoordinatorUnreachable:
                 ledger_unreachable = True
                 written = "redis-unavailable"
         repos[base] = {"name": full_name, "work_left": work[base], "event": event, "ledger": written}
 
-    if not dry_run:
-        _save_state(state_path, {"panes": panes, "nudged": nudged})
     report = {
         "loops": [{k: v for k, v in row.items() if k != "base"} for row in rows],
         "repos": repos,
@@ -266,19 +298,44 @@ def _print_text(report: dict) -> None:
         print(f"{base}: {value['event']['status']}, ledger {value['ledger']}")
 
 
+def _lock_pass(state_path: Path) -> Callable[[], None] | None:
+    """Take the lock for one pass without a wait. None when another pass holds it."""
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = state_path.with_name(f"{state_path.name}.lock").open("a+")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        return None
+    return lock.close
+
+
 def supervise(
     *,
     every: int | None = None,
     sleep: Callable[[float], None] = time.sleep,
     emit: Callable[[dict], None] = _print_text,
+    lock_pass: Callable[[Path], Callable[[], None] | None] = _lock_pass,
     **sources,
 ) -> int:
     """Run one pass, or one pass every `every` seconds until no work is left.
 
+    One pass at a time: if another pass holds the lock, print a line and return 0.
+    A dry run writes nothing, so it does not take the lock.
     Returns 0, or 3 when Redis is unavailable for a ledger write.
     """
     while True:
-        report = run_pass(**sources)
+        release = None
+        if not sources.get("dry_run"):
+            release = lock_pass(sources.get("state_path", STATE_FILE))
+            if release is None:
+                print("another supervise pass is running")
+                return 0
+        try:
+            report = run_pass(**sources)
+        finally:
+            if release:
+                release()
         emit(report)
         if report["ledger_unreachable"]:
             return 3
@@ -324,10 +381,14 @@ def _list_loops() -> list[dict]:
             (p for p in row.get("panes", []) if pane_id and p.get("pane_id") == pane_id),
             None,
         )
+        state = own.get("agent_status", "unknown") if own else row.get("state", "unknown")
+        if metadata.get("state") == "needs_attention":
+            # Lupin's own state. Herdr does not report it.
+            state = "needs_attention"
         loops.append({
             "repo": repo,
             "session": row.get("session"),
-            "state": own.get("agent_status", "unknown") if own else row.get("state", "unknown"),
+            "state": state,
             "unit": _unit_state(repo),
             "pane_id": pane_id,
             "started_at": metadata.get("started_at"),
@@ -410,6 +471,8 @@ def _work_left(connection: dict, full_name: str, base: str) -> tuple[int | None,
             # On some machines the Redis user cannot run MULTI. Then each issue counts as not claimed.
             notes.append("claims: unreadable")
             raise CoordinatorUnreachable(str(exc)) from exc
+        except CoordinatorAuthFailed:
+            raise
         except CoordinatorUnreachable as exc:
             raise _ClaimsUnknown(str(exc)) from exc
 
@@ -453,10 +516,14 @@ def _lock_loop(repo: str) -> Callable[[], None] | None:
     return lock.close
 
 
+def _read_metadata(repo: str) -> dict | None:
+    return loop_runtime._read_metadata(repo)
+
+
 def _send_nudge(loop: dict, text: str) -> None:
-    """Send `text` to the loop's pane. Use the agent name only when there is no pane ID."""
+    """Send `text` to the loop's pane ID."""
     loop_runtime._herdr(
-        loop["session"], "agent", "prompt", loop.get("pane_id") or loop["agent"], text,
+        loop["session"], "agent", "prompt", loop["pane_id"], text,
         timeout=loop_runtime.HERDR_TIMEOUT,
     )
 
@@ -476,5 +543,6 @@ def real_sources(connection: dict) -> dict:
         recent_events=functools.partial(_recent_events, connection),
         send_nudge=_send_nudge,
         lock_loop=_lock_loop,
+        read_metadata=_read_metadata,
         append_event=functools.partial(_append_event, connection),
     )
