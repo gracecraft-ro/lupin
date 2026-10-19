@@ -118,7 +118,7 @@ Use very simple English: short sentences and everyday words. Explain each
 technical term the first time you use it. The reader may never have seen this
 code.
 
-Start with a target line: `Target: OWNER/REPO PR #N at head SHA.` Use the full
+Start with a target line: `Target: OWNER/REPO PR #<number> at head SHA.` Use the full
 repo name and the full head SHA. Then start the next line with `What this change does:`.
 Write two or three sentences after it.
 
@@ -162,10 +162,12 @@ Run the fix cycle only when your brief says that the loop owns the PR. For any
 other PR, post the verdict, report it to the orchestrator, and stop. Do not
 dispatch a fix worker for it.
 
-Your brief gives your own tier and the fix worker's tier. Pick each fix
-worker's model with "Fix worker tiers" in the `delegation-loop` skill. Start
-each verdict review with `Round N.` Take N from the latest loop verdict on the
-PR.
+Pick each fix worker's model with "Fix worker models" in the
+`delegation-loop` skill. The first line of every verdict review is
+`Round N. LEVEL: size-m.` (or `size-l`), then the target line on the same
+line. N is 1 more than the N in the latest review on the PR that starts with
+`Round`, or 1 if there is none. Take LEVEL from that review, or from your
+brief.
 
 The fix cycle:
 
@@ -180,20 +182,20 @@ The fix cycle:
 3. You never edit files yourself. The fix worker is a different agent, so the
    review stays independent.
 4. Wait for the push. Every 60 seconds, run
-   `gh pr view N --repo OWNER/REPO --json headRefOid -q .headRefOid`. Stop
-   waiting when the output differs from the SHA that you reviewed, or when the
-   fix worker ends.
+   `gh pr view <number> --repo OWNER/REPO --json headRefOid -q .headRefOid`.
+   Stop waiting when the output differs from the SHA that you reviewed, or
+   when the fix worker ends.
 5. If the SHA changed, review the new head SHA. If the SHA did not change when
    the fix worker ended, start the next fix worker with the same findings and
    the new gate output. Either case ends a round.
 6. Repeat until `Verdict: Ship`. There is no round limit. Do not report, ask,
-   or stop between rounds. Items 1, 7, and 8, and step 3 of "Fix worker
-   tiers" in the `delegation-loop` skill, are the only exceptions.
-7. Stall rule: follow step 4 of "Fix worker tiers" in the `delegation-loop`
+   or stop between rounds. Items 1, 7, and 8, and step 2 of "Fix worker
+   models" in the `delegation-loop` skill, are the only exceptions.
+7. Stall rule: follow step 3 of "Fix worker models" in the `delegation-loop`
    skill. For a blocked PR, post the reason and the head SHA as a `Loop:` PR
    comment. Then report it to the orchestrator.
-8. If the fix worker's tier is above yours, stop the cycle and report the
-   findings and the fix worker's tier to the orchestrator.
+8. If the fix worker's LEVEL is `size-l` and yours is `size-m`, stop and
+   report.
 
 Report the final verdict to the orchestrator. The orchestrator releases the PR
 claim and merges only after approval and required checks pass. You never merge.

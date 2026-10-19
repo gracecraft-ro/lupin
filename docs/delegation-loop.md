@@ -109,8 +109,7 @@ repo:
    Report the branch name and commit range. Do not review or merge the branch.
 3. The orchestrator (the agent that dispatches and merges work) dispatches
    `/code-review` for every PR, including docs-only changes. The reviewer is
-   not the worker. The reviewer's model tier is not lower than the worker's or
-   the fix worker's.
+   not the worker. The reviewer's model tier is not lower than the worker's.
 4. If the review finds a problem and the loop owns the PR, the reviewer starts
    the fix worker and runs the fix cycle until the PR is ready for production.
    See "Run the fix cycle" in the `code-review` skill.
