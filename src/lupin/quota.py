@@ -18,6 +18,7 @@ login for each session, so Lupin only reads each login's quota.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -49,6 +50,7 @@ _USER_AGENT = "lupin-quota/1.0"
 # these apart from read failures.
 NO_CLAUDE_CREDENTIALS = "no Claude credentials"
 NO_OPENCODE_GO_KEY = "no OpenCode Go API key available"
+OPENCODE_GO_KEY_EXPIRED = "OpenCode Go API key expired -- get a new key in the OpenCode Console"
 NO_KEY_NOTES = frozenset({NO_CLAUDE_CREDENTIALS, NO_OPENCODE_GO_KEY})
 
 
@@ -340,6 +342,26 @@ def claude_oauth_quota() -> list[dict]:
     return rows or [{"provider": "claude", "note": "no quota data reported"}]
 
 
+def _omp_token(provider: str) -> str:
+    """The key that `omp` holds for `provider`, or "" if `omp` gives none.
+
+    Only stdout counts. A failed command gives no key. Output that is not
+    one word is an error message, not a key. The key is never logged.
+    """
+    try:
+        proc = subprocess.run(
+            ["omp", "token", provider],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    words = proc.stdout.split()
+    return words[0] if proc.returncode == 0 and len(words) == 1 else ""
+
+
 def opencode_go_quota() -> list[dict]:
     key = ""
     try:
@@ -352,6 +374,8 @@ def opencode_go_quota() -> list[dict]:
         pass
     if not key:
         key = os.environ.get("OPENCODE_API_KEY", "").strip()
+    if not key:
+        key = _omp_token("opencode-go")
     if not key:
         return [{"provider": "opencode-go", "note": NO_OPENCODE_GO_KEY}]
 
@@ -366,6 +390,14 @@ def opencode_go_quota() -> list[dict]:
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             data = json.load(response)
+    except urllib.error.HTTPError as error:
+        try:
+            body = error.read(4096)
+        except (OSError, http.client.HTTPException):
+            body = b""
+        if error.code == 401 and b"api_key_expired" in body:
+            return [{"provider": "opencode-go", "note": OPENCODE_GO_KEY_EXPIRED}]
+        return [{"provider": "opencode-go", "note": f"quota unavailable ({type(error).__name__})"}]
     except (OSError, ValueError, urllib.error.URLError) as error:
         return [{"provider": "opencode-go", "note": f"quota unavailable ({type(error).__name__})"}]
 
