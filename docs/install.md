@@ -20,10 +20,11 @@ The Lupin package puts `gh`, `git`, `tmux`, `herdr`, and `omp` on its own
 `PATH`. On Linux, it also adds `systemd` and `chromium`. The
 `without-omp` package does not add `omp`.
 
-The repo records a minimum version only for Python. The "Lupin package"
-column shows the version that `flake.lock` pins today. The "Example"
-column shows the version on one maintainer machine on 2026-10-19. These
-two columns are examples, not requirements.
+The repo records a minimum version only for Python. The last two columns
+are examples, not requirements:
+
+- **Lupin package**: the version that `flake.lock` pins.
+- **Example**: the version on one maintainer machine on 2026-10-19.
 
 <!-- markdownlint-disable MD013 -->
 | Tool | Needed on | Check | Minimum | Lupin package | Example |
@@ -89,26 +90,31 @@ Do this step on one machine.
    ```
 
 4. Make one ACL user for each machine. Limit each user to the keys
-   `lupin:*` and to the commands in "ACL command list" in
-   `docs/redis-schema.md`. Write one line for each machine in `users.acl`:
+   `lupin:*` and to the commands that Lupin uses. Write one line for each
+   machine in `users.acl`:
 
    <!-- markdownlint-disable MD013 -->
    ```text
    user default off
-   user lupin-MACHINE on >PASSWORD ~lupin:* resetchannels -@all +ping +get +set +del +expire +pexpire +ttl +zadd +zrem +zscore +zcard +zrange +zremrangebyscore +xadd +xrange +xrevrange +scan +eval +evalsha +script|load +script|exists
+   user lupin-MACHINE on >PASSWORD ~lupin:* resetchannels -@all +ping +get +set +del +ttl +pttl +multi +exec +zadd +zrem +zscore +zcard +zrange +zremrangebyscore +xadd +xrange +xrevrange +scan +eval
    ```
    <!-- markdownlint-enable MD013 -->
 
-5. Add `+multi +exec +pttl` to the user of each machine that runs
-   `lupin roadmap`. `lupin roadmap` reads claims with `MULTI`, `EXEC`, and
-   `PTTL` (`src/lupin/claims.py`, `claims_for`). These commands are not in
-   the list in `docs/redis-schema.md`. Without them, `lupin roadmap` fails
-   with `NoPermissionError`.
-6. Keep `users.acl` readable only by the Redis user. You can write
+   Give `+multi +exec +pttl` to every machine. Debriefs (in `lupin
+   agent`), `lupin serve`, `lupin quest start`, and `lupin roadmap` read
+   claims with these commands (`claims.claims_for`). Without them, a claim
+   read fails with `NoPermissionError ... 'multi'`, and debriefs lose the
+   claims with no error. `+ping` is only for the check in step 7.
+
+   Note: the list in "ACL command list" in `docs/redis-schema.md` does not
+   have `MULTI`, `EXEC`, and `PTTL`. It has `EXPIRE`, `PEXPIRE`, `EVALSHA`,
+   `SCRIPT|LOAD`, and `SCRIPT|EXISTS`, which the code in `src/` does not
+   use. A separate issue tracks that list.
+5. Keep `users.acl` readable only by the Redis user. You can write
    `#SHA256_HEX` in place of `>PASSWORD`. Then the file holds a hash, not
    the password.
-7. Start Redis.
-8. From another machine, check the login. Type the password when
+6. Start Redis.
+7. From another machine, check the login. Type the password when
    `redis-cli` asks for it:
 
    ```sh
@@ -176,13 +182,17 @@ Do these steps on each worker. A worker must run Linux with systemd.
    `LUPIN_LOOP_REDIS_PASSWORD_FILE` to that file. systemd reads the file
    and gives the password to loop units as the credential `redis-password`.
 8. Set `LUPIN_REDIS_HOST`, `LUPIN_REDIS_PORT`, and `LUPIN_REDIS_USERNAME`
-   for the Lupin services. `lupin agent` and the loop worker do not read
-   `fleet.json` for the host.
-9. Add the machine to the fleet. Give the password through
-   `LUPIN_REDIS_PASSWORD`, not in the command line:
+   for the Lupin services. The command queue of `lupin agent` and the loop
+   worker do not read `fleet.json`. The debriefs of `lupin agent` read it.
+9. Add the machine to the fleet. Do not type the password in the command
+   line. `read -rs` reads it with no echo and keeps it out of the shell
+   history:
 
    ```sh
+   read -rs LUPIN_REDIS_PASSWORD
+   export LUPIN_REDIS_PASSWORD
    lupin join COORDINATOR_HOST:6379 --redis-username lupin-MACHINE
+   unset LUPIN_REDIS_PASSWORD
    ```
 
    This writes `~/.config/lupin/fleet.json` and the machine record in
@@ -190,10 +200,19 @@ Do these steps on each worker. A worker must run Linux with systemd.
 10. Run `lupin heartbeat` at a fixed interval. A machine record with no
     heartbeat for 120 seconds shows as offline. `docs/redis-schema.md`
     gives an interval of 30 seconds. The host config must supply the timer.
+    Give the unit the password as the systemd credential `redis-password`
+    (`LoadCredential=redis-password:PATH`).
 11. Run `lupin agent` as a long-running service. It polls the command queue
     and writes the periodic debriefs. The host config must supply the unit.
+    The command queue does not read the credential `redis-password`. Put
+    the password in `LUPIN_REDIS_PASSWORD` in the environment of this
+    process only. For example, a wrapper script reads
+    `$CREDENTIALS_DIRECTORY/redis-password` and then starts `lupin agent`.
+    Do not put the password in a global environment file or in a command
+    line.
 12. Optional: run `lupin quota` at a fixed interval on each machine that
-    has provider logins. The host config must supply the timer.
+    has provider logins. The host config must supply the timer. Give the
+    unit the credential `redis-password`.
 13. Optional: set `LUPIN_GH_CANONICAL_FETCHER` to the same host name on
     every machine. Then one machine runs `gh` for the shared cache. Log in
     to `gh` on that machine (`gh auth login`).
@@ -213,36 +232,38 @@ A dispatch machine is optional. Do these steps on it.
 1. Install Lupin.
 2. Clone each repo into the code directory, as on a worker. The Repos and
    Roadmap pages list only the repos that have a checkout there.
-3. Join the fleet with `lupin join`, as on a worker. Do not run
+3. Make the loop state directory, as on a worker. `lupin enable` and
+   `fleet-run` use the `repos` file in it.
+4. Join the fleet with `lupin join`, as on a worker. Do not run
    `lupin agent` on this machine.
-4. Set `LUPIN_LOOP_COORDINATOR_ONLY=1` for `lupin serve`. The dashboard then
+5. Set `LUPIN_LOOP_COORDINATOR_ONLY=1` for `lupin serve`. The dashboard then
    does not offer this machine for "Run now".
-5. Give `lupin serve` the signing keys of all workers (see
+6. Give `lupin serve` the signing keys of all workers (see
    [Make the signing keys](#make-the-signing-keys)).
-6. Give `lupin serve` the Redis password as the systemd credential
+7. Give `lupin serve` the Redis password as the systemd credential
    `redis-password`.
-7. Run `lupin serve` as a service. Bind it to loopback or to a tailnet
+8. Run `lupin serve` as a service. Bind it to loopback or to a tailnet
    address. Lupin refuses other addresses:
 
    ```sh
    lupin serve --bind 127.0.0.1 --port 8788
    ```
 
-8. Enable the repos that `fleet-run` sends to workers. `fleet-run` reads
+9. Enable the repos that `fleet-run` sends to workers. `fleet-run` reads
    the enabled list on this machine:
 
    ```sh
    lupin enable REPO
    ```
 
-9. Optional: run `lupin fleet-run` from a systemd timer named
+10. Optional: run `lupin fleet-run` from a systemd timer named
    `delegation-loop.timer`. The dashboard and `lupin schedule`, `pause`,
    and `resume` control the timer with that name. The host config must
    supply the timer and its service. `lupin schedule first` and `lupin
    schedule cal` write a drop-in file at
    `<state dir>/timer-dropin.d/override.conf`. The host config must make
    systemd read that file for the timer.
-10. To open the dashboard from another computer, use an SSH tunnel:
+11. To open the dashboard from another computer, use an SSH tunnel:
 
     ```sh
     ssh -N -L 8788:127.0.0.1:8788 MACHINE
