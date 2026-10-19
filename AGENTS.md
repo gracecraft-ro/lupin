@@ -131,6 +131,17 @@ in a new Git worktree, not in the main checkout (see "State"). `run` refuses
 to start if the main checkout has an unfinished Git operation. `run --all`
 starts every enabled repo. Add `--machine M` to use the signed fleet queue
 on another machine; `run --all --machine M` starts its enabled repos.
+
+Each run has one claim holder: `<host>:<repo>:<run branch>`. The agent's
+shell gets it as `LUPIN_CLAIM_HOLDER`. `claim`, `renew-claim`, and
+`release-claim` use it when you do not give `--holder`. The monitor renews
+each claim of that holder every 2 minutes, until the run's workspace closes
+or the Herdr server stops. It also renews while the agent waits for input
+(state `done`). It renews no claim of another holder. When the renewals
+stop, the claims expire within 10 minutes. So a finished loop whose
+workspace is still open keeps its claims until `lupin stop`. A renew error
+does not stop the loop. The monitor log gets one line for each new error.
+
 Without a profile, Lupin uses the repo's configured platform. To let Lupin
 choose among orchestrators, add a profile when you enable the repo. Repeat
 `--orchestrator` for each allowed choice:

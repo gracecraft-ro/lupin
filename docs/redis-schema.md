@@ -8,7 +8,7 @@ This is the data model `lupin` uses once the `redis` backend exists
 | Key | Type | Holds | Replaces |
 | --- | --- | --- | --- |
 | `slot:<name>` | sorted set (member = holder, score = expiry in ms) | `bmo`, the declared `repo:<repo>` UI cap, and enforced `loop-<repo>` fleet locks (one active worker per repo). | `omp.lock` |
-| `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since), with a TTL | one claim per GitHub issue | nothing today |
+| `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since), with a TTL | one claim per GitHub issue; the loop monitor renews the claims of its run's holder (`LUPIN_CLAIM_HOLDER`) | nothing today |
 | `ledger:<owner>/<repo>` | stream (`XADD`/`XRANGE`) | `ts host event issue status branch summary highlights evidence decisions next children` | `.loop/loop-state.json` is ignored; no local fallback |
 | `machine:<name>` | string (JSON), with a TTL | one fleet machine's status — see Fleet keys below | nothing today |
 | `focus:<quest>` | string (JSON), no TTL | which machine a quest is pinned to — see Fleet keys below | nothing today |
