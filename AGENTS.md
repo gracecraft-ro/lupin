@@ -179,36 +179,49 @@ the worker name. Each worker needs `lupin agent` and its matching key. The
 command queues runs but does not wait for them to start.
 
 `supervise` checks the Lupin loops on this machine. It uses fixed rules and
-no model. For each loop, it reads the Herdr state, the systemd unit, the last
-20 pane lines and the newest handoff. It gives each loop one verdict:
+no model. For each loop, it reads the Herdr state of the loop's pane, the
+systemd unit, the last 20 pane lines and the newest handoff from this run. It
+gives each loop one verdict. The first rule that matches gives the verdict:
 
-- `repeated`: the last 3 ledger events (not `supervise`) have one issue and
-  one status. It flags the loop.
-- `busywork`: the state is `working` and the pane text is the same as in the
-  last pass. It flags the loop.
-- `stopped`: work is left, and the unit is not active, or Herdr says
-  `blocked`, or the pane or handoff asks "if you want me to". It flags the
-  loop and sends the nudge.
-- `idle`: work is left and Herdr says `idle` or `done`. It sends the nudge.
-- `ok`: none of the above.
+1. `stopped`, reason "waiting for the owner": Herdr says `blocked` or
+   `needs_attention`. It flags the loop. It does not send a nudge.
+2. `stopped`: work is left and the unit is `inactive` or `failed`. It flags
+   the loop and sends the nudge.
+3. `busywork`: Herdr says `working` and the pane text is the same as in the
+   last pass. It flags the loop. It does not send a nudge.
+4. `idle`: work is left and Herdr says `idle` or `done`. It sends the nudge.
+   If the pane or the handoff contains "tell me if you want" or "if you want
+   me to", the verdict is `stopped` and it sends the nudge.
+5. `repeated`: the last 3 ledger events (not `supervise`) have one issue and
+   one status. It flags the loop. It does not send a nudge. Other machines
+   write to the same ledger, so rule 4 comes first.
+6. `ok`: none of the above.
 
-Work left is the count of `ready` issues from `lupin roadmap`: open, not
-claimed, not blocked. Open pull requests are not counted. If Redis refuses the
-claim read, each issue counts as not claimed. If the count is not
-known, the supervisor gives no `idle` or `stopped` verdict, and it does not
-stop. The nudge is a fixed text that starts with `Supervisor:`. Lupin sends it
-with `herdr agent prompt`. The supervisor writes one `supervise` event to the
-ledger for each repo. The event has no pane text. The supervisor never merges,
-never pushes, and never edits a commit. It keeps only a hash of each pane in
-`~/.local/state/lupin/supervise.json`.
+Work left is the count of `ready` issues from `lupin roadmap` (open, not
+claimed, not blocked) plus the count of open pull requests that are not
+drafts. An open pull request that waits for the owner to merge it also counts,
+so `--every` does not end while a repo has one. If Redis refuses the claim read
+with a permission error, each issue counts as not claimed, and the event says
+`claims: unreadable`. If a count cannot be read, work left is not known. Then
+rules 2 and 4 do not apply, and `--every` does not end.
+
+The nudge is a fixed text that starts with `Supervisor:`. Lupin sends it to the
+loop's pane ID with `herdr agent prompt`. A loop gets at most one nudge in
+3600 seconds. If `lupin stop` holds the loop's lock, the supervisor skips the
+nudge (`nudge=busy`). The supervisor writes one `supervise` event to the ledger
+for each repo. The event has no pane or handoff text. The supervisor module
+itself calls only `systemctl is-active`, `herdr agent prompt` and, through the
+shared `gh` cache, `gh pr list`. A test checks this. It also uses Lupin's read
+functions, which run read-only `herdr`, `gh` and `git` commands. It keeps a hash
+of each pane and the time of each nudge in `~/.local/state/lupin/supervise.json`.
 
 Without `--every`, it makes one pass. With `--every`, it makes a pass every
-SECONDS (default 3600) and stops on the first pass with no work left. With no
-loops on the machine, it prints "no loops on this machine" and exits 0.
-`--dry-run` sends no nudge and writes no ledger event or hash. It still reads
-Redis for claims and the ledger. Exit code 3 means a ledger event was not
-written because Redis is unavailable. This repo has no timer for it. A host
-timer runs `lupin supervise` once an hour.
+SECONDS (default 3600, minimum 600) and ends on the first pass with no work
+left. With no loops on the machine, it prints "no loops on this machine" and
+exits 0. `--dry-run` sends no nudge and writes no ledger event or state file. It
+still reads Redis for claims, the ledger and the `gh` cache. Exit code 3 means
+a ledger event was not written because Redis is unavailable. A host timer can
+run `lupin supervise` once an hour. This repo does not ship one.
 
 On PiHome, the systemd timer runs `fleet-run` every 5h15m. The dashboard can
 start or stop that timer.

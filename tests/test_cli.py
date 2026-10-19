@@ -982,12 +982,14 @@ def test_place_reports_a_missing_model_category(monkeypatch, tmp_path, capsys):
 
 
 
-def test_supervise_parses_every_and_passes_flags(monkeypatch):
+def test_supervise_parses_every_and_passes_flags(monkeypatch, capsys):
     parser = cli._build_parser()
     assert parser.parse_args(["supervise"]).every is None
     assert parser.parse_args(["supervise", "--every"]).every == 3600
-    assert parser.parse_args(["supervise", "--every", "60"]).every == 60
+    assert parser.parse_args(["supervise", "--every", "600"]).every == 600
     assert cli.main(["supervise", "--every", "0"]) == 2
+    assert cli.main(["supervise", "--every", "599"]) == 2
+    assert "at least 600 seconds" in capsys.readouterr().err
 
     seen = {}
 

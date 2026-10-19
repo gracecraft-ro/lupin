@@ -598,7 +598,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     supervise_parser.add_argument(
         "--every", type=int, nargs="?", const=3600, default=None, metavar="SECONDS",
-        help="repeat the check (default 3600 s); stop when no repo has work left",
+        help="repeat the check (default 3600 s, minimum 600 s); stop when no repo has work left",
     )
     supervise_parser.add_argument(
         "--dry-run", action="store_true", help="report only: send no nudge, write no ledger event"
@@ -1654,8 +1654,8 @@ def _cmd_fleet_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_supervise(args: argparse.Namespace) -> int:
-    if args.every is not None and args.every < 1:
-        print("--every must be a positive number of seconds", file=sys.stderr)
+    if args.every is not None and args.every < supervise_mod.MIN_EVERY_S:
+        print(f"--every must be at least {supervise_mod.MIN_EVERY_S} seconds", file=sys.stderr)
         return 2
     emit = (lambda report: print(json.dumps(report))) if args.json else supervise_mod._print_text
     try:
