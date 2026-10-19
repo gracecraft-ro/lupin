@@ -42,7 +42,7 @@ pane" below.
 ## Pull requests come first
 
 Get pull requests (PRs) approved and merged first. This is the top priority.
-Do it before you start work on any new issue.
+In each cycle, dispatch PR work before you dispatch work on a new issue.
 
 A PR that waits goes stale. `main` gets new commits. The PR branch no longer
 contains the current `main`, so the PR fails a merge gate. A sync (a merge of
@@ -54,12 +54,26 @@ does not wait for the owner when all four merge gates pass.
 At the start of every cycle, the orchestrator handles the open PRs into
 `main`. The orchestrator is the agent that dispatches and merges work.
 It does this before it reads the backlog. Ignore draft PRs. Steps 2 and 3 are
-only for a PR that the loop opened. The loop opened a PR when the ledger has a
-dispatch event for its branch. Read all the events:
+only for a PR that the loop owns. The loop owns a PR when both are true:
+
+- The owner of its head repo is the fleet fork account (`FORK_OWNER`, the
+  owner of the `fork` remote), or the ledger has a dispatch event for its
+  branch.
+- No other holder has a live claim on it. If `lupin claim` exits 2 for the PR,
+  another holder has it.
+
+`headRepositoryOwner.login` in "Continuous merge of approved PRs" gives the
+head repo owner. Read all the ledger events:
 
 ```sh
 lupin ledger read OWNER/REPO --limit 100000 --json
 ```
+
+A PR is production ready when all three are true:
+
+- A reviewer approved its current head SHA.
+- The repo gate passes at that SHA.
+- The PR branch contains the current `main`.
 
 For each PR that is not a draft, do the first step that applies:
 
@@ -69,17 +83,17 @@ For each PR that is not a draft, do the first step that applies:
    dispatch a worker to sync it. A sync changes the head SHA, so get a new
    approval. If the sync stops on conflicts, the worker did not fail. Dispatch
    a fix worker to resolve them. Do not repeat that sync.
-3. The PR has review findings or a failed repo gate at its current head SHA:
-   dispatch a fix worker. The repo gate is the set of checks that `AGENTS.md`
-   defines. Give the worker the findings or the gate output. The fix goes on
-   the same branch.
+3. The PR has findings or a failed repo gate at its current head SHA:
+   dispatch a reviewer. The repo gate is the set of checks that `AGENTS.md`
+   defines. Give the reviewer the findings and the gate output. The reviewer
+   runs the fix cycle. See "Run the fix cycle" in the `code-review` skill.
 4. The PR has no review at its current head SHA: dispatch a reviewer. Do not
    wait for the worker to request a review.
 5. The PR waits for a gate that is still running: wait for the result.
 
 A worker is a fix worker, a sync worker, or a reviewer. Do not dispatch a
-worker for a PR that already has one running. Do not push to the branch of a PR
-that the loop did not open.
+worker for a PR that already has one running. A reviewer in a fix cycle is
+running. Do not push to the branch of a PR that the loop does not own.
 
 A sync worker or a fix worker starts from the PR branch. Give it the remote and
 the branch name. The remote is `origin` or `fork`, the one that holds the PR
@@ -117,25 +131,37 @@ gh api repos/OWNER/REPO/pulls/<number>/reviews \
 
 Use `-f event=REQUEST_CHANGES` when the review asks for changes.
 
+In each cycle, read the new comments on each PR that the loop owns:
+
+```sh
+gh api --paginate repos/OWNER/REPO/issues/<number>/comments
+gh api --paginate repos/OWNER/REPO/pulls/<number>/comments
+```
+
+The first command reads the PR comments. The second reads the review comments
+on lines of the diff. An owner comment that names a problem is a finding. It
+starts a fix cycle, as in step 3. A PR comment is never an approval.
+
+A review with findings is not an end state. The fix cycle repeats until the PR
+is production ready. It has no round limit. Do not report, ask, or stop between
+rounds.
+
 A PR is blocked on an owner decision when one of these is true:
 
-- It needs a sync or a fix, and the loop did not open it.
-- A worker for it fails. A worker fails when it ends without the push or the
-  report that its brief asks for. A worker also fails when its report says that
-  it could not do the work. A sync worker that stops on conflicts does not
-  fail. See step 2.
+- It needs a sync or a fix, and the loop does not own it.
+- Its fix cycle is stalled at the top model tier that the loop may use. See
+  "Run the fix cycle" in the `code-review` skill.
 - A worker for it stops to ask the owner.
-- A fix worker ends and the gate still fails.
 - Its merge fails.
 
-Report each blocked PR in the handoff, with its head SHA. Skip it. On each
-cycle, read the new comments on each blocked PR. Retry the PR when its head
-SHA changes or the owner asks in a comment.
+Post the reason and the head SHA as a PR comment on each blocked PR. Then take
+the next item. In each cycle, read the new comments on each blocked PR. Retry
+the PR when its head SHA changes or the owner answers in a comment. List the
+blocked PRs in the handoff.
 
-A PR is pending when it is open, is not a draft, is not merged, and is not
-blocked. Do not dispatch work on a new issue while a PR into `main` is
-pending. Work that is already running continues. A reviewer, a sync worker, or
-a fix worker for a pending PR is not new work.
+In each cycle, dispatch merges, syncs, and reviews first. Then use the free
+worker slots for new issues. A PR in a fix cycle does not stop work on a new
+issue. Work that is already running continues.
 
 ## Install skills on loop hosts
 
@@ -171,8 +197,8 @@ needs is missing.
 
 ## Read the backlog
 
-Read the backlog only after you handle the open PRs. See "Pull requests come
-first".
+Read the backlog only after you dispatch the PR work for this cycle. See "Pull
+requests come first".
 
 From a configured checkout, run:
 
@@ -265,9 +291,9 @@ agent. Do not claim those issues again.
 
 ## Dispatch work
 
-Do not dispatch a worker on a new issue until you handle the open PRs. See
-"Pull requests come first". A reviewer, a sync worker, or a fix worker for an
-open PR is not new work.
+Do not dispatch a worker on a new issue until you dispatch the PR work for
+this cycle. See "Pull requests come first". A reviewer, a sync worker, or a
+fix worker for an open PR is not new work.
 
 Give each worker a short brief with:
 
@@ -452,8 +478,8 @@ Do not leave it only in the ignored `evidence/<issue-number>/report.md`.
 Do not dispatch the reviewer on a visual PR with no screenshots.
 
 If the worker says it could not capture a screenshot, the PR is blocked on an
-owner decision. Report the PR number and the reason in the handoff. Ask the
-owner how to go on.
+owner decision. Ask the owner how to go on in a PR comment. Then take the next
+item.
 
 Use `lupin review-route --category CATEGORY --size SIZE --mode separate` for
 a reviewer recommendation. Compare it with the issue's implementation route
@@ -464,16 +490,15 @@ dispatch. Keep a separate verdict for each PR. Review complex or high-risk
 changes alone. Keep visual or 3D reviews to one or two PRs per dispatch.
 
 The reviewer must be capable of doing the issue and must not be below the
-worker's model tier. Prefer a reviewer one tier higher when quota allows.
+worker's model tier. This includes a fix worker that the fix cycle moved one
+tier higher. Prefer a reviewer one tier higher when quota allows.
 Never dispatch Fable without the user's approval. Use Opus sparingly because
 it costs more.
 
-If the review finds a problem, dispatch a `fix` worker with the exact finding.
-Tell it to push as in "Pull requests come first", and update the same PR. If the fix changes anything a person can see, tell the worker to capture fresh screenshots. Do this even when the finding was not labeled visual. The worker attaches them after it pushes. See "Attach screenshots to the PR" in the `ship` skill. Review the latest PR commit.
-Repeat until the reviewer approves the current head SHA. The head SHA is the
-newest commit ID on the branch.
-The orchestrator (the agent that dispatches and merges work) posts the verdict
-and findings on the PR.
+If the review finds a problem, the reviewer runs the fix cycle. See "Run the
+fix cycle" in the `code-review` skill. The fix worker pushes as in "Pull
+requests come first", and updates the same PR. If the fix changes anything a person can see, the brief tells the fix worker to capture fresh screenshots. Do this even when the finding was not labeled visual. The worker attaches them after it pushes. See "Attach screenshots to the PR" in the `ship` skill.
+The reviewer posts each verdict and its findings on the PR.
 
 Before a branch is merged, it must contain the current `main`. Fetch
 `origin` and the remote that holds the PR branch. Then run this check.
@@ -544,14 +569,20 @@ until no approved PR is left.
    branch. Use it to choose `origin` or `fork` for `REMOTE` in the ancestor
    check in "Review and merge each pull request".
 
-2. For each PR, get the commit of its latest approval:
+2. For each PR, get the commit of its latest formal decision, if that decision
+   is an approval:
 
    ```sh
-   gh api repos/OWNER/REPO/pulls/<PR-number>/reviews \
-     --jq '[.[] | select(.state == "APPROVED")] | last | .commit_id'
+   gh api --paginate --slurp repos/OWNER/REPO/pulls/<PR-number>/reviews \
+     --jq '[.[][] | select(.state == "APPROVED"
+       or .state == "CHANGES_REQUESTED")] | last
+       | if .state == "APPROVED" then .commit_id else null end'
    ```
 
-   The output is `null` when no reviewer approved the PR.
+   The output is `null` when the latest formal decision is not an approval,
+   or when no reviewer made one. `--paginate --slurp` reads every page. The
+   reviews endpoint returns 30 reviews per page. A later `CHANGES_REQUESTED`
+   removes an earlier approval. A `COMMENTED` review does not count.
 
 3. Merge the PR only when that commit equals its `headRefOid`. A push after the
    approval changes the head, so the PR waits for a new approval. Then run the
@@ -633,19 +664,23 @@ and that file.
 
 A worker's task ends when its issue is merged into `main`. A task also
 ends when it is blocked on an owner decision. A visual PR that cannot get
-screenshots is blocked. A pull request that waits for review is not blocked.
-The orchestrator dispatches the review and any fix. The fix goes on the same
-branch.
+screenshots is blocked.
 
 "Blocked" means an owner decision is needed. An example is a model-routing
-policy change.
+policy change. Waiting for the owner does not end the queue. Write the question
+as an issue comment or a PR comment. Then take the next item.
 
 Policy changes to this skill go to upstream `main` as a pull request, which the
 owner merges.
 
-The loop is not finished while an unblocked PR waits for a review, a fix, or a
-merge.
+Work the queue until nothing is left. Nothing is left when all of these are
+true:
 
-Continue working until the backlog is empty or every remaining item is blocked
-on an owner decision. Then run `/handoff`. State the exact next action and any
-missing owner input.
+- No open issue that the loop may take is unclaimed.
+- Every PR that the loop owns is production ready.
+- No PR waits for a review.
+- No research, docs, or triage item is open that a worker can do.
+
+Then run `/handoff`. State the exact next action and any missing owner input.
+Before that, do not ask the owner whether to go on. Never write "tell me if you
+want me to continue" or "if you want me to".

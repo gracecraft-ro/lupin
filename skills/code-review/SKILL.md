@@ -18,9 +18,9 @@ command as `--repo OWNER/REPO`. Never use a bare PR number from another repo,
 because two repos can each have a PR with the same number.
 
 The orchestrator holds a Lupin claim on `OWNER/REPO#N` for the length of your
-review. It takes the claim before it dispatches you. Do not claim the PR
-yourself. If the brief names no claim, stop and ask the orchestrator before you
-read the diff.
+review and its fix cycle. It takes the claim before it dispatches you. Do not
+claim the PR yourself. If the brief names no claim, stop and ask the
+orchestrator before you read the diff.
 
 Use Lupin for issue context when it is configured:
 
@@ -75,8 +75,10 @@ Do not replace a PR review with a review of an unsubmitted branch.
   no before: the new screen is enough. See "Attach screenshots to the PR" in the
   `ship` skill for what a visual change is.
 - For 3D changes, inspect the contact sheet and compare useful views.
-- Do not edit files, run linters, approve or request changes, or merge the PR.
-  Return the verdict and findings to the orchestrator.
+- An owner comment on the PR that names a problem is a finding. A PR comment
+  is never an approval.
+- Do not edit files, run linters, or merge the PR. A fix worker makes the
+  changes. See "Run the fix cycle".
 
 ## Check before you report
 
@@ -144,7 +146,31 @@ End with these lines:
 
 If nothing is found, write `What this change does:`, then `Looks good. Ship.`, then one line on what you checked.
 
-The orchestrator posts the verdict and findings on the PR. It releases the PR
-claim after it posts the verdict. It dispatches fixes and runs this review again
-on the new PR head, with a new claim. It merges only after approval and required
-checks pass.
+## Run the fix cycle
+
+You post each verdict and its findings on the PR, as a review. Use the API
+command in "Pull requests come first" in the `delegation-loop` skill, with the
+head SHA that you read. `Ship` is `APPROVE`. A blocking finding is
+`REQUEST_CHANGES`.
+
+After `Verdict: fix N first`, dispatch a fix worker. Dispatch it as the
+`delegation-loop` skill says for a fix worker. The brief has the PR, the
+branch, the remote, the numbered findings, and the failing gate output. The fix
+goes on the same branch. The fix worker is a different agent. You never edit
+files yourself.
+
+When the fix worker pushes, review the new head SHA. A fix worker that ends
+with no push, or with a failing gate, also ends a round. Repeat until
+`Verdict: Ship`. There is no round limit. Do not report, ask, or stop between
+rounds.
+
+If the same finding or the same failing check stays for 3 rounds in a row,
+dispatch the next fix worker one model tier higher. Your tier must stay at or
+above the fix worker's tier. If the new tier is above yours, stop and tell the
+orchestrator. It dispatches a reviewer at that tier or higher. If the fix
+worker is already at the top tier that the loop may use, the cycle is stalled.
+The PR is then blocked on an owner decision. Never dispatch Fable without the
+user's approval.
+
+Report the final verdict to the orchestrator. The orchestrator releases the PR
+claim and merges only after approval and required checks pass. You never merge.

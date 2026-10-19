@@ -109,13 +109,11 @@ repo:
    Report the branch name and commit range. Do not review or merge the branch.
 3. The orchestrator (the agent that dispatches and merges work) dispatches
    `/code-review` for every PR, including docs-only changes. The reviewer is
-   not the worker. The reviewer's model tier is not lower than the worker's.
-4. If the review finds a problem, dispatch a fix worker with the exact
-   finding. It pushes the fix to the same branch. See "Pull requests come first"
-   in the `delegation-loop` skill.
-   Repeat until the reviewer approves the current head SHA. The head SHA is the
-   newest commit ID on the branch.
-5. The orchestrator posts the verdict on the PR.
+   not the worker. The reviewer's model tier is not lower than the worker's or
+   the fix worker's.
+4. If the review finds a problem, the reviewer runs the fix cycle until the PR
+   is production ready. See "Run the fix cycle" in the `code-review` skill.
+5. The reviewer posts each verdict on the PR.
 6. The orchestrator merges into `main` only when all four are true:
    1. The PR is open on `OWNER/REPO`, with base `main`.
    2. A reviewer approves the current head SHA.
@@ -132,10 +130,9 @@ repo:
    into the default branch, `main`.
 7. On every orchestrator cycle, merge each approved PR that passes step 6. Follow
    "Continuous merge of approved PRs" in the `delegation-loop` skill.
-8. PRs come first. Handle the open PRs into `main` before you start
-   work on a new issue. A PR that is blocked on an owner decision does
-   not delay it. A PR that waits goes stale. See "Pull requests come
-   first" in the `delegation-loop` skill.
+8. PRs come first. In each cycle, dispatch the PR work before work on a new
+   issue. A PR in a fix cycle does not delay new work. A PR that waits goes
+   stale. See "Pull requests come first" in the `delegation-loop` skill.
 
 Changes to this policy and feature work go to upstream `main`, which the
 owner merges.
