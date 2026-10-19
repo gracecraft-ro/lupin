@@ -38,6 +38,17 @@ def _raw_client(redis_port):
     return redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
 
 
+def _lock_key(cache_key, repo="acme/repo"):
+    return f"{gh_cache.PREFIX}gh-lock:{repo}:{cache_key}"
+
+
+def _hold_lock(redis_port, cache_key, holder):
+    """Hold the fetch lock as another caller, the same way `gh_cache` does."""
+    _raw_client(redis_port).set(
+        _lock_key(cache_key), holder, nx=True, px=int(gh_cache.LOCK_TTL * 1000)
+    )
+
+
 def test_cache_hit_never_calls_fetch_fn(redis_port, flush_redis):
     key = f"{gh_cache.PREFIX}gh-cache:acme/repo:issues:open"
     _raw_client(redis_port).set(key, json.dumps({"data": [{"number": 1}]}))
@@ -164,25 +175,20 @@ def test_canonical_fetcher_check_refuses_when_the_registry_is_partly_unreadable(
 def test_fallback_fetcher_serializes_on_the_shared_lock(redis_port, flush_redis):
     """Two machines that both fall back still fetch once: the second finds
     the first's published result after waiting on the lock."""
-    from lupin import slots_redis
-
-    held = slots_redis.acquire("gh-fetch/acme/repo", holder="other-machine", **_kw(redis_port))
-    try:
-        _raw_client(redis_port).set(
-            f"{gh_cache.PREFIX}gh-cache:acme/repo:issues:open",
-            json.dumps({"data": [{"number": 1}]}),
-        )
-        fetch = mock.Mock()
-        with mock.patch.object(machines, "hostname", return_value="jesus"):
-            with mock.patch.object(machines, "machines", return_value=[_record(PINNED_FETCHER, "draining")]):
-                data, error = gh_cache.cached_gh_json(
-                    "acme", "repo", "issues:open", fetch, connection=_kw(redis_port)
-                )
-        assert data == [{"number": 1}]
-        assert error is None
-        fetch.assert_not_called()
-    finally:
-        slots_redis.release(held, **_kw(redis_port))
+    _hold_lock(redis_port, "issues:open", "other-machine")
+    _raw_client(redis_port).set(
+        f"{gh_cache.PREFIX}gh-cache:acme/repo:issues:open",
+        json.dumps({"data": [{"number": 1}]}),
+    )
+    fetch = mock.Mock()
+    with mock.patch.object(machines, "hostname", return_value="jesus"):
+        with mock.patch.object(machines, "machines", return_value=[_record(PINNED_FETCHER, "draining")]):
+            data, error = gh_cache.cached_gh_json(
+                "acme", "repo", "issues:open", fetch, connection=_kw(redis_port)
+            )
+    assert data == [{"number": 1}]
+    assert error is None
+    fetch.assert_not_called()
 
 
 def test_canonical_machine_fetches_and_publishes_on_a_miss(redis_port, flush_redis):
@@ -230,24 +236,19 @@ def test_canonical_machine_lock_contention_rereads_cache_instead_of_refetching(
     repo's lock. The second one should find the first's result already
     cached and skip its own fetch -- not run `gh` twice.
     """
-    from lupin import slots_redis
-
-    held = slots_redis.acquire("gh-fetch/acme/repo", holder="other-caller", **_kw(redis_port))
-    try:
-        _raw_client(redis_port).set(
-            f"{gh_cache.PREFIX}gh-cache:acme/repo:issues:open",
-            json.dumps({"data": [{"number": 1}]}),
+    _hold_lock(redis_port, "issues:open", "other-caller")
+    _raw_client(redis_port).set(
+        f"{gh_cache.PREFIX}gh-cache:acme/repo:issues:open",
+        json.dumps({"data": [{"number": 1}]}),
+    )
+    fetch = mock.Mock()
+    with mock.patch.object(machines, "hostname", return_value=PINNED_FETCHER):
+        data, error = gh_cache.cached_gh_json(
+            "acme", "repo", "issues:open", fetch, connection=_kw(redis_port)
         )
-        fetch = mock.Mock()
-        with mock.patch.object(machines, "hostname", return_value=PINNED_FETCHER):
-            data, error = gh_cache.cached_gh_json(
-                "acme", "repo", "issues:open", fetch, connection=_kw(redis_port)
-            )
-        assert data == [{"number": 1}]
-        assert error is None
-        fetch.assert_not_called()
-    finally:
-        slots_redis.release(held, **_kw(redis_port))
+    assert data == [{"number": 1}]
+    assert error is None
+    fetch.assert_not_called()
 
 
 def test_canonical_machine_fetches_anyway_if_lock_busy_and_cache_still_cold(
@@ -258,20 +259,17 @@ def test_canonical_machine_fetches_anyway_if_lock_busy_and_cache_still_cold(
     own caller rather than blocking indefinitely -- a duplicate `gh` call
     is wasted work, not a correctness problem.
     """
-    from lupin import slots_redis
-
-    held = slots_redis.acquire("gh-fetch/acme/repo", holder="other-caller", **_kw(redis_port))
-    try:
-        fetch = mock.Mock(return_value=([{"number": 2}], None))
-        with mock.patch.object(machines, "hostname", return_value=PINNED_FETCHER):
-            data, error = gh_cache.cached_gh_json(
-                "acme", "repo", "issues:open", fetch, connection=_kw(redis_port)
-            )
-        assert data == [{"number": 2}]
-        assert error is None
-        fetch.assert_called_once()
-    finally:
-        slots_redis.release(held, **_kw(redis_port))
+    _hold_lock(redis_port, "issues:open", "other-caller")
+    fetch = mock.Mock(return_value=([{"number": 2}], None))
+    with mock.patch.object(machines, "hostname", return_value=PINNED_FETCHER):
+        data, error = gh_cache.cached_gh_json(
+            "acme", "repo", "issues:open", fetch, connection=_kw(redis_port)
+        )
+    assert data == [{"number": 2}]
+    assert error is None
+    fetch.assert_called_once()
+    # This caller did not hold the lock, so it must not delete it.
+    assert _raw_client(redis_port).get(_lock_key("issues:open")) == "other-caller"
 
 
 def test_concurrent_caller_that_waits_reuses_the_result_instead_of_refetching(
@@ -279,16 +277,14 @@ def test_concurrent_caller_that_waits_reuses_the_result_instead_of_refetching(
 ):
     """Real two-thread race against a real redis-server, not a held-lease
     stand-in: caller A acquires the lock and is mid-fetch (simulated by a
-    brief sleep) when caller B starts and blocks inside
-    `slots_redis.acquire`'s own poll loop. A finishes, writes the cache,
-    and releases -- only then does B's `acquire()` return. B must re-check
-    the cache at that point and reuse A's result, not call its own
-    `fetch_fn`.
+    brief sleep) when caller B starts and waits in the lock poll loop.
+    A finishes, writes the cache, and releases. B must re-check the cache
+    and reuse A's result, not call its own `fetch_fn`.
 
-    The other lock-contention tests above pre-hold the lease for the whole
-    test, so `acquire()` always raises `SlotFull` for them -- they never
-    exercise a *successful* `acquire()` that happens after a wait, which is
-    the normal (not the exceptional) case and the one the bug was in.
+    The other lock-contention tests above pre-hold the lock for the whole
+    test, so the lock is never free for them -- they never exercise a
+    caller that waits while another fetch ends, which is the normal (not
+    the exceptional) case and the one the bug was in.
     """
     fetch_b = mock.Mock()
     a_holds_lock = threading.Event()
@@ -375,6 +371,178 @@ def test_unset_setting_pins_no_machine_so_a_miss_fetches_here(redis_port, flush_
     assert data == [{"number": 1}]
     assert error is None
     fetch.assert_called_once()
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_unset_setting_three_callers_on_one_empty_key_fetch_once(
+    redis_port, flush_redis, monkeypatch, value
+):
+    """With no machine pinned, three callers miss the same key while one
+    fetch runs for 3 seconds. Only one `gh` fetch may run. The other two
+    callers get an "in progress" error, not a second fetch. An empty value
+    means the same as an unset one.
+    """
+    if value is None:
+        monkeypatch.delenv("LUPIN_GH_CANONICAL_FETCHER")
+    else:
+        monkeypatch.setenv("LUPIN_GH_CANONICAL_FETCHER", value)
+    calls = []
+
+    def slow_fetch():
+        calls.append(1)
+        time.sleep(3)
+        return [{"number": 1}], None
+
+    results = []
+
+    def call():
+        results.append(
+            gh_cache.cached_gh_json(
+                "acme", "repo", "issues:open", slow_fetch, connection=_kw(redis_port)
+            )
+        )
+
+    with mock.patch.object(machines, "hostname", return_value="jesus"):
+        threads = [threading.Thread(target=call) for _ in range(3)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+
+    assert len(calls) == 1
+    assert sorted(error is None for _data, error in results) == [False, False, True]
+    losers = [error for _data, error in results if error is not None]
+    assert all("in progress" in error for error in losers)
+
+
+def test_unset_setting_two_callers_on_different_keys_both_fetch(
+    redis_port, flush_redis, monkeypatch
+):
+    """With no machine pinned, one repo has a slow fetch for `issues:open`.
+    A caller for `dependencies` of the same repo must still fetch. It must
+    not get an "in progress" error because of the other key.
+    """
+    monkeypatch.delenv("LUPIN_GH_CANONICAL_FETCHER")
+    calls = []
+
+    def slow_fetch(label):
+        def fetch():
+            calls.append(label)
+            time.sleep(3)
+            return [{"label": label}], None
+
+        return fetch
+
+    results = {}
+
+    def call(cache_key):
+        results[cache_key] = gh_cache.cached_gh_json(
+            "acme", "repo", cache_key, slow_fetch(cache_key), connection=_kw(redis_port)
+        )
+
+    with mock.patch.object(machines, "hostname", return_value="jesus"):
+        threads = [
+            threading.Thread(target=call, args=(cache_key,))
+            for cache_key in ("issues:open", "dependencies")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+
+    assert sorted(calls) == ["dependencies", "issues:open"]
+    assert results["issues:open"] == ([{"label": "issues:open"}], None)
+    assert results["dependencies"] == ([{"label": "dependencies"}], None)
+
+
+def test_many_issue_lookups_make_no_slots(redis_port, flush_redis, monkeypatch):
+    """The fetch lock is not a slot. 50 lookups of different issues must
+    add no `slot:*` key and no row to the slot status (the Machines page).
+    """
+    from lupin import slots_redis
+
+    monkeypatch.delenv("LUPIN_GH_CANONICAL_FETCHER")
+    with mock.patch.object(machines, "hostname", return_value="jesus"):
+        for number in range(50):
+            gh_cache.cached_gh_json(
+                "acme", "repo", f"issue:{number}",
+                lambda: ({"number": 1}, None), connection=_kw(redis_port),
+            )
+
+    assert list(_raw_client(redis_port).scan_iter(f"{gh_cache.PREFIX}slot:*")) == []
+    assert [slot for slot in slots_redis.status(**_kw(redis_port)) if "gh-fetch" in slot] == []
+
+
+def test_lock_key_has_a_ttl_while_held_and_is_gone_after(redis_port, flush_redis):
+    """A holder that crashes must free the lock after LOCK_TTL. So the key
+    has a TTL during the fetch. After the fetch, the key is gone."""
+    client = _raw_client(redis_port)
+    seen = {}
+
+    def fetch():
+        seen["value"] = client.get(_lock_key("issues:open"))
+        seen["pttl"] = client.pttl(_lock_key("issues:open"))
+        return [{"number": 1}], None
+
+    with mock.patch.object(machines, "hostname", return_value=PINNED_FETCHER):
+        gh_cache.cached_gh_json("acme", "repo", "issues:open", fetch, connection=_kw(redis_port))
+
+    assert seen["value"]
+    assert 0 < seen["pttl"] <= gh_cache.LOCK_TTL * 1000
+    assert client.exists(_lock_key("issues:open")) == 0
+
+
+def test_release_keeps_a_lock_that_another_holder_has(redis_port, flush_redis):
+    _hold_lock(redis_port, "issues:open", "other-caller")
+    client = gh_cache._client(_kw(redis_port))
+
+    gh_cache._release(client, _lock_key("issues:open"), "not-the-holder")
+
+    assert _raw_client(redis_port).get(_lock_key("issues:open")) == "other-caller"
+
+
+# The command list from docs/redis-schema.md, "ACL command list". It has no
+# MULTI and no WATCH.
+_FLEET_ACL_COMMANDS = (
+    "PING GET SET DEL EXPIRE PEXPIRE TTL ZADD ZREM ZSCORE ZCARD ZRANGE "
+    "ZREMRANGEBYSCORE XADD XRANGE XREVRANGE SCAN EVAL EVALSHA SCRIPT|LOAD SCRIPT|EXISTS"
+).split()
+
+
+def test_lock_works_with_the_fleet_acl(auth_redis_port, monkeypatch):
+    """A user with only the fleet's commands takes the lock, fetches,
+    publishes, and releases. No ACL error."""
+    admin = redis_lib.Redis(
+        host="127.0.0.1", port=auth_redis_port, password="test-pass", decode_responses=True
+    )
+    admin.execute_command(
+        "ACL", "SETUSER", "fleet", "reset", "on", ">fleet-pw", "~lupin:*",
+        *(f"+{command.lower()}" for command in _FLEET_ACL_COMMANDS),
+    )
+    monkeypatch.delenv("LUPIN_GH_CANONICAL_FETCHER")
+    connection = {
+        "redis_host": "127.0.0.1", "redis_port": auth_redis_port,
+        "redis_username": "fleet", "redis_password": "fleet-pw",
+    }
+    lock_key = _lock_key("issues:open", repo="acl/repo")
+    seen = {}
+
+    def fetch():
+        seen["pttl"] = admin.pttl(lock_key)
+        return [{"number": 1}], None
+
+    try:
+        with mock.patch.object(machines, "hostname", return_value="jesus"):
+            data, error = gh_cache.cached_gh_json(
+                "acl", "repo", "issues:open", fetch, connection=connection
+            )
+        assert (data, error) == ([{"number": 1}], None)
+        assert seen["pttl"] > 0
+        assert admin.exists(lock_key) == 0
+        assert admin.get(f"{gh_cache.PREFIX}gh-cache:acl/repo:issues:open") is not None
+    finally:
+        admin.delete(lock_key, f"{gh_cache.PREFIX}gh-cache:acl/repo:issues:open")
+        admin.execute_command("ACL", "DELUSER", "fleet")
 
 
 def test_unset_setting_never_fetches_when_redis_is_down(closed_port, monkeypatch):

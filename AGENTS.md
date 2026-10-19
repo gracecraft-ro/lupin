@@ -69,8 +69,11 @@ Use `--limit N` to choose another positive count. `_decode` in
 `src/lupin/ledger.py` turns one entry's ID and decoded fields into a dict.
 `read_events` decodes each entry on its own. It skips an entry when a
 field is not valid UTF-8. It also skips an entry when `_decode` raises
-KeyError, ValueError, or RecursionError. It reports each skipped entry on
-stderr. A skipped entry still counts toward the limit. Both commands exit 3
+KeyError, ValueError, or RecursionError. `_decode` raises ValueError when
+a list field nests brackets more than 8 levels deep. A real field has 1 level.
+The check does not use the C stack, so all platforms give the same result.
+It reports each skipped entry on stderr. A skipped entry still counts toward
+the limit. Both commands exit 3
 if Redis is unavailable. When Redis is unavailable, the roadmap shows no
 ledger annotations and a warning. It ignores `.loop/loop-state.json`.
 
@@ -291,6 +294,14 @@ per-machine Redis snapshots. The page adds totals by provider and marks a
 snapshot stale after five minutes. Each snapshot expires after 24 hours.
 Systemd runs `lupin quota` every five minutes on Jesus and Ralpha.
 
+For opencode-go, Lupin looks for the API key in this order:
+`~/.local/share/opencode/auth.json`, the `OPENCODE_API_KEY` variable, then the
+output of `omp token opencode-go` (it waits 10 seconds at most). Lupin never
+prints or logs the key. A provider with no usage rows shows its note instead,
+for example "OpenCode Go API key expired" or "no OpenCode Go API key
+available". `lupin quota` shows the note in plain output and in `--json`.
+Lupin does not publish a note to Redis.
+
 A provider can have more than one login, for example a free and a paid
 OpenAI account. `omp usage` reports each login. Lupin labels each row with
 the plan name (`free`, `plus`). The `/usage` page and `lupin quota` show
@@ -332,8 +343,11 @@ even when the checkout folder has another name.
 `LUPIN_GH_CANONICAL_FETCHER` names the one machine that runs `gh` on a cache
 miss. Set it to that machine's hostname on every machine that reads the cache.
 The named machine also fetches when Redis is down. When the variable is unset,
-no machine is pinned. Each machine then fetches on a miss, but only while Redis
-is reachable.
+no machine is pinned. A machine fetches on a miss only while Redis is
+reachable, and only when it gets the lock for that cache key. A machine that
+cannot get the lock reads the cache again. If the cache is still empty, it
+returns a "fetch in progress" error and does not fetch. The lock is a plain
+Redis key with a TTL, not a slot. It does not show on the Machines page.
 
 Each run has its own Git worktree in `worktrees/<repo>/` in the loop state
 directory. A worktree is a second working copy of the repo, with its own files
@@ -540,3 +554,57 @@ sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
 - Do not use the start, stop, or run controls on this dashboard. New runs use
   the `lupin-loops` session. Older loops may use an old session until they
   stop.
+
+## Rules for unattended loops
+
+These rules keep a loop moving when no person is present.
+
+1. **Do not use the question menu.** The menu asks a person to choose. No
+   person is there, so the loop waits forever. Write the question as a comment
+   on the issue. Then take the next item.
+2. **Do not stop while work exists.** An unmerged pull request is not a reason
+   to stop. Reviews, research, and docs are work. Do them.
+3. **Use the fork login for fork pushes.** A fork is your own copy of a repo.
+   On ralpha, `GH_TOKEN` cannot push to the fork. The saved `gracecraft-ro`
+   login can. `FORK_OWNER` is `gracecraft-ro` on ralpha. Put `env -u GH_TOKEN`
+   before each command. It removes `GH_TOKEN` for that one command only. Do not
+   run `unset GH_TOKEN`:
+
+   <!-- markdownlint-disable MD013 -->
+   ```sh
+   env -u GH_TOKEN git push -u fork <branch>
+   env -u GH_TOKEN gh pr create --repo OWNER/REPO --base main --head FORK_OWNER:<branch> --title "<title>" --body-file <file>
+   ```
+   <!-- markdownlint-enable MD013 -->
+
+4. **Do not run `rm` with a glob.** A glob is a pattern such as `*`. It can
+   delete more files than you mean. Do not delete old files with a pattern.
+   Give each new file a new name.
+5. **Ask a worker with no result for it.** If a worker has no result 30
+   minutes after it starts, ask it for the result. If it has none, write that
+   on the issue. Then stop the worker. The `delegation-loop` skill shows how to
+   ask a worker (`herdr agent prompt`).
+6. **Log environment problems in the ledger.** On ralpha, `lupin roadmap`
+   fails. The Redis user `lupin-ralpha` has no permission to run `MULTI`.
+   `MULTI` is a Redis command that runs several commands as one unit. Also,
+   on ralpha, `gh` cannot see `gracecraft/nix`. That repo tracks environment
+   problems. Write each problem to the ledger instead. `OWNER/REPO` is
+   `gracecraft/nix`:
+
+   ```sh
+   lupin ledger append OWNER/REPO --event env-friction --summary "<problem>"
+   ```
+
+7. **Do not stop after a review.** A review with findings starts the next
+   round. Send the findings to a fix worker. Then get a new review at the new
+   head. Repeat until the pull request is ready for production. Ready for
+   production means three things. A reviewer approved the current head. The
+   full gate passes. The branch contains `main`. There is no limit on rounds.
+   If the same finding comes back for 3 rounds, give the fix worker a model
+   one tier higher.
+8. **Work the queue until nothing is left.** Nothing is left when all of these
+   are true. No open issue that you may take is unclaimed. Every pull request
+   you own is ready for production. No pull request waits for a review. No
+   research or docs item is left. Waiting for the owner is not the end. Write
+   the question as a comment on the issue. Then take the next item. Never write
+   "tell me if you want me to continue".

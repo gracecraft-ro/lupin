@@ -21,6 +21,7 @@ This is the data model `lupin` uses once the `redis` backend exists
 | `benchmark-snapshot` | string (JSON), with a TTL | one fleet-wide benchmark/quality score per model ID — see Fleet keys below | nothing today |
 | `model-snapshot` | string (JSON), with a TTL | latest model list and prices from `lupin fetch-models`; a subscription whose fetch failed keeps its last verified list, marked stale (`model_fetch._merge_previous_subscriptions`) | nothing today |
 | `gh-cache:<owner>/<repo>:<cache-key>` | string (JSON: `{"data": ...}`), with a TTL | one read-only `gh` lookup's cached result — see Fleet keys below | each machine's own direct `gh` call for the same lookup |
+| `gh-lock:<owner>/<repo>:<cache-key>` | string (holder ID), with a TTL | the lock for one `gh-cache` key: the caller that holds it fetches — see Fleet keys below | nothing today |
 | `quota-snapshot` | string (JSON), with a TTL | one fleet-wide quota reading per provider — see Fleet keys below | nothing today |
 | `usage-snapshot:<machine>` | string (JSON), with a TTL | one machine's 7-day usage rows — see Fleet keys below | nothing today |
 | `debrief-digest:<machine>:<repo>:<file>` | string (JSON), with a TTL | one debrief's text and its model-written digest — see Fleet keys below | each machine shows only its own debrief files |
@@ -267,12 +268,13 @@ A machine that finds the slot already held just reads whatever is in
 Backs `place`/`quest`/`roadmap`'s read-only `gh` lookups (issue #35):
 issue state, issue body/labels, quest-labeled issues, dependency links.
 Written by the machine named in `LUPIN_GH_CANONICAL_FETCHER`
-(a hard pin to one named machine, not a race any machine could win).
+when a machine is named. If the variable is unset or empty, no machine is
+named and the lock below picks one writer.
 Every other machine reads it while that fetcher is alive. When the pinned
 machine is not maintaining the cache — draining, offline, or never joined
 — a machine that needs the data fetches it and publishes through the same
-`gh-fetch/<owner>/<repo>` slot, so the first machine to win still answers
-for the fleet and no two machines fetch the same repo at once.
+`gh-lock:<owner>/<repo>:<cache-key>` lock, so the first machine to win still
+answers for the fleet and no two machines fetch the same key at once.
 Read by every machine, the pinned machine included.
 The roadmap uses the dashboard's Redis connection for this cache.
 
@@ -296,13 +298,29 @@ different queries that must not share one cache entry: `issues:<state>`
 (`roadmap_cli`'s blocker-exists check), `quest-locate-issue:<number>`
 (`quest`'s issue-to-repo lookup).
 
-Guarded by the existing `slot:<name>` shape above, as
-`slot:gh-fetch/<owner>/<repo>` (max 1 holder, `/` not `:` -- a colon in the
-slot name breaks `release`/`renew`'s lease-id parsing, which splits on the
-first colon) — this only stops the pinned machine from running the same fetch
-twice if two `lupin` invocations there race each other. A machine that is
-not pinned never takes this lock and never calls `gh` for these lookups at all; on a
-miss it reports "no data yet" instead.
+Guarded by `gh-lock:<owner>/<repo>:<cache-key>`. This lock is a plain key
+with a TTL, not a slot. It does not show on the Machines page. A caller sets
+it with `SET <key> <holder> NX PX 120000`. The holder is a new random ID for
+each call. If the key is set, the caller tries again every 0.05 seconds for
+2 seconds at most. Between tries, it reads the cache. On release, one `EVAL`
+deletes the key only if it still holds this caller's holder ID. A holder that
+crashes frees the key after 2 minutes. The lock uses only `SET` and `EVAL`
+(with `GET` and `DEL` in the script). All are on the ACL command list below.
+One holder fetches one key of a repo
+at a time. Other keys of the same repo have their own locks. The lock is
+used in three cases:
+
+- The pinned machine takes it, so two `lupin` invocations there do not run
+  the same fetch twice.
+- When the pinned machine is draining, offline, or never joined, any
+  machine that needs the data takes it.
+- When `LUPIN_GH_CANONICAL_FETCHER` is unset or empty, any machine that
+  misses the cache takes it. A machine that cannot get the lock reads the
+  cache again. If the cache is still empty, it reports "fetch in progress"
+  and does not call `gh`.
+
+While the pinned machine is online, no other machine takes the lock. On a
+miss, it reports "no data yet" and does not call `gh`.
 
 ### `quota-snapshot`
 
@@ -358,7 +376,7 @@ credentialed machine republishes it.
 
 Guarded by `slot:quota-fetch/<provider>` (max 1 holder, non-blocking, no
 wait) — only stops two `lupin` processes on the *same* machine from
-publishing the same provider at once, same narrow job the `gh-fetch`/
+publishing the same provider at once, same narrow job the `gh-lock`/
 `benchmark-fetch` locks do.
 
 ### `usage-snapshot:<machine>`
@@ -738,7 +756,7 @@ numbers.
 | `benchmark-snapshot` | n/a — not renewed | 7 days (retention only, see below) |
 | `model-snapshot` | n/a — not renewed | 7 days (retention only) |
 | GitHub data cache (`gh-cache:...`) | n/a — not renewed | 5 min |
-| GitHub fetch lock (`slot:gh-fetch/<owner>/<repo>`) | n/a — held only for one fetch | 2 min |
+| GitHub fetch lock (`gh-lock:<owner>/<repo>:<cache-key>`) | n/a — held only for one fetch | 2 min |
 | `quota-snapshot` | n/a — not renewed | 24 hours (retention only; freshness is per-provider, 5 min, see above) |
 | `debrief-digest:...` | n/a — written once, rewritten only to add a digest | 30 days |
 | `debrief-digest-claim:...` | n/a — written once | 30 days |
