@@ -15,7 +15,9 @@ Two questions per subscription (opencode-go, claude, codex):
 What's live and what's not, confirmed against this sandbox:
 
 - opencode-go: `OPENCODE_GO_MODELS_URL`, same API key quota.py's
-  `opencode_go_quota()` already reads from `OPENCODE_GO_AUTH_FILE`. Live.
+  `opencode_go_quota()` reads: `OPENCODE_GO_AUTH_FILE`, then
+  `OPENCODE_API_KEY`, then `omp token opencode-go`. Live. A 401 with
+  `api_key_expired` gives the "key expired" error.
 - claude: `ANTHROPIC_MODELS_URL`, same OAuth token quota.py's
   `claude_oauth_quota()` already reads from `CLAUDE_CREDENTIALS_FILE`.
   Live, but carries no price -- Anthropic's API never returns one.
@@ -47,6 +49,7 @@ makes.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import re
@@ -57,7 +60,7 @@ from datetime import datetime, timezone
 
 import redis
 
-from . import slots_redis
+from . import quota, slots_redis
 from .quota import CLAUDE_CREDENTIALS_FILE, OPENCODE_GO_AUTH_FILE, run
 
 ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
@@ -203,6 +206,8 @@ def opencode_go_models(catalog: dict | None = None) -> dict:
     if not key:
         key = os.environ.get("OPENCODE_API_KEY", "").strip()
     if not key:
+        key = quota._omp_token("opencode-go")  # module lookup: tests replace it
+    if not key:
         return {
             "subscription": "opencode-go",
             "live": False,
@@ -215,6 +220,18 @@ def opencode_go_models(catalog: dict | None = None) -> dict:
             OPENCODE_GO_MODELS_URL,
             headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
         )
+    except urllib.error.HTTPError as error:
+        try:
+            body = error.read(4096)
+        except (OSError, http.client.HTTPException):
+            body = b""
+        expired = error.code == 401 and b"api_key_expired" in body
+        return {
+            "subscription": "opencode-go",
+            "live": False,
+            "error": quota.OPENCODE_GO_KEY_EXPIRED if expired else f"unavailable ({type(error).__name__})",
+            "models": [],
+        }
     except (OSError, ValueError, urllib.error.URLError) as error:
         return {
             "subscription": "opencode-go",

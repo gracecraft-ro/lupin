@@ -112,7 +112,10 @@ what they cost. It saves the result to
 also publishes the snapshot to Redis, so the PiHome dashboard shows pulls
 from other fleet machines. A Redis error leaves the local file in place and
 prints a warning. Model lists for opencode-go and claude come from live
-provider calls. Codex uses `omp models` when available; otherwise it uses
+provider calls. For opencode-go, `fetch-models` finds the API key in the same
+order as `quota` (see the opencode-go key order below). It never prints or
+logs the key. If the key is expired, the row says "OpenCode Go API key
+expired". Codex uses `omp models` when available; otherwise it uses
 models.dev and is marked `live: false`. Prices
 come from models.dev, matched by model ID. A model with no match has
 `price: null`. Promo pricing has no live source, so `promo` stays `null`.
