@@ -36,7 +36,10 @@ from . import claims, ledger, machines, roadmap, slots_redis
 from .slots import CoordinatorUnreachable
 
 GH_TIMEOUT = 30.0
-DEBRIEF_TIME_LIMIT_S = 10.0  # Time limit for all gh calls in one debrief. Redis reads do not count.
+DEBRIEF_TIME_LIMIT_S = 10.0  # Time limit for all gh calls in one stop debrief. Redis reads do not count.
+# A periodic window is written in the background and nobody waits for it, so it may take longer.
+# With 10 seconds, jesus ran out of time before it read the closed issues, and the digest said little.
+PERIODIC_TIME_LIMIT_S = 120.0
 LIST_LIMIT = "200"
 COMMIT_PAGE = 100  # The most commits one GitHub API page gives.
 COMMIT_PAGES_MAX = 50  # Stop after this many pages (5000 commits). More is an error, not a cut list.
@@ -431,7 +434,7 @@ def _write(
     `past_day` writes a backfill file: window `[start, end)`, no claims, no
     screenshots, name `<end>-day.md`.
     """
-    time_limit = _TimeLimit(DEBRIEF_TIME_LIMIT_S)
+    time_limit = _TimeLimit(DEBRIEF_TIME_LIMIT_S if period is None else PERIODIC_TIME_LIMIT_S)
     view = time_limit.gh(["repo", "view", "--json", "nameWithOwner"], cwd=str(checkout))
     full_name = view["nameWithOwner"]
 
