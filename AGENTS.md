@@ -335,8 +335,11 @@ even when the checkout folder has another name.
 `LUPIN_GH_CANONICAL_FETCHER` names the one machine that runs `gh` on a cache
 miss. Set it to that machine's hostname on every machine that reads the cache.
 The named machine also fetches when Redis is down. When the variable is unset,
-no machine is pinned. Each machine then fetches on a miss, but only while Redis
-is reachable.
+no machine is pinned. A machine fetches on a miss only while Redis is
+reachable, and only when it gets the lock for that cache key. A machine that
+cannot get the lock reads the cache again. If the cache is still empty, it
+returns a "fetch in progress" error and does not fetch. The lock is a plain
+Redis key with a TTL, not a slot. It does not show on the Machines page.
 
 Each run has its own Git worktree in `worktrees/<repo>/` in the loop state
 directory. A worktree is a second working copy of the repo, with its own files
