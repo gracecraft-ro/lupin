@@ -300,7 +300,7 @@ output of `omp token opencode-go` (it waits 10 seconds at most). Lupin never
 prints or logs the key. A provider with no cached usage rows shows its note
 instead, for example "OpenCode Go API key expired" or "no OpenCode Go API key
 available". `lupin quota` shows the note in plain output and in `--json`.
-`lupin quota` does not put a note in the shared quota cache.
+`lupin quota` does not publish a provider that has only notes.
 
 A provider can have more than one login, for example a free and a paid
 OpenAI account. `omp usage` reports each login. Lupin labels each row with

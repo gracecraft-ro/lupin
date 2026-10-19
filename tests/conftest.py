@@ -70,7 +70,8 @@ def flush_redis(redis_port):
 def no_real_omp_token(monkeypatch):
     """No test may run the real `omp token`. It prints a secret key.
 
-    A test of `_omp_token` itself mocks `subprocess.run` instead.
+    A test of `_omp_token` itself mocks `subprocess.run`, or puts a fake `omp`
+    program on PATH.
     """
     monkeypatch.setattr(quota, "_omp_token", lambda provider: "", raising=False)
 
