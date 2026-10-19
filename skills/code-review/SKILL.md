@@ -155,8 +155,8 @@ You post each verdict and its findings on the PR, as a review. Use the API
 command in "Pull requests come first" in the `delegation-loop` skill, with the
 head SHA that you read. `Ship` is `APPROVE`. A blocking finding is
 `REQUEST_CHANGES`. GitHub refuses an approval or a change request from the PR's
-author. If your login opened the PR, use `COMMENT`. Then ask the owner in a
-`Loop:` PR comment to approve or merge the PR.
+author. If your login opened the PR, use `COMMENT`. If your verdict is `Ship`,
+ask the owner in a `Loop:` PR comment to approve or merge the PR.
 
 Run the fix cycle only when your brief says that the loop owns the PR. For any
 other PR, post the verdict, report it to the orchestrator, and stop. Do not
@@ -171,8 +171,8 @@ The fix cycle:
 1. After `Verdict: fix N first`, start a fix worker. Use your runner's agent
    tool, or run `herdr agent start` in a new pane. See "Talk to an agent in a
    Herdr pane" in the `delegation-loop` skill. If you cannot start an agent,
-   post the verdict, tell the orchestrator, and stop. The orchestrator then
-   dispatches the fix worker and the next review.
+   post the verdict, tell the orchestrator, and stop. This is the fallback in
+   step 3 of "Pull requests come first" in the `delegation-loop` skill.
 2. Give the fix worker a brief with the PR, the branch, the remote, the
    numbered findings, and the failing gate output. It makes its worktree and
    pushes as "Pull requests come first" in the `delegation-loop` skill says.
@@ -187,7 +187,8 @@ The fix cycle:
    the fix worker ended, start the next fix worker with the same findings and
    the new gate output. Either case ends a round.
 6. Repeat until `Verdict: Ship`. There is no round limit. Do not report, ask,
-   or stop between rounds. Items 1, 7, and 8 are the only exceptions.
+   or stop between rounds. Items 1, 7, and 8, and step 3 of "Fix worker
+   tiers" in the `delegation-loop` skill, are the only exceptions.
 7. Stall rule: follow step 4 of "Fix worker tiers" in the `delegation-loop`
    skill. For a blocked PR, post the reason and the head SHA as a `Loop:` PR
    comment. Then report it to the orchestrator.

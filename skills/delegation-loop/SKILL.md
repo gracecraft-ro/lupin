@@ -89,12 +89,18 @@ For each PR that is not a draft, do the first step that applies:
 3. The PR has findings or a failed repo gate at its current head SHA:
    dispatch a reviewer. The repo gate is the set of checks that `AGENTS.md`
    defines. Give the reviewer the findings and the gate output. The reviewer
-   runs the fix cycle. See "Run the fix cycle" in the `code-review` skill.
-   - If the reviewer cannot start an agent, it reports the verdict to you.
-     Then dispatch a fix worker. When it pushes, dispatch a new reviewer. You
-     count the rounds.
-   - If the reviewer reports that the fix worker needs a tier above the
-     reviewer's, dispatch a reviewer at that tier.
+   runs the fix cycle and starts the fix worker. See "Run the fix cycle" in
+   the `code-review` skill.
+   - Fallback: the reviewer reports that it cannot start an agent. In
+     fallback, you start the fix worker and apply "Fix worker tiers"
+     yourself. When it pushes, dispatch a new reviewer. You count the rounds.
+     A PR with a posted verdict at its head and no fix worker running gets a
+     fix worker, not a reviewer.
+   - The reviewer reports that a fix worker cannot start: start it yourself
+     with the same brief. If you cannot, post a `Loop:` PR comment with the
+     reason and take the next item.
+   - The reviewer reports that the fix worker needs a tier above the
+     reviewer's: dispatch a reviewer at that tier.
 4. The PR has no review at its current head SHA: dispatch a reviewer. Do not
    wait for the worker to request a review.
 5. The PR waits for a gate that is still running: wait for the result.
@@ -143,8 +149,8 @@ gh api repos/OWNER/REPO/pulls/<number>/reviews \
 
 Use `-f event=REQUEST_CHANGES` when the review asks for changes. GitHub refuses
 an approval or a change request from the PR's author. If your login opened the
-PR, post the verdict with `-f event=COMMENT`. Then ask the owner in a `Loop:`
-PR comment to approve or merge the PR.
+PR, post the verdict with `-f event=COMMENT`. If your verdict is `Ship`, ask
+the owner in a `Loop:` PR comment to approve or merge the PR.
 
 Every comment the loop posts starts with `Loop:`. An owner comment has
 `author_association` `OWNER` or `MEMBER` and does not start with `Loop:`. A
@@ -183,26 +189,28 @@ issue. Work that is already running continues.
 
 ### Fix worker tiers
 
-Tiers are the keys `tier0`, `tier1`, and `tier2` of a category row in
-`src/lupin/model-tiers.json`. `tier2` is the highest. Every row has `tier2`.
+Tiers are the keys `tier1` and `tier2` of a category row in
+`src/lupin/model-tiers.json`. `tier2` is the highest. Every row has both. A fix
+worker never uses `tier0`.
 
 1. Get the category and the size with `lupin classify --issue-json FILE`. Use
    the JSON of the linked issue. For a PR with no linked issue, use the PR's
-   JSON. If no other category matches, `classify` returns `coding`.
-2. The first fix worker uses the tier of the size: `tier0` for `size-xs` and
-   `size-s`, `tier1` for `size-m`, and `tier2` for `size-l`, `size-xl`, and
-   `size-?`. If the row has no `tier0`, the first fix worker uses `tier1`.
-   The `frontend-ui`, `translation`, and `prose` rows have no `tier0`.
-3. Run `lupin route CATEGORY SIZE --json`. For SIZE, use `size-s` for `tier0`,
-   `size-m` for `tier1`, and `size-l` for `tier2`. So on a row with no
-   `tier0`, a first fix worker of size `size-xs` or `size-s` asks for
-   `size-m`. The fix worker's tier is the tier that you asked for. The output
-   has `model` and `effort`.
+   JSON. If no other category matches, `classify` returns `coding`. If the
+   item has no size label, `classify` returns `size-?`.
+2. `size-l` and `size-xl` start at `tier2`. Every other size, `size-?`
+   included, starts at `tier1`.
+3. Run `lupin route CATEGORY SIZE --no-bmo --json`. For SIZE, use `size-m` for
+   `tier1` and `size-l` for `tier2`. `--no-bmo` is needed because a `bmo:`
+   model cannot run as an agent. The fix worker's tier is the tier that you
+   asked for. The output has `model` and `effort`.
    - If the output has a number in `wait_seconds`, wait that long. Then run
      `lupin route` again.
-   - If `wait_seconds` is `null`, or `lupin route` fails, report it to the
-     orchestrator.
-   - A fix worker that cannot start does not end a round.
+   - If the output has `downgraded_from`, quota blocked the first pick. Find
+     the new `model` in the row in `model-tiers.json`. If it is not in the
+     tier that you asked for, the raise did not happen. Wait 5 minutes, then
+     run `lupin route` again.
+   - If `wait_seconds` is `null`, or `lupin route` fails, or a fix worker
+     cannot start, report it to the orchestrator and stop.
 4. Stall rule: after 3 rounds in a row with the same finding or the same
    failing check, the next fix worker is one tier higher, one time only. If
    the same finding or check stays for 3 more rounds, the PR is blocked on an
@@ -210,7 +218,7 @@ Tiers are the keys `tier0`, `tier1`, and `tier2` of a category row in
    after 3 rounds with the same finding or check.
 5. Use the model that `lupin route` gives for the tier. A raise to `tier2`
    usually gives Opus. This is the one case where the stall rule asks for
-   Opus; Opus stays sparing everywhere else. Never use Fable without the
+   Opus. Opus stays sparing everywhere else. Never use Fable without the
    user's approval.
 
 ## Install skills on loop hosts

@@ -111,8 +111,8 @@ repo:
    `/code-review` for every PR, including docs-only changes. The reviewer is
    not the worker. The reviewer's model tier is not lower than the worker's or
    the fix worker's.
-4. If the review finds a problem and the loop owns the PR, the reviewer runs
-   the fix cycle until the PR is ready for production. See "Run the fix cycle"
+4. If the review finds a problem and the loop owns the PR, the reviewer starts
+   the fix worker and runs the fix cycle until the PR is ready for production. See "Run the fix cycle"
    in the `code-review` skill and "Fix worker tiers" in the `delegation-loop`
    skill.
 5. The reviewer posts each verdict on the PR. Every comment the loop posts

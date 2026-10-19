@@ -173,6 +173,7 @@ screenshots, follow it. Otherwise follow this section.
    with no before, show the new screen. Say what the reader should look at. Use
    the same path in the body and in `--attach`:
    ```md
+   Loop: Screenshots for PR #123.
    Before: ![before](./evidence/123/before.png)
    After: ![after](./evidence/123/after.png)
    ```
