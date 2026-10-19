@@ -53,6 +53,7 @@ PERIODS = {
 # same window for the same repo, so one machine can write it for the whole fleet.
 CLOCK = ZoneInfo("America/Los_Angeles")
 _HOUR_STEPS = {"6h": 6, "12h": 12, "24h": 24}
+WINDOW_GRACE_S = 180  # A window is written this long after it ends. A fast clock or a late GitHub search must not cut it.
 WINDOW_WRITING_S = 3600  # A claim not finished in this time is free again. The writer may have crashed.
 WINDOW_DONE_S = 8 * 24 * 60 * 60  # Longer than the longest window (7d), so a late machine does not repeat it.
 # A backfill file covers one UTC day. Its name ends in `-day.md`. `DAY` is not
@@ -724,11 +725,21 @@ def window_start(period: str, end: datetime) -> datetime:
     return wall.replace(tzinfo=CLOCK).astimezone(timezone.utc)
 
 
+def finished_window_end(period: str, now: datetime) -> datetime:
+    """The end of the newest window that has been over for `WINDOW_GRACE_S`.
+
+    The grace keeps a machine with a clock a few minutes fast from writing a window too early.
+    The first claim wins for the whole fleet, so an early write would cut the window for everyone.
+    Run NTP on every machine. A larger clock error is not covered.
+    """
+    return window_end(period, now - timedelta(seconds=WINDOW_GRACE_S))
+
+
 def window_due(root: Path, repo: str, period: str, now: datetime) -> bool:
     """Return True when this machine has no debrief for the newest finished window of `period`."""
     if not REPO_RE.fullmatch(repo or ""):
         raise DebriefError(f"invalid repo name {repo!r}")
-    end = window_end(period, now)
+    end = finished_window_end(period, now)
     return not (root / "debriefs" / repo / f"{end.strftime(STAMP_FORMAT)}-{period}.md").exists()
 
 
@@ -739,19 +750,21 @@ def _window_key(repo: str, period: str, end: datetime) -> str:
 def claim_window(client, repo: str, period: str, end: datetime, machine: str) -> bool:
     """Return True if this machine may write the window. Only one machine in the fleet gets True.
 
-    The claim is a Redis key set with NX. If Redis cannot be read, return True: a duplicate
+    The claim is a Redis key set with NX. A machine can take back its own unfinished claim.
+    If Redis cannot be read, return True: a duplicate
     debrief is better than a missing one. Call `finish_window` when the write ends.
     """
     if client is None:
         return True
     key = _window_key(repo, period, end)
+    mine = f"{machine}:writing"
     try:
-        got = slots_redis._call_with_retry(
-            lambda: client.set(key, f"{machine}:writing", nx=True, ex=WINDOW_WRITING_S)
-        )
+        if slots_redis._call_with_retry(lambda: client.set(key, mine, nx=True, ex=WINDOW_WRITING_S)):
+            return True
+        # This machine's own claim, left by a restart or a retried SET, is still this machine's.
+        return slots_redis._call_with_retry(lambda: client.get(key)) == mine
     except redis.exceptions.RedisError:
         return True
-    return bool(got)
 
 
 def finish_window(client, repo: str, period: str, end: datetime, machine: str, *, written: bool) -> None:
@@ -777,7 +790,7 @@ def write_window(
     end, so every machine gives the same window the same name. Screenshots are added.
     """
     when = datetime.now(timezone.utc) if now is None else now
-    end = window_end(period, when)
+    end = finished_window_end(period, when)
     start = window_start(period, end)
     if not checkout.is_dir():
         raise DebriefError(f"no checkout at {checkout}")

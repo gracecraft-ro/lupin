@@ -1508,6 +1508,7 @@ def write_due_periodic_debriefs(now: datetime | None = None) -> None:
     client = None  # Made when the first window is due. None means Redis is not available.
     client_tried = False
     machine = socket.gethostname()
+    wrote = False
     for repo in repos:
         checkout = CODE_DIR / repo
         if not checkout.is_dir():
@@ -1522,17 +1523,32 @@ def write_due_periodic_debriefs(now: datetime | None = None) -> None:
                         client = slots_redis.debrief_client(*debrief._redis_connection())
                     except (ValueError, OSError) as exc:  # A fleet config file that cannot be read.
                         print(f"lupin agent: debrief claims off: {exc}", file=sys.stderr)
-                end = debrief.window_end(period, now)
+                end = debrief.finished_window_end(period, now)
                 if not debrief.claim_window(client, repo, period, end, machine):
                     continue  # Another machine writes this window.
                 written = False
                 try:
                     debrief.write_window(STATE_DIR, repo, checkout, period, now=now)
-                    written = True
+                    written = wrote = True
                 finally:
                     debrief.finish_window(client, repo, period, end, machine, written=written)
             except Exception as exc:
                 print(f"lupin agent: no {period} debrief for {repo}: {exc}", file=sys.stderr)
+    if wrote:
+        # The window is claimed for the whole fleet, so no other machine will write it. Put the text
+        # in Redis now, so it is not lost if this machine goes away before the digest thread runs.
+        # `limit=0`: no model call here. The digest thread writes the digest.
+        try:
+            from . import digest
+
+            host, port, username, password = debrief._redis_connection()
+            digest.sync(
+                STATE_DIR,
+                dict(redis_host=host, redis_port=port, redis_username=username, redis_password=password),
+                limit=0, now=now, images=False,
+            )
+        except Exception as exc:
+            print(f"lupin agent: could not publish the new debriefs: {exc}", file=sys.stderr)
 
 
 def publish_debrief_digests() -> None:

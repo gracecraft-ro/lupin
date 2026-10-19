@@ -825,3 +825,37 @@ def test_read_refuses_an_entry_whose_record_only_flag_is_not_a_boolean(redis_por
     _raw_client(redis_port).set(digest._key("jesus", "widgets", "20261010-120000-6h.md"), json.dumps(entry))
 
     assert digest.read_one("jesus", "widgets", "20261010-120000-6h.md", **_kw(redis_port)) is None
+
+
+def test_an_old_failed_entry_for_a_record_period_becomes_a_record_and_loses_the_missing_digest_label(tmp_path, redis_port, flush_redis):
+    name = "20261010-120000-6h.md"
+    _write(tmp_path, "widgets", name)
+    old = {"machine": "jesus", "repo": "widgets", "name": name, "raw": "# x", "digest": None, "error": "claude not found", "tries": 3}
+    _raw_client(redis_port).set(digest._key("jesus", "widgets", name), json.dumps(old))
+
+    digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_make([]), now=NOW)
+
+    assert digest.read_one("jesus", "widgets", name, **_kw(redis_port))["record_only"] is True
+
+
+def test_a_12h_entry_that_used_all_its_tries_is_not_tried_again(tmp_path, redis_port, flush_redis):
+    name = "20261010-120000-12h.md"
+    _write(tmp_path, "widgets", name)
+    old = {"machine": "jesus", "repo": "widgets", "name": name, "raw": "# x", "digest": None, "error": "claude exited 1", "tries": 3}
+    _raw_client(redis_port).set(digest._key("jesus", "widgets", name), json.dumps(old))
+    calls = []
+
+    digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_make(calls), now=NOW)
+
+    assert calls == []
+
+
+def test_sync_without_images_makes_no_github_call_even_for_a_digest_that_has_pictures(tmp_path, redis_port, flush_redis, monkeypatch):
+    _write(tmp_path, "widgets", RECENT, WITH_IMAGE)
+    fetched = _fetcher(monkeypatch, (PNG, "image/png"))
+    digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_story([]), now=NOW, images=False)
+    assert fetched == []
+
+    digest.sync(tmp_path, _kw(redis_port), machine="jesus", make=_fake_story([]), now=NOW)  # Later, with images.
+
+    assert fetched == [ATTACH_ID]

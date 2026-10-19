@@ -1687,3 +1687,110 @@ def test_write_due_periodic_debriefs_skips_a_window_this_machine_already_has(tmp
 
     assert (state / "debriefs" / "widgets" / "20261010-070000-6h.md").read_text(encoding="utf-8") == "# old\n"
     assert len(_window_files(state)) == 4
+
+
+# --- review of the fleet windows: grace, self-claim, publish at once, one bad repo ---
+
+END_6H = _utc(2026, 10, 10, 7)  # The window that ends at NOW's 00:00 PDT boundary.
+
+
+def test_a_window_is_not_due_until_the_grace_after_its_end_has_passed(tmp_path: Path):
+    just_before = END_6H + timedelta(seconds=debrief.WINDOW_GRACE_S - 1)
+    at_grace = END_6H + timedelta(seconds=debrief.WINDOW_GRACE_S)
+    _debrief_file(tmp_path, "widgets", "20261010-010000-6h.md")  # The window before. This machine has it.
+
+    assert debrief.finished_window_end("6h", just_before) == _utc(2026, 10, 10, 1)
+    assert debrief.window_due(tmp_path, "widgets", "6h", just_before) is False
+    assert debrief.finished_window_end("6h", at_grace) == END_6H
+    assert debrief.window_due(tmp_path, "widgets", "6h", at_grace) is True
+
+
+def test_a_machine_with_a_fast_clock_does_not_claim_or_write_a_window_early(tmp_path: Path, monkeypatch, redis_port, flush_redis):
+    state = _fleet_machine(tmp_path, monkeypatch, redis_port, "fast")
+    two_minutes_early = END_6H - timedelta(minutes=2)  # The clock says 06:58 when it is really 06:56.
+
+    loop_runtime.write_due_periodic_debriefs(now=two_minutes_early)
+
+    names = _window_files(state)
+    assert "20261010-070000-6h.md" not in names  # The 07:00 window is not over yet.
+    raw = redis.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    assert raw.get(debrief._window_key("widgets", "6h", END_6H)) is None
+
+
+def test_write_window_uses_the_newest_window_that_is_over_by_the_grace(tmp_path: Path, monkeypatch):
+    checkout = tmp_path / "widgets"
+    checkout.mkdir()
+    _stub_io(monkeypatch)
+    monkeypatch.setattr(debrief, "_screenshots", lambda root, repo, path: "")
+
+    path = debrief.write_window(tmp_path, "widgets", checkout, "6h", now=END_6H + timedelta(seconds=30))
+
+    assert path.name == "20261010-010000-6h.md"
+
+
+def test_a_machine_can_take_back_its_own_unfinished_claim_but_not_another_machines(redis_port, flush_redis):
+    client = slots_redis.debrief_client("127.0.0.1", redis_port)
+    end = debrief.window_end("12h", NOW)
+
+    assert debrief.claim_window(client, "widgets", "12h", end, "jesus") is True
+    # The agent restarted, or a retried SET saw its own key.
+    assert debrief.claim_window(client, "widgets", "12h", end, "jesus") is True
+    assert debrief.claim_window(client, "widgets", "12h", end, "ralpha") is False
+
+
+def test_a_machine_does_not_claim_again_a_window_it_already_finished(redis_port, flush_redis):
+    client = slots_redis.debrief_client("127.0.0.1", redis_port)
+    end = debrief.window_end("12h", NOW)
+    debrief.claim_window(client, "widgets", "12h", end, "jesus")
+    debrief.finish_window(client, "widgets", "12h", end, "jesus", written=True)
+
+    assert debrief.claim_window(client, "widgets", "12h", end, "jesus") is False
+
+
+def test_new_debriefs_are_in_redis_as_soon_as_they_are_written_with_no_model_call(tmp_path: Path, monkeypatch, redis_port, flush_redis):
+    from lupin import digest
+
+    state = _fleet_machine(tmp_path, monkeypatch, redis_port, "jesus")
+
+    def no_model(*args, **kwargs):
+        raise AssertionError("the publish step must not call a model")
+
+    monkeypatch.setattr(digest, "make_digest", no_model)
+    monkeypatch.setattr(digest, "_fetch_image", no_model)
+
+    loop_runtime.write_due_periodic_debriefs(now=NOW)
+
+    entries = digest.read_all(redis_host="127.0.0.1", redis_port=redis_port)
+    assert sorted(e["name"] for e in entries) == _window_files(state)
+    assert all(e["machine"] == "jesus" and not e["digest"] for e in entries)
+    # 6h and 24h are records. The 12h and 7d windows wait for the digest thread.
+    assert {e["name"]: e["record_only"] for e in entries}["20261010-070000-6h.md"] is True
+    assert {e["name"]: e["record_only"] for e in entries}["20261010-070000-12h.md"] is False
+
+
+def test_a_failing_repo_does_not_stop_the_others_and_a_repo_without_a_checkout_is_left_alone(tmp_path: Path, monkeypatch, redis_port, flush_redis, capsys):
+    state = _fleet_machine(tmp_path, monkeypatch, redis_port, "jesus", checkout=True)
+    code = loop_runtime.CODE_DIR
+    (code / "broken").mkdir()
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"broken": "claude", "gone": "claude", "widgets": "claude"})
+
+    class FailingForBroken(FakeGh):
+        def __call__(self, args, cwd=None, timeout=None):
+            if cwd and cwd.endswith("broken"):
+                raise debrief.DebriefError("gh repo view exited 1")
+            return super().__call__(args, cwd=cwd, timeout=timeout)
+
+    monkeypatch.setattr(debrief, "_gh", FailingForBroken(dict(RESPONSES)))
+
+    loop_runtime.write_due_periodic_debriefs(now=NOW)
+
+    assert len(_window_files(state)) == 4  # widgets is written after the broken repo failed.
+    err = capsys.readouterr().err
+    for period in debrief.PERIODS:
+        assert f"lupin agent: no {period} debrief for broken: gh repo view exited 1" in err
+    assert "gone" not in err and not (state / "debriefs" / "gone").exists()
+    raw = redis.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    # The repo with no checkout never took a claim. The broken repo freed its claims.
+    assert raw.keys("*debrief-window:gone:*") == []
+    assert raw.keys("*debrief-window:broken:*") == []
+    assert len(raw.keys("*debrief-window:widgets:*")) == 4

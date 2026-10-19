@@ -466,6 +466,7 @@ def sync(
     limit: int = MAX_NEW_PER_SYNC,
     make=None,
     now: datetime | None = None,
+    images: bool = True,
 ) -> int:
     """Publish each local debrief that Redis lacks, or that has no digest yet.
 
@@ -475,6 +476,7 @@ def sync(
     So is a debrief whose period is not in `DIGEST_PERIODS`: it is a record only.
     A debrief older than `SYNC_MAX_AGE_S` is skipped. A problem with one debrief
     is printed and does not stop the others. A Redis problem ends the call.
+    `images=False` skips the picture copies, which can be slow.
     Returns the number of digests written.
     """
     machine = machine or socket.gethostname()
@@ -483,7 +485,7 @@ def sync(
     written = 0
     calls = 0
     blocked = False
-    image_budget = MAX_IMAGE_COPIES_PER_SYNC
+    image_budget = MAX_IMAGE_COPIES_PER_SYNC if images else 0  # `images=False`: no GitHub calls.
     try:
         client = _client(connection)
         for repo, name in debrief.list_debriefs(root):
@@ -499,12 +501,14 @@ def sync(
                             client, current["digest"], raw=current["raw"], machine=machine, budget=image_budget
                         )
                     continue
-                if current and (current.get("quiet") or current.get("record_only") or current.get("tries", 0) >= MAX_TRIES):
+                if current and (current.get("quiet") or current.get("record_only")):
                     continue
                 raw = debrief.read_debrief(root, repo, name)
                 tries = current.get("tries", 0) if current else 0
                 if period_of(name) not in DIGEST_PERIODS:  # A record only. No model call.
                     _publish(client, machine, repo, name, raw, record_only=True)
+                    continue
+                if current and tries >= MAX_TRIES:
                     continue
                 if is_quiet(raw):  # Nothing changed. No model call and no digest.
                     _publish(client, machine, repo, name, raw, quiet=True)

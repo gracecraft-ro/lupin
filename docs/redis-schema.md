@@ -418,6 +418,11 @@ before it writes:
 - A machine with no checkout of the repo does not claim.
 - If Redis cannot be read, the agent writes anyway. A duplicate is better than a missing debrief.
 - A machine that already has the file for the newest window does not claim again.
+- A window is written 3 minutes after it ends (`WINDOW_GRACE_S`), so a clock that is a few minutes
+  fast does not cut the window for the whole fleet. Every machine needs NTP.
+- A machine can take back its own `:writing` claim, for example after an agent restart.
+- Right after a write, the agent publishes the new debriefs to Redis (no model call). The winner of
+  the claim is the only machine that has the file, so the text must not stay only on that machine.
 
 After a long downtime the agent writes only the newest window of each period. It does not catch up.
 
@@ -558,8 +563,8 @@ to `localhost:6379` without auth. Issue #118 tracks this.
 
 Periodic debriefs run on a background thread of `lupin agent`, not in the stop
 subprocess. They do not block commands. They read the same Redis keys as stop
-debriefs. They add no new keys. Their file names end in `-6h`, `-24h`, or
-`-7d`. They have no time budget entry. The "Budget result" section and the
+debriefs. They add the keys `debrief-window:*` and `debrief-digest:*` (see
+Fleet keys). Their file names end in `-6h`, `-12h`, `-24h`, or `-7d`. They have no time budget entry. The "Budget result" section and the
 "Lock waits" section cover stop debriefs only. They connect to `localhost:6379`
 without auth, as stop debriefs do (issue #118).
 Each one also saves two screenshots in a folder named `<file name>-screenshots/`.
