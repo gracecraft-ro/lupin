@@ -105,18 +105,37 @@ def read_shared_snapshot(**connection) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def latest_snapshot(**connection) -> dict | None:
-    """The newest model snapshot: the fleet's shared one first, then this
-    machine's file.
+def _snapshot_time(snapshot: dict | None) -> datetime | None:
+    value = snapshot.get("fetched_at") if isinstance(snapshot, dict) else None
+    if not isinstance(value, str):
+        return None
+    try:
+        when = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        return None
+    return when
 
-    The shared copy is the one every machine sees, so it comes first.
-    The local file is the fallback for a machine that cannot reach Redis,
-    and it holds the same shape. `None` when there is neither.
+
+def latest_snapshot(**connection) -> dict | None:
+    """Return the newer timestamped snapshot from Redis or disk.
+
+    Use the shared snapshot if neither timestamp is valid.
     """
     shared = read_shared_snapshot(**connection)
+    local = _read_local_snapshot()
+    shared_time = _snapshot_time(shared)
+    local_time = _snapshot_time(local)
+
+    if shared_time is not None and local_time is not None:
+        return local if local_time > shared_time else shared
+    if local_time is not None:
+        return local
+    if shared_time is not None:
+        return shared
     if isinstance(shared, dict):
         return shared
-    local = _read_local_snapshot()
     return local if isinstance(local, dict) else None
 
 

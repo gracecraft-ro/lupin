@@ -334,16 +334,77 @@ class FetchBenchmarkScoresTests(_WorkerSnapshotMixin, unittest.TestCase):
 
 
 class LatestSnapshotTests(unittest.TestCase):
-    """The newest snapshot: the fleet's shared copy first, then the file."""
+    """Benchmark workers come from the newest valid snapshot."""
 
-    def test_the_shared_snapshot_wins_over_the_local_file(self):
+    def test_newer_shared_snapshot_selects_its_worker(self):
         shared = _worker_snapshot([{"id": "worker-shared", "price": {"input": 0, "output": 0}}])
+        shared["fetched_at"] = "2026-10-07T00:00:00+00:00"
         local = _worker_snapshot([{"id": "worker-local", "price": {"input": 0, "output": 0}}])
+        local["fetched_at"] = "2026-10-06T00:00:00+00:00"
         with (
             mock.patch.object(model_fetch, "read_shared_snapshot", return_value=shared),
             mock.patch.object(model_fetch, "_read_local_snapshot", return_value=local),
         ):
-            self.assertIs(model_fetch.latest_snapshot(), shared)
+            self.assertEqual(
+                benchmark_fetch._resolve_workers(),
+                (["opencode-go/worker-shared"], None),
+            )
+
+    def test_newer_local_snapshot_selects_its_worker_by_instant(self):
+        shared = _worker_snapshot([{"id": "worker-shared", "price": {"input": 0, "output": 0}}])
+        shared["fetched_at"] = "2026-10-07T01:00:00+00:00"
+        local = _worker_snapshot([{"id": "worker-local", "price": {"input": 0, "output": 0}}])
+        local["fetched_at"] = "2026-10-06T22:00:00-04:00"
+        with (
+            mock.patch.object(model_fetch, "read_shared_snapshot", return_value=shared),
+            mock.patch.object(model_fetch, "_read_local_snapshot", return_value=local),
+        ):
+            self.assertEqual(
+                benchmark_fetch._resolve_workers(),
+                (["opencode-go/worker-local"], None),
+            )
+
+    def test_valid_local_snapshot_wins_over_bad_shared_timestamp(self):
+        shared = _worker_snapshot([{"id": "worker-shared", "price": {"input": 0, "output": 0}}])
+        shared["fetched_at"] = "not a timestamp"
+        local = _worker_snapshot([{"id": "worker-local", "price": {"input": 0, "output": 0}}])
+        local["fetched_at"] = "2026-10-07T00:00:00+00:00"
+        with (
+            mock.patch.object(model_fetch, "read_shared_snapshot", return_value=shared),
+            mock.patch.object(model_fetch, "_read_local_snapshot", return_value=local),
+        ):
+            self.assertEqual(
+                benchmark_fetch._resolve_workers(),
+                (["opencode-go/worker-local"], None),
+            )
+
+    def test_valid_shared_snapshot_wins_over_bad_local_timestamp(self):
+        shared = _worker_snapshot([{"id": "worker-shared", "price": {"input": 0, "output": 0}}])
+        shared["fetched_at"] = "2026-10-07T00:00:00+00:00"
+        local = _worker_snapshot([{"id": "worker-local", "price": {"input": 0, "output": 0}}])
+        local["fetched_at"] = "not a timestamp"
+        with (
+            mock.patch.object(model_fetch, "read_shared_snapshot", return_value=shared),
+            mock.patch.object(model_fetch, "_read_local_snapshot", return_value=local),
+        ):
+            self.assertEqual(
+                benchmark_fetch._resolve_workers(),
+                (["opencode-go/worker-shared"], None),
+            )
+
+    def test_shared_snapshot_is_fallback_when_both_timestamps_are_invalid(self):
+        shared = _worker_snapshot([{"id": "worker-shared", "price": {"input": 0, "output": 0}}])
+        shared["fetched_at"] = "not a timestamp"
+        local = _worker_snapshot([{"id": "worker-local", "price": {"input": 0, "output": 0}}])
+        local["fetched_at"] = "also not a timestamp"
+        with (
+            mock.patch.object(model_fetch, "read_shared_snapshot", return_value=shared),
+            mock.patch.object(model_fetch, "_read_local_snapshot", return_value=local),
+        ):
+            self.assertEqual(
+                benchmark_fetch._resolve_workers(),
+                (["opencode-go/worker-shared"], None),
+            )
 
     def test_the_local_file_is_used_when_the_shared_snapshot_is_missing(self):
         local = _worker_snapshot([{"id": "worker-local", "price": {"input": 0, "output": 0}}])
