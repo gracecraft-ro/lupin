@@ -24,6 +24,7 @@ def test_systemd_run_uses_nixos_sudo_wrapper_when_not_on_path(monkeypatch, tmp_p
     wrapper.chmod(0o755)
     monkeypatch.setattr(loop_runtime, "NIXOS_SUDO_WRAPPER", wrapper)
     monkeypatch.setenv("PATH", "")
+    monkeypatch.delenv("LUPIN_SYSTEMD_RUN", raising=False)
     launched = []
     monkeypatch.setattr(
         loop_runtime,
@@ -39,8 +40,29 @@ def test_systemd_run_uses_nixos_sudo_wrapper_when_not_on_path(monkeypatch, tmp_p
 
 def test_sudo_argv_uses_path_when_nixos_wrapper_is_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(loop_runtime, "NIXOS_SUDO_WRAPPER", tmp_path / "sudo")
+    monkeypatch.delenv("LUPIN_SYSTEMD_RUN", raising=False)
 
     assert loop_runtime._sudo_argv("systemd-run") == ["sudo", "-n", "systemd-run"]
+
+
+def test_sudo_argv_uses_validated_systemd_run_wrapper(monkeypatch, tmp_path):
+    wrapper = tmp_path / "lupin-systemd-run"
+    monkeypatch.setattr(loop_runtime, "NIXOS_SUDO_WRAPPER", tmp_path / "sudo")
+    monkeypatch.setenv("LUPIN_SYSTEMD_RUN", str(wrapper))
+
+    assert loop_runtime._sudo_argv("systemd-run", "--unit=x") == [
+        "sudo",
+        "-n",
+        str(wrapper),
+        "--unit=x",
+    ]
+    assert loop_runtime._sudo_argv("systemctl", "start", "x") == [
+        "sudo",
+        "-n",
+        "systemctl",
+        "start",
+        "x",
+    ]
 
 
 def test_loop_state_uses_herdr_agent_state_and_ids(monkeypatch):

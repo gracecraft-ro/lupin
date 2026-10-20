@@ -79,11 +79,10 @@ the username and password from the options or the variables only.
 `lupin agent` reads its command queue through the local group path. Its
 debriefs use the debrief path and read `fleet.json` when their connection
 variables are unset. The queue needs `LUPIN_REDIS_PASSWORD` or
-`--redis-password`; the systemd credential alone is not enough.
+`--redis-password`, or the systemd credential `redis-password`.
 
-A value of `LUPIN_REDIS_PORT` that is not an integer stops every `lupin`
-command with a `ValueError`. The parser reads the variable for all
-subcommands when it starts.
+A value of `LUPIN_REDIS_PORT` that is not an integer gives one line and
+exit code 2 on the commands that use it. `--help` still works.
 
 ### `LUPIN_CLAIM_HOLDER`
 
@@ -115,10 +114,15 @@ subcommands when it starts.
 - **Default**: none. The fleet group and debriefs then use `redis_port`
   from `fleet.json`, then `6379`. The local group, `roadmap`, and the loop
   worker use `6379`.
-- **Effect**: Lupin connects to this port.
-- **Read by**: the same functions as `LUPIN_REDIS_HOST`.
+- **Effect**: Lupin connects to this port. A value that is not a whole
+  number gives one line and exit code 2 and names the variable.
+- **Read by**: `src/lupin/cli.py` (`_redis_port`, `_redis_args`,
+  `_redis_conn_args`, `_fleet_connection_args`), `src/lupin/serve.py`
+  (`_serve_port`, `main`), `src/lupin/loop_runtime.py` (`_env_int` via
+  `_redis_kwargs`), `src/lupin/debrief.py` (`_redis_connection`).
   `debrief._redis_connection` ignores a value that is not all digits.
-  The other paths raise `ValueError`.
+  `loop_runtime._env_int` raises `EnvValueError`, which `cli.main` reports
+  as the same one line and exit code 2.
 - **Set by**: the user or the host config. `lupin run` copies it into loop
   units.
 - **Option**: `--redis-port`.
@@ -187,9 +191,11 @@ subcommands when it starts.
 - **Purpose**: the slot-lease backend for `acquire`, `hold`, `release`, and
   `status`.
 - **Default**: `local`.
-- **Effect**: `redis` selects the Redis backend. Any other value selects the
-  `local` backend. The parser does not check the value of the variable.
-- **Read by**: `src/lupin/cli.py` (`_backend_args`, `_backend_module`).
+- **Effect**: `redis` selects the Redis backend. Any value except `local`
+  or `redis` gives exit code 2 with `invalid choice`, the same error as a
+  bad `--backend` value.
+- **Read by**: `src/lupin/cli.py` (`_backend_args`, `_backend_name`,
+  `_backend_module`).
 - **Set by**: the user or the host config. `lupin run` copies it into loop
   units.
 - **Option**: `--backend local|redis`.
@@ -254,6 +260,22 @@ subcommands when it starts.
   `herdr`.
 - **Read by**: `src/lupin/loop_runtime.py` (module constant `HERDR`).
 - **Set by**: the user or the host config. `lupin run` copies it into loop
+  units.
+
+### `LUPIN_SYSTEMD_RUN`
+
+- **Purpose**: a wrapper that validates `systemd-run` arguments before it
+  runs `systemd-run`.
+- **Default**: none. Lupin runs `sudo -n systemd-run` directly.
+- **Effect**: when set, Lupin runs `sudo -n <wrapper>` in place of
+  `sudo -n systemd-run` for loop units, the Herdr server, and one-off
+  timers. The wrapper gets the `systemd-run` arguments without the command
+  name. The NixOS module sets this to a wrapper that accepts only the
+  options Lupin uses, so the loop user does not need `NOPASSWD` on
+  `systemd-run` itself.
+- **Read by**: `src/lupin/loop_runtime.py` (`_sudo_argv`).
+- **Set by**: the host config. The NixOS module sets it for `lupin agent`,
+  `lupin serve`, and `lupin fleet-run`. Those services copy it into loop
   units.
 
 ### `LUPIN_LOOP_USER`
@@ -363,7 +385,8 @@ subcommands when it starts.
 - **Purpose**: one signing key for the command queue.
 - **Default**: none.
 - **Effect**:
-  - `lupin agent` checks each command with this key.
+  - `lupin agent` checks each command with this key. When the key is unset,
+    the agent reads its own key from `LUPIN_CMD_SIGNING_KEYS_DIR`.
   - `cmd send` signs each command with this key.
   - Some commands sign with this key when they have a remote `--machine`:
     `run`, `stop`, `peek`, `loops`, `schedule`, `pause`, and `resume`.
@@ -384,8 +407,9 @@ subcommands when it starts.
 - **Format**: each file name is the machine name of a worker. The machine
   name is the host name (`socket.gethostname()`) unless the worker runs
   `lupin agent --machine NAME`. Lupin removes space at the start and end.
-- **Effect**: `fleet-run` and `lupin serve` read the key of each target
-  from this directory. Lupin finds the key in this order:
+- **Effect**: `fleet-run`, `lupin serve`, and `lupin agent` read a key from
+  this directory. `lupin agent` reads the key of its own machine. Lupin
+  finds the key in this order:
   1. When the variable is set, `<dir>/<machine>`. If that file is missing,
      the machine has no key.
   2. When the variable is not set, `$CREDENTIALS_DIRECTORY/<machine>`, if
@@ -396,8 +420,9 @@ subcommands when it starts.
 - **Set by**: the host config of the sending machine.
 - **Option**: `--cmd-signing-key-dir` (`serve` only).
 
-`lupin agent` does not read this directory. Give each worker its own key
-with `LUPIN_CMD_SIGNING_KEY` or `--signing-key`.
+`lupin agent` reads the key of its own machine from this directory. You can
+also give it one key with `LUPIN_CMD_SIGNING_KEY` or `--signing-key`. That
+key wins over the directory.
 
 ### `LUPIN_GH_CANONICAL_FETCHER`
 
@@ -438,11 +463,11 @@ with `LUPIN_CMD_SIGNING_KEY` or `--signing-key`.
 - **Purpose**: how long the dashboard keeps a rendered roadmap fragment.
 - **Default**: `30` (seconds).
 - **Effect**: `/roadmap/board` uses a kept fragment for this many seconds.
-  Lupin reads the value one time, when `serve.py` loads. A value that is
-  not a number stops every `lupin` command with a `ValueError`, because
-  `cli.py` loads `serve.py`.
-- **Read by**: `src/lupin/serve.py` (module constant `_FRAGMENT_TTL`,
-  used by `_cached_fragment`).
+  Lupin reads the value when it is used. `lupin serve` checks it at
+  startup and exits 2 with one line that names the variable. Other
+  commands do not read it.
+- **Read by**: `src/lupin/serve.py` (`_fragment_ttl`, used by
+  `_cached_fragment`; checked by `main`).
 - **Set by**: the user or the host config.
 
 ## Models and quota
@@ -507,8 +532,8 @@ systemd gives a credential to a service as a file in
 | Name | Content | Read by | Given by |
 | --- | --- | --- | --- |
 | `redis-password` | The Redis password. | `machines._redis_password`, `loop_runtime._redis_kwargs`, `loop_runtime.worker` | The host config, or `lupin run` from `LUPIN_LOOP_REDIS_PASSWORD_FILE`. |
-| `gh-token` | A GitHub token for one repo. | `loop_runtime.herdr_server` | `lupin run`, from `LUPIN_LOOP_CREDENTIALS_FILE`, for a per-repo Herdr session only. |
-| `<machine>` | The signing key of that worker. | `commands.signing_key_for` | The host config of the sending machine. |
+| `gh-token` | A GitHub token for one repo. | `loop_runtime.herdr_server` | `lupin run`, from `LUPIN_LOOP_CREDENTIALS_FILE`, for a per-repo Herdr session only. The NixOS module's `systemd-run` wrapper allows it only when the source is one of the absolute paths in that file. |
+| `<machine>` | The signing key of that worker. | `commands.signing_key_for` | The host config of the machine that reads or sends commands. The NixOS module gives the agent its own key this way. |
 <!-- markdownlint-enable MD013 -->
 
 ## Files

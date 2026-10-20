@@ -30,6 +30,7 @@ from . import loops as loops_mod
 from . import machines
 from . import model_fetch
 from . import place as place_mod
+from . import pr_status
 from . import quest as quest_mod
 from . import quota
 from . import quota_cache
@@ -122,13 +123,37 @@ def _state_root_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--state-root", default=None, help="default: $LUPIN_STATE_ROOT or ~/.lupin/slots")
 
 
+def _redis_port(value: str) -> int:
+    """Parse a port from `--redis-port` or `LUPIN_REDIS_PORT`.
+
+    A wrong value must not stop the import of this module. Argparse applies
+    this function to a string default too, so the environment value gets the
+    same check and exit code 2 as the flag.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"LUPIN_REDIS_PORT or --redis-port needs a whole number, got {value!r}"
+        ) from None
+
+
+def _backend_name(value: str) -> str:
+    """Parse a backend name from `--backend` or `LUPIN_BACKEND`."""
+    if value not in ("local", "redis"):
+        raise argparse.ArgumentTypeError(
+            f"invalid choice: {value!r} (choose from 'local', 'redis')"
+        )
+    return value
+
+
 def _redis_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--redis-host", default=os.environ.get("LUPIN_REDIS_HOST", "localhost"),
         help="default: $LUPIN_REDIS_HOST or localhost",
     )
     parser.add_argument(
-        "--redis-port", type=int, default=int(os.environ.get("LUPIN_REDIS_PORT", "6379")),
+        "--redis-port", type=_redis_port, default=os.environ.get("LUPIN_REDIS_PORT", "6379"),
         help="default: $LUPIN_REDIS_PORT or 6379",
     )
     parser.add_argument(
@@ -143,7 +168,8 @@ def _redis_args(parser: argparse.ArgumentParser) -> None:
 
 def _backend_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--backend", choices=["local", "redis"], default=os.environ.get("LUPIN_BACKEND", "local"),
+        "--backend", type=_backend_name, metavar="{local,redis}",
+        default=os.environ.get("LUPIN_BACKEND", "local"),
         help="slot-lease backend (default: $LUPIN_BACKEND or local)",
     )
     _redis_args(parser)
@@ -236,7 +262,7 @@ def _redis_conn_args(parser: argparse.ArgumentParser) -> None:
         help="default: $LUPIN_REDIS_HOST or localhost",
     )
     parser.add_argument(
-        "--redis-port", type=int, default=int(os.environ.get("LUPIN_REDIS_PORT", "6379")),
+        "--redis-port", type=_redis_port, default=os.environ.get("LUPIN_REDIS_PORT", "6379"),
         help="default: $LUPIN_REDIS_PORT or 6379",
     )
     parser.add_argument(
@@ -331,6 +357,22 @@ def _serve_args(parser: argparse.ArgumentParser) -> None:
     _fleet_connection_args(parser)
 
 
+def _pr_status_args(parser: argparse.ArgumentParser) -> None:
+    """`lupin pr-status` — one read-only view of every open pull request."""
+    parser.add_argument(
+        "--repo",
+        default=None,
+        help="OWNER/REPO (default: let gh resolve the current repository)",
+    )
+    parser.add_argument("--json", action="store_true", help="print one JSON object")
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="do not truncate the description, comment, or review text",
+    )
+    _fleet_connection_args(parser)
+
+
 def _review_route_args(parser: argparse.ArgumentParser) -> None:
     """`lupin review-route` — route a pair and report which lock it needs.
 
@@ -380,8 +422,7 @@ def _fleet_connection_args(parser: argparse.ArgumentParser) -> None:
     """
     parser.add_argument("--redis-host", default=os.environ.get("LUPIN_REDIS_HOST"))
     parser.add_argument(
-        "--redis-port", type=int,
-        default=int(os.environ["LUPIN_REDIS_PORT"]) if os.environ.get("LUPIN_REDIS_PORT") else None,
+        "--redis-port", type=_redis_port, default=os.environ.get("LUPIN_REDIS_PORT"),
     )
     parser.add_argument("--redis-username", default=os.environ.get("LUPIN_REDIS_USERNAME"))
     parser.add_argument("--redis-password", default=os.environ.get("LUPIN_REDIS_PASSWORD"))
@@ -573,6 +614,9 @@ def _build_parser() -> argparse.ArgumentParser:
     _ledger_args(sub.add_parser("ledger", help="append or read shared repository events"))
     _review_route_args(
         sub.add_parser("review-route", help="route a pair and report which lock it needs")
+    )
+    _pr_status_args(
+        sub.add_parser("pr-status", help="show every open pull request in one view")
     )
     _roadmap_args(sub.add_parser("roadmap", help="prioritized open tasks, across repos"))
     _serve_args(sub.add_parser("serve", help="run the loopback fleet dashboard"))
@@ -1499,14 +1543,26 @@ def _cmd_cmd(args: argparse.Namespace) -> int:
 
 
 def _cmd_agent(args: argparse.Namespace) -> int:
-    if not args.signing_key:
-        print("agent needs --signing-key or $LUPIN_CMD_SIGNING_KEY", file=sys.stderr)
-        return 1
     machine = args.machine or machines.hostname()
+    # A fleet host can give the worker a directory with one key per worker
+    # (`LUPIN_CMD_SIGNING_KEYS_DIR`, or systemd's credential directory). The
+    # key of this machine has the machine name. `--signing-key` still wins.
+    signing_key = args.signing_key or commands.signing_key_for(machine)
+    if not signing_key:
+        print(
+            "agent needs --signing-key, $LUPIN_CMD_SIGNING_KEY, or its key in "
+            "$LUPIN_CMD_SIGNING_KEYS_DIR",
+            file=sys.stderr,
+        )
+        return 1
+    # `LoadCredential=redis-password` puts the secret in the unit's credential
+    # directory. The queue path does not read the fleet config.
+    redis_password = args.redis_password or machines._redis_password()
     try:
         agent_mod.run_forever(
-            machine, args.signing_key,
-            batch=args.batch, poll_interval=args.poll_interval, **_redis_kwargs(args),
+            machine, signing_key,
+            batch=args.batch, poll_interval=args.poll_interval,
+            **(_redis_kwargs(args) | {"redis_password": redis_password}),
         )
     except _REDIS_REFUSED as exc:
         _print_auth_failed(exc, f"agent {machine!r}")
@@ -1527,6 +1583,8 @@ def _start_loop_with_result(repo: str, args: argparse.Namespace) -> tuple[bool, 
             note=args.note,
             resume=args.resume,
         )
+    except loop_runtime.EnvValueError:
+        raise
     except loop_runtime.LoopError as exc:
         return False, f"could not start loop for {repo}: {exc}"
 
@@ -1606,6 +1664,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
             ok, message = _start_loop_with_result(repo, args)
             results.append({"repo": repo, "started": ok, "message": message})
             failed |= not ok and not message.startswith("skip ")
+    except loop_runtime.EnvValueError:
+        raise
     except loop_runtime.LoopError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1652,6 +1712,8 @@ def _cmd_fleet_run(args: argparse.Namespace) -> int:
     except slots.CoordinatorUnreachable as exc:
         print(f"cannot reach the redis coordinator: {exc}", file=sys.stderr)
         return 3
+    except loop_runtime.EnvValueError:
+        raise
     except loop_runtime.LoopError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1705,6 +1767,8 @@ def _cmd_once(args: argparse.Namespace) -> int:
             args.when, targets, platform=args.platform, provider=args.provider,
             model=args.model, note=args.note, resume=args.resume
         )
+    except loop_runtime.EnvValueError:
+        raise
     except loop_runtime.LoopError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1723,6 +1787,8 @@ def _cmd_enable(args: argparse.Namespace) -> int:
             args.orchestrator,
             clear_orchestrators=args.clear_orchestrators,
         )
+    except loop_runtime.EnvValueError:
+        raise
     except loop_runtime.LoopError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1733,6 +1799,8 @@ def _cmd_enable(args: argparse.Namespace) -> int:
 def _cmd_disable(args: argparse.Namespace) -> int:
     try:
         loop_runtime.disable_repo(args.repo)
+    except loop_runtime.EnvValueError:
+        raise
     except loop_runtime.LoopError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1753,6 +1821,8 @@ def _cmd_loops(args: argparse.Namespace) -> int:
                 rows = [loop_runtime.loop_state(args.repo)]
             else:
                 rows = loop_runtime.status_rows()
+        except loop_runtime.EnvValueError:
+            raise
         except loop_runtime.LoopError as exc:
             print(str(exc), file=sys.stderr)
             return 1
@@ -1946,6 +2016,8 @@ def _cmd_attach(args: argparse.Namespace) -> int:
     target = loops_mod.ssh_target_for(machine) if machine != local_host else None
     try:
         argv = loop_runtime.attach_argv(args.repo, machine, local_host, target)
+    except loop_runtime.EnvValueError:
+        raise
     except loop_runtime.LoopError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -2097,6 +2169,9 @@ def main(argv: list[str] | None = None) -> int:
     except _REDIS_REFUSED as exc:
         _print_auth_failed(exc, "a Redis step in this command", fleet=True)
         return 3
+    except loop_runtime.EnvValueError as exc:
+        print(f"lupin: {exc}", file=sys.stderr)
+        return 2
     except route_mod.RouteInputError as exc:
         print(f"lupin: {exc}", file=sys.stderr)
         return 2
@@ -2118,6 +2193,9 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "review-route":
         return review_dispatch.main(lupin_argv[1:])
+
+    if args.cmd == "pr-status":
+        return pr_status.main(lupin_argv[1:])
 
     if args.cmd == "route":
         return _cmd_route(args)

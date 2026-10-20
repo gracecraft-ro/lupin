@@ -6,8 +6,8 @@ description: >-
   handing off a loop run.
 compatibility: >-
   Requires Lupin, GitHub CLI, an agent runner, and the `delegation-loop`,
-  `triage`, `ship`, `code-review`, and `handoff` skills on each worker host. Redis is
-  required for fleet claims.
+  `triage`, `ship`, `code-review`, `handoff`, and `ui-pressure-test` skills on
+  each worker host. Redis is required for fleet claims.
 ---
 
 # Run a Lupin delegation loop
@@ -220,22 +220,21 @@ issue. Work that is already running continues.
 ## Install skills on loop hosts
 
 The `skills/` tree is the source. Installing the Lupin command does not
-install these files. A Nix host flake maps the five required directories from
+install these files. A Nix host flake maps the six required directories from
 its pinned Lupin input into each runner's skill set. A rebuild creates or
 updates the links; do not copy the files by hand. The `ui-pressure-test`
-skill is optional. Add it to a selected runner when a task needs visual QA.
+skill is required on every loop host.
 
 - Claude Code: `~/.claude/skills/`
 - Pi: `~/.pi/agent/skills/`
 - OMP: `~/.omp/agent/skills/`
 
-Add all five required names to each host's skill set, including any curated
-subset. Add `ui-pressure-test` to hosts that run UI pressure tests. After a
-rebuild, check that every required `SKILL.md` is readable:
+Add all six required names to each host's skill set, including any curated
+subset. After a rebuild, check that every required `SKILL.md` is readable:
 
 ```sh
 for root in "$HOME/.claude/skills" "$HOME/.pi/agent/skills" "$HOME/.omp/agent/skills"; do
-  for name in delegation-loop triage ship code-review handoff; do
+  for name in delegation-loop triage ship code-review handoff ui-pressure-test; do
     test -r "$root/$name/SKILL.md" || {
       echo "Missing $root/$name/SKILL.md" >&2
       exit 1
@@ -245,9 +244,8 @@ done
 ```
 
 Start a new agent session and confirm it loads `/delegation-loop`, `/triage`,
-`/ship`, `/code-review`, and `/handoff`. If the task needs UI pressure testing, also
-confirm it loads `/ui-pressure-test`. Do not start a worker if a skill it
-needs is missing.
+`/ship`, `/code-review`, `/handoff`, and `/ui-pressure-test`. Do not start a
+worker if a skill it needs is missing.
 
 ## Read the backlog
 
@@ -372,7 +370,8 @@ journey, and a preview is ready, dispatch a separate QA task with
 `ui-pressure-test`. Keep the test agent read-only with respect to source code,
 and keep its browser data separate from implementation work. Ask for evidence,
 prioritized tickets, and a list of untested items. Do not ask the test agent to
-fix findings.
+fix findings. See "Run a standing pressure test" below for the schedule.
+
 A worker that opens a new branch uses the runner's worktree isolation feature
 when it has one. Otherwise, it creates a separate worktree and verifies its
 working directory. On a Herdr worker, it uses the Herdr worktree commands:
@@ -694,6 +693,95 @@ not run a server for a feature branch.
 7. A PR does not need a tunnel command. The PR body says whether the change is
    visible only after the merge.
 
+## Run a standing pressure test
+
+This is a queue item, not an option. Do it for every repo with a web UI.
+
+A UI pull request changes a web UI. The repo's `frontend-ui` capability label
+marks it. If the repo has no such label, a change under the UI paths that the
+repo names marks it.
+
+Start a run when one of these is true:
+
+- The repo has no `pressure-test` event. This is the first run, so it is due.
+- 5 or more UI pull requests merged since the last run.
+- The last run is more than 24 hours old, and a UI pull request merged since
+  it.
+- A release pull request is about to open.
+
+The release trigger applies only when the repo names a release signal. The
+signal is a release pull request that the repo's `AGENTS.md` release rules
+name, or an owner `Loop:` comment. If the repo has neither, the trigger does
+not apply.
+
+A `blocked` event counts as the last run for the due check. The repo is due
+again when one of the other triggers holds, or when a host can launch the
+browser again.
+
+Read the ledger and find the newest `pressure-test` event:
+
+```sh
+lupin ledger read OWNER/REPO --limit 100000 --json
+```
+
+The default limit is 10 events. A recent `pressure-test` event can be older
+than the latest 10 events. With the default limit, you can miss it. Always
+give `--limit 100000`.
+
+The event `status` is `running`, `done`, or `blocked`. A `running` event
+younger than 4 hours means a director is active. Do not start a second one.
+A run can take 4 hours or more. The director writes the `running` event again
+before 4 hours pass. This keeps the guard true. If the orchestrator cannot see
+the director's live session, it does not treat an old `running` event as
+inactive. `lupin loops` and `herdr agent list` show live sessions. If the
+ledger exits 3, do not start a run. Report it and take the next queue item.
+
+Record the start:
+
+```sh
+lupin ledger append OWNER/REPO --event pressure-test --status running \
+  --summary "director=SESSION; reason=first|5-prs|24h|release"
+```
+
+Check that the browser starts before you dispatch. Playwright cannot launch on
+some hosts. If it does not start, try to file or update an environment issue
+in the environment repo with label `environment`. On ralpha, `gh` cannot see
+that repo (`AGENTS.md` rule 6). If `gh` cannot write, run this command. Say in
+the `blocked` event summary or the handoff that the loop did not file the
+issue. `ENV_OWNER/REPO` is the environment repo that rule 6 of the repo's
+`AGENTS.md` names. The summary text names the repo that you test:
+
+```sh
+lupin ledger append ENV_OWNER/REPO --event env-friction \
+  --summary "browser did not start for OWNER/REPO pressure test: <detail>"
+```
+
+Then run the test on a host where the browser works. If no host can launch the
+browser, write the blocked event, report it, and take the next queue item:
+
+```sh
+lupin ledger append OWNER/REPO --event pressure-test --status blocked \
+  --summary "browser did not start; see <issue or ledger entry>"
+```
+
+Dispatch `/ui-pressure-test` as the only director for that repo. The test
+agent stays read-only for source code, has its own browser data, and writes
+prioritized tickets. The test agent also writes a coverage report. The report
+has Result, Coverage, Tickets, Not tested, and Risks. Write the report to the
+QA task issue. If there is no QA task issue, put the coverage report in the
+handoff, and link the handoff entry with `--evidence`. After the agent posts
+the tickets, record the end:
+
+```sh
+lupin ledger append OWNER/REPO --event pressure-test --status done \
+  --summary "tickets=N; untested=M" --evidence "<report link>"
+```
+
+Then dispatch fix workers for the tickets. A pressure-test ticket has no pull
+request at first. Dispatch a normal implementation worker from "Dispatch work"
+for the first fix. Then use the review-fix cycle in `/code-review` on the pull
+request that it opens. Do not ask the director to fix findings.
+
 ## Monitor and finish
 
 Use `lupin machines`, `lupin peek`, and `lupin attach` to check live work. On
@@ -741,6 +829,8 @@ true:
 - Every PR that the loop owns is ready for production.
 - No PR waits for a review.
 - No research, docs, or triage item is open that a worker can do.
+- No repo with a web UI is due a pressure test. See "Run a standing pressure
+  test".
 
 Then run `/handoff`. State the exact next action and any missing owner input.
 Before that, do not ask the owner whether to go on. Never write "tell me if you
