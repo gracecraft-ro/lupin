@@ -83,6 +83,17 @@ def test_claims_for_reads_the_ttl_in_one_round_trip_when_asked(monkeypatch):
     assert result["gracecraft/lupin#6"]["ttl"] == 90.0
 
 
+def test_claims_for_works_when_the_acl_denies_multi(auth_redis_port, no_multi_kw):
+    admin = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, "redis_password": "test-pass"}
+    claims.claim("gracecraft/lupin#6", "holder-a", **admin)
+    connection = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, **no_multi_kw}
+
+    result = claims.claims_for(["gracecraft/lupin"], with_ttl=True, **connection)
+
+    assert result["gracecraft/lupin#6"]["session"] == "holder-a"
+    assert result["gracecraft/lupin#6"]["ttl"] > 0
+
+
 def test_claims_for_skips_a_claim_that_is_not_a_json_object(redis_port, flush_redis):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     claims.claim("gracecraft/lupin#6", "holder-a", **kw)
