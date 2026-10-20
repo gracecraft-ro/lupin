@@ -172,6 +172,21 @@ Do these steps on each worker. A worker must run Linux with systemd.
    `LUPIN_SYSTEMD_RUN` to the wrapper. Do not add a `systemd-run *` rule:
    it matches any arguments, including `--uid=0`, which lets the user run
    a command as root.
+
+   A manual `sudo -u <user> lupin run ...` does not inherit the service
+   environment. Set `LUPIN_SYSTEMD_RUN` to the wrapper path in your shell
+   first; otherwise `lupin run` calls plain `sudo -n systemd-run`, which
+   the sudo rule denies. `systemctl show lupin-agent.service -p Environment`
+   prints the path that the module set. For example:
+
+   ```sh
+   sudo -u lupin env LUPIN_SYSTEMD_RUN=/nix/store/.../bin/lupin-systemd-run \
+     lupin run REPO
+   ```
+
+   The wrapper accepts a `LoadCredential` only for the `redis-password`
+   credential (with the configured password file as its source) and only
+   `lupin-` unit names.
 5. Set the loop user with `LUPIN_LOOP_USER`, or make sure that `USER` is
    set. Set `LUPIN_LOOP_GROUP` if the group is not `users`.
 6. Give each repo a GitHub token. Write the path of each token file in a

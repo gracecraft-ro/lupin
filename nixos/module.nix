@@ -49,8 +49,12 @@ let
   }
   // lib.optionalAttrs (cfg.redis.passwordFile != null) {
     LUPIN_LOOP_REDIS_PASSWORD_FILE = toString cfg.redis.passwordFile;
-  }
-  // lib.optionalAttrs (cfg.signingKeysDir != null) {
+  };
+
+  # The units that sign commands for other workers need the directory.
+  # `lupin agent` reads only its own key, as a credential, so a loop unit
+  # that runs as the same user cannot see the other workers' keys.
+  signingKeysEnvironment = lib.optionalAttrs (cfg.signingKeysDir != null) {
     LUPIN_CMD_SIGNING_KEYS_DIR = toString cfg.signingKeysDir;
   };
 
@@ -62,17 +66,19 @@ let
 
   # The command queue signing keys are read from this directory. Serve and
   # `fleet-run` sign commands for every worker; the agent only needs the key
-  # of this worker. Mount the keys read-only; the service user never writes
-  # one.
+  # of this worker. Mount the keys read-only for the units that need the
+  # whole directory; the service user never writes one.
   signingKeyMount = lib.optionalAttrs (cfg.signingKeysDir != null) {
     BindReadOnlyPaths = [ (toString cfg.signingKeysDir) ];
   };
 
-  agentSigningKeyMount = lib.optionalAttrs (cfg.signingKeysDir != null) {
-    # The tmpfs hides the other workers' keys; the bind makes this worker's
-    # key readable. Binding the file alone would leave its siblings visible.
-    TemporaryFileSystem = [ "${toString cfg.signingKeysDir}:ro" ];
-    BindReadOnlyPaths = [ "${toString cfg.signingKeysDir}/${config.networking.hostName}" ];
+  # A credential is one file, so the agent's unit sees only its own key.
+  # `commands.signing_key_for` reads `$CREDENTIALS_DIRECTORY/<hostName>` when
+  # `LUPIN_CMD_SIGNING_KEYS_DIR` is unset.
+  agentSigningKeyCredential = lib.optionalAttrs (cfg.signingKeysDir != null) {
+    LoadCredential = (credentials.LoadCredential or [ ]) ++ [
+      "${config.networking.hostName}:${toString cfg.signingKeysDir}/${config.networking.hostName}"
+    ];
   };
 
   # `systemd-run` can become root with `--uid=0` or `--property=User=root`,
@@ -86,6 +92,9 @@ let
     allowed_user="${cfg.user}"
     allowed_group="${cfg.group}"
     code_dir="$(${pkgs.coreutils}/bin/realpath -m -- "${cfg.codeDir}")"
+    # The only credential a loop unit may load. Empty when the module has no
+    # Redis password file, which rejects every `LoadCredential`.
+    expected_credential_path=${lib.escapeShellArg (if cfg.redis.passwordFile != null then toString cfg.redis.passwordFile else "")}
 
     fail() {
       printf 'lupin-systemd-run: %s\n' "$*" >&2
@@ -94,6 +103,10 @@ let
 
     check_unit() {
       [ -n "$1" ] || fail "empty unit name"
+      case "$1" in
+        lupin-*) ;;
+        *) fail "unit name must start with lupin-: $1" ;;
+      esac
       case "$1" in
         *[!A-Za-z0-9_.@:-]*) fail "invalid unit name: $1" ;;
       esac
@@ -161,6 +174,13 @@ let
               [ "$name" != "$value" ] || fail "LoadCredential needs name:path"
               check_credential_name "$name"
               [ -n "$source" ] || fail "LoadCredential needs a path"
+              [ "$name" = "redis-password" ] || fail "refusing credential: $name"
+              [ -n "$expected_credential_path" ] || fail "no credential is configured"
+              case "$source" in
+                /*) ;;
+                *) fail "credential source must be absolute: $source" ;;
+              esac
+              [ "$source" = "$expected_credential_path" ] || fail "refusing credential source: $source"
               ;;
             *)
               fail "refusing property: $key"
@@ -315,7 +335,8 @@ in
       description = ''
         A directory with one command-queue signing key for each worker. Each
         file name is a worker name. `lupin serve` and `fleet-run` get the
-        directory read-only. The agent gets only the key of this machine.
+        directory read-only. The agent gets only the key of this machine, as
+        the systemd credential `<hostName>`.
       '';
     };
 
@@ -447,7 +468,7 @@ in
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       environment = commonEnvironment // controllerEnvironment;
-      serviceConfig = commonServiceConfig // agentSigningKeyMount // {
+      serviceConfig = commonServiceConfig // agentSigningKeyCredential // {
         ExecStart = "${package}/bin/lupin agent";
         Restart = "always";
         RestartSec = 5;
@@ -479,7 +500,7 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      environment = commonEnvironment // controllerEnvironment // dispatchEnvironment;
+      environment = commonEnvironment // signingKeysEnvironment // controllerEnvironment // dispatchEnvironment;
       serviceConfig = commonServiceConfig // signingKeyMount // {
         ExecStart = "${package}/bin/lupin serve --bind ${cfg.serve.bind} --port ${toString cfg.serve.port}";
         Restart = "always";
@@ -493,7 +514,7 @@ in
       description = "Dispatch enabled Lupin loops to fleet workers";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      environment = commonEnvironment // controllerEnvironment // dispatchEnvironment;
+      environment = commonEnvironment // signingKeysEnvironment // controllerEnvironment // dispatchEnvironment;
       serviceConfig = commonServiceConfig // signingKeyMount // {
         Type = "oneshot";
         ExecStart = "${package}/bin/lupin fleet-run";
