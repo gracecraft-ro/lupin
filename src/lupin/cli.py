@@ -30,6 +30,7 @@ from . import loops as loops_mod
 from . import machines
 from . import model_fetch
 from . import place as place_mod
+from . import pr_status
 from . import quest as quest_mod
 from . import quota
 from . import quota_cache
@@ -356,6 +357,22 @@ def _serve_args(parser: argparse.ArgumentParser) -> None:
     _fleet_connection_args(parser)
 
 
+def _pr_status_args(parser: argparse.ArgumentParser) -> None:
+    """`lupin pr-status` — one read-only view of every open pull request."""
+    parser.add_argument(
+        "--repo",
+        default=None,
+        help="OWNER/REPO (default: let gh resolve the current repository)",
+    )
+    parser.add_argument("--json", action="store_true", help="print one JSON object")
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="do not truncate the description, comment, or review text",
+    )
+    _fleet_connection_args(parser)
+
+
 def _review_route_args(parser: argparse.ArgumentParser) -> None:
     """`lupin review-route` — route a pair and report which lock it needs.
 
@@ -597,6 +614,9 @@ def _build_parser() -> argparse.ArgumentParser:
     _ledger_args(sub.add_parser("ledger", help="append or read shared repository events"))
     _review_route_args(
         sub.add_parser("review-route", help="route a pair and report which lock it needs")
+    )
+    _pr_status_args(
+        sub.add_parser("pr-status", help="show every open pull request in one view")
     )
     _roadmap_args(sub.add_parser("roadmap", help="prioritized open tasks, across repos"))
     _serve_args(sub.add_parser("serve", help="run the loopback fleet dashboard"))
@@ -2173,6 +2193,9 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "review-route":
         return review_dispatch.main(lupin_argv[1:])
+
+    if args.cmd == "pr-status":
+        return pr_status.main(lupin_argv[1:])
 
     if args.cmd == "route":
         return _cmd_route(args)
