@@ -164,8 +164,10 @@ has fresh, usable quota, Lupin refuses to start the loop.
 
 Explicit `--platform`, `--provider`, or `--model` options select a fixed
 orchestrator for that run and skip profile routing. For OMP, use
-`--platform omp` and optionally `--provider openai|opencode-go` or
-`--model MODEL`. For example, use
+`--platform omp` and optionally `--provider openai-codex|opencode-go` or
+`--model MODEL`. `openai` and `openai/MODEL` remain accepted aliases for
+`openai-codex` and `openai-codex/MODEL`. For example, use
+`--model openai-codex/gpt-5.6-luna` or
 `--model opencode-go/step-5-preview-free:xhigh`. Set auto-compaction for the
 selected model in OMP, near 200k tokens. Lupin passes the model to OMP; it
 does not set or check OMP's compaction settings. These options work with
@@ -334,8 +336,11 @@ loop stops) are records.
 The Debriefs page (`/debrief`) shows the debriefs of all workers, so
 PiHome shows them too. Redis holds text only. A screenshot file stays on its
 worker. A GitHub attachment image is shown through the dashboard.
-If no model can run, the debrief shows with no digest and the agent tries again
-(3 tries at most).
+If Claude cannot run, Lupin uses `openai-codex/gpt-5.6-luna`. Quota and
+rate-limit errors do not use a try; other failed model calls count (3 tries
+at most).
+If both models are blocked, the debrief shows with no digest and Lupin tries
+again later.
 
 `fetch-benchmarks` gets public benchmark scores. It does not run models.
 The lookup worker is a free opencode-go model (`step-5-preview-free`) run

@@ -373,7 +373,7 @@ def test_schedule_once_keeps_omp_provider_and_model(monkeypatch, tmp_path: Path)
     schedule, = (tmp_path / "once").glob("*.json")
     entry = json.loads(schedule.read_text(encoding="utf-8"))
     assert (entry["platform"], entry["provider"], entry["model"]) == (
-        "omp", "openai", "openai/gpt-5.2"
+        "omp", "openai-codex", "openai-codex/gpt-5.2"
     )
 
 
@@ -523,8 +523,8 @@ def test_start_loop_starts_without_delegation_doc_and_skips_duplicate(
     metadata = loop_runtime._read_metadata("widgets")
     assert metadata["state"] == "starting"
     assert metadata["platform"] == "omp"
-    assert metadata["provider"] == "openai"
-    assert metadata["model"] == "openai/gpt-5.2"
+    assert metadata["provider"] == "openai-codex"
+    assert metadata["model"] == "openai-codex/gpt-5.2"
     prompt = Path(metadata["prompt_file"]).read_text(encoding="utf-8")
     assert prompt.endswith("review\n")
     assert command[1:] == [
@@ -2153,7 +2153,7 @@ def test_select_orchestrator_uses_the_account_with_quota_left():
     choice = loop_runtime.select_orchestrator(["claude", "openai/gpt-5"], snapshot, now=now)
 
     # The free account is used up. Headroom is the paid account's 90%, not 0%.
-    assert choice == {"platform": "omp", "provider": "openai", "model": "openai/gpt-5"}
+    assert choice == {"platform": "omp", "provider": "openai-codex", "model": "openai-codex/gpt-5"}
 
 
 def test_select_orchestrator_skips_a_provider_when_every_account_is_blocked():

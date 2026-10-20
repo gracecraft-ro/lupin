@@ -93,7 +93,7 @@ def test_loop_run_returns_after_starting_lupin_worker(redis_port, flush_redis, m
             },
             [
                 "lupin", "run", "lupin", "--platform", "omp",
-                "--provider", "openai", "--model", "openai/gpt-5.2",
+                "--provider", "openai-codex", "--model", "openai-codex/gpt-5.2",
             ],
         ),
         (

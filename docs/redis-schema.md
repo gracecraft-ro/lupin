@@ -420,12 +420,12 @@ when it collected that data, so missing data never counts as quiet. The entry ha
 A model call writes the digest. It is a short story with a title, a few themes and
 up to 3 pictures. It is not a list of pull requests. A picture must be a GitHub
 attachment that the debrief itself holds. The page shows it through `/image`. The model gets no tools and no MCP servers, because the
-text can hold PR titles that other people wrote. `lupin route prose size-s` picks the model.
+text can hold PR titles that other people wrote. `lupin route prose size-s` picks a model. If it picks Claude and Claude cannot run, the worker uses `openai-codex/gpt-5.6-luna`. A quota or rate-limit error does not use a try.
 The agent's digest thread runs this every 5 minutes. It makes at most 3 digests
 in one run, newest debrief first. A debrief past that limit is stored with no
 digest and gets one in a later run. A failed model call adds 1 to the try
-count. After 3 tries the agent stops. A blocked model (no quota) does not add
-to the count. The debrief text is stored in all cases.
+count. After 3 failed calls the agent stops. A quota or rate-limit error does
+not add to the count. The debrief text is stored in all cases.
 
 The Debriefs page (`/debrief`) reads all keys with `SCAN` and `GET`. A machine
 without a loop, such as PiHome, shows the debriefs of every worker. Each key
