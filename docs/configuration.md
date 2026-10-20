@@ -526,7 +526,7 @@ systemd gives a credential to a service as a file in
 | Name | Content | Read by | Given by |
 | --- | --- | --- | --- |
 | `redis-password` | The Redis password. | `machines._redis_password`, `loop_runtime._redis_kwargs`, `loop_runtime.worker` | The host config, or `lupin run` from `LUPIN_LOOP_REDIS_PASSWORD_FILE`. |
-| `gh-token` | A GitHub token for one repo. | `loop_runtime.herdr_server` | `lupin run`, from `LUPIN_LOOP_CREDENTIALS_FILE`, for a per-repo Herdr session only. |
+| `gh-token` | A GitHub token for one repo. | `loop_runtime.herdr_server` | `lupin run`, from `LUPIN_LOOP_CREDENTIALS_FILE`, for a per-repo Herdr session only. The NixOS module's `systemd-run` wrapper allows it only when the source is one of the absolute paths in that file. |
 | `<machine>` | The signing key of that worker. | `commands.signing_key_for` | The host config of the machine that reads or sends commands. The NixOS module gives the agent its own key this way. |
 <!-- markdownlint-enable MD013 -->
 

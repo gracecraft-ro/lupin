@@ -149,11 +149,20 @@ The module needs these secret files:
   its environment. Skip this option if the coordinator has no password.
 - `signingKeysDir`: a directory with one command-queue key for each worker.
   The file name is the worker name and the file holds that worker's key.
-  `lupin serve` and `fleet-run` read every key. `lupin agent` sees only the
-  key of the local machine; the module hides the rest of the directory.
+  On a worker, keep the directory root-owned with mode `0700` and the key
+  files mode `0400`. `lupin agent` receives only its own key as a systemd
+  credential, and every unit the loop `systemd-run` wrapper starts mounts the
+  directory inaccessible (`InaccessiblePaths=`), so a loop unit cannot read
+  any key. `lupin serve` and `fleet-run` need the whole directory read-only,
+  so on a dispatch machine `cfg.user` must be able to read it. With
+  `role = "both"`, `serve` holds the directory open to `cfg.user`, and a loop
+  unit on that machine can reach the keys through `serve`; use `worker` and
+  `dispatch` on separate machines when the keys must stay apart.
 - `credentialsFile`: a JSON file that maps a repository name to its GitHub
   token file, for `LUPIN_LOOP_CREDENTIALS_FILE`. The agent, the dashboard,
-  and `fleet-run` read it.
+  and `fleet-run` read it. The wrapper allows `LoadCredential=gh-token:PATH`
+  only when `PATH` is one of the values in this file; without the file it
+  rejects `gh-token`.
 
 The default `serve.bind` is `127.0.0.1` and cannot be `0.0.0.0`. The default
 `serve.port` is 8788. The default package is the flake's
@@ -167,7 +176,9 @@ The module also writes the sudo rules for the loop control path. The loop
 user can start and stop `lupin-*` units and the `delegation-loop` timer. The
 `systemd-run` rule names a wrapper, not `systemd-run` itself: the wrapper
 accepts only the options Lupin uses and the Lupin command, so the loop user
-cannot pass `--uid=0` or `--property=User=root`. Set `role = "dispatch"` to
+cannot pass `--uid=0` or `--property=User=root`. The wrapper also adds
+`--property=InaccessiblePaths=<signingKeysDir>` itself after it validates the
+arguments, so a loop unit cannot remove it. Set `role = "dispatch"` to
 set `LUPIN_LOOP_COORDINATOR_ONLY` for `lupin serve` and `fleet-run`, which
 hides the local loop start control.
 

@@ -92,9 +92,26 @@ let
     allowed_user="${cfg.user}"
     allowed_group="${cfg.group}"
     code_dir="$(${pkgs.coreutils}/bin/realpath -m -- "${cfg.codeDir}")"
-    # The only credential a loop unit may load. Empty when the module has no
-    # Redis password file, which rejects every `LoadCredential`.
+    # The only Redis credential a loop unit may load. Empty when the module
+    # has no Redis password file, which rejects that credential.
     expected_credential_path=${lib.escapeShellArg (if cfg.redis.passwordFile != null then toString cfg.redis.passwordFile else "")}
+    # The directory the agent's key lives in. Every unit the wrapper allows
+    # gets it mounted inaccessible, so a loop cannot read the sibling keys.
+    signing_keys_dir=${lib.escapeShellArg (if cfg.signingKeysDir != null then toString cfg.signingKeysDir else "")}
+    # The repository token map. A `gh-token` credential may load only one of
+    # its files. Empty when the module has no map, which rejects `gh-token`.
+    credentials_file=${lib.escapeShellArg (if cfg.credentialsFile != null then toString cfg.credentialsFile else "")}
+
+    # `jq` reads the repository token map below.
+    export PATH="${pkgs.jq}/bin:''${PATH:-/run/current-system/sw/bin:/usr/bin:/bin}"
+
+    credential_source_in_map() {
+      local candidate
+      while IFS= read -r candidate; do
+        [ "$candidate" = "$1" ] && return 0
+      done < <(jq -r '.[]' "$credentials_file" 2>/dev/null)
+      return 1
+    }
 
     fail() {
       printf 'lupin-systemd-run: %s\n' "$*" >&2
@@ -174,13 +191,24 @@ let
               [ "$name" != "$value" ] || fail "LoadCredential needs name:path"
               check_credential_name "$name"
               [ -n "$source" ] || fail "LoadCredential needs a path"
-              [ "$name" = "redis-password" ] || fail "refusing credential: $name"
-              [ -n "$expected_credential_path" ] || fail "no credential is configured"
               case "$source" in
                 /*) ;;
                 *) fail "credential source must be absolute: $source" ;;
               esac
-              [ "$source" = "$expected_credential_path" ] || fail "refusing credential source: $source"
+              case "$name" in
+                redis-password)
+                  [ -n "$expected_credential_path" ] || fail "no credential is configured"
+                  [ "$source" = "$expected_credential_path" ] || fail "refusing credential source: $source"
+                  ;;
+                gh-token)
+                  [ -n "$credentials_file" ] || fail "no repository credential map is configured"
+                  [ -r "$credentials_file" ] || fail "repository credential map is not readable: $credentials_file"
+                  credential_source_in_map "$source" || fail "refusing credential source: $source"
+                  ;;
+                *)
+                  fail "refusing credential: $name"
+                  ;;
+              esac
               ;;
             *)
               fail "refusing property: $key"
@@ -218,7 +246,20 @@ let
     done
 
     [ "$seen_command" = 1 ] || fail "missing the $lupin command"
-    exec "$systemd_run" "''${original[@]}"
+
+    # Add the property after validation, so a caller cannot remove it. Only
+    # the first `--` separates the systemd-run options from the command.
+    exec_argv=()
+    injected=0
+    for arg in "''${original[@]}"; do
+      if [ "$injected" = 0 ] && [ "$arg" = "--" ] && [ -n "$signing_keys_dir" ]; then
+        exec_argv+=("--property=InaccessiblePaths=$signing_keys_dir")
+        injected=1
+      fi
+      exec_argv+=("$arg")
+    done
+
+    exec "$systemd_run" "''${exec_argv[@]}"
   '';
 
   # The agent, the dashboard, and `fleet-run` start loop units with the
@@ -253,7 +294,10 @@ in
       description = ''
         The job of this machine. A worker runs `lupin agent` and loops. A
         dispatch machine runs `lupin serve` and `fleet-run`. `both` runs
-        every service.
+        every service. `both` also gives the signing-key directory to
+        `serve`, so a loop unit on that machine can read the whole directory
+        through `serve`. Use `worker` and `dispatch` on separate machines
+        when the signing keys must stay apart.
       '';
     };
 
@@ -334,9 +378,17 @@ in
       default = null;
       description = ''
         A directory with one command-queue signing key for each worker. Each
-        file name is a worker name. `lupin serve` and `fleet-run` get the
-        directory read-only. The agent gets only the key of this machine, as
-        the systemd credential `<hostName>`.
+        file name is a worker name. On a worker, make the directory root-owned
+        with mode `0700` and each key file mode `0400`: the agent reads only
+        its own key as the systemd credential `<hostName>`, and every unit
+        that the loop `systemd-run` wrapper starts mounts the whole directory
+        inaccessible (`InaccessiblePaths=`), so a loop unit cannot read it.
+        `lupin serve` and `fleet-run` need the directory and get it read-only,
+        so on a dispatch machine `cfg.user` must be able to read it (for
+        example, `0750` with a group that has `cfg.user`). `role = "both"`
+        gives the directory to `serve`, so a loop on that machine can read it
+        through `serve`'s credentials; use `worker` and `dispatch` on separate
+        machines when the keys must stay apart.
       '';
     };
 
@@ -346,7 +398,9 @@ in
       description = ''
         A JSON object that maps a repository name to the path of its GitHub
         token file. The agent, the dashboard, and `fleet-run` read it as
-        `LUPIN_LOOP_CREDENTIALS_FILE`.
+        `LUPIN_LOOP_CREDENTIALS_FILE`. The loop `systemd-run` wrapper allows
+        `LoadCredential=gh-token:<path>` only when `<path>` is one of the
+        values in this object. Without this option, it rejects `gh-token`.
       '';
     };
 

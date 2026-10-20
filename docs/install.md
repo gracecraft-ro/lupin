@@ -141,8 +141,14 @@ key of the target worker.
    worker. The file name is the machine name of the worker. The machine
    name is the host name, unless the worker runs `lupin agent --machine
    NAME`.
-4. Make the directory and its files readable only by the user that runs
-   Lupin.
+4. On a worker, keep only the worker's own key, make the directory
+   root-owned with mode `0700`, and make each key file mode `0400`. The
+   agent loads its key as a systemd credential, and loop units cannot read
+   the directory (`InaccessiblePaths=`). On a machine that runs
+   `lupin serve` or `lupin fleet-run`, `cfg.user` must be able to read the
+   directory. With `role = "both"`, `serve` exposes the directory to
+   `cfg.user`; use `worker` and `dispatch` on separate machines when the
+   keys must stay apart.
 5. Set `LUPIN_CMD_SIGNING_KEYS_DIR` to the directory. As an alternative,
    load each file as a systemd credential with the worker name as the
    credential name. Lupin then reads it from `$CREDENTIALS_DIRECTORY`.
