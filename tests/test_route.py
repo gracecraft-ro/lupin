@@ -223,6 +223,20 @@ class RouteTests(unittest.TestCase):
         self.assertEqual(result, {"model": "opencode-go/glm-5.3", "effort": "high"})
 
 
+class ProviderForModelTests(unittest.TestCase):
+    """Which quota provider a routed model runs on (issue #241)."""
+
+    def test_the_codex_prefix_maps_to_the_openai_provider(self):
+        # "openai-codex/" is the real prefix for the OpenAI (Codex)
+        # subscription. It has to land on the "openai" provider, the name
+        # quota.py tracks that account under.
+        self.assertEqual(route.provider_for_model("openai-codex/gpt-6.1-sol"), "openai")
+        self.assertEqual(route.provider_for_model("openai-codex/gpt-5.6-terra"), "openai")
+
+    def test_the_openai_alias_maps_to_the_same_provider(self):
+        self.assertEqual(route.provider_for_model("openai/gpt-6-luna"), "openai")
+
+
 class RoutePacingTests(unittest.TestCase):
     """Issue #36: quota is fleet-wide, so route() paces on it directly.
     Grace's three literal rules (see pace.py), exercised through route()'s
@@ -250,6 +264,53 @@ class RoutePacingTests(unittest.TestCase):
 
         self.assertEqual(result["model"], "opencode-go/glm-5.3")
         self.assertEqual(result["downgraded_from"], {"model": "opus", "effort": "high"})
+
+    def test_a_codex_tier_entry_is_blocked_when_the_openai_quota_is_blocked(self):
+        # "openai-codex/" models run on the OpenAI account, so a blocked
+        # openai quota blocks them too. The pick must move off the codex
+        # model instead of running it while the account is out of quota.
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier2": [
+                        {"model": "openai-codex/gpt-6.1-sol", "effort": "high"},
+                        {"model": "opus", "effort": "high"},
+                    ],
+                }
+            }
+        }
+        rows = [self._row("openai", 100, 10 * HOUR_MS)]
+        result = route.route("coding", "size-l", tiers=tiers, quota_rows=rows)
+
+        self.assertEqual(result["model"], "opus")
+        self.assertEqual(
+            result["downgraded_from"],
+            {"model": "openai-codex/gpt-6.1-sol", "effort": "high"},
+        )
+
+    def test_a_blocked_codex_tier_entry_waits_when_no_other_provider_is_open(self):
+        # Every provider is blocked, so there is nothing to fall to. The
+        # route reports a wait on the codex model. It must not hand back a
+        # model it knows is blocked.
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier2": [
+                        {"model": "openai-codex/gpt-6.1-sol", "effort": "high"},
+                        {"model": "opus", "effort": "high"},
+                    ],
+                }
+            }
+        }
+        rows = [
+            self._row("openai", 100, 10 * HOUR_MS),
+            self._row("claude", 100, 10 * HOUR_MS),
+        ]
+        result = route.route("coding", "size-l", tiers=tiers, quota_rows=rows)
+
+        self.assertEqual(result["model"], "openai-codex/gpt-6.1-sol")
+        self.assertNotIn("downgraded_from", result)
+        self.assertIsNotNone(result["wait_seconds"])
 
     def test_fable_on_a_blocked_claude_account_is_not_a_fallback(self):
         # fable is served by the claude account, the same account as opus.
@@ -555,6 +616,53 @@ class PackagedTiersTests(unittest.TestCase):
             for tier_name, entries in row["tiers"].items():
                 for entry in entries:
                     self.assertNotEqual(entry["model"], "fable", f"{category} {tier_name}")
+
+    def test_packaged_tiers_offer_a_codex_model_in_every_category(self):
+        # Issue #241: every category has an openai-codex fallback, so a
+        # blocked Claude account still has a paid model to fall to.
+        packaged = json.loads(
+            resources.files("lupin").joinpath("model-tiers.json").read_text(encoding="utf-8")
+        )
+        for category, row in packaged.items():
+            if category.startswith("_"):
+                continue
+            with self.subTest(category=category):
+                models = [
+                    entry["model"]
+                    for entries in row["tiers"].values()
+                    for entry in entries
+                ]
+                self.assertTrue(
+                    [model for model in models if model.startswith("openai-codex/")],
+                    f"{category} has no openai-codex model",
+                )
+
+    def test_packaged_tiers_never_pick_a_luna_model(self):
+        # Owner rule (2026-10-20): no luna model in the default picks.
+        packaged = json.loads(
+            resources.files("lupin").joinpath("model-tiers.json").read_text(encoding="utf-8")
+        )
+        for category, row in packaged.items():
+            if category.startswith("_"):
+                continue
+            for tier_name, entries in row["tiers"].items():
+                for entry in entries:
+                    self.assertNotIn("luna", entry["model"], f"{category} {tier_name}")
+
+    def test_packaged_codex_models_sit_above_tier0(self):
+        # The OpenAI quota window is shared with other work, so no codex
+        # model may sit in tier0 (issue #241).
+        packaged = json.loads(
+            resources.files("lupin").joinpath("model-tiers.json").read_text(encoding="utf-8")
+        )
+        for category, row in packaged.items():
+            if category.startswith("_"):
+                continue
+            for entry in row["tiers"].get("tier0", []):
+                self.assertFalse(
+                    entry["model"].startswith("openai-codex/"),
+                    f"{category} tier0 {entry['model']}",
+                )
 
 
 if __name__ == "__main__":
