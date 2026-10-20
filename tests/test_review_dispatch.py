@@ -107,6 +107,10 @@ def _fake_run_gh_json(args, *, repo=None, timeout=60):
     if kind == "issue":
         if item == "1":
             return {"body": "issue body", "comments": [{"body": "a comment"}]}, None
+        if item == "2":
+            # Current gh resolves a PR number in `issue view`; only the PR
+            # lookup carries reviews and files.
+            return {"body": "pr body", "comments": []}, None
         return None, "GraphQL: Could not resolve to an Issue"
     if kind == "pr":
         if item == "2":

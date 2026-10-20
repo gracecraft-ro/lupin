@@ -134,43 +134,48 @@ def _fetch_item(item: str, *, repo: str | None = None) -> dict:
     """Fetch one issue or PR's text and (for a PR) its diff stat.
 
     An issue and a PR share one number counter in a GitHub repo, so there is
-    no way to tell which an item is without asking. Try `gh issue view`
-    first; if that fails, it's either a PR or nothing. Diff stat only --
-    the changed-file list plus additions/deletions -- never the full diff
-    text (out of scope, see issue #1: same cost whether lupin or the
-    dispatched agent fetches it).
+    no way to tell which an item is without asking. Ask `gh pr view` first:
+    current `gh` resolves a PR number in `gh issue view` too, so the issue
+    lookup cannot distinguish the two. Only when the PR lookup fails is the
+    item an issue or nothing. Diff stat only -- the changed-file list plus
+    additions/deletions -- never the full diff text (out of scope, see issue
+    #1: same cost whether lupin or the dispatched agent fetches it).
     """
-    issue_data, issue_error = _run_gh_json(
-        ["issue", "view", item, "--json", "body,comments"], repo=repo
-    )
-    if issue_data is not None:
-        return {
-            "kind": "issue",
-            "body": issue_data.get("body") or "",
-            "comments": [
-                _trim_comment(comment) for comment in issue_data.get("comments") or []
-            ],
-        }
-
     pr_data, pr_error = _run_gh_json(
         ["pr", "view", item, "--json", "body,comments,reviews,files"], repo=repo
     )
-    if pr_data is None:
-        return {"error": f"not a fetchable issue or PR {item!r}: {issue_error}; {pr_error}"}
+    if pr_data is not None:
+        files = pr_data.pop("files", [])
+        return {
+            "kind": "pr",
+            "body": pr_data.get("body") or "",
+            "comments": [
+                _trim_comment(comment) for comment in pr_data.get("comments") or []
+            ],
+            "reviews": [
+                _trim_review(review) for review in pr_data.get("reviews") or []
+            ],
+            "diff_stat": [
+                {
+                    "path": f["path"],
+                    "additions": f["additions"],
+                    "deletions": f["deletions"],
+                }
+                for f in files
+            ],
+        }
 
-    files = pr_data.pop("files", [])
+    issue_data, issue_error = _run_gh_json(
+        ["issue", "view", item, "--json", "body,comments"], repo=repo
+    )
+    if issue_data is None:
+        return {"error": f"not a fetchable issue or PR {item!r}: {pr_error}; {issue_error}"}
+
     return {
-        "kind": "pr",
-        "body": pr_data.get("body") or "",
-        "comments": [_trim_comment(comment) for comment in pr_data.get("comments") or []],
-        "reviews": [_trim_review(review) for review in pr_data.get("reviews") or []],
-        "diff_stat": [
-            {
-                "path": f["path"],
-                "additions": f["additions"],
-                "deletions": f["deletions"],
-            }
-            for f in files
+        "kind": "issue",
+        "body": issue_data.get("body") or "",
+        "comments": [
+            _trim_comment(comment) for comment in issue_data.get("comments") or []
         ],
     }
 

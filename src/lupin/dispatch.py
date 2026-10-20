@@ -6,9 +6,11 @@ the repository, under the loop state directory's `notes/`, so it is never
 committed and a worker never has to decode JSON to read it.
 
 The order matters: claim first, then fetch, then write the brief, then start
-the loop. A failed fetch releases the claim instead of leaving a worker to
-run on a partial brief. A failed start keeps the claim: the work is still
-this holder's, and the caller can retry.
+the loop. A failed fetch or a failed brief write releases the claim instead
+of leaving a worker to run on a partial brief. A failed start keeps the
+claim: the work is still this holder's, and the caller can retry. A brief
+longer than `loop_runtime.MAX_NOTE_CHARS` is not passed as the start note;
+the note names the brief path instead, which the loop user can read.
 """
 
 from __future__ import annotations
@@ -72,9 +74,11 @@ def dispatch(
 ) -> dict:
     """Claim `item`, write its brief, and (unless `no_start`) start its loop.
 
-    Raises `DispatchError` for a missing holder, a failed fetch, or a start
-    that returned false. Claim errors keep their own exception type so the
-    CLI can map them to the same exit codes as `claim`.
+    Raises `DispatchError` for a missing holder, a failed fetch, a failed
+    brief write, or a start that returned false. A failed fetch or write
+    releases the claim; `no_start` and a failed start keep it. Claim errors
+    keep their own exception type so the CLI can map them to the same exit
+    codes as `claim`.
     """
     if not holder:
         raise DispatchError("dispatch needs --holder or LUPIN_CLAIM_HOLDER")
@@ -100,13 +104,26 @@ def dispatch(
         raise DispatchError(data["error"])
 
     brief = review_dispatch.brief_markdown(target, data)
-    path = write_brief(target, brief, state_dir=state_dir)
+    try:
+        path = write_brief(target, brief, state_dir=state_dir)
+    except OSError as error:
+        # Leave no claim behind for a brief that never reached disk.
+        try:
+            claims.release_claim(target, holder, **connection)
+        except Exception:
+            pass  # the claim's TTL is the backstop
+        raise DispatchError(
+            f"could not write the brief for {target}: {error}"
+        ) from error
 
     started = False
     message = ""
     if not no_start:
+        note = brief
+        if len(brief) > loop_runtime.MAX_NOTE_CHARS:
+            note = f"Read the brief at {path}."
         try:
-            started, message = loop_runtime.start_loop(repo, note=brief)
+            started, message = loop_runtime.start_loop(repo, note=note)
         except loop_runtime.LoopError as exc:
             raise DispatchError(str(exc)) from exc
         if not started:

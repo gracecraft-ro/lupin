@@ -30,7 +30,7 @@ lupin fetch-models [--snapshot-file FILE] [--no-write] [--json]
 lupin fetch-benchmarks [--force] [--json]
 lupin quota [--json]
 lupin review-route (--category C --size S | --issue-json FILE) [--mode M]
-lupin review-route --prefetch N[,N...] [--repo OWNER/REPO]
+lupin review-route --prefetch N[,N...] [--repo OWNER/REPO] [--json]
 lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
 lupin hold (--lease ID | <slot> --holder H --wait S) [--ttl SECONDS] -- <command>
 lupin release --lease ID
@@ -92,8 +92,11 @@ trimmed to the fields a worker reads: comments keep
 `dispatch OWNER/REPO#N` claims the item, writes a markdown brief with its
 body and every comment (plus reviews and changed files for a PR) under the
 loop state directory's `notes/`, and starts the loop with that brief. Add
-`--no-start` to only write the brief, or `--json` for its path and claim.
-The brief is never committed to the repository.
+`--no-start` to only write the brief; the claim stays with the holder.
+`--json` prints the brief's path and the claim. A brief over 8,000
+characters is passed to the loop as a short note naming its path, because
+the loop's note field has a cap. The brief is never committed to the
+repository.
 
 `acquire` prints a lease ID on success. Exit code 2 means the slot is full.
 The caller must skip and try again later. Exit code 3 means the `redis`

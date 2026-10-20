@@ -14,6 +14,7 @@ from lupin import cli
 from lupin import dispatch as dispatch_mod
 from lupin import loop_runtime
 from lupin import review_dispatch
+from lupin import slots_redis
 
 
 ISSUE = {
@@ -227,8 +228,106 @@ def test_json_prints_the_contract_fields(tmp_path):
     assert payload["started"] is True
 
 
+def test_brief_over_the_note_cap_starts_with_a_path_note(tmp_path):
+    start = mock.Mock(return_value=(True, "started widgets"))
+    big = {**ISSUE, "body": "x" * 9000}
+    with mock.patch.object(dispatch_mod.claims, "claim"), mock.patch.object(
+        dispatch_mod.review_dispatch, "prefetch", side_effect=_prefetch(big)
+    ), mock.patch.object(dispatch_mod.loop_runtime, "start_loop", start):
+        result = dispatch_mod.dispatch("o/r#1", "holder", state_dir=tmp_path)
+
+    with open(result["brief_path"], encoding="utf-8") as handle:
+        brief = handle.read()
+    assert len(brief) > loop_runtime.MAX_NOTE_CHARS
+    assert start.call_args == mock.call(
+        "r", note=f"Read the brief at {result['brief_path']}."
+    )
+
+
+def test_brief_at_the_note_cap_is_passed_whole(tmp_path):
+    empty = review_dispatch.brief_markdown("o/r#1", {**ISSUE, "body": ""})
+    at_cap = {**ISSUE, "body": "x" * (loop_runtime.MAX_NOTE_CHARS - len(empty))}
+    brief = review_dispatch.brief_markdown("o/r#1", at_cap)
+    assert len(brief) == loop_runtime.MAX_NOTE_CHARS
+
+    start = mock.Mock(return_value=(True, "started widgets"))
+    with mock.patch.object(dispatch_mod.claims, "claim"), mock.patch.object(
+        dispatch_mod.review_dispatch, "prefetch", side_effect=_prefetch(at_cap)
+    ), mock.patch.object(dispatch_mod.loop_runtime, "start_loop", start):
+        dispatch_mod.dispatch("o/r#1", "holder", state_dir=tmp_path)
+
+    assert start.call_args == mock.call("r", note=brief)
+
+
+def test_brief_write_failure_releases_the_claim_and_exits_1(tmp_path):
+    release = mock.Mock(return_value=True)
+    start = mock.Mock()
+    err = io.StringIO()
+    with mock.patch.object(dispatch_mod.claims, "claim"), mock.patch.object(
+        dispatch_mod.claims, "release_claim", release
+    ), mock.patch.object(
+        dispatch_mod.review_dispatch, "prefetch", side_effect=_prefetch(ISSUE)
+    ), mock.patch.object(
+        dispatch_mod, "write_brief", side_effect=OSError("read-only file system")
+    ), mock.patch.object(
+        dispatch_mod.loop_runtime, "start_loop", start
+    ), mock.patch.dict(
+        "os.environ", {"LUPIN_LOOP_STATE_DIR": str(tmp_path)}
+    ), contextlib.redirect_stderr(err):
+        rc = cli.main(["dispatch", "o/r#1", "--holder", "holder"])
+
+    assert rc == 1
+    assert len(err.getvalue().splitlines()) == 1
+    assert "read-only file system" in err.getvalue()
+    assert release.call_count == 1
+    assert release.call_args.args == ("o/r#1", "holder")
+    start.assert_not_called()
+
+
+def test_redis_login_refusal_exits_3(tmp_path):
+    refusal = slots_redis.CoordinatorAuthFailed(
+        "redis refused the login. Check the Redis password."
+    )
+    err = io.StringIO()
+    with mock.patch.object(
+        dispatch_mod.claims, "claim", side_effect=refusal
+    ), contextlib.redirect_stderr(err):
+        rc = cli.main(
+            [
+                "dispatch",
+                "o/r#1",
+                "--holder",
+                "holder",
+                "--redis-password",
+                "hunter2",
+            ]
+        )
+
+    assert rc == 3
+    assert len(err.getvalue().splitlines()) == 1
+    assert "redis refused the login" in err.getvalue()
+    assert "hunter2" not in err.getvalue()
+
+
 def _fake_gh(args, *, repo=None, timeout=60):
     kind, item = args[0], args[2]
+    if kind == "pr":
+        if item == "2":
+            return {
+                "body": "pr body",
+                "comments": [],
+                "reviews": [
+                    {
+                        "author": {"login": "dave"},
+                        "state": "APPROVED",
+                        "submittedAt": "2026-02-02T00:00:00Z",
+                        "body": "looks good",
+                        "commit": {"oid": "abc"},
+                    }
+                ],
+                "files": [{"path": "a.py", "additions": 3, "deletions": 1}],
+            }, None
+        return None, "no pull requests found"
     if kind == "issue":
         if item == "1":
             return {
@@ -243,23 +342,33 @@ def _fake_gh(args, *, repo=None, timeout=60):
                     }
                 ],
             }, None
+        if item == "2":
+            # Current gh resolves a PR number in `issue view` and returns an
+            # issue-shaped payload with no reviews or files.
+            return {"body": "pr body", "comments": []}, None
         return None, "not an issue"
-    if item == "2":
-        return {
-            "body": "pr body",
-            "comments": [],
-            "reviews": [
-                {
-                    "author": {"login": "dave"},
-                    "state": "APPROVED",
-                    "submittedAt": "2026-02-02T00:00:00Z",
-                    "body": "looks good",
-                    "commit": {"oid": "abc"},
-                }
-            ],
-            "files": [{"path": "a.py", "additions": 3, "deletions": 1}],
-        }, None
-    return None, "not a pr"
+    raise AssertionError(f"unexpected gh args: {args}")
+
+
+def test_pr_number_is_a_pr_not_an_issue():
+    with mock.patch.object(
+        review_dispatch, "_run_gh_json", side_effect=_fake_gh
+    ):
+        result = review_dispatch.prefetch(["2"])
+
+    assert result["2"]["kind"] == "pr"
+    assert result["2"]["body"] == "pr body"
+    assert result["2"]["reviews"] == [
+        {
+            "author": {"login": "dave"},
+            "state": "APPROVED",
+            "submittedAt": "2026-02-02T00:00:00Z",
+            "body": "looks good",
+        }
+    ]
+    assert result["2"]["diff_stat"] == [
+        {"path": "a.py", "additions": 3, "deletions": 1}
+    ]
 
 
 def test_prefetch_defaults_to_markdown():

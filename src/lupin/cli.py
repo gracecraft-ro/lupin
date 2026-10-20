@@ -284,7 +284,7 @@ def _dispatch_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--no-start", action="store_true",
-        help="write the brief and print its path, but start no worker",
+        help="write the brief and print its path, but start no worker; the claim stays",
     )
     parser.add_argument("--json", action="store_true")
     _redis_conn_args(parser)
