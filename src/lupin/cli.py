@@ -122,13 +122,37 @@ def _state_root_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--state-root", default=None, help="default: $LUPIN_STATE_ROOT or ~/.lupin/slots")
 
 
+def _redis_port(value: str) -> int:
+    """Parse a port from `--redis-port` or `LUPIN_REDIS_PORT`.
+
+    A wrong value must not stop the import of this module. Argparse applies
+    this function to a string default too, so the environment value gets the
+    same check and exit code 2 as the flag.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"LUPIN_REDIS_PORT or --redis-port needs a whole number, got {value!r}"
+        ) from None
+
+
+def _backend_name(value: str) -> str:
+    """Parse a backend name from `--backend` or `LUPIN_BACKEND`."""
+    if value not in ("local", "redis"):
+        raise argparse.ArgumentTypeError(
+            f"invalid choice: {value!r} (choose from 'local', 'redis')"
+        )
+    return value
+
+
 def _redis_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--redis-host", default=os.environ.get("LUPIN_REDIS_HOST", "localhost"),
         help="default: $LUPIN_REDIS_HOST or localhost",
     )
     parser.add_argument(
-        "--redis-port", type=int, default=int(os.environ.get("LUPIN_REDIS_PORT", "6379")),
+        "--redis-port", type=_redis_port, default=os.environ.get("LUPIN_REDIS_PORT", "6379"),
         help="default: $LUPIN_REDIS_PORT or 6379",
     )
     parser.add_argument(
@@ -143,7 +167,7 @@ def _redis_args(parser: argparse.ArgumentParser) -> None:
 
 def _backend_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--backend", choices=["local", "redis"], default=os.environ.get("LUPIN_BACKEND", "local"),
+        "--backend", type=_backend_name, default=os.environ.get("LUPIN_BACKEND", "local"),
         help="slot-lease backend (default: $LUPIN_BACKEND or local)",
     )
     _redis_args(parser)
@@ -236,7 +260,7 @@ def _redis_conn_args(parser: argparse.ArgumentParser) -> None:
         help="default: $LUPIN_REDIS_HOST or localhost",
     )
     parser.add_argument(
-        "--redis-port", type=int, default=int(os.environ.get("LUPIN_REDIS_PORT", "6379")),
+        "--redis-port", type=_redis_port, default=os.environ.get("LUPIN_REDIS_PORT", "6379"),
         help="default: $LUPIN_REDIS_PORT or 6379",
     )
     parser.add_argument(
@@ -380,8 +404,7 @@ def _fleet_connection_args(parser: argparse.ArgumentParser) -> None:
     """
     parser.add_argument("--redis-host", default=os.environ.get("LUPIN_REDIS_HOST"))
     parser.add_argument(
-        "--redis-port", type=int,
-        default=int(os.environ["LUPIN_REDIS_PORT"]) if os.environ.get("LUPIN_REDIS_PORT") else None,
+        "--redis-port", type=_redis_port, default=os.environ.get("LUPIN_REDIS_PORT"),
     )
     parser.add_argument("--redis-username", default=os.environ.get("LUPIN_REDIS_USERNAME"))
     parser.add_argument("--redis-password", default=os.environ.get("LUPIN_REDIS_PASSWORD"))

@@ -1028,11 +1028,20 @@ def _load_credential(name: str) -> str | None:
     return value or None
 
 
+def _env_int(name: str, default: int) -> int:
+    """A whole number from `name`, or a clean `LoopError`."""
+    value = os.environ.get(name, str(default))
+    try:
+        return int(value)
+    except ValueError:
+        raise LoopError(f"{name} needs a whole number, got {value!r}") from None
+
+
 def _redis_kwargs() -> dict:
     password = _load_credential("redis-password") or os.environ.get("LUPIN_REDIS_PASSWORD")
     return {
         "redis_host": os.environ.get("LUPIN_REDIS_HOST", "localhost"),
-        "redis_port": int(os.environ.get("LUPIN_REDIS_PORT", "6379")),
+        "redis_port": _env_int("LUPIN_REDIS_PORT", 6379),
         "redis_username": os.environ.get("LUPIN_REDIS_USERNAME"),
         "redis_password": password,
     }
@@ -1303,7 +1312,7 @@ def _monitor_loop(
         provider=metadata.get("provider"), model=metadata.get("model"),
     )
     max_holders = (
-        int(os.environ.get("LUPIN_LOOP_CLAUDE_MAX_CONCURRENT", "1"))
+        _env_int("LUPIN_LOOP_CLAUDE_MAX_CONCURRENT", 1)
         if platform == "claude" else 1
     )
     wait_s = 0.0 if launch and platform == "claude" else 10800.0
