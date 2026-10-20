@@ -627,6 +627,9 @@ This repo has a runnable dashboard. Its preview serves `main`.
 
 ```sh
 nix develop --command env \
+  -u LUPIN_REDIS_USERNAME -u LUPIN_REDIS_PASSWORD \
+  LUPIN_REDIS_HOST=127.0.0.1 LUPIN_REDIS_PORT=6399 \
+  LUPIN_FLEET_CONFIG="$HOME/.local/state/lupin-preview/fleet.json" \
   LUPIN_LOOP_STATE_DIR="$HOME/.local/state/lupin-preview" PYTHONPATH=src \
   python3 -c '
 import sys
@@ -641,12 +644,15 @@ sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
 - Owner tunnel command: `ssh -N -L 8789:127.0.0.1:8789 MACHINE`. A tunnel
   forwards a port on your computer to the machine.
 - Local URL: `http://localhost:8789`.
-- Keep it running: a Herdr pane, or a detached process (`setsid nohup`). The
-  `systemd-run --user` command also starts a background service, but it needs
-  a user bus. ralpha has none for the loop user.
+- Keep it running: a Herdr pane, or `systemd-run --user`. The `systemd-run`
+  command starts a command as a background service. If the shell has no user
+  bus, set `XDG_RUNTIME_DIR=/run/user/$(id -u)`.
 - To bind means to choose the address a server listens on. Never bind to
   `0.0.0.0`. This is a security rule.
-- Do not set `LUPIN_REDIS_HOST` to the fleet Redis unless the test needs it.
+- Do not point the preview at the fleet Redis. Start a scratch Redis and use
+  it, for example `redis-server --port 6399 --bind 127.0.0.1 --save ""`.
+  Inherited `LUPIN_REDIS_*` values from the loop shell reach the server, so
+  the start command removes them and sets the scratch values.
 - Do not use the start, stop, or run controls on this dashboard. New runs use
   the `lupin-loops` session. Older loops may use an old session until they
   stop.

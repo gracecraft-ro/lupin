@@ -145,10 +145,10 @@ This repo follows "Preview server" in the `delegation-loop` skill. For this
 repo:
 
 - The start command and port are in "Preview server" in `AGENTS.md`. The
-  machine is not named yet.
+  machine is `ralpha`.
 - Set `LUPIN_LOOP_STATE_DIR` to a preview-only path. The default is
   `/var/lib/delegation-loop`, which is the real fleet state.
-- Do not set `LUPIN_REDIS_HOST` to the fleet Redis unless the test needs it.
+- Do not point the preview at the fleet Redis. Use a scratch Redis.
 - The state directory does not change the Herdr session. New runs use the
   `lupin-loops` session (`SESSION_NAME` in `src/lupin/loop_runtime.py`). Older
   loops may use an old session until they stop.
