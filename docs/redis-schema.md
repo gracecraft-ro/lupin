@@ -8,7 +8,7 @@ This is the data model `lupin` uses once the `redis` backend exists
 | Key | Type | Holds | Replaces |
 | --- | --- | --- | --- |
 | `slot:<name>` | sorted set (member = holder, score = expiry in ms) | `bmo`, the declared `repo:<repo>` UI cap, and enforced `loop-<repo>` fleet locks (one active worker per repo). | `omp.lock` |
-| `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since), with a TTL | one claim per GitHub issue | nothing today |
+| `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since), with a TTL | one claim per GitHub issue; the loop monitor renews the claims of its run's holder (`LUPIN_CLAIM_HOLDER`) | nothing today |
 | `ledger:<owner>/<repo>` | stream (`XADD`/`XRANGE`) | `ts host event issue status branch summary highlights evidence decisions next children` | `.loop/loop-state.json` is ignored; no local fallback |
 | `machine:<name>` | string (JSON), with a TTL | one fleet machine's status — see Fleet keys below | nothing today |
 | `focus:<quest>` | string (JSON), no TTL | which machine a quest is pinned to — see Fleet keys below | nothing today |
@@ -21,9 +21,15 @@ This is the data model `lupin` uses once the `redis` backend exists
 | `benchmark-snapshot` | string (JSON), with a TTL | one fleet-wide benchmark/quality score per model ID — see Fleet keys below | nothing today |
 | `model-snapshot` | string (JSON), with a TTL | latest model list and prices from `lupin fetch-models`; a subscription whose fetch failed keeps its last verified list, marked stale (`model_fetch._merge_previous_subscriptions`) | nothing today |
 | `gh-cache:<owner>/<repo>:<cache-key>` | string (JSON: `{"data": ...}`), with a TTL | one read-only `gh` lookup's cached result — see Fleet keys below | each machine's own direct `gh` call for the same lookup |
-| `quota-snapshot` | string (JSON), with a TTL | one fleet-wide quota reading per provider — see Fleet keys below | nothing today |
+| `gh-lock:<owner>/<repo>:<cache-key>` | string (holder ID), with a TTL | the lock for one `gh-cache` key: the caller that holds it fetches — see Fleet keys below | nothing today |
+| `quota-accounts` | string (JSON), with a TTL | one fleet-wide quota reading per provider, with account labels — see Fleet keys below | `quota-snapshot` |
+| `quota-snapshot` | string (JSON), with a TTL | the same, from `lupin` versions before issue #169, with no account labels. Read only. | nothing today |
 | `usage-snapshot:<machine>` | string (JSON), with a TTL | one machine's 7-day usage rows — see Fleet keys below | nothing today |
 | `debrief-digest:<machine>:<repo>:<file>` | string (JSON), with a TTL | one debrief's text and its model-written digest — see Fleet keys below | each machine shows only its own debrief files |
+| `debrief-window:<repo>:<period>:<window end>` | string, with a TTL | the claim for one periodic debrief window: the machine that holds it writes the window for the whole fleet — see Fleet keys below | each machine writes its own |
+| `debrief-digest-claim:<repo>:<file>` | string, with a TTL | the machine that writes the digest of one window — see Fleet keys below | each machine writes its own |
+| `debrief-image:<attachment-id>` | string (JSON), with a TTL | a picture from a digest, as base64 — see Fleet keys below | the dashboard asks GitHub with its own login |
+| `debrief-image-miss:<machine>:<attachment-id>` | string, with a TTL | one machine's marker for a failed or too big copy | nothing |
 These are new keys for the fleet CLI (issues #6–#14, split from #2) and the
 cross-machine command queue (issue #28, split from #27). They stay under
 `v1`: `v1` is the shape of each key, not the whole file, and adding a key
@@ -206,7 +212,7 @@ snapshot, so there is no `benchmark-snapshot:<machine>` variant.
 {
   "fetched_at": "2026-10-08T04:20:00+00:00",
   "live": true,
-  "source": "omp -p opencode-go/step-5-preview-free thinking=max, web search",
+  "source": "omp -p opencode-go/beam-free thinking=xhigh, web search",
   "scores": [
     {"id": "qwen3.7-max", "score": 29, "scale": "Artificial Analysis Intelligence Index, 0-100",
      "source": "https://artificialanalysis.ai/models/qwen3-7-max", "as_of": "2026-10-08",
@@ -239,8 +245,8 @@ window (`benchmark_fetch.CACHE_FRESH_SECONDS`), not by the key expiring;
 the same "stored timestamp, not Redis TTL" convention as `machine:<name>`'s
 offline detection above.
 
-The lookup worker is a free opencode-go model (`step-5-preview-free`) run
-through `omp -p` with `--thinking max` and two tools, `read` and
+The lookup worker is a free opencode-go model (`beam-free`) run
+through `omp -p` with `--thinking xhigh` and two tools, `read` and
 `web_search`: `read` fetches each model's own `artificialanalysis.ai`
 page, which states the Intelligence Index in plain text and costs no
 search quota, and `web_search` is the fallback for a model the site does
@@ -263,12 +269,13 @@ A machine that finds the slot already held just reads whatever is in
 Backs `place`/`quest`/`roadmap`'s read-only `gh` lookups (issue #35):
 issue state, issue body/labels, quest-labeled issues, dependency links.
 Written by the machine named in `LUPIN_GH_CANONICAL_FETCHER`
-(a hard pin to one named machine, not a race any machine could win).
+when a machine is named. If the variable is unset or empty, no machine is
+named and the lock below picks one writer.
 Every other machine reads it while that fetcher is alive. When the pinned
 machine is not maintaining the cache — draining, offline, or never joined
 — a machine that needs the data fetches it and publishes through the same
-`gh-fetch/<owner>/<repo>` slot, so the first machine to win still answers
-for the fleet and no two machines fetch the same repo at once.
+`gh-lock:<owner>/<repo>:<cache-key>` lock, so the first machine to win still
+answers for the fleet and no two machines fetch the same key at once.
 Read by every machine, the pinned machine included.
 The roadmap uses the dashboard's Redis connection for this cache.
 
@@ -292,17 +299,34 @@ different queries that must not share one cache entry: `issues:<state>`
 (`roadmap_cli`'s blocker-exists check), `quest-locate-issue:<number>`
 (`quest`'s issue-to-repo lookup).
 
-Guarded by the existing `slot:<name>` shape above, as
-`slot:gh-fetch/<owner>/<repo>` (max 1 holder, `/` not `:` -- a colon in the
-slot name breaks `release`/`renew`'s lease-id parsing, which splits on the
-first colon) — this only stops the pinned machine from running the same fetch
-twice if two `lupin` invocations there race each other. A machine that is
-not pinned never takes this lock and never calls `gh` for these lookups at all; on a
-miss it reports "no data yet" instead.
+Guarded by `gh-lock:<owner>/<repo>:<cache-key>`. This lock is a plain key
+with a TTL, not a slot. It does not show on the Machines page. A caller sets
+it with `SET <key> <holder> NX PX 120000`. The holder is a new random ID for
+each call. If the key is set, the caller tries again every 0.05 seconds for
+2 seconds at most. Between tries, it reads the cache. On release, one `EVAL`
+deletes the key only if it still holds this caller's holder ID. A holder that
+crashes frees the key after 2 minutes. The lock uses only `SET` and `EVAL`
+(with `GET` and `DEL` in the script). All are on the ACL command list below.
+One holder fetches one key of a repo
+at a time. Other keys of the same repo have their own locks. The lock is
+used in three cases:
 
-### `quota-snapshot`
+- The pinned machine takes it, so two `lupin` invocations there do not run
+  the same fetch twice.
+- When the pinned machine is draining, offline, or never joined, any
+  machine that needs the data takes it.
+- When `LUPIN_GH_CANONICAL_FETCHER` is unset or empty, any machine that
+  misses the cache takes it. A machine that cannot get the lock reads the
+  cache again. If the cache is still empty, it reports "fetch in progress"
+  and does not call `gh`.
 
-Backs `lupin quota` and `serve.py`'s `/usage` page (issue #38). Every
+While the pinned machine is online, no other machine takes the lock. On a
+miss, it reports "no data yet" and does not call `gh`.
+
+### `quota-accounts`
+
+The `quota-accounts` key stores the quota of each provider for
+`lupin quota` and the `/usage` page (issue #38). Every
 machine sees the same accounts (Claude, opencode-go, OpenAI/Codex — issue
 #36), so one real reading per provider is the fleet's answer. Do not merge
 readings from different machines.
@@ -322,19 +346,33 @@ readings from different machines.
 }
 ```
 
-One key, one entry per provider — each provider goes stale/fresh on its
-own, so each carries its own `fetched_at`/`fetched_by`. `rows` is
-`quota.quota_usage()`'s own row shape for that provider (one row per
-window: 5 hours, 7 days, 30 days), kept whole rather than collapsed to one
-number, so a reader can show duration, percent left, and time to reset —
-not just one of them. When a provider has more than one login, each row
-has an `account` label: the plan name (`free`, `plus`), or the plan name
-and six hex characters when two logins have the same plan. A provider with
-one login has no `account` key. The label never holds an email or an
-account ID. One machine writes the whole entry, so that machine must have
-every login for the provider. A provider's `duration` is written as the plain
-string `quota.QuotaDuration`'s own value serializes to (`"PT5H"` etc.);
-`quota_cache.py` converts it back to the real enum on read.
+One key, one entry per provider. Each entry has its own `fetched_at` and
+`fetched_by`, because each provider becomes stale at a different time.
+
+- `rows` has one row for each login and quota window (5 hours, 7 days,
+  30 days). The row shape is the shape of `quota.quota_usage()`.
+- When a provider has more than one login, each row has an `account`
+  label. The label is the plan name (`free`, `plus`). When two logins
+  have the same plan, the label also has six hex characters. They come
+  from a hash of the email and the account ID.
+- A provider with one login has no `account` key.
+- The label never holds an email or an account ID.
+- One machine writes the whole entry. That machine must have every login
+  for the provider.
+- `duration` is a string, for example `"PT5H"`. `quota_cache.py` changes
+  it back to `quota.QuotaDuration` when it reads the row.
+
+### `quota-snapshot` (old versions)
+
+`lupin` versions before issue #169 write to `quota-snapshot`, with the
+same shape and no `account` labels. Two logins can then look like one
+blocked login. The current version never writes this key. It reads the
+key and adds an entry only for a provider that `quota-accounts` does not
+have. It marks that entry `"old_writer": true`. Such an entry is never
+fresh, so a loop start does not use it, and the `/usage` page marks it
+stale. An old version never reads `quota-accounts`, so it never sees
+labeled rows. Update every machine that runs `lupin quota`. After that,
+no machine writes `quota-snapshot`, and the key expires after 24 hours.
 
 Unlike `gh-cache`'s pin, there is no fixed canonical
 machine here: credentials for different providers can live on different
@@ -354,7 +392,7 @@ credentialed machine republishes it.
 
 Guarded by `slot:quota-fetch/<provider>` (max 1 holder, non-blocking, no
 wait) — only stops two `lupin` processes on the *same* machine from
-publishing the same provider at once, same narrow job the `gh-fetch`/
+publishing the same provider at once, same narrow job the `gh-lock`/
 `benchmark-fetch` locks do.
 
 ### `usage-snapshot:<machine>`
@@ -374,17 +412,78 @@ the machine, repo, file name, the debrief text, the digest, the model that wrote
 it, an error text, a try count, and the publish time. Screenshot links in the
 text are replaced with plain words. Redis holds no images.
 
-A model call writes the digest. `lupin route prose size-s` picks the model.
+A quiet debrief gets no digest. A debrief is quiet when Shipped, Follow-up tasks,
+Risk and Evidence each hold only `- None.`. The debrief writer puts `- None.` only
+when it collected that data, so missing data never counts as quiet. The entry has
+`quiet: true`, no model call is made, and the Debriefs page shows "no changes".
+
+A model call writes the digest. It is a short story with a title, a few themes and
+up to 3 pictures. It is not a list of pull requests. A picture must be a GitHub
+attachment that the debrief itself holds. The page shows it through `/image`. The model gets no tools and no MCP servers, because the
+text can hold PR titles that other people wrote. `lupin route prose size-s` picks a model. The digest tries bmo first, then `opencode-go/deepseek-v4.1-flash`, then Claude (`Haiku`). It reserves the fleet `bmo` slot and waits up to 300 s, because bmo can sleep. A failed model moves to the next one. A quota or rate-limit error does not use a try.
 The agent's digest thread runs this every 5 minutes. It makes at most 3 digests
 in one run, newest debrief first. A debrief past that limit is stored with no
 digest and gets one in a later run. A failed model call adds 1 to the try
-count. After 3 tries the agent stops. A blocked model (no quota) does not add
-to the count. The debrief text is stored in all cases.
+count. After 3 failed calls the agent stops. A quota or rate-limit error does
+not add to the count. The debrief text is stored in all cases.
 
 The Debriefs page (`/debrief`) reads all keys with `SCAN` and `GET`. A machine
 without a loop, such as PiHome, shows the debriefs of every worker. Each key
-expires after 30 days. The file on the worker stays. The keys need no new ACL
+expires after 30 days. The file on the worker stays. The agent skips a debrief
+older than 29 days, so an expired key does not start a new model call.
+The page waits 1 second at most for Redis and shows local debriefs if Redis fails. The keys need no new ACL
 command.
+
+### `debrief-window:<repo>:<period>:<window end>`
+
+Periodic debriefs (6h, 12h, 24h, 7d) use fixed windows on the Los Angeles clock. A 6h window
+ends at 00:00, 06:00, 12:00 or 18:00. A 12h window ends at 00:00 or 12:00. A 24h window ends at
+00:00. A 7d window ends on Monday at 00:00. A day with a clock change is 23 or 25 hours long.
+Every machine computes the same window, and the file name is the window end (in UTC), so
+the same window has the same name on every machine.
+
+One machine writes each window for the whole fleet. The agent sets this key with `SET NX`
+before it writes:
+
+- The value is `<machine>:writing` with a TTL of 1 hour. A writer that crashes frees the window
+  after an hour.
+- After the write, the value is `<machine>:done` with a TTL of 8 days (longer than the longest window).
+- After a failed write, the agent deletes the key. Another machine can then try.
+- A machine with no checkout of the repo does not claim.
+- If Redis cannot be read, the agent writes anyway. A duplicate is better than a missing debrief.
+- A machine that already has the file for the newest window does not claim again.
+- A window is written 3 minutes after it ends (`WINDOW_GRACE_S`), so a clock that is a few minutes
+  fast does not cut the window for the whole fleet. Every machine needs NTP.
+- A machine can take back its own `:writing` claim, for example after an agent restart.
+- Right after a write, the agent publishes the new debriefs to Redis (no model call). The winner of
+  the claim is the only machine that has the file, so the text must not stay only on that machine.
+
+After a long downtime the agent writes only the newest window of each period. It does not catch up.
+
+### `debrief-digest-claim:<repo>:<file>`
+
+Only a 12h window and a 7d window get a digest. Every other debrief (6h, 24h, a loop stop, a
+backfill day) is published as a record: `record_only: true`, no model call. Normally one machine
+has the file of a window, so one machine writes the digest. If two machines have it (Redis was
+down when it was written), the first to set this key with `SET NX` writes the digest. The value is
+the machine name, and the TTL is 30 days. The same machine can retry after a failed model call.
+
+### `debrief-image:<attachment-id>` and `debrief-image-miss:<machine>:<attachment-id>`
+
+A digest can show pictures from the debrief (GitHub attachments). A private repo's
+pictures need the worker's `gh` login, and PiHome has none for that repo. So the agent
+copies each picture of a digest to Redis: `{"type": "image/png", "data": "<base64>"}`.
+`GET /image?id=<attachment-id>` reads this key first and asks GitHub only if there is no copy.
+
+- A copy lives 7 days. The agent copies pictures only for a debrief younger than 7 days.
+- At most 3 pictures per digest, and each must be in the debrief's own text.
+- One `sync` makes at most 6 downloads. The rest wait for the next cycle.
+- An image over 1.5 MB is not copied. A failed copy is not stored either.
+  Instead the machine writes a marker, `debrief-image-miss:<machine>:<id>`: 1 day for
+  "too big", 1 hour for a failure. The marker is per machine. A machine with no access to
+  the repo cannot stop a machine that has access.
+- The agent checks with `TTL` (a missing key gives -2), so it needs no `EXISTS`.
+- The page accepts only `image/gif`, `image/jpeg`, `image/png` and `image/webp`.
 
 ## Command queue keys
 
@@ -483,7 +582,8 @@ This is the worst case, not a measured time.
 The debrief runs inside the stop subprocess, after the repo lock is released.
 The debrief has these waits:
 
-- All `gh` calls share one time limit of 10 seconds (`DEBRIEF_TIME_LIMIT_S`).
+- All `gh` calls of a stop debrief share one time limit of 10 seconds (`DEBRIEF_TIME_LIMIT_S`).
+  A periodic window shares 120 seconds (`PERIODIC_TIME_LIMIT_S`), because nobody waits for it.
   A call that hits the limit leaves a `Not collected` note in the debrief.
 - Three Redis calls, each up to 14 seconds (`DEBRIEF_CALL_WORST_S`):
   - A ledger read (one `XRANGE`).
@@ -498,8 +598,8 @@ to `localhost:6379` without auth. Issue #118 tracks this.
 
 Periodic debriefs run on a background thread of `lupin agent`, not in the stop
 subprocess. They do not block commands. They read the same Redis keys as stop
-debriefs. They add no new keys. Their file names end in `-6h`, `-24h`, or
-`-7d`. They have no time budget entry. The "Budget result" section and the
+debriefs. They add the keys `debrief-window:*` and `debrief-digest:*` (see
+Fleet keys). Their file names end in `-6h`, `-12h`, `-24h`, or `-7d`. They have no time budget entry. The "Budget result" section and the
 "Lock waits" section cover stop debriefs only. They connect to `localhost:6379`
 without auth, as stop debriefs do (issue #118).
 Each one also saves two screenshots in a folder named `<file name>-screenshots/`.
@@ -672,9 +772,13 @@ numbers.
 | `benchmark-snapshot` | n/a — not renewed | 7 days (retention only, see below) |
 | `model-snapshot` | n/a — not renewed | 7 days (retention only) |
 | GitHub data cache (`gh-cache:...`) | n/a — not renewed | 5 min |
-| GitHub fetch lock (`slot:gh-fetch/<owner>/<repo>`) | n/a — held only for one fetch | 2 min |
-| `quota-snapshot` | n/a — not renewed | 24 hours (retention only; freshness is per-provider, 5 min, see above) |
+| GitHub fetch lock (`gh-lock:<owner>/<repo>:<cache-key>`) | n/a — held only for one fetch | 2 min |
+| `quota-accounts`, `quota-snapshot` | n/a — not renewed | 24 hours (retention only; freshness is per-provider, 5 min, see above) |
 | `debrief-digest:...` | n/a — written once, rewritten only to add a digest | 30 days |
+| `debrief-digest-claim:...` | n/a — written once | 30 days |
+| `debrief-window:...` | n/a — written twice (claim, then done) | 1 hour while writing, 8 days when done |
+| `debrief-image:...` | n/a — written once | 7 days |
+| `debrief-image-miss:...` | n/a — written once | 1 hour (failed) or 1 day (too big) |
 | Quota fetch lock (`slot:quota-fetch/<provider>`) | n/a — held only for one fetch, no wait | 1 min |
 
 A command's Redis retention (1h) is not the same thing as how long it's
@@ -689,8 +793,8 @@ Each host gets its own Redis user (`lupin-jesus`, `lupin-ralpha`,
 `lupin-mac`), limited to keys under `~lupin:*` and these commands:
 
 ```
-PING GET SET DEL PEXPIRE ZADD ZREM ZCARD ZRANGE ZREMRANGEBYSCORE
-XADD XRANGE XREVRANGE SCAN EVAL EVALSHA SCRIPT|LOAD
+PING GET SET DEL TTL PTTL MULTI EXEC ZADD ZREM ZSCORE ZCARD ZRANGE
+ZREMRANGEBYSCORE XADD XRANGE XREVRANGE SCAN EVAL
 ```
 
 ## Fallback when Redis is unreachable

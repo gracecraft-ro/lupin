@@ -610,7 +610,7 @@ class ModelTierTests(unittest.TestCase):
             "prose": {
                 "source": "LMArena <b>Creative</b> Writing",
                 "last_verified": "2026-10-03",
-                "tiers": {"tier2": [{"model": "a<b", "effort": "x'high"}]},
+                "tiers": {"tier2": [{"model": "a<b", "effort": "high"}]},
                 "note": 'Opus leads both, at "5.5"',
             },
         })
@@ -618,24 +618,30 @@ class ModelTierTests(unittest.TestCase):
 
         self.assertIn("LMArena &lt;b&gt;Creative&lt;/b&gt; Writing", page)
         self.assertIn("a&lt;b", page)
-        self.assertIn("x&#x27;high", page)
         self.assertIn("Opus leads both, at &quot;5.5&quot;", page)
         self.assertNotIn("<b>Creative</b>", page)
 
-    def test_missing_or_malformed_file_reports_instead_of_crashing(self):
-        with mock.patch.object(serve, "MODEL_TIERS_PATH", self.tiers_path + ".missing"):
+    def test_missing_or_bad_model_tier_file_shows_a_clear_error(self):
+        missing = self.tiers_path + ".missing"
+        with mock.patch.object(serve, "MODEL_TIERS_PATH", missing):
             page = serve.render_model_tiers().decode()
-        self.assertIn("unavailable (FileNotFoundError)", page)
-        self.assertIn(self.tiers_path, page)
+        self.assertIn(missing, page)
+        self.assertIn("cannot read model tiers file", page)
 
         self.write_tiers(None, raw="{")
-        self.assertIn("unavailable (JSONDecodeError)", self.render())
+        self.assertIn("cannot read model tiers file", self.render())
 
-        # Valid JSON that is not an object of categories.
         self.write_tiers(None, raw="[1, 2, 3]")
-        self.assertIn("no categories in the file", self.render())
+        page = self.render()
+        self.assertIn("expected a JSON object of categories", page)
+        self.assertIn(self.tiers_path, page)
 
         self.write_tiers({"coding": {"tiers": {"tier0": [{"model": "opus"}]}}})
+        page = self.render()
+        self.assertIn("needs an effort", page)
+        self.assertIn(self.tiers_path, page)
+
+        self.write_tiers({"coding": {"tiers": {"tier0": [{"model": "opus", "effort": "high"}]}}})
         page = self.render()
         self.assertIn("verified -", page)
         self.assertIn("not recorded", page)
@@ -653,6 +659,21 @@ class ModelTierTests(unittest.TestCase):
         )
         for category in categories:
             self.assertIn(f"<h3>{category}</h3>", page)
+
+    def test_custom_model_tiers_path_is_used_and_shown(self):
+        self.write_tiers({
+            "coding": {"tiers": {"tier1": [{"model": "opencode-go/custom", "effort": "high"}]}}
+        })
+        with (
+            mock.patch.dict(os.environ, {"LUPIN_MODEL_TIERS": self.tiers_path}),
+            mock.patch.object(serve.model_fetch, "SNAPSHOT_FILE", self.tiers_path + ".snapshot-missing"),
+            mock.patch.object(serve.model_fetch, "read_shared_snapshot", return_value=None),
+            mock.patch.object(serve.benchmark_fetch, "read_snapshot", return_value=None),
+        ):
+            page = serve.render_model_tiers().decode()
+
+        self.assertIn(f"<code>{self.tiers_path}</code>", page)
+        self.assertIn("opencode-go/custom", page)
 
     def test_model_tiers_route_and_dashboard_link(self):
         state = {"loops": [], "enabled": [], "timers": [], "timer_active": False, "repos": []}
@@ -854,7 +875,7 @@ class AllModelsTableTests(unittest.TestCase):
             return serve.render_model_tiers(sent=sent).decode()
 
     def test_render_uses_fleet_snapshot_timestamp_and_models(self):
-        self.write_tiers({"coding": {"tiers": {}}})
+        self.write_tiers({"coding": {"tiers": {"tier1": [{"model": "sonnet", "effort": "high"}]}}})
         shared = {
             "fetched_at": "2026-10-07T00:00:00+00:00",
             "subscriptions": {
@@ -897,7 +918,7 @@ class AllModelsTableTests(unittest.TestCase):
         self.assertNotIn("no live data", page)
 
     def test_all_models_table_lists_every_subscription_model(self):
-        self.write_tiers({"coding": {"tiers": {}}})
+        self.write_tiers({"coding": {"tiers": {"tier1": [{"model": "sonnet", "effort": "high"}]}}})
         self.write_snapshot({
             "fetched_at": "2026-10-07T00:00:00+00:00",
             "subscriptions": {
@@ -921,7 +942,7 @@ class AllModelsTableTests(unittest.TestCase):
         self.assertIn("Empty cells mean no verified public score is available", page)
 
     def test_model_matrix_uses_category_sources_and_normalizes_perf(self):
-        self.write_tiers({"coding": {"tiers": {}}})
+        self.write_tiers({"coding": {"tiers": {"tier1": [{"model": "sonnet", "effort": "high"}]}}})
         self.write_snapshot({
             "fetched_at": "2026-10-07T00:00:00+00:00",
             "subscriptions": {
@@ -963,7 +984,7 @@ class AllModelsTableTests(unittest.TestCase):
 
 
     def test_missing_benchmark_snapshot_keeps_matrix_blank(self):
-        self.write_tiers({"coding": {"tiers": {}}})
+        self.write_tiers({"coding": {"tiers": {"tier1": [{"model": "sonnet", "effort": "high"}]}}})
         self.write_snapshot({
             "fetched_at": "2026-10-07T00:00:00+00:00",
             "subscriptions": {
@@ -4201,3 +4222,89 @@ def test_debrief_page_for_a_worker_debrief_that_is_not_published_is_404(tmp_path
     handler.do_GET()
 
     assert handler.reply.call_args.args[1] == 404
+
+
+def test_debrief_index_labels_a_quiet_debrief_as_no_changes_not_as_missing_a_digest(tmp_path, monkeypatch, redis_port, flush_redis):
+    from lupin import digest as digest_mod
+
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(serve.socket, "gethostname", lambda: "pihome")
+    client = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    entry = {"machine": "jesus", "repo": "widgets", "name": "20261002-090000-6h.md", "raw": "# Raw\n", "digest": None, "quiet": True}
+    client.set(digest_mod._key("jesus", "widgets", "20261002-090000-6h.md"), json.dumps(entry))
+
+    index = _get_handler("/debrief", {"redis_host": "127.0.0.1", "redis_port": redis_port})
+    index.do_GET()
+    page = _get_handler("/debrief?machine=jesus&repo=widgets&file=20261002-090000-6h.md", {"redis_host": "127.0.0.1", "redis_port": redis_port})
+    page.do_GET()
+
+    index_body = index.reply.call_args.args[0].decode()
+    page_body = page.reply.call_args.args[0].decode()
+    assert "no changes" in index_body and "no digest" not in index_body
+    assert "Nothing changed in this period" in page_body
+
+
+def test_image_route_serves_a_picture_a_worker_copied_to_redis_without_asking_github(monkeypatch, redis_port, flush_redis):
+    import base64
+    import io
+
+    from lupin import digest as digest_mod
+
+    attachment_id = "eba1e250-ae34-481a-9f8c-98503030f83e"
+    png = b"\x89PNG\r\n\x1a\n-test-image"
+    redis_lib.Redis(host="127.0.0.1", port=redis_port).set(
+        digest_mod.IMAGE_KEY_PREFIX + attachment_id,
+        json.dumps({"type": "image/png", "data": base64.b64encode(png).decode()}),
+    )
+
+    def never(_id):
+        raise AssertionError("GitHub must not be asked")
+
+    monkeypatch.setattr(serve, "github_attachment", never)
+    handler = _get_handler("/image", {"redis_host": "127.0.0.1", "redis_port": redis_port})
+    handler.send_response = mock.Mock()
+    handler.send_header = mock.Mock()
+    handler.end_headers = mock.Mock()
+    handler.wfile = io.BytesIO()
+
+    handler.do_image({"id": attachment_id})
+
+    handler.send_response.assert_called_once_with(200)
+    assert handler.wfile.getvalue() == png
+    assert mock.call("Content-Type", "image/png") in handler.send_header.call_args_list
+    assert mock.call("X-Content-Type-Options", "nosniff") in handler.send_header.call_args_list
+
+
+def test_image_route_falls_back_to_github_when_redis_has_no_copy(monkeypatch, redis_port, flush_redis):
+    import io
+
+    asked = []
+    monkeypatch.setattr(serve, "github_attachment", lambda attachment_id: asked.append(attachment_id) or (b"gh-bytes", "image/png"))
+    handler = _get_handler("/image", {"redis_host": "127.0.0.1", "redis_port": redis_port})
+    handler.send_response = mock.Mock()
+    handler.send_header = mock.Mock()
+    handler.end_headers = mock.Mock()
+    handler.wfile = io.BytesIO()
+
+    handler.do_image({"id": "eba1e250-ae34-481a-9f8c-98503030f83e"})
+
+    assert asked == ["eba1e250-ae34-481a-9f8c-98503030f83e"] and handler.wfile.getvalue() == b"gh-bytes"
+
+
+def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_the_page_says_it_is_a_record(tmp_path, monkeypatch, redis_port, flush_redis):
+    from lupin import digest as digest_mod
+
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(serve.socket, "gethostname", lambda: "pihome")
+    client = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    entry = {"machine": "jesus", "repo": "widgets", "name": "20261002-090000-6h.md", "raw": "# Raw\n", "digest": None, "record_only": True}
+    client.set(digest_mod._key("jesus", "widgets", "20261002-090000-6h.md"), json.dumps(entry))
+    conn = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+
+    index = _get_handler("/debrief", conn)
+    index.do_GET()
+    page = _get_handler("/debrief?machine=jesus&repo=widgets&file=20261002-090000-6h.md", conn)
+    page.do_GET()
+
+    assert "no digest" not in index.reply.call_args.args[0].decode()
+    assert "This is a record" in page.reply.call_args.args[0].decode()

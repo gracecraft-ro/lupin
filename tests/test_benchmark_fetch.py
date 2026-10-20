@@ -72,14 +72,14 @@ class ModelIdsForScoringTests(unittest.TestCase):
                 "_comment": "not a category",
                 "coding": {
                     "tiers": {
-                        "tier0": [{"model": "bmo:qwen"}],
-                        "tier1": [{"model": "sonnet"}, {"model": "sonnet"}],
+                        "tier0": [{"model": "bmo:qwen", "effort": "low"}],
+                        "tier1": [{"model": "sonnet", "effort": "medium"}, {"model": "sonnet", "effort": "high"}],
                     }
                 },
             }, handle)
         with (
             mock.patch.object(model_fetch, "SNAPSHOT_FILE", os.path.join(self.tempdir.name, "missing.json")),
-            mock.patch.object(benchmark_fetch, "_FALLBACK_TIERS_PATH", self.tiers_path),
+            mock.patch.dict(os.environ, {"LUPIN_MODEL_TIERS": self.tiers_path}),
         ):
             ids = benchmark_fetch.model_ids_for_scoring()
         self.assertEqual(ids, ["bmo:qwen", "sonnet"])
@@ -94,10 +94,10 @@ class ModelIdsForScoringTests(unittest.TestCase):
         with open(self.snapshot_path, "w", encoding="utf-8") as handle:
             handle.write("{not json")
         with open(self.tiers_path, "w", encoding="utf-8") as handle:
-            json.dump({"coding": {"tiers": {"tier1": [{"model": "opus"}]}}}, handle)
+            json.dump({"coding": {"tiers": {"tier1": [{"model": "opus", "effort": "high"}]}}}, handle)
         with (
             mock.patch.object(model_fetch, "SNAPSHOT_FILE", self.snapshot_path),
-            mock.patch.object(benchmark_fetch, "_FALLBACK_TIERS_PATH", self.tiers_path),
+            mock.patch.dict(os.environ, {"LUPIN_MODEL_TIERS": self.tiers_path}),
         ):
             ids = benchmark_fetch.model_ids_for_scoring()
         self.assertEqual(ids, ["opus"])
@@ -106,7 +106,7 @@ class ModelIdsForScoringTests(unittest.TestCase):
         missing = os.path.join(self.tempdir.name, "missing.json")
         with (
             mock.patch.object(model_fetch, "SNAPSHOT_FILE", missing),
-            mock.patch.object(benchmark_fetch, "_FALLBACK_TIERS_PATH", missing),
+            mock.patch.dict(os.environ, {"LUPIN_MODEL_TIERS": missing}),
         ):
             self.assertEqual(benchmark_fetch.model_ids_for_scoring(), [])
 
@@ -146,6 +146,11 @@ class BuildArgvTests(unittest.TestCase):
         self.assertIn("--max-time", argv)
         self.assertEqual(argv[argv.index("--max-time") + 1], str(int(benchmark_fetch.SHARD_TIMEOUT)))
         self.assertEqual(argv[-1], "a prompt")
+
+    def test_the_lookup_worker_is_a_free_model(self):
+        # The lookup is a daily job. A paid model turns it into a cost leak.
+        # The 2026-10-20 model snapshot lists this ID at $0.00 input and output.
+        self.assertEqual(benchmark_fetch.OMP_MODEL, "opencode-go/beam-free")
 
     def test_argv_grants_no_shell_or_edit_tools(self):
         argv = benchmark_fetch._build_argv("a prompt")

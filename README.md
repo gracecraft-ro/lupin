@@ -25,8 +25,8 @@ four jobs:
 | `gh` (GitHub CLI) | Claims, roadmap, dashboard | The Nix package adds it to `PATH`. |
 | `git` | Loops, roadmap | The Nix package adds it to `PATH`. |
 | systemd (Linux) | Loop workers, timers | Not available on macOS. |
-| Herdr | Loop workers | In nixpkgs (`pkgs.herdr`). The Lupin package does not add it to `PATH` yet. |
-| `omp` | OMP loops, `fetch-benchmarks`, some quota data | From the `github:can1357/oh-my-pi` flake. The Lupin package does not add it to `PATH` yet. |
+| Herdr | Loop workers | The Lupin package adds it to `PATH`. Set `LUPIN_HERDR_BIN` to use another binary. |
+| `omp` | OMP loops, `fetch-benchmarks`, some quota data | The default adds it to `PATH` from a pinned input. `without-omp` saves about 228 MiB; install `omp` separately for OMP tasks. |
 
 ## Install
 
@@ -74,8 +74,31 @@ command stops:
 lupin hold demo --holder me --wait 5 -- echo inside-lease
 ```
 
-The route categories are: `coding`, `general`, `frontend-ui`, `translation`,
-`prose`, `cad-spatial`. They come from `src/lupin/model-tiers.json`.
+The route categories are `coding`, `general`, `frontend-ui`, `translation`,
+`prose`, and `cad-spatial`. If `LUPIN_MODEL_TIERS` is not set, Lupin uses
+the bundled `src/lupin/model-tiers.json` file.
+
+Set `LUPIN_MODEL_TIERS` to a JSON file to use your own model tiers. The
+category selected by `route` must exist in the file. Each category has a
+`tiers` object with one or more of `tier0`, `tier1`, and `tier2`. Each tier
+is a list of ordered `{model, effort}` choices. The first choice is tried
+first. Effort must be `low`, `medium`, `high`, or `xhigh`. You can omit a tier.
+If a route needs it, Lupin uses the next higher tier. If no higher tier exists,
+the route reports an error. Optional fields are `source`, `last_verified`, and
+`note`. A top-level key that starts with `_` is ignored. The Models page shows
+the file path.
+
+```json
+{
+  "coding": {
+    "tiers": {
+      "tier1": [
+        {"model": "opencode-go/glm-5.3", "effort": "high"}
+      ]
+    }
+  }
+}
+```
 
 ## Fleet setup
 
@@ -103,10 +126,61 @@ systemd `CREDENTIALS_DIRECTORY`. The file name is the worker name.
 
 The Redis key layout is in `docs/redis-schema.md`.
 
-> The systemd units for `lupin agent`, the quota timer, and the
-> `delegation-loop.timer` are not in this repo yet. The flake has an empty
-> `nixosModules.default`. Until that module is complete, you must write
-> these units yourself.
+## NixOS module
+
+`nixosModules.default` writes the service user, `lupin-agent.service`,
+`lupin-serve.service`, the `lupin-quota` timer, and the `delegation-loop`
+timer. Set `role` to `worker`, `dispatch`, or `both`.
+
+```nix
+services.lupin = {
+  enable = true;
+  role = "worker";
+  redis.host = "COORDINATOR_HOST";
+  redis.passwordFile = "/run/secrets/redis-password";
+  signingKeysDir = "/run/secrets/lupin-keys";
+};
+```
+
+The module needs these secret files:
+
+- `redis.passwordFile`: a file with the Redis password. The module loads it
+  as the systemd credential `redis-password`. No unit gets the password in
+  its environment. Skip this option if the coordinator has no password.
+- `signingKeysDir`: a directory with one command-queue key for each worker.
+  The file name is the worker name and the file holds that worker's key.
+  On a worker, keep the directory root-owned with mode `0700` and the key
+  files mode `0400`. `lupin agent` receives only its own key as a systemd
+  credential, and every unit the loop `systemd-run` wrapper starts mounts the
+  directory inaccessible (`InaccessiblePaths=`), so a loop unit cannot read
+  any key. `lupin serve` and `fleet-run` need the whole directory read-only,
+  so on a dispatch machine `cfg.user` must be able to read it. With
+  `role = "both"`, `serve` holds the directory open to `cfg.user`, and a loop
+  unit on that machine can reach the keys through `serve`; use `worker` and
+  `dispatch` on separate machines when the keys must stay apart.
+- `credentialsFile`: a JSON file that maps a repository name to its GitHub
+  token file, for `LUPIN_LOOP_CREDENTIALS_FILE`. The agent, the dashboard,
+  and `fleet-run` read it. The wrapper allows `LoadCredential=gh-token:PATH`
+  only when `PATH` is one of the values in this file; without the file it
+  rejects `gh-token`.
+
+The default `serve.bind` is `127.0.0.1` and cannot be `0.0.0.0`. The default
+`serve.port` is 8788. The default package is the flake's
+`packages.<system>.default`.
+
+Without `fleetConfig`, the module writes `/etc/lupin/fleet.json` from the
+`redis` options. To use one file for several machines, set `fleetConfig` to
+that file.
+
+The module also writes the sudo rules for the loop control path. The loop
+user can start and stop `lupin-*` units and the `delegation-loop` timer. The
+`systemd-run` rule names a wrapper, not `systemd-run` itself: the wrapper
+accepts only the options Lupin uses and the Lupin command, so the loop user
+cannot pass `--uid=0` or `--property=User=root`. The wrapper also adds
+`--property=InaccessiblePaths=<signingKeysDir>` itself after it validates the
+arguments, so a loop unit cannot remove it. Set `role = "dispatch"` to
+set `LUPIN_LOOP_COORDINATOR_ONLY` for `lupin serve` and `fleet-run`, which
+hides the local loop start control.
 
 ## Dashboard
 
@@ -191,8 +265,6 @@ approve it. `AGENTS.md` gives the full rules.
 
 - There is no license file yet. Until there is one, you have no right to
   copy or change this code.
-- `src/lupin/model-tiers.json` names private hosts of the owner's fleet
-  (for example `bmo`). You cannot replace it without a code change.
 - Some defaults name the owner's machines and user name.
 - Lupin is tested only on Linux. The flake builds for macOS, but loop
   workers need systemd.

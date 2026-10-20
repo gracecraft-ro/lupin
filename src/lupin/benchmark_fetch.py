@@ -50,7 +50,7 @@ empty slot and fetches instead.
 The exact command this module runs per shard, confirmed by hand first
 (see `_build_argv`'s docstring for each flag):
 
-    omp -p --model opencode-go/step-5-preview-free --thinking max \\
+    omp -p --model opencode-go/beam-free --thinking xhigh \\
       --tools web_search,read --no-session --auto-approve \\
       --max-time 420 '<prompt>'
 
@@ -71,15 +71,14 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from importlib import resources
 
 import redis
 
 from . import model_fetch, slots_redis
+from . import model_tiers as tiers_config
 
 CoordinatorUnreachable = slots_redis.CoordinatorUnreachable
 
-_FALLBACK_TIERS_PATH = str(resources.files("lupin").joinpath("model-tiers.json"))
 REDIS_KEY = f"{slots_redis.PREFIX}benchmark-snapshot"
 LOCK_SLOT = "benchmark-fetch"
 
@@ -95,15 +94,17 @@ CACHE_FRESH_SECONDS = 20 * 60 * 60
 # short Redis outage does not erase the last real score on file.
 REDIS_KEY_TTL = 7 * 24 * 60 * 60
 
-# The lookup worker. `omp -p` on opencode-go's zero-price tier (input and
-# output both $0.00 per Mtok in the 2026-10-08 model snapshot), with the
-# thinking level at its maximum -- this lookup is web research, where the
-# cheap answer is the one that says "not found". `step-5-preview-free`
-# scored qwen3.6-plus, qwen3.7-max, gpt-6-sol and minimax-m2.7 in hand
-# tests, four models the paid single-call agent had all missed.
+# The lookup worker. `omp -p` on opencode-go's zero-price tier, with the
+# thinking level at its maximum (`xhigh` for this model) -- this lookup is web research, where the
+# cheap answer is the one that says "not found". The 2026-10-20 model
+# snapshot lists `beam-free` at $0.00 input and output; `step-5-preview-free`
+# is gone, and `step-5-preview` now costs $1.00/$2.70 per Mtok. A hand test
+# on 2026-10-20 read the Artificial Analysis page for glm-5.3: `beam-free`
+# returned score 45 in 4.0 s, and `minimax-m3.1-flash-free` returned the same
+# score in 5.8 s.
 OMP_BINARY = "omp"
-OMP_MODEL = "opencode-go/step-5-preview-free"
-OMP_THINKING = "max"
+OMP_MODEL = "opencode-go/beam-free"
+OMP_THINKING = "xhigh"
 
 # One tool for the page fetch, plus web search as the fallback. `read`
 # fetches a URL as text: no search-provider quota, ~2s per page. The free
@@ -169,12 +170,10 @@ def model_ids_for_scoring() -> list[str]:
     if not ids:
         tiers = _read_model_tiers_fallback()
         for category, entry in (tiers or {}).items():
-            if category.startswith("_") or not isinstance(entry, dict):
+            if category.startswith("_"):
                 continue
-            for picks in (entry.get("tiers") or {}).values():
-                for pick in picks if isinstance(picks, list) else []:
-                    if isinstance(pick, dict) and pick.get("model"):
-                        ids.append(pick["model"])
+            for picks in entry["tiers"].values():
+                ids.extend(pick["model"] for pick in picks)
 
     seen: set[str] = set()
     deduped = []
@@ -187,9 +186,8 @@ def model_ids_for_scoring() -> list[str]:
 
 def _read_model_tiers_fallback() -> dict | None:
     try:
-        with open(_FALLBACK_TIERS_PATH, encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, ValueError):
+        return tiers_config.load()
+    except tiers_config.ModelTiersError:
         return None
 
 
@@ -269,9 +267,9 @@ def _build_argv(prompt: str) -> list[str]:
 
     - `-p` runs one prompt to completion and exits -- the unattended
       shape, same as the `claude -p` call this replaces.
-    - `--model opencode-go/step-5-preview-free` is the zero-price
-      subscription model (see `OMP_MODEL`'s comment).
-    - `--thinking max` spends the most reasoning the provider offers.
+    - `--model opencode-go/beam-free` is the zero-price subscription model
+      (see `OMP_MODEL`'s comment).
+    - `--thinking xhigh` spends the most reasoning this model offers.
       A web lookup that gives up early is the failure mode here, not cost.
     - `--tools web_search,read` exposes two built-in tools. `read` fetches
       the model's own Artificial Analysis page as text -- the page states

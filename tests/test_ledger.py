@@ -134,7 +134,7 @@ def test_read_of_empty_ledger_returns_no_events(connection):
                 "event": "work",
                 "highlights": "[" * 100_000 + "]" * 100_000,
             },
-            "RecursionError",
+            "ValueError",
         ),
     ],
     ids=["bad-json", "missing-ts", "missing-host", "bad-issue", "deep-json"],
@@ -156,6 +156,54 @@ def test_read_skips_bad_entry_and_reports_it_once(
     assert events == [first, last]
     assert err.count(bad_id) == 1
     assert f"{error_name}:" in err
+
+
+def test_read_skips_deep_entry_even_when_json_loads_accepts_it(
+    connection, capsys, monkeypatch
+):
+    # Some platforms have a big C stack: json.loads then accepts a very deep
+    # value. The skip must not depend on that, so fake the accepting case.
+    monkeypatch.setattr(ledger.json, "loads", lambda text: [])
+    first = ledger.append_event(
+        "acme/repo", {"event": "work", "issue": 1}, **connection
+    )
+    bad_id = ledger._client(**connection).xadd(
+        ledger._stream_key("acme/repo"),
+        {
+            "ts": "2026-10-10T00:00:00Z",
+            "host": "machine-a",
+            "event": "work",
+            "highlights": "[" * 100_000 + "]" * 100_000,
+        },
+    )
+
+    events = ledger.read_events("acme/repo", **connection)
+
+    err = capsys.readouterr().err
+    assert events == [first]
+    assert err.count(bad_id) == 1
+    assert "ValueError:" in err
+
+
+_LIMIT = ledger._MAX_JSON_DEPTH
+
+
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        ("[" * _LIMIT + "]" * _LIMIT, True),
+        ("[" * (_LIMIT + 1) + "]" * (_LIMIT + 1), False),
+        ('["[[[[[[[[[[[[[[[[[[[[ \\" ]]]]"]', True),
+    ],
+    ids=["at-limit", "over-limit", "brackets-in-text"],
+)
+def test_decode_depth_limit(text, kept):
+    fields = {"ts": "t", "host": "h", "event": "work", "highlights": text}
+    if kept:
+        assert ledger._decode("1-0", fields)["highlights"] == json.loads(text)
+    else:
+        with pytest.raises(ValueError, match="nested deeper than"):
+            ledger._decode("1-0", fields)
 
 
 def test_read_counts_bad_entry_toward_limit(connection, capsys):

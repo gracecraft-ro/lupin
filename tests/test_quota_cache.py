@@ -110,21 +110,65 @@ def test_refresh_publishes_real_rows_only(redis_port, flush_redis):
     rows = [
         {"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 10, "resets_at": 1},
         {"provider": "openai", "note": "no credentials"},
+        {"provider": "opencode-go", "account": "free", "duration": quota.QuotaDuration.MONTHLY,
+         "used_pct": 100, "resets_at": 2},
+        {"provider": "opencode-go", "account": "plus", "duration": quota.QuotaDuration.FIVE_HOURS,
+         "used_pct": 1, "resets_at": 1},
     ]
     with mock.patch.object(quota, "quota_usage", return_value=rows):
         result = quota_cache.refresh_snapshot(**_kw(redis_port))
 
     assert "claude" in result
-    assert "openai" not in result  # no real data -- never published
+    assert result["openai"]["rows"] == [rows[1]]  # note only: shown, never published
     assert result["claude"]["rows"] == [rows[0]]
     assert result["claude"]["fetched_by"]
     stored = json.loads(_raw_client(redis_port).get(quota_cache.REDIS_KEY))
     assert "claude" in stored
+    # Account labels and durations come back unchanged.
+    read_back = quota_cache.read_snapshot(**_kw(redis_port))["opencode-go"]["rows"]
+    assert [(row["account"], row["duration"]) for row in read_back] == [
+        ("free", quota.QuotaDuration.MONTHLY),
+        ("plus", quota.QuotaDuration.FIVE_HOURS),
+    ]
     # The lock is released afterward -- nothing still holds it.
     assert slots_redis.status(**_kw(redis_port))["quota-fetch/claude"]["holders"] == 0
 
 
-def test_account_labels_survive_publish_and_read(redis_port, flush_redis):
+# The key that `lupin` versions before issue #169 read and write.
+OLD_KEY = f"{slots_redis.PREFIX}quota-snapshot"
+
+
+def test_new_reader_does_not_trust_rows_from_an_old_writer(redis_port, flush_redis):
+    """Issue #169, case 2. An old writer has two logins but writes no labels.
+    The rows look like one login that is blocked. A new reader must not use
+    them to choose an orchestrator.
+    """
+    later = 4_102_444_800_000  # 2100-01-01
+    old_entry = {
+        "openai": {
+            "rows": [
+                {"provider": "openai", "duration": "P30D", "used_pct": 100, "resets_at": later},
+                {"provider": "openai", "duration": "PT5H", "used_pct": 1, "resets_at": later},
+                {"provider": "openai", "duration": "P7D", "used_pct": 0, "resets_at": later},
+            ],
+            "fetched_at": quota_cache._now_iso(),
+            "fetched_by": "old-machine",
+        }
+    }
+    _raw_client(redis_port).set(OLD_KEY, json.dumps(old_entry))
+
+    snapshot = quota_cache.read_snapshot(**_kw(redis_port))
+
+    # The old rows are still there to show on the /usage page.
+    assert snapshot["openai"]["fetched_by"] == "old-machine"
+    # But they are never fresh, so a loop start does not use them.
+    assert not quota_cache.is_fresh(snapshot["openai"])
+
+
+def test_new_writer_does_not_write_labeled_rows_where_an_old_reader_looks(redis_port, flush_redis):
+    """Issue #169, case 2, other direction. An old reader treats all rows of a
+    provider as one login. It must never see labeled rows.
+    """
     rows = [
         {"provider": "openai", "account": "free", "duration": quota.QuotaDuration.MONTHLY,
          "used_pct": 100, "resets_at": 2},
@@ -134,12 +178,46 @@ def test_account_labels_survive_publish_and_read(redis_port, flush_redis):
     with mock.patch.object(quota, "quota_usage", return_value=rows):
         quota_cache.refresh_snapshot(**_kw(redis_port))
 
-    read_back = quota_cache.read_snapshot(**_kw(redis_port))["openai"]["rows"]
+    old_view = _raw_client(redis_port).get(OLD_KEY)
+    assert old_view is None or '"account"' not in old_view
 
-    assert [(row["account"], row["duration"]) for row in read_back] == [
-        ("free", quota.QuotaDuration.MONTHLY),
-        ("plus", quota.QuotaDuration.FIVE_HOURS),
-    ]
+
+def test_new_writer_does_not_copy_old_rows_into_its_key(redis_port, flush_redis):
+    old_entry = {
+        "claude": {
+            "rows": [{"provider": "claude", "duration": "PT5H", "used_pct": 5, "resets_at": 1}],
+            "fetched_at": quota_cache._now_iso(),
+            "fetched_by": "old-machine",
+        }
+    }
+    _raw_client(redis_port).set(OLD_KEY, json.dumps(old_entry))
+    rows = [{"provider": "openai", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 20, "resets_at": 2}]
+
+    with mock.patch.object(quota, "quota_usage", return_value=rows):
+        result = quota_cache.refresh_snapshot(**_kw(redis_port))
+
+    assert result["claude"]["fetched_by"] == "old-machine"
+    assert not quota_cache.is_fresh(result["claude"])
+    stored = json.loads(_raw_client(redis_port).get(quota_cache.REDIS_KEY))
+    assert list(stored) == ["openai"]
+
+
+def test_cli_quota_wrong_password_exits_3_and_names_the_setting(auth_redis_port, capsys):
+    """Issue #169, item 5. A refused login is not hidden behind local rows."""
+    rows = [{"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 10, "resets_at": 1}]
+    with (
+        mock.patch.object(quota, "quota_usage", return_value=rows),
+        mock.patch.object(usage_cache, "refresh_snapshot"),
+    ):
+        code = cli.main([
+            "quota", "--redis-host", "127.0.0.1", "--redis-port", str(auth_redis_port),
+            "--redis-password", "wrong-secret",
+        ])
+
+    err = capsys.readouterr().err
+    assert code == 3
+    assert "password" in err.lower()
+    assert "wrong-secret" not in err
 
 
 def test_refresh_does_not_republish_a_fresh_provider(redis_port, flush_redis):
@@ -257,6 +335,44 @@ def test_fetcher_publishes_then_credential_less_reader_sees_it(redis_port, flush
     assert passive["claude"]["rows"][0]["used_pct"] == 30
 
 
+def test_refresh_returns_a_note_only_provider_but_never_publishes_it(redis_port, flush_redis):
+    rows = [{"provider": "opencode-go", "note": "key expired"}]
+    with mock.patch.object(quota, "quota_usage", return_value=rows):
+        result = quota_cache.refresh_snapshot(**_kw(redis_port))
+
+    assert result["opencode-go"]["rows"] == rows
+    assert result["opencode-go"]["fetched_by"]
+    assert _raw_client(redis_port).get(quota_cache.REDIS_KEY) is None
+
+
+def test_refresh_publishes_a_mixed_provider_with_its_notes_and_skips_a_note_only_one(redis_port, flush_redis):
+    real = {"provider": "openai", "account": "plus", "duration": quota.QuotaDuration.FIVE_HOURS,
+            "used_pct": 10, "resets_at": 1}
+    note = {"provider": "openai", "account": "free", "note": "free login has no quota data"}
+    only_note = {"provider": "opencode-go", "note": "key expired"}
+    with mock.patch.object(quota, "quota_usage", return_value=[real, note, only_note]):
+        quota_cache.refresh_snapshot(**_kw(redis_port))
+
+    stored = json.loads(_raw_client(redis_port).get(quota_cache.REDIS_KEY))
+    assert [row.get("note") for row in stored["openai"]["rows"]] == [None, note["note"]]
+    assert stored["openai"]["rows"][0]["used_pct"] == 10
+    assert "opencode-go" not in stored
+
+
+def test_refresh_keeps_the_cached_reading_over_a_local_note(redis_port, flush_redis):
+    cached = {"opencode-go": {
+        "rows": [{"provider": "opencode-go", "duration": "PT5H", "used_pct": 5, "resets_at": 1}],
+        "fetched_at": "2026-01-01T00:00:00+00:00", "fetched_by": "other-machine",
+    }}
+    _raw_client(redis_port).set(quota_cache.REDIS_KEY, json.dumps(cached))
+    rows = [{"provider": "opencode-go", "note": "key expired"}]
+    with mock.patch.object(quota, "quota_usage", return_value=rows):
+        result = quota_cache.refresh_snapshot(**_kw(redis_port))
+
+    assert result["opencode-go"]["fetched_by"] == "other-machine"
+    assert result["opencode-go"]["rows"][0]["used_pct"] == 5
+
+
 class CliQuotaTests(unittest.TestCase):
     def test_cli_json_prints_merged_snapshot(self):
         fixed = {"claude": {"rows": [{"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS,
@@ -299,6 +415,55 @@ class CliQuotaTests(unittest.TestCase):
         self.assertIn("5 hours", output)
         self.assertIn("60% left", output)
         self.assertIn("via jesus", output)
+
+    def _run_cli(self, merged, *argv):
+        import io
+        import contextlib
+
+        with (
+            mock.patch.object(quota_cache, "refresh_snapshot", return_value=merged),
+            mock.patch.object(usage_cache, "refresh_snapshot"),
+        ):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                code = cli.main(["quota", *argv])
+        self.assertEqual(code, 0)
+        return buf.getvalue()
+
+    @staticmethod
+    def _merged_with_a_note():
+        return {
+            "claude": {
+                "rows": [{"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS,
+                          "used_pct": 40, "resets_at": 99999999999999}],
+                "fetched_at": quota_cache._now_iso(), "fetched_by": "jesus",
+            },
+            "opencode-go": {
+                "rows": [{"provider": "opencode-go", "note": "OpenCode Go API key expired"}],
+                "fetched_at": quota_cache._now_iso(), "fetched_by": "ralpha",
+            },
+        }
+
+    def test_cli_plain_output_shows_the_note_of_a_provider_with_no_usage_rows(self):
+        output = self._run_cli(self._merged_with_a_note())
+        self.assertIn("opencode-go: OpenCode Go API key expired", output.splitlines())
+        # A provider with usage rows is shown as before.
+        self.assertTrue(any(
+            line.startswith("claude ") and "60% left" in line for line in output.splitlines()
+        ))
+        self.assertNotIn("no quota data cached yet", output)
+
+    def test_cli_json_output_shows_the_note_of_a_provider_with_no_usage_rows(self):
+        merged = json.loads(self._run_cli(self._merged_with_a_note(), "--json"))
+        self.assertEqual(
+            merged["opencode-go"]["rows"],
+            [{"provider": "opencode-go", "note": "OpenCode Go API key expired"}],
+        )
+        self.assertEqual(merged["claude"]["rows"][0]["used_pct"], 40)
+
+    def test_cli_provider_with_no_rows_and_no_note_keeps_the_cached_message(self):
+        merged = {"openai": {"rows": [], "fetched_at": None, "fetched_by": "h"}}
+        self.assertEqual(self._run_cli(merged).strip(), "openai: no quota data cached yet")
 
     def test_cli_no_data_is_a_clear_message_not_a_crash(self):
         import io

@@ -35,9 +35,7 @@ class DispatchPlanTests(unittest.TestCase):
 
 class DecideTests(unittest.TestCase):
     def test_small_coding_issue_has_model_effort_and_plan(self):
-        # No injected tiers dict -- decide() goes through route.route(),
-        # which falls back to the real model-tiers.json, same as
-        # test_route.py's test_loads_the_real_model_tiers_json.
+        # No injected tiers dict -- decide() uses the configured model-tier file.
         result = review_dispatch.decide("coding", "size-xs")
         self.assertIn("model", result)
         self.assertIn("effort", result)
@@ -109,6 +107,10 @@ def _fake_run_gh_json(args, *, repo=None, timeout=60):
     if kind == "issue":
         if item == "1":
             return {"body": "issue body", "comments": [{"body": "a comment"}]}, None
+        if item == "2":
+            # Current gh resolves a PR number in `issue view`; only the PR
+            # lookup carries reviews and files.
+            return {"body": "pr body", "comments": []}, None
         return None, "GraphQL: Could not resolve to an Issue"
     if kind == "pr":
         if item == "2":
@@ -158,19 +160,35 @@ class PrefetchTests(unittest.TestCase):
         self.assertIn("error", result["999"])
         self.assertNotIn("kind", result["999"])
 
-    def test_main_prefetch_prints_one_json_blob_keyed_by_number(self):
+    def test_main_prefetch_json_prints_one_blob_keyed_by_number(self):
         import contextlib
         import io
 
         buf = io.StringIO()
         with mock.patch.object(review_dispatch, "_run_gh_json", side_effect=_fake_run_gh_json):
             with contextlib.redirect_stdout(buf):
-                rc = review_dispatch.main(["--prefetch", "1,2"])
+                rc = review_dispatch.main(["--prefetch", "1,2", "--json"])
         self.assertEqual(rc, 0)
         payload = json.loads(buf.getvalue())
         self.assertEqual(set(payload), {"1", "2"})
         self.assertEqual(payload["1"]["kind"], "issue")
         self.assertEqual(payload["2"]["kind"], "pr")
+
+    def test_main_prefetch_defaults_to_markdown(self):
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with mock.patch.object(review_dispatch, "_run_gh_json", side_effect=_fake_run_gh_json):
+            with contextlib.redirect_stdout(buf):
+                rc = review_dispatch.main(["--prefetch", "1,2", "--repo", "o/r"])
+        self.assertEqual(rc, 0)
+        text = buf.getvalue()
+        self.assertTrue(text.startswith("# Issue o/r#1\n"))
+        self.assertIn("# PR o/r#2\n", text)
+        self.assertIn("## Comments (1)", text)
+        self.assertIn("## Reviews (0)", text)
+        self.assertIn("- a.py (+3 -1)", text)
 
     def test_prefetch_is_exclusive_of_category_requirement(self):
         # --prefetch alone must not trip the "one of --category or

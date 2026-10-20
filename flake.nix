@@ -3,18 +3,24 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/8ce4ef6cb6f871616146b9fe26d2a5ae594e94fe";
+    oh-my-pi = {
+      url = "github:can1357/oh-my-pi/cde91bb38674d365e8c3916d05d2292273bb8554";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, oh-my-pi }:
     let
       systems = [ "aarch64-linux" "x86_64-linux" "aarch64-darwin" ];
       forEachSystem = f: nixpkgs.lib.genAttrs systems f;
       mkLupin =
         pkgs:
+        withOmp:
         pkgs.python3Packages.buildPythonApplication {
           pname = "lupin";
-          version = "0.1.0";
+          # `pyproject.toml` is the only place the version is set.
+          version = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).project.version;
           pyproject = true;
           src = self;
           build-system = [ pkgs.python3Packages.setuptools ];
@@ -26,10 +32,8 @@
           # runs them from PATH, so they belong on the wrapper's PATH.
           # `systemd` and `chromium` are Linux-only and this flake builds for darwin too.
           # `chromium` takes the periodic debrief screenshots.
-          # `omp` is deliberately absent: it is not in nixpkgs. The caller
-          # puts it on PATH (ghostbook.nix's ai-skills-claude module ships
-          # it), and the usage page already reports a row as unavailable
-          # when the binary is missing rather than failing.
+          # `herdr` and `omp` are runtime tools used by Lupin; include them on
+          # the wrapper PATH. `LUPIN_HERDR_BIN` can select another Herdr binary.
           makeWrapperArgs = [
             "--prefix"
             "PATH"
@@ -39,7 +43,10 @@
                 pkgs.gh
                 pkgs.git
                 pkgs.tmux
+                pkgs.herdr
               ]
+              ++ nixpkgs.lib.optional withOmp
+                oh-my-pi.packages.${pkgs.stdenv.hostPlatform.system}.default
               ++ nixpkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd pkgs.chromium ]
             ))
           ];
@@ -56,7 +63,8 @@
           pkgs = nixpkgs.legacyPackages.${system};
         in
         {
-          default = mkLupin pkgs;
+          default = mkLupin pkgs true;
+          without-omp = mkLupin pkgs false;
         }
       );
 
@@ -113,11 +121,16 @@
             touch "$out"
           '';
         }
+        # The VM test needs a Linux host. A darwin check cannot build it.
+        // nixpkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          nixos-module = import ./nixos/tests/module.nix {
+            inherit pkgs self;
+          };
+        }
       );
 
-      # Filled in by a later sub-issue, once lupin is a real dependency of a
-      # fleet config (ghostbook.nix, lab.nix). No options yet -- there is no
-      # consumer to write them against.
-      nixosModules.default = { config, lib, pkgs, ... }: { };
+      # The fleet services (agent, dashboard, quota timer, fleet-run timer)
+      # for a worker, a dispatch machine, or both.
+      nixosModules.default = import ./nixos/module.nix { inherit self; };
     };
 }

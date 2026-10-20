@@ -11,6 +11,7 @@ control access to write routes.
 
 from __future__ import annotations
 
+import argparse
 import html
 import ipaddress
 import json
@@ -26,7 +27,6 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from importlib import resources
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
@@ -34,6 +34,7 @@ from urllib.parse import parse_qs, quote, urlparse, urlsplit
 import redis
 
 from . import benchmark_catalog, benchmark_fetch, claims, commands, debrief, digest, loop_runtime, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
+from . import model_tiers as tiers_config
 from . import usage_cache
 from .slots import CoordinatorUnreachable
 from .quota import (
@@ -136,12 +137,13 @@ def bind_allowed(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Loopback, or a tailnet address -- see TAILNET_RANGE above."""
     return addr.is_loopback or (addr.version == 4 and addr in TAILNET_RANGE)
 
-# model-tiers.json -- the same file route.py routes a (category, size) pair
-# with. It ships as package data, so read it the same way route.py does.
-MODEL_TIERS_PATH = str(resources.files("lupin").joinpath("model-tiers.json"))
-# The tier keys the data file uses, cheapest first. A category may be
-# missing any of them; route.py escalates a missing tier to the next one up.
-MODEL_TIER_ORDER = ("tier0", "tier1", "tier2")
+# The bundled file is the default. `LUPIN_MODEL_TIERS` can select another file.
+MODEL_TIERS_PATH = tiers_config.default_path()
+MODEL_TIER_ORDER = tiers_config.TIER_ORDER
+
+
+def _model_tiers_path() -> str:
+    return tiers_config.path(MODEL_TIERS_PATH)
 
 # --------------------------------------------------------------------------
 # running read-only probes
@@ -266,7 +268,31 @@ def _roadmap_models(repos: list[str], connection: dict) -> dict:
 # query, because every filter changes the output. The lifetime stays short
 # so ledger events and GitHub data remain near-live, while a reload inside
 # the window costs nothing -- including no GitHub call.
-_FRAGMENT_TTL = float(os.environ.get("LUPIN_ROADMAP_FRAGMENT_TTL", "30"))
+def _fragment_ttl() -> float:
+    """The fragment cache lifetime in seconds.
+
+    Read when the value is used, not at import. A wrong value names the
+    variable and stops `lupin serve` with exit code 2.
+    """
+    value = os.environ.get("LUPIN_ROADMAP_FRAGMENT_TTL", "30")
+    try:
+        return float(value)
+    except ValueError:
+        raise ValueError(
+            f"LUPIN_ROADMAP_FRAGMENT_TTL needs a number of seconds, got {value!r}"
+        ) from None
+
+
+def _serve_port(value: str) -> int:
+    """A Redis port from `--redis-port` or `LUPIN_REDIS_PORT`."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"LUPIN_REDIS_PORT or --redis-port needs a whole number, got {value!r}"
+        ) from None
+
+
 _FRAGMENT_MAX = 64
 _FRAGMENT_CACHE: dict[tuple, tuple[float, bytes]] = {}
 _FRAGMENT_LOCK = threading.Lock()
@@ -280,7 +306,7 @@ def _cached_fragment(key: tuple, build) -> bytes:
     now = time.monotonic()
     with _FRAGMENT_LOCK:
         cached = _FRAGMENT_CACHE.get(key)
-        if cached and now - cached[0] < _FRAGMENT_TTL:
+        if cached and now - cached[0] < _fragment_ttl():
             return cached[1]
     body = build()
     with _FRAGMENT_LOCK:
@@ -1614,33 +1640,27 @@ def render_usage(*, connection: dict | None = None) -> bytes:
     )
 
 
-def unavailable_tiers(error: Exception) -> list[dict]:
-    return [{
-        "error": f"unavailable ({type(error).__name__})",
-        "source": MODEL_TIERS_PATH,
-    }]
+def unavailable_tiers(error: Exception, source: str) -> list[dict]:
+    return [{"error": str(error), "source": source or tiers_config.SETTING}]
 
 
 def model_tiers() -> list[dict]:
-    """Read MODEL_TIERS_PATH, one row per task category."""
+    """Read and validate the selected model-tier file."""
+    source = _model_tiers_path()
     try:
-        with open(MODEL_TIERS_PATH, encoding="utf-8") as handle:
-            raw = json.load(handle)
-    except (OSError, ValueError) as error:
-        return unavailable_tiers(error)
-    if not isinstance(raw, dict):
-        return [{"error": "no categories in the file", "source": MODEL_TIERS_PATH}]
+        raw = tiers_config.load(source)
+    except tiers_config.ModelTiersError as error:
+        return unavailable_tiers(error, source)
     rows = []
     for category, entry in raw.items():
-        # Keys starting with "_" are file comments, not categories.
-        if category.startswith("_") or not isinstance(entry, dict):
+        # Keys starting with "_" (like "_comment") are notes, not categories.
+        if category.startswith("_"):
             continue
-        tiers = entry.get("tiers")
         rows.append({
             "category": category,
             "source": entry.get("source", "not recorded"),
             "last_verified": entry.get("last_verified", "-"),
-            "tiers": tiers if isinstance(tiers, dict) else {},
+            "tiers": entry["tiers"],
             "note": entry.get("note", ""),
         })
     return rows
@@ -1933,7 +1953,7 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
     body.extend([
         "<h2>Routing by task category</h2>",
         "<p class=dim>Read from <code>"
-        f"{esc(MODEL_TIERS_PATH)}</code>. Each tier is an ordered fallback "
+        f"{esc(_model_tiers_path())}</code>. Each tier is an ordered fallback "
         "chain: the first entry is tried first, then the next. A category "
         "with no entry for a tier escalates to the next tier up. The "
         "&middot; note after each pick is today's live match (issue #16's "
@@ -2822,8 +2842,14 @@ def debrief_items(root: Path, connection: dict) -> list[dict]:
     here = socket.gethostname()
     published = digest.read_all(**connection)
     digested = {(e["machine"], e["repo"], e["name"]) for e in published if e.get("digest")}
+    quiet = {(e["machine"], e["repo"], e["name"]) for e in published if e.get("quiet")}
+    records = {(e["machine"], e["repo"], e["name"]) for e in published if e.get("record_only")}
     items = [
-        {"repo": repo, "name": name, "machine": None, "has_digest": (here, repo, name) in digested}
+        {
+            "repo": repo, "name": name, "machine": None,
+            "has_digest": (here, repo, name) in digested, "quiet": (here, repo, name) in quiet,
+            "record_only": (here, repo, name) in records,
+        }
         for repo, name in debrief.list_debriefs(root)
     ]
     local = {(i["repo"], i["name"]) for i in items}
@@ -2831,7 +2857,11 @@ def debrief_items(root: Path, connection: dict) -> list[dict]:
         if entry["machine"] == here and (entry["repo"], entry["name"]) in local:
             continue
         items.append(
-            {"repo": entry["repo"], "name": entry["name"], "machine": entry["machine"], "has_digest": bool(entry.get("digest"))}
+            {
+                "repo": entry["repo"], "name": entry["name"], "machine": entry["machine"],
+                "has_digest": bool(entry.get("digest")), "quiet": bool(entry.get("quiet")),
+                "record_only": bool(entry.get("record_only")),
+            }
         )
     return sorted(items, key=lambda i: (debrief._newest_first((i["repo"], i["name"])), i["machine"] or ""), reverse=True)
 
@@ -2847,7 +2877,7 @@ def render_debrief_index(items: list[dict]) -> bytes:
         f"<li><a href='{link(item)}'>{esc(item['repo'])}</a> "
         f"<span class=dim>{esc(_debrief_stamp(item['name']))}"
         f"{' &middot; ' + esc(item['machine']) if item['machine'] else ''}"
-        f"{'' if item['has_digest'] else ' &middot; no digest'}</span></li>"
+        f"{' &middot; no changes' if item['quiet'] else '' if item['has_digest'] or item['record_only'] else ' &middot; no digest'}</span></li>"
         for item in items
     )
     listing = f"<ul>{rows}</ul>" if rows else "<p class=dim>No debriefs yet.</p>"
@@ -3155,7 +3185,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             return
-        image = github_attachment(attachment_id)
+        # A worker may hold a copy in Redis. A machine with no GitHub access to the repo needs it.
+        image = digest.read_image(attachment_id, **self.fleet_connection) or github_attachment(attachment_id)
         if image is None:
             self.send_response(404)
             self.send_header("Content-Length", "0")
@@ -3202,6 +3233,10 @@ class Handler(BaseHTTPRequestHandler):
                 f"<p class=dim>Digest by {esc(str(entry.get('model') or 'a model'))}. "
                 "The full debrief is below.</p><hr>"
             )
+        elif entry and entry.get("record_only"):
+            summary = "<p class=dim>This is a record. Digests cover the 12-hour and 7-day windows.</p>"
+        elif entry and entry.get("quiet"):
+            summary = "<p class=dim>Nothing changed in this period, so no digest was written.</p>"
         elif entry and entry.get("error"):
             summary = f"<p class=dim>No digest: {esc(str(entry['error']))}</p>"
         remote_note = f"<p class=dim>Written on {esc(machine)}. Screenshots stay on that machine.</p>" if machine != here else ""
@@ -4091,8 +4126,7 @@ def main(argv: list[str] | None = None) -> int:
     # docstring) and importing cli.py here would be circular.
     ap.add_argument("--redis-host", default=os.environ.get("LUPIN_REDIS_HOST"))
     ap.add_argument(
-        "--redis-port", type=int,
-        default=int(os.environ["LUPIN_REDIS_PORT"]) if os.environ.get("LUPIN_REDIS_PORT") else None,
+        "--redis-port", type=_serve_port, default=os.environ.get("LUPIN_REDIS_PORT"),
     )
     ap.add_argument("--redis-username", default=os.environ.get("LUPIN_REDIS_USERNAME"))
     ap.add_argument("--redis-password", default=os.environ.get("LUPIN_REDIS_PASSWORD"))
@@ -4109,6 +4143,11 @@ def main(argv: list[str] | None = None) -> int:
         help="directory with one file per target machine",
     )
     args, _unknown = ap.parse_known_args(argv)
+    try:
+        _fragment_ttl()
+    except ValueError as exc:
+        print(f"lupin: {exc}", file=sys.stderr)
+        return 2
 
     if args.roadmap:
         repos = roadmap.repository_names(code_repos())

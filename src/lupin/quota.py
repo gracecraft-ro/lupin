@@ -18,6 +18,7 @@ login for each session, so Lupin only reads each login's quota.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -49,6 +50,7 @@ _USER_AGENT = "lupin-quota/1.0"
 # these apart from read failures.
 NO_CLAUDE_CREDENTIALS = "no Claude credentials"
 NO_OPENCODE_GO_KEY = "no OpenCode Go API key available"
+OPENCODE_GO_KEY_EXPIRED = "OpenCode Go API key expired -- get a new key in the OpenCode Console"
 NO_KEY_NOTES = frozenset({NO_CLAUDE_CREDENTIALS, NO_OPENCODE_GO_KEY})
 
 
@@ -340,6 +342,27 @@ def claude_oauth_quota() -> list[dict]:
     return rows or [{"provider": "claude", "note": "no quota data reported"}]
 
 
+def _omp_token(provider: str) -> str:
+    """The key that `omp` holds for `provider`, or "" if `omp` gives none.
+
+    Only stdout counts. A failed command gives no key. Output that is not
+    one word is an error message, not a key. Output that is not UTF-8 gives
+    no key. The key is never logged.
+    """
+    try:
+        proc = subprocess.run(
+            ["omp", "token", provider],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return ""
+    words = proc.stdout.split()
+    return words[0] if proc.returncode == 0 and len(words) == 1 else ""
+
+
 def opencode_go_quota() -> list[dict]:
     key = ""
     try:
@@ -352,6 +375,8 @@ def opencode_go_quota() -> list[dict]:
         pass
     if not key:
         key = os.environ.get("OPENCODE_API_KEY", "").strip()
+    if not key:
+        key = _omp_token("opencode-go")
     if not key:
         return [{"provider": "opencode-go", "note": NO_OPENCODE_GO_KEY}]
 
@@ -366,6 +391,14 @@ def opencode_go_quota() -> list[dict]:
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             data = json.load(response)
+    except urllib.error.HTTPError as error:
+        try:
+            body = error.read(4096)
+        except (OSError, http.client.HTTPException):
+            body = b""
+        if error.code == 401 and b"api_key_expired" in body:
+            return [{"provider": "opencode-go", "note": OPENCODE_GO_KEY_EXPIRED}]
+        return [{"provider": "opencode-go", "note": f"quota unavailable ({type(error).__name__})"}]
     except (OSError, ValueError, urllib.error.URLError) as error:
         return [{"provider": "opencode-go", "note": f"quota unavailable ({type(error).__name__})"}]
 
@@ -409,8 +442,10 @@ def _account_labels(reports: list[dict]) -> list[str | None]:
     """One label per `omp` report. `None` when the provider has one login.
 
     The label is the plan name (`free`, `plus`). Two logins on the same
-    plan get a short hash of the account ID too. The email and the account
-    ID never leave this function: the label goes to Redis and the dashboard.
+    plan also get a short hash of the user (email) and the workspace
+    (`accountId`). Two users can share one workspace, so the hash uses
+    both. The email and the account ID never leave this function: the
+    label goes to Redis and the dashboard.
     """
     by_provider: dict[str, list[int]] = {}
     for index, report in enumerate(reports):
@@ -429,7 +464,9 @@ def _account_labels(reports: list[dict]) -> list[str | None]:
             if plans.count(plan) == 1:
                 labels[index] = plan
             else:
-                identity = str(item.get("accountId") or index)
+                user = str(item.get("email") or "").strip().lower()
+                workspace = str(item.get("accountId") or "")
+                identity = f"{user}\0{workspace}" if user or workspace else str(index)
                 labels[index] = f"{plan}-{hashlib.sha256(identity.encode()).hexdigest()[:6]}"
     return labels
 
@@ -503,26 +540,55 @@ def snapshot() -> dict[str, dict]:
     heartbeat, eventually `place`) decide what to do with missing data.
 
     With more than one account, this picks one row for each account as
-    above. Then it keeps the row with the most quota left, because `omp`
-    sends work to an account that has quota.
+    above. Then it keeps the account with the most quota left on its
+    most-used window, as `pace.headroom` does, because `omp` sends work to
+    an account that has quota. The reported row stays the 5-hour row. An
+    account that is blocked on any window (`pace.blocked`) is not used when
+    another account is not blocked.
     """
+    # `pace` imports this module, so import it here, not at the top.
+    from . import pace
+
+    rows = quota_usage()
+    now_ms = time.time() * 1000
     per_account: dict[tuple[str, str | None], dict] = {}
-    for row in quota_usage():
+    account_rows: dict[tuple[str, str | None], list[dict]] = {}
+    for row in rows:
         provider = row.get("provider")
         if not provider:
             continue
         key = (provider, row.get("account"))
+        account_rows.setdefault(key, []).append(row)
         if key not in per_account or row.get("duration") == QuotaDuration.FIVE_HOURS:
             per_account[key] = row
 
-    def _left(row: dict) -> float:
-        used = row.get("used_pct")
-        return max(0.0, 100 - used) if isinstance(used, (int, float)) else -1.0
+    blocked_accounts = {
+        key for key in per_account
+        if pace.blocked(account_rows[key], key[0], now_ms)
+    }
 
-    chosen: dict[str, dict] = {}
-    for (provider, _), row in per_account.items():
-        if provider not in chosen or _left(row) > _left(chosen[provider]):
-            chosen[provider] = row
+    def _left(key: tuple[str, str | None]) -> float:
+        # The most-used window decides. That is the number `pace.headroom` uses,
+        # so the rows are the same `pace._usable_rows` test: a real `used_pct`
+        # and a real `resets_at`. A row with an unknown reset is unknown, not
+        # almost-used.
+        values = [
+            max(0.0, 100 - row["used_pct"]) for row in account_rows[key]
+            if isinstance(row.get("used_pct"), (int, float))
+            and isinstance(row.get("resets_at"), (int, float))
+        ]
+        return min(values) if values else -1.0
+
+    def _rank(key: tuple[str, str | None]) -> tuple[bool, float]:
+        # An open account comes before a blocked one. Then most quota left.
+        return (key not in blocked_accounts, _left(key))
+
+    best: dict[str, tuple[str, str | None]] = {}
+    for key in per_account:
+        provider = key[0]
+        if provider not in best or _rank(key) > _rank(best[provider]):
+            best[provider] = key
+    chosen = {provider: per_account[key] for provider, key in best.items()}
 
     result = {}
     for provider, row in chosen.items():
