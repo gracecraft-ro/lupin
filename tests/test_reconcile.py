@@ -395,3 +395,20 @@ def test_cli_reconcile_unreachable_redis_exits_3(closed_port, clean_fleet_env, c
 
     assert code == 3
     assert "cannot reach" in captured.err
+
+
+def test_release_lost_claims_keeps_a_renewed_claim_and_releases_one_nothing_renews(
+    redis_port, flush_redis
+):
+    # Issue #156: a renew writes a new `since`, so reconcile keeps that claim.
+    # Reconcile still releases a claim that nothing renews.
+    _write_claim(redis_port, "acme/repo#1", "loop-a", age_seconds=700)
+    _write_claim(redis_port, "acme/repo#2", "loop-b", age_seconds=700)
+
+    assert claims.renew_holder_claims("loop-a", **_kw(redis_port)) == ["acme/repo#1"]
+    lines = reconcile._release_lost_claims(_kw(redis_port))
+
+    assert lines == ["released claim #2 · lost, no heartbeat for 10m · back in the queue, branch kept"]
+    client = _client(redis_port)
+    assert client.get(f"{claims.PREFIX}claim:acme/repo#1") is not None
+    assert client.get(f"{claims.PREFIX}claim:acme/repo#2") is None

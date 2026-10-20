@@ -26,7 +26,7 @@ Modeled on `gh_cache.py` (#35) and `benchmark_fetch.py` (#17), adapted:
 - **One shared key, one entry per provider.** Different providers can go
   stale/fresh independently (one machine might refresh "claude" while
   another refreshes "openai"), so each provider's entry carries its own
-  `fetched_at`/`fetched_by`, inside one Redis key (`quota-snapshot`) --
+  `fetched_at`/`fetched_by`, inside one Redis key (`quota-accounts`) --
   same single-key-many-entries shape `machine:<name>`'s own `quota` field
   already uses, just shared instead of per-machine.
 
@@ -49,7 +49,13 @@ from . import quota, slots_redis
 
 CoordinatorUnreachable = slots_redis.CoordinatorUnreachable
 
-REDIS_KEY = f"{slots_redis.PREFIX}quota-snapshot"
+# Rows with `account` labels (issue #169). An old `lupin` reads all rows
+# of a provider as one login, so these rows must not go to its key.
+REDIS_KEY = f"{slots_redis.PREFIX}quota-accounts"
+# The key that `lupin` versions before issue #169 read and write. Its rows
+# have no `account` labels, so two logins can look like one blocked login.
+# This module reads it but never writes it. See `read_snapshot`.
+OLD_REDIS_KEY = f"{slots_redis.PREFIX}quota-snapshot"
 
 # How long a provider's entry is trusted before another refresh is worth
 # attempting -- the issue's "5-minute refresh cadence". Retention
@@ -82,7 +88,7 @@ def _client(connection: dict):
 
 
 def is_fresh(entry: dict | None, now: float | None = None) -> bool:
-    if not entry:
+    if not entry or entry.get("old_writer"):
         return False
     fetched_at = entry.get("fetched_at")
     if not fetched_at:
@@ -135,19 +141,16 @@ def _restore_durations(rows: list[dict]) -> list[dict]:
     return restored
 
 
-def read_snapshot(**connection) -> dict:
-    """Best-effort, passive read -- no lock, no local provider call, never
-    writes anything. `{}` if nothing is cached yet, the cached value is
-    corrupt, or Redis can't be reached right now -- same "degrade, don't
-    crash" contract as `benchmark_fetch.read_snapshot`. This is what
-    `serve.py`'s `/usage` page calls, on every render, so it never hits a
-    provider API from the dashboard process.
+def _read_key(client, key: str) -> dict:
+    """One key's entries. `{}` if the key is missing or not a JSON object.
+
+    A refused login raises `CoordinatorAuthFailed`. Other connection
+    errors go to the caller.
     """
     try:
-        client = _client(connection)
-        raw = slots_redis._call_with_retry(lambda: client.get(REDIS_KEY))
-    except _REDIS_ERRORS:
-        return {}
+        raw = slots_redis._call_with_retry(lambda: client.get(key))
+    except redis.exceptions.AuthenticationError as exc:
+        raise slots_redis._auth_failed(exc) from exc
     if raw is None:
         return {}
     try:
@@ -156,10 +159,49 @@ def read_snapshot(**connection) -> dict:
         return {}
     if not isinstance(data, dict):
         return {}
-    for provider, entry in data.items():
-        if isinstance(entry, dict) and isinstance(entry.get("rows"), list):
+    return {provider: entry for provider, entry in data.items() if isinstance(entry, dict)}
+
+
+def _read_both(connection: dict) -> tuple[dict, dict]:
+    """The entries of `REDIS_KEY` and of `OLD_REDIS_KEY`, in that order."""
+    client = _client(connection)
+    return _read_key(client, REDIS_KEY), _read_key(client, OLD_REDIS_KEY)
+
+
+def _merge(current: dict, old: dict) -> dict:
+    """`current` entries, plus `old` entries for providers not in `current`.
+
+    An entry from `old` gets `"old_writer": True`. `is_fresh` is then
+    always false for it, so a loop start never uses it, and the `/usage`
+    page marks it stale. Its rows can hide a login, so they are only for
+    display.
+    """
+    merged = dict(current)
+    for provider, entry in old.items():
+        if provider not in merged:
+            merged[provider] = {**entry, "old_writer": True}
+    for entry in merged.values():
+        if isinstance(entry.get("rows"), list):
             entry["rows"] = _restore_durations(entry["rows"])
-    return data
+    return merged
+
+
+def read_snapshot(**connection) -> dict:
+    """Best-effort, passive read -- no lock, no local provider call, never
+    writes anything. `{}` if nothing is cached yet, the cached value is
+    corrupt, or Redis can't be reached right now -- same "degrade, don't
+    crash" contract as `benchmark_fetch.read_snapshot`. This is what
+    `serve.py`'s `/usage` page calls, on every render, so it never hits a
+    provider API from the dashboard process. A refused login also gives
+    `{}` here; `refresh_snapshot` raises for it.
+
+    It also reads `OLD_REDIS_KEY`. See `_merge` for how it uses those rows.
+    """
+    try:
+        current, old = _read_both(connection)
+    except (slots_redis.CoordinatorAuthFailed, *_REDIS_ERRORS):
+        return {}
+    return _merge(current, old)
 
 
 def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connection) -> dict:
@@ -178,8 +220,15 @@ def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connec
     than every 5 minutes fleet-wide" guarantee comes from *this function*
     only being invoked every 5 minutes -- by `lupin quota` on an external
     timer, same convention `fetch-models`/`fetch-benchmarks` already use.
+
+    A refused login raises `CoordinatorAuthFailed`. An ACL denial raises
+    `NoPermissionError`. The CLI then exits 3.
     """
-    cached = read_snapshot(**connection)
+    try:
+        current, old = _read_both(connection)
+    except _REDIS_ERRORS:
+        current, old = {}, {}
+    cached = _merge(current, old)
     local_rows = group_by_provider(quota.quota_usage())
     updated = dict(cached)
     changed = False
@@ -205,6 +254,8 @@ def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connec
             )
         except slots_redis.SlotFull:
             continue  # another process on this machine is already publishing this provider
+        except slots_redis.CoordinatorAuthFailed:
+            raise
         except slots_redis.CoordinatorUnreachable:
             # No fleet cache reachable, so nothing to publish *through* --
             # but this machine's own reading is still real. Surface it to
@@ -224,6 +275,8 @@ def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connec
         finally:
             try:
                 slots_redis.release(lease, **connection)
+            except slots_redis.CoordinatorAuthFailed:
+                raise
             except slots_redis.CoordinatorUnreachable:
                 pass
 
@@ -231,7 +284,9 @@ def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connec
         try:
             client = _client(connection)
             slots_redis._call_with_retry(
-                lambda: client.set(REDIS_KEY, json.dumps(updated), ex=REDIS_KEY_TTL)
+                lambda: client.set(REDIS_KEY, json.dumps(
+                    {provider: entry for provider, entry in updated.items() if not entry.get("old_writer")}
+                ), ex=REDIS_KEY_TTL)
             )
         except _REDIS_ERRORS:
             pass  # best effort -- this machine's own caller still gets `updated` back
