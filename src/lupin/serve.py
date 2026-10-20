@@ -422,13 +422,18 @@ def loop_tail(repo: str, machine: str, lines: int, connection: dict, signing_key
 def _repo_platforms() -> dict[str, str]:
     """Repo to platform, read from `REPOS_FILE`.
     Lines use `repo` or `repo platform`.
+
+    A line that starts with `#` is a comment. Lupin ignores it, so it
+    must not turn up as a repo (issue #65).
     """
     result: dict[str, str] = {}
     try:
         with open(REPOS_FILE, encoding="utf-8") as fh:
             for line in fh:
                 parts = line.split()
-                if parts and "~" not in parts[0]:
+                if not parts or parts[0].startswith("#"):
+                    continue
+                if "~" not in parts[0]:
                     result[parts[0]] = parts[1] if len(parts) > 1 else "claude"
     except OSError:
         pass

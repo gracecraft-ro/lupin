@@ -3761,6 +3761,32 @@ class TestReposPageRoutes:
         handler.do_POST()
         handler.redirect.assert_called_once()
 
+    def test_add_route_keeps_a_comment_line_in_the_schedule_file(self, tmp_path, monkeypatch):
+        """A comment line stays one line. An add must not write it again."""
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        _make_repo(tmp_path, "gadgets")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        repos_file = state_dir / "repos"
+        repos_file.write_text("# notes for the loop\nlupin omp\n", encoding="utf-8")
+        monkeypatch.setattr(serve, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(serve, "REPOS_FILE", str(repos_file))
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/add", {"repo": "widgets"})
+        handler.do_POST()
+        assert repos_file.read_text(encoding="utf-8") == (
+            "# notes for the loop\nlupin omp\nwidgets claude\n"
+        )
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/add", {"repo": "gadgets"})
+        handler.do_POST()
+        assert repos_file.read_text(encoding="utf-8") == (
+            "# notes for the loop\nlupin omp\nwidgets claude\ngadgets claude\n"
+        )
+
     def test_generate_docs_route_rejects_a_repo_that_already_has_one(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
         _make_repo(tmp_path, "widgets")
