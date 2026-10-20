@@ -23,8 +23,8 @@ import pytest
 import redis as redis_lib
 
 from lupin import (
-    cli, claims, commands, ledger, machines, quest, quota_cache, roadmap, serve, slots,
-    slots_redis, usage_cache,
+    agent, cli, claims, commands, ledger, machines, quest, quota_cache, roadmap, serve,
+    slots, slots_redis, usage_cache,
 )
 
 
@@ -2623,6 +2623,26 @@ class LoopsRouteUnitTests(unittest.TestCase):
         self.assertNotIn("action=/loops/close", body)
         self.assertNotIn("action=/loops/state", body)
 
+    def test_sent_message_shows_up_as_a_pill(self):
+        data = {
+            "entries": [_loop_entry("a", "stopped", "pihome")],
+            "local_host": "pihome",
+            "machines": [{"name": "pihome", "state": "online", "slots": {}}],
+            "fleet_error": None,
+        }
+
+        body = serve.render_loops(
+            data,
+            group="repo",
+            selected_repo="a",
+            selected_tail=None,
+            lines=60,
+            sent="Started loop a on jesus",
+        ).decode()
+
+        self.assertIn("Started loop a on jesus", body)
+        self.assertIn("pill on", body)
+
 
     def test_close_route_rejects_bad_repo_name(self):
         handler = _loops_handler()
@@ -2748,7 +2768,37 @@ class LoopsRouteUnitTests(unittest.TestCase):
         ):
             handler.do_POST()
         fake_run.assert_called_once_with(["lupin", "run", "a"], timeout=20.0)
-        handler.redirect.assert_called_once_with("/loops?repo=a")
+        handler.redirect.assert_called_once_with(
+            "/loops?repo=a&sent=Started%20loop%20a%20on%20h"
+        )
+
+    def test_start_route_names_the_repo_and_the_machine(self):
+        handler = _loops_handler()
+        handler.cmd_signing_key = "secret"
+        _post_body(handler, "/loops/start", {"repo": "a", "machine": "jesus"})
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.loops.commands, "enqueue", return_value="cmd-1"),
+        ):
+            handler.do_POST()
+        target = handler.redirect.call_args.args[0]
+        assert target.startswith("/loops?repo=a&sent=")
+        # A queued start names the repo and the machine that will run it.
+        assert quote("Started loop a on jesus", safe="") in target
+
+    def test_start_route_reports_a_failed_start(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/start", {"repo": "a", "machine": "h"})
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve, "run", return_value=(1, "boom")),
+        ):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 502)
+        body = handler.reply.call_args.args[0].decode()
+        self.assertIn("run failed", body)
+        self.assertIn("machine h", body)
+        handler.redirect.assert_not_called()
 
     def test_coordinator_cannot_start_a_local_loop(self):
         handler = _loops_handler()
@@ -3155,6 +3205,35 @@ class ScheduleRunRouteUnitTests(unittest.TestCase):
             handler.do_POST()
         self.assertTrue(fake_machines.call_args.kwargs.get("strict"))
 
+    def test_note_reaches_the_local_loop(self):
+        handler = _schedule_handler()
+        _post_body(
+            handler, "/schedule/run",
+            {"repo": "a-repo", "place": "h", "note": "read the notes first"},
+        )
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", return_value=[]),
+            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
+        ):
+            handler.do_POST()
+        fake_run.assert_called_once_with(
+            ["lupin", "run", "a-repo", "--note=read the notes first"], timeout=20.0
+        )
+
+    def test_no_note_leaves_the_loop_arguments_alone(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "a-repo", "place": "h"})
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", return_value=[]),
+            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
+        ):
+            handler.do_POST()
+        fake_run.assert_called_once_with(["lupin", "run", "a-repo"], timeout=20.0)
+
 
 
 class TestSchedulePageIntegration:
@@ -3200,6 +3279,30 @@ class TestSchedulePageIntegration:
         assert stored["issuer"] == "pihome"
         assert commands.verify(stored, "secret") is True
         handler.send_response.assert_called_once_with(303)
+
+    def test_run_now_passes_the_note_to_a_remote_loop(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        _write_machine_record(redis_port, "jesus", state="online")
+        handler = _post_handler(
+            "/schedule/run", b"repo=widgets&place=jesus&note=read+the+notes", kw
+        )
+        handler.cmd_signing_key = "secret"
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            handler.do_POST()
+
+        raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+        queued = raw.zrange("lupin:v1:cmdq:jesus", 0, -1)
+        assert len(queued) == 1
+        stored = json.loads(raw.get(f"lupin:v1:cmd:{queued[0]}"))
+        assert stored["action"] == "loop.run"
+        assert stored["params"] == {"repo": "widgets", "note": "read the notes"}
+        # The agent on the worker turns the note into a "--note" argument.
+        assert agent.ACTIONS["loop.run"](stored["params"], "cmd-1") == [
+            "lupin", "run", "widgets", "--note", "read the notes",
+        ]
 
     def test_run_now_rejects_a_draining_named_machine(self, redis_port, flush_redis):
         kw = _kw(redis_port)

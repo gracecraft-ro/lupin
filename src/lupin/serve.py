@@ -2614,7 +2614,7 @@ def render_schedule(data: dict, *, sent: str | None = None) -> bytes:
     body.append(
         '<div class=card><div class=row style="margin-bottom:.4rem">'
         "<b>Run now</b><span class=dim>Starts loops on free machines. "
-        "The note is kept with the request but is not passed into the loop.</span></div>"
+        "The note is passed to each loop as extra instructions.</span></div>"
         f"{error_note}"
         "<form method=post action=/schedule/run class=row>"
         f"<select name=repo><option value=all>all enabled repos</option>{repo_options}</select>"
@@ -2642,7 +2642,13 @@ def _loops_url(repo: str, group: str, lines: int) -> str:
 
 
 def render_loops(
-    data: dict, *, group: str, selected_repo: str, selected_tail: str | None, lines: int
+    data: dict,
+    *,
+    group: str,
+    selected_repo: str,
+    selected_tail: str | None,
+    lines: int,
+    sent: str | None = None,
 ) -> bytes:
     """The Loops page (issue #21): a sidebar grouped by repo or by machine,
     and a tail pane for whichever loop is selected.
@@ -2651,6 +2657,9 @@ def render_loops(
     separately by the caller (same split `gather()`/`render_dashboard()`
     already use: this function renders a already-read state, it doesn't go
     read anything itself).
+
+    `sent` is the message a POST handler left for the user. It shows up
+    as a pill, like on the other pages.
     """
     entries = data["entries"]
     local_host = data["local_host"]
@@ -2794,9 +2803,13 @@ def render_loops(
     error_note = (
         f"<p class=dim>Fleet registry unreachable: {esc(fleet_error)}</p>" if fleet_error else ""
     )
+    sent_note = (
+        f"<div class=card><span class='pill on'>{esc(sent)}</span></div>" if sent else ""
+    )
     body = (
         f'<header><h1>{icon("M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3")}Loops</h1></header>'
         f"{error_note}"
+        f"{sent_note}"
         "<div class=loops-shell>"
         f"<div class='card loops-side'>{''.join(side)}</div>"
         f"<div class=loops-main>{''.join(main)}</div>"
@@ -3566,7 +3579,16 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_loop_fullscreen(selected, tail, lines, group))
             return
 
-        self.reply(render_loops(data, group=group, selected_repo=selected_repo, selected_tail=tail, lines=lines))
+        self.reply(
+            render_loops(
+                data,
+                group=group,
+                selected_repo=selected_repo,
+                selected_tail=tail,
+                lines=lines,
+                sent=query.get("sent"),
+            )
+        )
 
     def _loop_targets(self, machine: str, scope: str, repo: str) -> list[str]:
         """Return active Herdr loops on a machine for an all-stop request."""
@@ -3679,9 +3701,15 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("cannot reach the redis coordinator"), 502)
             return
         if result["mode"] == "local" and result["returncode"] != 0:
-            self.reply(render_error(f"run failed: {result['output'].strip()}"), 502)
+            self.reply(
+                render_error(f"run failed: {result['output'].strip()} (machine {machine})"), 502
+            )
             return
-        self.redirect(f"/loops?repo={quote(loop_runtime.loop_repo(repo), safe='')}")
+        name = loop_runtime.loop_repo(repo)
+        # The same wording the "Run now" card uses: the repo and the
+        # machine that owns the run.
+        sent = f"Started loop {name} on {machine}"
+        self.redirect(f"/loops?repo={quote(name, safe='')}&sent={quote(sent, safe='')}")
 
     def do_schedule_timer(self, form: dict) -> None:
         """Start or stop `delegation-loop.timer` -- always on this machine.
@@ -3778,6 +3806,12 @@ class Handler(BaseHTTPRequestHandler):
         for repo, machine in zip(targets_repos, assigned):
             local_argv = ["lupin", "run", repo]
             queue_params = {"repo": repo}
+            if note:
+                # The note rides along as extra instructions for the run.
+                # "--note=..." keeps a note that starts with "-" out of
+                # argparse's way: it would read "-x" as an option.
+                local_argv.append(f"--note={note}")
+                queue_params["note"] = note
             try:
                 result = loops.dispatch_loop_action(
                     machine=machine, local_host=local_host,
