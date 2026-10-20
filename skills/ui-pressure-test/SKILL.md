@@ -57,8 +57,8 @@ Include all relevant items, such as:
   right-click, keyboard-only use, touch, drag and drop, pen, or other modes.
   Do not claim that a method passed if the browser or device could not perform
   it.
-- Supported screen sizes, orientation changes, and browsers. Include narrow
-  mobile, tablet, and desktop sizes when relevant.
+- Supported screen sizes, orientation changes, and browsers. Every journey
+  runs on all three device sizes. See "Run the three device passes".
 - Keyboard focus and visible focus, labels and instructions, zoom, and other
   access needs that affect the journey. Name assistive tools that were actually
   used; do not claim a screen-reader check from keyboard testing alone.
@@ -66,12 +66,31 @@ Include all relevant items, such as:
 Create a coverage table before dispatch. Give every planned journey and
 variation a status: `not started`, `passed`, `finding`, `blocked`, or `not run`.
 For each item, record the device, browser, input method, account or data state,
-and the expected result. Do not drop a journey, mode, or export to fit one
-agent's workload; add agents or run another wave. Test each supported option.
+and the expected result. The table has one row per journey and device. Do not
+drop a journey, mode, or export to fit one agent's workload; add agents or run
+another wave. Test each supported option.
 For a large set of combinations, first test each option on its own, then test
 the important combinations. List every combination not tested, with the exact
 reason and a next step. Do not call the test complete while safe, available
 items remain untested. Never mark an untried item as passed.
+
+## Run the three device passes
+
+Every journey runs on all three device sizes. These sizes are fixed:
+
+- Phone: 390x844.
+- Tablet: 768x1024.
+- Desktop: 1440x900.
+
+The coverage table has one row per journey and device. A journey that did not
+run on a device is `not run`, with the exact reason. `not run` is not a pass.
+Do not skip a device because the screen looks the same. A small screen often
+breaks the parts a big screen hides.
+
+Give each device pass to an evaluator, or run the passes in sequence. Keep the
+journey steps the same on every device, so the difference is the size. Save a
+screenshot of every screen on every device. These images are the evidence for
+the visual review and the pull request comments.
 
 ## Find the core journey
 
@@ -99,7 +118,7 @@ than five paths, including the baseline if it must repeat it. Examples of
 separate assignments:
 
 - Same creation flow with mouse, keyboard-only, and touch input.
-- Same flow on narrow mobile, tablet, and desktop sizes.
+- Same flow on phone 390x844, tablet 768x1024, and desktop 1440x900.
 - A different creation mode or tool path.
 - One export family, with each available format and its reopen/import check.
 - A recovery path, such as refresh, undo, interruption, and resume.
@@ -121,7 +140,8 @@ Give each evaluator a short brief with:
 
 - The exact journey, starting state, and assigned variations.
 - The target URL, build, account, test data, and safety limits.
-- The device, viewport, browser, and input method to use.
+- The device, viewport, browser, and input method to use. Give the phone,
+  tablet, and desktop sizes when the evaluator runs all three passes.
 - The expected result and any known project rule.
 - Where to save screenshots, downloads, and other evidence.
 - A limit of one journey family and five paths.
@@ -135,6 +155,7 @@ Each evaluator returns one row per path with:
 - Status: `passed`, `finding`, `blocked`, or `not run`.
 - Device, browser, viewport, input method, and starting data.
 - Steps completed and the result seen.
+- A screenshot of every screen it visited, named with the device.
 - Findings with repeat steps, user impact, and evidence links.
 - Any assigned item not tested and the exact reason.
 
@@ -158,7 +179,9 @@ For each assigned path:
 4. For each export, choose the format in the UI, download it, and inspect or
    re-import the file. Compare the result with the on-screen work.
 5. Save evidence for each finding. Include the steps, screen, and relevant
-   output. Keep private data out of screenshots and tickets.
+   output. Keep private data out of screenshots and tickets. Take one
+   screenshot of every screen on every device pass, and name each file with
+   the journey, the screen, and the device.
 6. Reset to a known state before the next variation. Report any test data that
    could not be reset.
 
@@ -172,6 +195,62 @@ Do not create real irreversible side effects. Do not use a live account to test
 payment, send messages, or delete user data. Use the app's safe test path or
 mark that action as blocked and explain the missing setup.
 
+## Critical visual review
+
+Look at every screenshot from every device pass. For each screen, list what is
+ugly, cramped, unclear, or misaligned. A screen with no problem gets no
+entry. Do not skip a screen because the task worked.
+
+Give each entry:
+
+- The screen and the device it was seen on.
+- A screenshot of the screen.
+- The reason, in plain design terms: spacing, contrast, order, or alignment.
+
+Use these words:
+
+- **Spacing**: too tight, too loose, uneven gaps, text cut off, a control too
+  close to the edge, a row that wraps in a strange place.
+- **Contrast**: text that is hard to read, a border that cannot be seen, a
+  state that looks the same as the normal state.
+- **Order**: the wrong thing first, a title below its content, an action far
+  from what it acts on, an important item at the bottom.
+- **Alignment**: things that should line up and do not, a label not next to
+  its field, a button off the grid, a ragged edge.
+
+Say what the user feels, not what you would build. "The save button is under
+the fold on a phone, so the user cannot see it" is a finding. "Use a 24 pixel
+gap" is not, unless the repo's design system says so.
+
+Keep the visual review in the report and in the tickets. A finding with no
+screenshot is not ready.
+
+## Design-system conformance
+
+Find the design system and mockup files in the repo first. Read the repo
+instructions and look for a design file, a token file, a component library, or
+a mockup page. In this repo they are `docs/ui.dc.html` and
+`docs/ui-mockups.md`. If the repo has no design system, say so in the report
+and check the mockup files alone.
+
+Compare each screen with those files. Report:
+
+- Colors, sizes, or spacing that are not in the token set.
+- A component built by hand where a standard one exists.
+- Missing states: focus, hover, disabled, error, empty, loading.
+- Mockup elements the screen does not have.
+
+Give each item the file and the rule it comes from. Name the token, the
+component, or the mockup section. "The card border uses `#e3e3e3`, which is
+not in the token set in `docs/ui.dc.html`" is a finding. "The border color
+looks off" is not.
+
+Do not invent a style. Do not propose a new color, size, font, or spacing
+value that the design system does not already have. If the design system has
+no answer, say that the design team must decide. Check the states on the
+screen, not only the happy path. The `Scenario` mockup in `docs/ui.dc.html`
+shows the empty and failing states to check.
+
 ## Report findings and write tickets
 
 The director merges agent reports, removes duplicates, and checks the evidence
@@ -180,6 +259,8 @@ request. Group findings only when they share the same cause and fix. Do not
 turn a preference into a bug: state the user goal, what happened, and
 why it causes friction. Include design-team requests when wording, layout,
 information order, control visibility, or workflow complexity is the problem.
+File the visual review and the design-system check as design requests. Each
+one gets its screenshot and the file the rule comes from.
 
 Use the repo's `/triage` skill and issue label map. Give every ticket a `P0` to
 `P3` priority, mapped to the repo's labels when needed:
@@ -212,8 +293,10 @@ Each ticket must include:
   journey, device, browser, and input method.
 - User impact and the expected result.
 - Exact steps to repeat the issue and what happened instead.
-- Evidence links or attachments. Say if the problem happened once or more than
-  once.
+- Evidence links or attachments. When the pressure test covers a pull
+  request, each device image is posted as a pull request comment. See "Post
+  the images on the pull request". Say if the problem happened once or more
+  than once.
 - A clear recommendation. For a design request, say what users need to
   understand or do; do not prescribe a visual style without evidence.
 - Acceptance checks that a designer or developer can verify.
@@ -223,18 +306,57 @@ allow. If they do not, provide complete issue-ready ticket text and state why
 the tickets were not filed. Use the repo's priority and issue-type labels; do
 not invent labels or change the repo's label setup.
 
+## Post the images on the pull request
+
+When the pressure test covers a pull request, post each device image as a pull
+request comment. Do this the way the `ship` skill does in "Attach screenshots
+to the PR". Do not commit the images to the repo.
+
+1. Get the pull request number and the repo that holds it. Use the pull
+   request URL, not the fork name, unless the pull request is on the fork.
+2. Write the comment body in a file, such as
+   `evidence/<issue-number>/report.md`. Name each image in the body with the
+   same path that goes into `--attach`.
+3. Attach the images and post the comment:
+
+   ```sh
+   gh pr comment <PR_NUMBER> --repo <owner>/<repo> \
+     --attach './evidence/246/phone-overview.png#phone overview' \
+     --attach './evidence/246/tablet-overview.png#tablet overview' \
+     --attach './evidence/246/desktop-overview.png#desktop overview' \
+     --body-file ./evidence/246/report.md
+   ```
+
+   Text after `#` is the image's alt text. One command takes up to 50 files.
+4. Run `gh pr view <PR_NUMBER> --repo <owner>/<repo> --comments`. Each image
+   must be a `https://github.com/user-attachments/...` link. A local path
+   means the upload did not happen. Fix it and post again.
+
+Post one comment per device pass when a journey has many screens, so each
+comment is easy to read. Say what the reader should look at in each image. If
+the upload fails, keep the image files, say in the report that the upload
+failed, and give the exact error.
+
+The coverage report links each pull request comment.
+
 ## Finish with an honest coverage report
 
 Give the director's report these sections:
 
 1. **Result** — the build and environment, test window, and high-level outcome.
-2. **Coverage** — the journey and variation table, with `passed`, `finding`,
-   `blocked`, or `not run` status and the evidence location.
+2. **Coverage** — the journey and variation table, with one row per journey and
+   device, with `passed`, `finding`, `blocked`, or `not run` status and the
+   evidence location. A device that did not run is `not run`, with the reason.
+   Link each pull request comment.
 3. **Tickets** — each ticket ID or link, title, priority, and whether it is a
    bug or design request. Include issue-ready text if it could not be filed.
-4. **Not tested** — every planned item not run or blocked, the exact reason,
+4. **Visual review** — the screen-by-screen list of what is ugly, cramped,
+   unclear, or misaligned, with a screenshot and the reason for each item.
+5. **Design-system check** — each item that breaks the repo's design system or
+   mockups, with the file and the rule it comes from.
+6. **Not tested** — every planned item not run or blocked, the exact reason,
    its impact on confidence, and the next step needed to test it.
-5. **Risks** — any P0 issue, data safety concern, or unresolved uncertainty.
+7. **Risks** — any P0 issue, data safety concern, or unresolved uncertainty.
 
 Do not say that everything passed if any planned item was not tested. Do not
 hide gaps behind phrases such as “all major flows.” Complete the work only
