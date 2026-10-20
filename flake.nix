@@ -121,11 +121,16 @@
             touch "$out"
           '';
         }
+        # The VM test needs a Linux host. A darwin check cannot build it.
+        // nixpkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          nixos-module = import ./nixos/tests/module.nix {
+            inherit pkgs self;
+          };
+        }
       );
 
-      # Filled in by a later sub-issue, once lupin is a real dependency of a
-      # fleet config (ghostbook.nix, lab.nix). No options yet -- there is no
-      # consumer to write them against.
-      nixosModules.default = { config, lib, pkgs, ... }: { };
+      # The fleet services (agent, dashboard, quota timer, fleet-run timer)
+      # for a worker, a dispatch machine, or both.
+      nixosModules.default = import ./nixos/module.nix { inherit self; };
     };
 }

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import uuid
 from typing import Any, Callable
@@ -96,6 +97,28 @@ def _resolve(connection: dict | None) -> dict:
         redis_username=connection.get("redis_username"),
         redis_password=connection.get("redis_password"),
     )
+
+
+_AUTH_WARNED = False
+
+
+def _call(func):
+    """Run one cache command. Report a refused login once, then let the
+    caller treat it as a cache miss. A refused login is an answer from
+    Redis, not an outage, so the reader must not hide it.
+    """
+    global _AUTH_WARNED
+    try:
+        return slots_redis._call_with_retry(func)
+    except redis.exceptions.AuthenticationError as exc:
+        if not _AUTH_WARNED:
+            _AUTH_WARNED = True
+            print(
+                "lupin: Redis refused the GitHub cache login. "
+                f"Check {slots_redis.FLAG_SETTING}. {exc}",
+                file=sys.stderr,
+            )
+        raise
 
 
 def _client(connection: dict):
@@ -164,7 +187,7 @@ def _fetch_and_publish(
     try:
         while True:
             locked = bool(
-                slots_redis._call_with_retry(
+                _call(
                     lambda: client.set(lock_key, holder, nx=True, px=int(LOCK_TTL * 1000))
                 )
             )
@@ -277,14 +300,14 @@ def cached_gh_json(
 
 def _release(client, lock_key: str, holder: str) -> None:
     try:
-        slots_redis._call_with_retry(lambda: client.eval(_RELEASE_SCRIPT, 1, lock_key, holder))
+        _call(lambda: client.eval(_RELEASE_SCRIPT, 1, lock_key, holder))
     except _REDIS_ERRORS:
         pass  # The key expires after LOCK_TTL.
 
 
 def _read_cache(client, key: str) -> tuple[bool, Any, bool]:
     try:
-        raw = slots_redis._call_with_retry(lambda: client.get(key))
+        raw = _call(lambda: client.get(key))
     except _REDIS_ERRORS:
         return False, None, False
     if raw is None:
@@ -298,8 +321,6 @@ def _read_cache(client, key: str) -> tuple[bool, Any, bool]:
 
 def _write_cache(client, key: str, data: Any) -> None:
     try:
-        slots_redis._call_with_retry(
-            lambda: client.set(key, json.dumps({"data": data}), ex=CACHE_TTL)
-        )
+        _call(lambda: client.set(key, json.dumps({"data": data}), ex=CACHE_TTL))
     except _REDIS_ERRORS:
         pass  # best effort -- the canonical fetcher still has the live answer
