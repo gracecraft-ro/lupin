@@ -33,7 +33,7 @@ four jobs:
 Run Lupin one time, without installing it:
 
 ```sh
-nix run github:gracecraft-software/lupin -- --help
+nix run github:OWNER/REPO -- --help
 ```
 
 Build it from a checkout:

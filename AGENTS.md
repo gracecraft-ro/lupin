@@ -124,7 +124,7 @@ signal.
 `fetch-models` checks which model IDs each subscription can call today and
 what they cost. It saves the result to
 `~/.local/state/lupin/model-snapshot.json` unless `--no-write` is given. It
-also publishes the snapshot to Redis, so the PiHome dashboard shows pulls
+also publishes the snapshot to Redis, so the dashboard shows pulls
 from other fleet machines. A Redis error leaves the local file in place and
 prints a warning. Model lists for opencode-go and claude come from live
 provider calls. For opencode-go, `fetch-models` finds the API key in the same
@@ -272,11 +272,11 @@ code 3 means a ledger event was not written because Redis is unavailable, or
 Redis refused the login. A host timer can
 run `lupin supervise` once an hour. This repo does not ship one.
 
-On PiHome, the systemd timer runs `fleet-run` every 5h15m. The dashboard can
-start or stop that timer.
+On the dispatch host, the systemd timer runs `fleet-run` every 5h15m. The
+dashboard can start or stop that timer.
 
-PiHome sends work to other machines. It does not run loops, and it has no
-Herdr. Only worker machines (for example `jesus` and `ralpha`) run loops.
+The dispatch host sends work to other machines. It does not run loops, and it
+has no Herdr. Only worker machines run loops.
 Use the dashboard to see all machines. Use Herdr on a worker to see its
 loops.
 
@@ -322,11 +322,12 @@ minutes.
 Herdr server over SSH. `--print` shows the command instead of running it.
 Remote attach needs a local SSH target in `~/.config/lupin/ssh-targets`, one
 `<machine> <target>` pair per line. Blank lines and `#` comments are ignored.
-Add one line for each worker machine. Do not add PiHome. It has no Herdr:
+Add one line for each worker machine. Do not add the dispatch host. It has no
+Herdr:
 
 ```
-jesus   ghosta@jesus.orb.local
-ralpha  user@192.168.44.217
+worker-a  user@host-a
+worker-b  user@host-b
 ```
 
 This file is local config, not fleet state. Herdr must be installed on both
@@ -347,8 +348,8 @@ computes the same window. One machine in the fleet writes each window: the first
 to claim it in Redis. Only the 12-hour and 7-day windows get a digest, so a repo
 has one digest per window, not one per machine. The other debriefs (6h, 24h,
 loop stops) are records.
-The Debriefs page (`/debrief`) shows the debriefs of all workers, so
-PiHome shows them too. Redis holds text only. A screenshot file stays on its
+The Debriefs page (`/debrief`) shows the debriefs of all workers, so the
+dispatch host shows them too. Redis holds text only. A screenshot file stays on its
 worker. A GitHub attachment image is shown through the dashboard.
 The digest uses these models in this order: bmo (`bmo:qwen3.8-flash-next`,
 tier0 in `model-tiers.json`), then `opencode-go/deepseek-v4.1-flash`, then
@@ -393,7 +394,7 @@ it to shared Redis. The `/usage` page reads these shared rows. It also reads
 each machine's local 7-day token and cost totals, stored in separate
 per-machine Redis snapshots. The page adds totals by provider and marks a
 snapshot stale after five minutes. Each snapshot expires after 24 hours.
-Systemd runs `lupin quota` every five minutes on Jesus and Ralpha.
+Systemd runs `lupin quota` every five minutes on each worker machine.
 
 For opencode-go, Lupin looks for the API key in this order:
 `~/.local/share/opencode/auth.json`, the `OPENCODE_API_KEY` variable, then the
@@ -525,7 +526,7 @@ per-machine limit or add controls that the current code cannot support.
 ## Code layout
 
 - `src/lupin/route.py`, `src/lupin/classify.py`, `src/lupin/model-tiers.json`
-  — moved from `ghostbook.nix`. See the comments at the top of each file for
+  — moved from an earlier project. See the comments at the top of each file for
   the source commit.
 - `src/lupin/slots.py` — the `local` slot backend. New code.
 - `src/lupin/slots_redis.py` — the `redis` slot backend, with a fallback to
@@ -539,7 +540,7 @@ per-machine limit or add controls that the current code cannot support.
 - `src/lupin/free_gate.py` — routes, then reserves the fleet `bmo` Redis
   slot for a `bmo:` pick before calling it final (issue #37).
 - `src/lupin/serve.py`, `src/lupin/roadmap.py` — the dashboard. Moved from
-  `ghostbook.nix`'s `hosts/jesus/loopgui/` (issue #204).
+  the earlier dashboard project (issue #204).
 - `src/lupin/quota.py` — the `/usage` page's quota reads, split out of
   `serve.py`.
 - `src/lupin/quota_cache.py` — `lupin quota`'s shared Redis cache: one
@@ -662,7 +663,8 @@ sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
 
 - Port: `8789`. Check it is free with `ss -ltn` first. The `ss` command lists
   listening ports.
-- Machine: `ralpha`. The preview serves `main` there on `127.0.0.1:8789`.
+- Machine: the owner names the machine in their own machine notes. The preview
+  serves `main` there on `127.0.0.1:8789`.
 - Owner tunnel command: `ssh -N -L 8789:127.0.0.1:8789 MACHINE`. A tunnel
   forwards a port on your computer to the machine.
 - Local URL: `http://localhost:8789`.
@@ -674,6 +676,8 @@ sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
 - Do not point the preview at the fleet Redis. Start a scratch Redis and use
   it, for example
   `nix develop --command redis-server --port 6399 --bind 127.0.0.1 --save ""`.
+  Check port `6399` is free with `ss -ltn` before you start it, so a taken
+  port cannot point the preview at another service.
   Redis is not on the PATH outside the dev shell, so run it through
   `nix develop`. Inherited `LUPIN_REDIS_*` values from the loop shell reach
   the server, so the start command removes them and sets the scratch values.
@@ -691,8 +695,8 @@ These rules keep a loop moving when no person is present.
 2. **Do not stop while work exists.** An unmerged pull request is not a reason
    to stop. Reviews, research, and docs are work. Do them.
 3. **Use the fork login for fork pushes.** A fork is your own copy of a repo.
-   On ralpha, `GH_TOKEN` cannot push to the fork. The saved `gracecraft-ro`
-   login can. `FORK_OWNER` is `gracecraft-ro` on ralpha. Put `env -u GH_TOKEN`
+   On a host where `GH_TOKEN` cannot push to the fork, the saved fork login
+   can. `FORK_OWNER` is the fork owner on that host. Put `env -u GH_TOKEN`
    before each command. It removes `GH_TOKEN` for that one command only. Do not
    run `unset GH_TOKEN`:
 
@@ -710,12 +714,12 @@ These rules keep a loop moving when no person is present.
    minutes after it starts, ask it for the result. If it has none, write that
    on the issue. Start it with `Loop:`. Then stop the worker. The
    `delegation-loop` skill shows how to ask a worker (`herdr agent prompt`).
-6. **Log environment problems in the ledger.** On ralpha, `lupin roadmap`
-   fails. The Redis user `lupin-ralpha` has no permission to run `MULTI`.
+6. **Log environment problems in the ledger.** On some hosts, `lupin roadmap`
+   fails. The Redis user for that host has no permission to run `MULTI`.
    `MULTI` is a Redis command that runs several commands as one unit. Also,
-   on ralpha, `gh` cannot see `gracecraft/nix`. That repo tracks environment
-   problems. Write each problem to the ledger instead. `OWNER/REPO` is
-   `gracecraft/nix`:
+   on some hosts, `gh` cannot see the environment repo. That repo tracks
+   environment problems. Write each problem to the ledger instead.
+   `OWNER/REPO` is that environment repo:
 
    ```sh
    lupin ledger append OWNER/REPO --event env-friction --summary "<problem>"
