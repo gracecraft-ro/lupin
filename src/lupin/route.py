@@ -62,6 +62,7 @@ class RouteInputError(ValueError):
 _PROVIDER_BY_MODEL = {
     "sonnet": "claude",
     "opus": "claude",
+    "haiku": "claude",
     # fable is served by the claude account. It shares that account's quota
     # with sonnet and opus.
     "fable": "claude",
@@ -73,7 +74,7 @@ def provider_for_model(model: str) -> str:
 
     The prefix is the same one `lupin run`/`lupin enable --orchestrator` use
     for a model selector, so `opencode-go/glm-5.3` is the opencode-go
-    subscription's glm-5.3. A bare name (sonnet/opus/fable) is a Claude
+    subscription's glm-5.3. A bare name (sonnet/opus/haiku/fable) is a Claude
     subscription alias.
 
     "bmo:"/"local:" models run on local/shared-GPU inference, not a cloud
