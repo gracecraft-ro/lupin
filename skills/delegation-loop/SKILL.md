@@ -149,8 +149,9 @@ gh api repos/OWNER/REPO/pulls/<number>/reviews \
 
 Use `-f event=REQUEST_CHANGES` when the review asks for changes. GitHub refuses
 an approval or a change request from the PR's author. If your login opened the
-PR, post the verdict with `-f event=COMMENT`. If your verdict is `Ship`, ask
-the owner in a `Loop:` PR comment to approve or merge the PR.
+PR, use the `gracecraft` account for the approval or change request. If that
+account is unavailable, post the verdict with `-f event=COMMENT`. If your verdict
+is `Ship`, ask the owner in a `Loop:` PR comment to approve or merge the PR.
 
 Every comment that the loop or its workers post starts with `Loop:`. An
 owner comment has `author_association` `OWNER` or `MEMBER` and does not start
