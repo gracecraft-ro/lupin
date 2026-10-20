@@ -651,7 +651,7 @@ These rules keep a loop moving when no person is present.
 
 1. **Do not use the question menu.** The menu asks a person to choose. No
    person is there, so the loop waits forever. Write the question as a comment
-   on the issue. Then take the next item.
+   on the issue. Start it with `Loop:`. Then take the next item.
 2. **Do not stop while work exists.** An unmerged pull request is not a reason
    to stop. Reviews, research, and docs are work. Do them.
 3. **Use the fork login for fork pushes.** A fork is your own copy of a repo.
@@ -672,8 +672,8 @@ These rules keep a loop moving when no person is present.
    Give each new file a new name.
 5. **Ask a worker with no result for it.** If a worker has no result 30
    minutes after it starts, ask it for the result. If it has none, write that
-   on the issue. Then stop the worker. The `delegation-loop` skill shows how to
-   ask a worker (`herdr agent prompt`).
+   on the issue. Start it with `Loop:`. Then stop the worker. The
+   `delegation-loop` skill shows how to ask a worker (`herdr agent prompt`).
 6. **Log environment problems in the ledger.** On ralpha, `lupin roadmap`
    fails. The Redis user `lupin-ralpha` has no permission to run `MULTI`.
    `MULTI` is a Redis command that runs several commands as one unit. Also,
@@ -695,6 +695,6 @@ These rules keep a loop moving when no person is present.
 8. **Work the queue until nothing is left.** Nothing is left when all of these
    are true. No open issue that you may take is unclaimed. Every pull request
    you own is ready for production. No pull request waits for a review. No
-   research or docs item is left. Waiting for the owner is not the end. Write
-   the question as a comment on the issue. Then take the next item. Never write
-   "tell me if you want me to continue".
+   research, docs, or triage item is left. Waiting for the owner is not the
+   end. Write the question as a comment on the issue. Start it with `Loop:`.
+   Then take the next item. Never write "tell me if you want me to continue".

@@ -54,10 +54,8 @@ benchmark category covers both.
 
 ## Decide what is ready
 
-- Handle the open PRs first. Do not dispatch a new issue while a PR into
-  `main` is pending. A PR is pending when it is open, not a draft, not
-  merged, and not blocked. See "Pull requests come first" in the
-  `delegation-loop` skill.
+- Dispatch the PR work first in each cycle. Then use the free worker slots for
+  new issues. See "Pull requests come first" in the `delegation-loop` skill.
 - Check the dependency graph and the latest comments. Do not dispatch an issue
   with an open blocker.
 - Check that the issue has a clear result. For a large issue, split it into
@@ -100,6 +98,7 @@ A claim is stored in Redis. It does not add a GitHub label or comment, and it
 does not store the worktree path. After the claim succeeds, the claim owner
 adds the `claimed` label and comments with the machine, worktree, branch, and
 holder. When the claim ends, remove the label and comment with the result.
+Start each comment with `Loop:`.
 Do not mark an issue as claimed if the Redis claim fails. Lupin has no local
 claim fallback.
 

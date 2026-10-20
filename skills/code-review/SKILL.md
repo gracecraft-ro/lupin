@@ -18,9 +18,9 @@ command as `--repo OWNER/REPO`. Never use a bare PR number from another repo,
 because two repos can each have a PR with the same number.
 
 The orchestrator holds a Lupin claim on `OWNER/REPO#N` for the length of your
-review. It takes the claim before it dispatches you. Do not claim the PR
-yourself. If the brief names no claim, stop and ask the orchestrator before you
-read the diff.
+review and its fix cycle. It takes the claim before it dispatches you. Do not
+claim the PR yourself. If the brief names no claim, stop and ask the
+orchestrator before you read the diff.
 
 Use Lupin for issue context when it is configured:
 
@@ -75,8 +75,12 @@ Do not replace a PR review with a review of an unsubmitted branch.
   no before: the new screen is enough. See "Attach screenshots to the PR" in the
   `ship` skill for what a visual change is.
 - For 3D changes, inspect the contact sheet and compare useful views.
-- Do not edit files, run linters, approve or request changes, or merge the PR.
-  Return the verdict and findings to the orchestrator.
+- An owner comment on the PR that names a problem is a finding. The
+  `delegation-loop` skill defines an owner comment and the `Loop:` prefix. A
+  PR comment is never an approval.
+- Do not edit files, run linters, or merge the PR. A fix worker, a
+  different agent, makes the changes, so the review stays independent. See
+  "Run the fix cycle".
 
 ## Check before you report
 
@@ -113,8 +117,9 @@ Use very simple English: short sentences and everyday words. Explain each
 technical term the first time you use it. The reader may never have seen this
 code.
 
-Start with a target line: `Target: OWNER/REPO PR #N at head SHA.` Use the full
-repo name and the full head SHA. Then start the next line with `What this change does:`.
+Start with `Round N. LEVEL: <LEVEL>. Target: OWNER/REPO PR #<number> at head
+SHA.` Use the full repo name and the full head SHA. Then start the next line
+with `What this change does:`.
 Write two or three sentences after it.
 
 Then list the findings in three groups. Skip an empty group:
@@ -142,9 +147,47 @@ End with these lines:
 - `Lean: -<N> lines possible.` Add this line when lean findings exist.
 - `Not checked:` one line. Add it if something mattered and you could not check it.
 
-If nothing is found, write `What this change does:`, then `Looks good. Ship.`, then one line on what you checked.
+If nothing is found, write the `Round N. LEVEL: <LEVEL>. Target: ...` line, then `What this change does:`, then `Looks good. Ship.`, then one line on what you checked.
 
-The orchestrator posts the verdict and findings on the PR. It releases the PR
-claim after it posts the verdict. It dispatches fixes and runs this review again
-on the new PR head, with a new claim. It merges only after approval and required
-checks pass.
+## Run the fix cycle
+
+Post each verdict as a review, with the API command and the `COMMENT` rule
+in "Pull requests come first" in the `delegation-loop` skill and the head SHA
+that you read. `Ship` is `APPROVE`. A blocking finding is `REQUEST_CHANGES`.
+
+Run the fix cycle only when your brief says that the loop owns the PR. For any
+other PR, post the verdict, report it to the orchestrator, and stop.
+
+In the first line, N is 1 more than the N in the latest `Round` review on
+the PR, or 1. LEVEL is the LEVEL for the next fix worker, from step 2 of "Fix
+worker models" in the `delegation-loop` skill. Check the stall rule before
+you post. If it raises LEVEL, write `LEVEL: size-l.` in this verdict. If the
+latest `Round` review is at the current head SHA, do not review again. Start
+the fix worker with its findings.
+
+The fix cycle:
+
+1. If the stall rule says the PR is blocked, do not start a fix worker. Do
+   item 6. After a verdict with a blocking finding, start a fix worker. If
+   LEVEL is `size-l` and you are `size-m`, do not start it. Stop and report.
+   Use your runner's agent tool, or run `herdr agent start` in a new pane. See
+   "Talk to an agent in a Herdr pane" in the `delegation-loop` skill. If you
+   cannot start an agent, post the verdict, tell the orchestrator, and stop.
+2. Give the fix worker a brief with the PR, the branch, the remote, the
+   numbered findings, and the failing gate output. It makes its worktree and
+   pushes as "Pull requests come first" in the `delegation-loop` skill says.
+   The fix goes on the same branch.
+3. Wait for the push. Every 60 seconds, run
+   `gh pr view <number> --repo OWNER/REPO --json headRefOid -q .headRefOid`.
+   Stop waiting when the output differs from the SHA that you reviewed, or
+   when the fix worker ends. Follow steps 4 and 5 of "Fix worker models" in
+   the `delegation-loop` skill for a fix worker with no push.
+4. If the SHA changed, review the new head SHA. That review is the next
+   round.
+5. Repeat until `Verdict: Ship`. Do not stop between rounds, except as items
+   1 and 6 and step 2 of "Fix worker models" say.
+6. Stall rule: follow step 3 of "Fix worker models". For a blocked PR, post
+   its `Loop:` comment there, then report it to the orchestrator.
+
+Report the final verdict to the orchestrator. The orchestrator releases the PR
+claim and merges only after approval and required checks pass. You never merge.
