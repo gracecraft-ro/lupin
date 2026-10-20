@@ -719,6 +719,8 @@ repo names marks it.
 Start a run when one of these is true:
 
 - The repo has no `pressure-test` event. This is the first run, so it is due.
+- A QA register row has no `Last QA date`, or the date is 14 days old or older.
+  This trigger applies whether or not a UI pull request merged.
 - 5 or more UI pull requests merged since the last run.
 - The last run is more than 24 hours old, and a UI pull request merged since
   it.
@@ -729,9 +731,21 @@ signal is a release pull request that the repo's `AGENTS.md` release rules
 name, or an owner `Loop:` comment. If the repo has neither, the trigger does
 not apply.
 
-A `blocked` event counts as the last run for the due check. The repo is due
-again when one of the other triggers holds, or when a host can launch the
-browser again.
+Before the due check, read the repo's QA register issue. In Lupin, use issue
+#88. In another repo, find the existing register issue or create it once.
+Use its rows for the 14-day trigger and sample pool.
+
+Every run also samples long-tail rows. The pool has rows whose `Last QA date`
+is 30 days old or older, or whose `Changed since?` value is greater than zero.
+Do not sample rows already selected as due. Choose 3 rows at random without
+replacement, or choose the whole pool if it has fewer than 3 rows. Record the
+sample count and random seed in the `pressure-test` ledger event. If the pool
+is empty, record `sample_n=0; seed=none`.
+
+A `blocked` event records an attempt, not a test. It does not update the
+register or clear an overdue row. The 14-day trigger uses `Last QA date`, not
+the event time. Retry blocked work when a host can launch the browser; the row
+stays due.
 
 Read the ledger and find the newest `pressure-test` event:
 
@@ -755,7 +769,7 @@ Record the start:
 
 ```sh
 lupin ledger append OWNER/REPO --event pressure-test --status running \
-  --summary "director=SESSION; reason=first|5-prs|24h|release"
+  --summary "director=SESSION; reason=first|14d|5-prs|24h|release; sample_n=N; seed=SEED"
 ```
 
 Check that the browser starts before you dispatch. Playwright cannot launch on
@@ -776,21 +790,24 @@ browser, write the blocked event, report it, and take the next queue item:
 
 ```sh
 lupin ledger append OWNER/REPO --event pressure-test --status blocked \
-  --summary "browser did not start; see <issue or ledger entry>"
+  --summary "sample_n=0; seed=none; browser did not start; see <issue or ledger entry>"
 ```
 
 Dispatch `/ui-pressure-test` as the only director for that repo. The test
 agent stays read-only for source code, has its own browser data, and writes
-prioritized tickets. The test agent also writes a coverage report. The report
-has Result, Coverage, Tickets, Not tested, and Risks. Write the report to the
-QA task issue. If there is no QA task issue, put the coverage report in the
-handoff, and link the handoff entry with `--evidence`. After the agent posts
-the tickets, record the end:
+prioritized tickets. The test agent also writes a coverage report with Result,
+Coverage, Tickets, Visual review, Design-system check, Not tested, and Risks.
+Write it to the QA register issue. Update only rows the test ran, with the full
+commit SHA, device results, evidence link, and changed-since count. Leave other
+rows unchanged. If the browser blocked a test, leave that row's date and result
+unchanged; it stays due. After the agent posts the tickets, record the end:
 
 ```sh
 lupin ledger append OWNER/REPO --event pressure-test --status done \
-  --summary "tickets=N; untested=M" --evidence "<report link>"
+  --summary "tickets=N; untested=M; sample_n=N; seed=SEED" \
+  --evidence "<report link>"
 ```
+
 
 Then dispatch fix workers for the tickets. A pressure-test ticket has no pull
 request at first. Dispatch a normal implementation worker from "Dispatch work"

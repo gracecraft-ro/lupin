@@ -34,6 +34,39 @@ that missing access; test the parts that are available.
 and inspect the rendered screen. Do not infer a visual result from source code,
 API responses, or a passing automated test.
 
+## Keep the repo QA register
+
+Find the repo's one QA register issue. Use an existing issue. Create one only
+when none exists. In Lupin, use issue #88.
+
+The register has one row per capability, journey, mode, or export. Use these
+columns:
+
+| Item | Devices | Last QA date | Commit tested | Result | Evidence | Changed since? |
+|---|---|---|---|---|---|---|
+
+List phone, tablet, and desktop as `tested` or `not run` in `Devices`. Use the
+full commit SHA for `Commit tested`. Fetch origin before this check. For
+`Changed since?`, list commits that changed the item's files after the tested
+commit:
+
+```sh
+git log --format=%H <commit-sha>..origin/main -- <item-files>
+```
+
+Record `0` when this command returns no commits. Otherwise record the count
+and newest SHA. Link the pull request comment with the screenshots in
+`Evidence`. For a standing test, attach screenshots to a comment on the QA
+register issue and link that comment. Do not use a local file path.
+
+Update only rows that the test ran. Add a row for each new item. For a new item
+that was not tested, leave the date, commit, and changed-since value blank and
+set `Result` to `not run`. Leave other rows unchanged.
+
+If a browser blocks a test, keep the existing row's date and result. Put the
+blocked status and reason in the run report and the `pressure-test` ledger
+event. A blocked attempt is not a completed test.
+
 ## Build the coverage plan
 
 Inventory the app's user-facing tasks and visible modes before testing. Use the
