@@ -87,7 +87,6 @@ subcommands when it starts.
 
 ### `LUPIN_REDIS_HOST`
 
-- **Purpose**: the host name or address of the coordinator.
 - **Default**: none. The fleet group and debriefs then use `redis_host`
   from `fleet.json`, then `localhost`. The local group, `roadmap`, and the
   loop worker use `localhost`.
@@ -119,8 +118,8 @@ subcommands when it starts.
 
 - **Purpose**: the Redis ACL user name.
 - **Default**: none. The fleet group, `roadmap`, and debriefs then use
-  `redis_username` from `fleet.json`. The local group and the loop worker
-  use no name. Without a name, Redis uses its user `default`.
+  `redis_username` from `fleet.json`. The local group and loop worker send
+  no username; Redis uses its `default` user.
 - **Effect**: Lupin logs in with this user name.
 - **Read by**: the same functions as `LUPIN_REDIS_HOST`.
 - **Set by**: the user or the host config. `lupin run` copies it into loop
