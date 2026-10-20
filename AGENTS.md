@@ -350,10 +350,13 @@ loop stops) are records.
 The Debriefs page (`/debrief`) shows the debriefs of all workers, so
 PiHome shows them too. Redis holds text only. A screenshot file stays on its
 worker. A GitHub attachment image is shown through the dashboard.
-If Claude cannot run, Lupin uses `openai-codex/gpt-5.6-luna`. Quota and
-rate-limit errors do not use a try; other failed model calls count (3 tries
-at most).
-If both models are blocked, the debrief shows with no digest and Lupin tries
+The digest uses these models in this order: bmo (`bmo:qwen3.8-flash-next`,
+tier0 in `model-tiers.json`), then `opencode-go/deepseek-v4.1-flash`, then
+Claude (`sonnet`). The worker reserves the fleet `bmo` slot and waits up to
+300 s, because bmo can sleep. A failed or out-of-quota model moves to the next
+one. Quota and rate-limit errors do not use a try; other failed model calls
+count (3 tries at most).
+If every model is blocked, the debrief shows with no digest and Lupin tries
 again later.
 
 `fetch-benchmarks` gets public benchmark scores. It does not run models.
