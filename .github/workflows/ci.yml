@@ -1,9 +1,10 @@
 # Runs `nix flake check` on each pull request to main or release/next.
-# The owner has no GitHub Actions minutes, so the job runs on the self-hosted
-# runner on ralpha (aarch64 Linux). The runner service is in gracecraft/ghostbook.nix.
-# `nix flake check` checks only the system it runs on. The flake also has
-# x86_64-linux and aarch64-darwin outputs. No runner or minutes are available
-# for those systems, so this workflow does not check them.
+# `nix flake check` checks the host system, so the job runs once per system.
+# The workflow checks all three systems the flake has outputs for.
+# The repository is public, so the x86_64-linux and aarch64-darwin legs use
+# standard GitHub-hosted runners (ubuntu-latest and macos-latest) and cost no
+# minutes. The aarch64-linux leg runs on the self-hosted runner on ralpha.
+# That runner is registered on the host, outside this repository.
 name: CI
 
 # `pull_request_target` runs the workflow from the base branch, not from the
@@ -11,6 +12,12 @@ name: CI
 # on the self-hosted runner. The job checks out the pull request head only
 # after the guard allows it. `permissions: contents: read` keeps the token
 # read-only. This workflow uses no secrets.
+#
+# GitHub's default Actions event policy blocks `pull_request_target` in public
+# repositories from 2026-11-02 unless the owner configures an applicable
+# policy under Settings -> Actions -> General. The loop token cannot read the
+# policy endpoints (HTTP 403), so the owner must confirm the policy allows it.
+# This is a note only; the trigger below and the behavior do not change.
 on:
   pull_request_target:
     branches: [main, release/next]
@@ -41,13 +48,19 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
-      # The runner is NixOS and has Nix. It may not enable flakes for a
-      # non-interactive shell, so set the feature here.
+      # The self-hosted runner is NixOS and has Nix. It may not enable flakes
+      # for a non-interactive shell, so set the feature here for every leg.
       NIX_CONFIG: experimental-features = nix-command flakes
     strategy:
       fail-fast: false
       matrix:
         include:
+          # The `ubuntu-latest` runner is x64 Linux.
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          # The `macos-latest` runner is an Apple Silicon Mac.
+          - system: aarch64-darwin
+            runner: macos-latest
           # The ralpha runner is aarch64 Linux. It has Nix, so this workflow
           # does not install Nix and does not change the host.
           - system: aarch64-linux
@@ -60,6 +73,15 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
+          # checkout refuses a fork-head checkout under `pull_request_target`
+          # unless this is set. The job-level `if` already limits the head
+          # repository to the two trusted repositories.
+          allow-unsafe-pr-checkout: true
+
+      # The self-hosted runner is NixOS, so it already has Nix. The hosted
+      # runners do not, so install Nix there.
+      - if: matrix.system != 'aarch64-linux'
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
 
       # Fail the job if the runner has the wrong system.
       # Otherwise, the check passes but skips the target system.
