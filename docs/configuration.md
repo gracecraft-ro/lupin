@@ -33,18 +33,17 @@ coordinator.
 
 Each path below finds the Redis server in its own way. "Option" is the
 command-line option, for example `--redis-host`. "Variable" is the
-matching variable, for example `LUPIN_REDIS_HOST`. "Credential" is the systemd credential
-`redis-password`.
+matching variable, for example `LUPIN_REDIS_HOST`. "Credential" is the
+systemd credential `redis-password`.
 
 <!-- markdownlint-disable MD013 -->
 | Path | Host and port | Username | Password |
 | --- | --- | --- | --- |
-| Fleet group (see the list below) | option, variable, `fleet.json`, `localhost:6379` | option, variable, `fleet.json` | option, variable, credential |
-| `roadmap` | option, variable, `localhost:6379` | option, variable, `fleet.json` | option, variable, credential |
-| Debriefs (`debrief._redis_connection`) | variable, `fleet.json`, `localhost:6379` | variable, `fleet.json` | credential, variable |
-| Loop worker (`loop_runtime._redis_kwargs`) | variable, `localhost:6379` | variable | credential, variable |
-| Local group (see the list below) | option, variable, `localhost:6379` | option, variable | option, variable |
-<!-- markdownlint-enable MD013 -->
+| Fleet group (see the list below) | option, variable, `fleet.json`, then `localhost:6379` | option, variable, `fleet.json`, then Redis `default` | option, variable, credential |
+| `roadmap` | option, variable, then `localhost:6379` | option, variable, `fleet.json`, then Redis `default` | option, variable, credential |
+| Debriefs (`debrief._redis_connection`) | variable, `fleet.json`, then `localhost:6379` | variable, `fleet.json`, then Redis `default` | credential, variable |
+| Loop worker (`loop_runtime._redis_kwargs`) | variable, then `localhost:6379` | variable, then Redis `default` | credential, variable |
+| Local group (see the list below) | option, variable, then `localhost:6379` | option, variable, then Redis `default` | option, variable |
 
 Sources: `cli.py` (`_redis_args`, `_redis_conn_args`,
 `_fleet_connection_args`, `_cmd_roadmap`), `machines.py`
@@ -61,19 +60,26 @@ The local group is these commands: `claim`, `renew-claim`,
 commands `acquire`, `hold`, `release`, and `status` are also in it when
 they use `--backend redis`.
 
-`roadmap` has a host default of `localhost`. Thus it does not use the
-host or port in `fleet.json`.
+The fleet group uses `LUPIN_REDIS_HOST` and `LUPIN_REDIS_PORT` when set.
+Otherwise, it reads `redis_host` and `redis_port` from `fleet.json`, then
+uses `localhost:6379`. Debriefs follow the same defaults. The local group,
+`roadmap`, and the loop worker use `localhost:6379` when their variables or
+options are unset. For usernames, the fleet group, `roadmap`, and debriefs
+read `redis_username` from `fleet.json` when no option or variable is set.
+Other paths send no username, so Redis uses its `default` user.
 
-The GitHub cache (`gh_cache._resolve`) gets a connection from its caller.
-It fills each empty field in the same way as the fleet group.
+The GitHub cache (`gh_cache._resolve`) fills missing fields from the default
+`~/.config/lupin/fleet.json`, then uses `localhost:6379` and Redis `default`.
+It does not read `LUPIN_FLEET_CONFIG`. A caller-provided connection takes
+precedence.
 
 `lupin join HOST[:PORT]` takes the host and port as its argument. It reads
 the username and password from the options or the variables only.
 
 `lupin agent` reads its command queue through the local group path. Its
-debriefs use the debrief path. Thus `lupin agent` needs the password in
-`LUPIN_REDIS_PASSWORD` or `--redis-password`. The credential is not
-sufficient for its queue.
+debriefs use the debrief path and read `fleet.json` when their connection
+variables are unset. The queue needs `LUPIN_REDIS_PASSWORD` or
+`--redis-password`; the systemd credential alone is not enough.
 
 A value of `LUPIN_REDIS_PORT` that is not an integer stops every `lupin`
 command with a `ValueError`. The parser reads the variable for all
@@ -322,8 +328,8 @@ subcommands when it starts.
   value that is not an absolute path, or a token file that does not exist
   stops the loop start with an error.
 - **Read by**: `src/lupin/loop_runtime.py` (`_runtime_paths`, called from
-  `_workspace_env` and `_ensure_server`). `herdr_server` does not read the
-  variable. It reads the credential `gh-token`.
+  `_workspace_env` and `_ensure_server`). `herdr_server` reads the credential
+  `gh-token`, not this variable.
 - **Set by**: the host config. `lupin run` copies it into loop units.
 
 ## Fleet and signing
@@ -338,9 +344,9 @@ subcommands when it starts.
   `src/lupin/serve.py` (`main`), `src/lupin/debrief.py`
   (`_redis_connection`). These functions give the path to
   `machines.load_config` and `machines.join`. Those two functions do not
-  read the variable. `lupin roadmap` and the GitHub cache
-  (`gh_cache._resolve`) do not read the variable. They read the default
-  path.
+  read the variable; their callers pass its value. `lupin roadmap` and the
+  GitHub cache (`gh_cache._resolve`) do not read the variable. They read the
+  default path.
 - **Set by**: the user or the host config.
 - **Option**: `--config-path`.
 
@@ -354,10 +360,9 @@ subcommands when it starts.
   - Some commands sign with this key when they have a remote `--machine`:
     `run`, `stop`, `peek`, `loops`, `schedule`, `pause`, and `resume`.
   - These commands use one key. Give the key of the target machine.
-  - `lupin serve` uses it only when `LUPIN_CMD_SIGNING_KEYS_DIR` and
-    `--cmd-signing-key-dir` are not set and `$CREDENTIALS_DIRECTORY` has
-    no file for that machine.
-  - `fleet-run` does not use it.
+  - `lupin serve` uses it only when `LUPIN_CMD_SIGNING_KEYS_DIR` is unset
+    (including `--cmd-signing-key-dir`) and the worker has no systemd
+    credential file.
 - **Read by**: `src/lupin/cli.py` (`_signing_key_arg`), `src/lupin/serve.py`
   (`main`, `Handler._signing_key_for`).
 - **Set by**: the host config, through a secret manager. Do not put it in a

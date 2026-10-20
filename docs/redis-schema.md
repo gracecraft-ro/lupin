@@ -777,8 +777,8 @@ Each host gets its own Redis user (`lupin-jesus`, `lupin-ralpha`,
 `lupin-mac`), limited to keys under `~lupin:*` and these commands:
 
 ```
-PING GET SET DEL EXPIRE PEXPIRE TTL ZADD ZREM ZSCORE ZCARD ZRANGE
-ZREMRANGEBYSCORE XADD XRANGE XREVRANGE SCAN EVAL EVALSHA SCRIPT|LOAD SCRIPT|EXISTS
+PING GET SET DEL TTL PTTL MULTI EXEC ZADD ZREM ZSCORE ZCARD ZRANGE
+ZREMRANGEBYSCORE XADD XRANGE XREVRANGE SCAN EVAL
 ```
 
 ## Fallback when Redis is unreachable

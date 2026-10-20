@@ -100,16 +100,11 @@ Do this step on one machine.
    ```
    <!-- markdownlint-enable MD013 -->
 
-   Give `+multi +exec +pttl` to every machine. Debriefs (in `lupin
-   agent`), `lupin serve`, `lupin quest start`, and `lupin roadmap` read
-   claims with these commands (`claims.claims_for`). Without them, a claim
-   read fails with `NoPermissionError ... 'multi'`, and debriefs lose the
-   claims with no error. `+ping` is only for the check in step 7.
-
-   Note: the list in "ACL command list" in `docs/redis-schema.md` does not
-   have `MULTI`, `EXEC`, and `PTTL`. It has `EXPIRE`, `PEXPIRE`, `EVALSHA`,
-   `SCRIPT|LOAD`, and `SCRIPT|EXISTS`, which the code in `src/` does not
-   use. A separate issue tracks that list.
+   Give every machine user `+multi +exec +pttl`. `claims.claims_for` uses
+   these commands to read claims consistently, including in debriefs,
+   `lupin serve`, `lupin quest start`, and `lupin roadmap`. Without them,
+   claim reads fail or debriefs omit claims. `+ping` is only for the check
+   in step 7.
 5. Keep `users.acl` readable only by the Redis user. You can write
    `#SHA256_HEX` in place of `>PASSWORD`. Then the file holds a hash, not
    the password.
@@ -182,14 +177,15 @@ Do these steps on each worker. A worker must run Linux with systemd.
    `LUPIN_LOOP_REDIS_PASSWORD_FILE` to that file. systemd reads the file
    and gives the password to loop units as the credential `redis-password`.
 8. Set `LUPIN_REDIS_HOST`, `LUPIN_REDIS_PORT`, and `LUPIN_REDIS_USERNAME`
-   for the Lupin services. The command queue of `lupin agent` and the loop
-   worker do not read `fleet.json`. The debriefs of `lupin agent` read it.
+   for the Lupin services. The `lupin agent` command queue and loop worker
+   do not read `fleet.json`; debriefs in `lupin agent` do.
 9. Add the machine to the fleet. Do not type the password in the command
    line. `read -rs` reads it with no echo and keeps it out of the shell
    history:
 
    ```sh
-   read -rs LUPIN_REDIS_PASSWORD
+   read -rsp "Redis password: " LUPIN_REDIS_PASSWORD
+   printf '\n'
    export LUPIN_REDIS_PASSWORD
    lupin join COORDINATOR_HOST:6379 --redis-username lupin-MACHINE
    unset LUPIN_REDIS_PASSWORD
@@ -232,7 +228,8 @@ A dispatch machine is optional. Do these steps on it.
 1. Install Lupin.
 2. Clone each repo into the code directory, as on a worker. The Repos and
    Roadmap pages list only the repos that have a checkout there.
-3. Make the loop state directory, as on a worker. `lupin enable` and
+3. Make the loop state directory, as on a worker. Set `LUPIN_LOOP_STATE_DIR`
+   if it differs from `/var/lib/delegation-loop`. `lupin enable` and
    `fleet-run` use the `repos` file in it.
 4. Join the fleet with `lupin join`, as on a worker. Do not run
    `lupin agent` on this machine.
