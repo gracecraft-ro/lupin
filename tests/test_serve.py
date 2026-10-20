@@ -211,6 +211,57 @@ class QuotaRenderingTests(unittest.TestCase):
         self.assertIn("3d 12h", rendered)
         self.assertIn("42% used", rendered)
 
+    def test_unclassified_window_keeps_its_pace_marker(self):
+        # Issue #80: the legend and the footer promise the marker, so a row
+        # whose window the page cannot name keeps one.
+        row = {
+            "provider": "openai",
+            "duration": serve.QuotaDuration.OTHER,
+            "label": "New window",
+            "used_pct": 42,
+            "resets_at": 302_400_000,
+        }
+        rendered = serve.render_quota_row(row, now_ms=0)
+
+        self.assertIn("quota-meter-elapsed", rendered)
+        self.assertIn("quota-meter-elapsed-unknown", rendered)
+        self.assertIn("pace not shown: unknown window length", rendered)
+        self.assertIn("Status unavailable", rendered)
+
+        # The same row with a known window length gets a real marker and a
+        # real pace status, even though the window name is unknown.
+        row["duration_ms"] = 604_800_000
+        rendered = serve.render_quota_row(row, now_ms=0)
+
+        self.assertEqual(serve.quota_elapsed_pct(row, now_ms=0), 50)
+        self.assertIn("left:50.0%", rendered)
+        self.assertIn("On pace", rendered)
+        self.assertNotIn("unknown window length", rendered)
+
+    def test_totals_table_shows_no_exception_name_and_no_file_path(self):
+        # Issue #51: a cached row can still hold the old text and the old
+        # path. The page shows a plain state either way.
+        snapshots = {
+            "jesus": {
+                "rows": [{
+                    "provider": "claude",
+                    "error": "unavailable (FileNotFoundError)",
+                    "source": "/var/lib/delegation-loop/stats-cache.json",
+                }],
+                "fetched_at": "2026-01-01T00:00:00+00:00",
+                "fetched_by": "jesus",
+            }
+        }
+        with (
+            mock.patch.object(quota_cache, "read_snapshot", return_value={}),
+            mock.patch.object(usage_cache, "read_snapshot", return_value=snapshots),
+        ):
+            page = serve.render_usage().decode()
+
+        self.assertIn("<td>claude</td><td colspan=3>Not available</td>", page)
+        self.assertNotIn("FileNotFoundError", page)
+        self.assertNotIn("/var/lib/delegation-loop", page)
+
     def test_quota_section_groups_by_provider_and_precedes_totals(self):
         # Real-shaped row, as `quota.quota_usage()` would produce it --
         # confirmed against that module's own tests.
@@ -295,7 +346,8 @@ class QuotaRenderingTests(unittest.TestCase):
         ):
             page = serve.render_usage().decode()
         self.assertIn("<h3>omp</h3>", page)
-        self.assertIn("<p class=dim>unavailable (RuntimeError)</p>", page)
+        self.assertIn("<p class=dim>Not available</p>", page)
+        self.assertNotIn("RuntimeError", page)
 
         claude_snapshot = {
             "claude": {
@@ -367,7 +419,7 @@ class QuotaRenderingTests(unittest.TestCase):
         self.assertIn("<td>claude</td><td>130</td><td>-</td><td>not tracked</td>", page)
         self.assertIn("<td>openai-codex</td><td>21</td><td>15</td><td>$0.75</td>", page)
         self.assertIn(
-            "<td>opencode-go</td><td colspan=3>unavailable (FileNotFoundError)</td>",
+            "<td>opencode-go</td><td colspan=3>Not available</td>",
             page,
         )
         self.assertIn("Usage snapshots:", page)
