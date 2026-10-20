@@ -568,10 +568,14 @@ def snapshot() -> dict[str, dict]:
     }
 
     def _left(key: tuple[str, str | None]) -> float:
-        # The most-used window decides. That is the number `pace.headroom` uses.
+        # The most-used window decides. That is the number `pace.headroom` uses,
+        # so the rows are the same `pace._usable_rows` test: a real `used_pct`
+        # and a real `resets_at`. A row with an unknown reset is unknown, not
+        # almost-used.
         values = [
             max(0.0, 100 - row["used_pct"]) for row in account_rows[key]
             if isinstance(row.get("used_pct"), (int, float))
+            and isinstance(row.get("resets_at"), (int, float))
         ]
         return min(values) if values else -1.0
 

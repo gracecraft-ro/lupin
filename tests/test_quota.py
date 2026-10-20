@@ -667,6 +667,24 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(result["openai"]["pct_left"], 50)
         self.assertEqual(result["openai"]["pct_left"], pace.headroom(rows, "openai", later))
 
+    def test_ignores_a_window_with_no_reset_when_ranking_logins(self):
+        # Issue #207, review finding 1: login "a" has room on both windows.
+        # Login "b" has more room on 5 hours, but its 7-day row has no
+        # `resets_at`. `pace.headroom` drops that row as unknown; the summary
+        # must drop it too, or it picks a different login than routing does.
+        later = int(time.time() * 1000) + 10 * 24 * 60 * 60 * 1000
+        rows = [
+            {"provider": "openai", "account": "a", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 30, "resets_at": later},
+            {"provider": "openai", "account": "a", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 30, "resets_at": later},
+            {"provider": "openai", "account": "b", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 20, "resets_at": later},
+            {"provider": "openai", "account": "b", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 90, "resets_at": None},
+        ]
+        with mock.patch.object(quota, "quota_usage", return_value=rows):
+            result = quota.snapshot()
+
+        self.assertEqual(result["openai"]["pct_left"], 80)
+        self.assertEqual(result["openai"]["pct_left"], pace.headroom(rows, "openai", later))
+
     def test_skips_a_login_that_is_blocked_on_another_window(self):
         # Issue #169, case 3: login "a" has room on 5 hours but none on 7 days.
         later = int(time.time() * 1000) + 10 * 24 * 60 * 60 * 1000
