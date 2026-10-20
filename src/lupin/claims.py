@@ -308,10 +308,11 @@ def claims_for(
             return result
         # One batch for all keys. GET, not MGET: a key of the wrong type
         # raises an error, where MGET returns None. With `with_ttl`, each key
-        # also gets a PTTL. MULTI/EXEC makes each GET and PTTL read one
-        # moment. Build the batch inside the retry: execute() clears it.
+        # also gets a PTTL. No MULTI: the fleet ACL does not allow it. A
+        # claim that expires between GET and PTTL only loses its TTL. Build
+        # the batch inside the retry: execute() clears it.
         def read_claims():
-            pipe = client.pipeline()
+            pipe = client.pipeline(transaction=False)
             for key in wanted:
                 pipe.get(key)
                 if with_ttl:

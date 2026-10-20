@@ -15,10 +15,11 @@ from lupin import cli, claims, slots
 
 
 class _FakePipeline:
-    """Queues commands and runs them inside MULTI/EXEC, as redis-py does by default."""
+    """Queues commands and runs them like redis-py."""
 
-    def __init__(self, client):
+    def __init__(self, client, transaction=True):
         self._client = client
+        self._transaction = transaction
         self._queued = []
 
     def get(self, key):
@@ -30,12 +31,14 @@ class _FakePipeline:
         return self
 
     def execute(self, **kwargs):
-        self._client.commands.append("MULTI")
+        if self._transaction:
+            self._client.commands.append("MULTI")
         results = []
         for name, key in self._queued:
             self._client.commands.append(name)
             results.append(self._client.values[key] if name == "GET" else 90_000)
-        self._client.commands.append("EXEC")
+        if self._transaction:
+            self._client.commands.append("EXEC")
         return results
 
 
@@ -54,8 +57,8 @@ class _FakeClient:
         self.commands.append("GET")
         return self.values[key]
 
-    def pipeline(self):
-        return _FakePipeline(self)
+    def pipeline(self, transaction=True):
+        return _FakePipeline(self, transaction)
 
 
 def test_claims_for_reads_only_the_value_by_default(monkeypatch):
@@ -65,7 +68,7 @@ def test_claims_for_reads_only_the_value_by_default(monkeypatch):
 
     result = claims.claims_for(["gracecraft/lupin"])
 
-    assert fake.commands == ["SCAN", "MULTI", "GET", "EXEC"]
+    assert fake.commands == ["SCAN", "GET"]
     assert result == {"gracecraft/lupin#6": {"host": "h", "session": "s", "since": 1}}
 
 
@@ -76,7 +79,7 @@ def test_claims_for_reads_the_ttl_in_one_round_trip_when_asked(monkeypatch):
 
     result = claims.claims_for(["gracecraft/lupin"], with_ttl=True)
 
-    assert fake.commands == ["SCAN", "MULTI", "GET", "PTTL", "EXEC"]
+    assert fake.commands == ["SCAN", "GET", "PTTL"]
     assert result["gracecraft/lupin#6"]["ttl"] == 90.0
 
 
