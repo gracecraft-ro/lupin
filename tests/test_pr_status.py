@@ -91,6 +91,125 @@ class ChecksTests(unittest.TestCase):
         # A neutral or skipped check is not a failure and not pending.
         self.assertEqual(self._checks([{"conclusion": "NEUTRAL"}]), "pass")
 
+    def test_newer_success_replaces_old_failure(self):
+        self.assertEqual(
+            self._checks(
+                [
+                    {
+                        "workflowName": "ci",
+                        "name": "tests",
+                        "conclusion": "FAILURE",
+                        "completedAt": "2026-01-01T00:00:00Z",
+                    },
+                    {
+                        "workflowName": "ci",
+                        "name": "tests",
+                        "conclusion": "SUCCESS",
+                        "completedAt": "2026-01-02T00:00:00Z",
+                    },
+                ]
+            ),
+            "pass",
+        )
+
+    def test_newer_failure_replaces_old_success(self):
+        self.assertEqual(
+            self._checks(
+                [
+                    {
+                        "workflowName": "ci",
+                        "name": "tests",
+                        "conclusion": "SUCCESS",
+                        "completedAt": "2026-01-01T00:00:00Z",
+                    },
+                    {
+                        "workflowName": "ci",
+                        "name": "tests",
+                        "conclusion": "FAILURE",
+                        "completedAt": "2026-01-02T00:00:00Z",
+                    },
+                ]
+            ),
+            "fail",
+        )
+
+    def test_started_at_orders_checks_before_they_complete(self):
+        self.assertEqual(
+            self._checks(
+                [
+                    {
+                        "workflowName": "ci",
+                        "name": "tests",
+                        "conclusion": "FAILURE",
+                        "startedAt": "2026-01-01T00:00:00Z",
+                    },
+                    {
+                        "workflowName": "ci",
+                        "name": "tests",
+                        "conclusion": "SUCCESS",
+                        "startedAt": "2026-01-02T00:00:00Z",
+                    },
+                ]
+            ),
+            "pass",
+        )
+
+    def test_same_name_in_different_workflows_is_not_deduped(self):
+        self.assertEqual(
+            self._checks(
+                [
+                    {
+                        "workflowName": "ci",
+                        "name": "tests",
+                        "conclusion": "FAILURE",
+                        "completedAt": "2026-01-01T00:00:00Z",
+                    },
+                    {
+                        "workflowName": "nightly",
+                        "name": "tests",
+                        "conclusion": "SUCCESS",
+                        "completedAt": "2026-01-02T00:00:00Z",
+                    },
+                ]
+            ),
+            "fail",
+        )
+
+    def test_stale_is_pending(self):
+        self.assertEqual(self._checks([{"conclusion": "STALE"}]), "pending")
+
+
+class ClaimTests(unittest.TestCase):
+    def test_claim_comes_from_the_linked_issue(self):
+        row = pr_status.analyze(
+            _pr(body="Closes #175"),
+            "o/r",
+            {"o/r#175": {"session": "linked"}, "o/r#226": {"session": "own"}},
+        )
+        self.assertEqual(row["linked_issue"], 175)
+        self.assertEqual(row["claim"], "linked")
+
+    def test_pr_claim_is_the_fallback_when_the_linked_issue_has_none(self):
+        row = pr_status.analyze(
+            _pr(body="Fixes #175"),
+            "o/r",
+            {"o/r#226": {"session": "own"}},
+        )
+        self.assertEqual(row["linked_issue"], 175)
+        self.assertEqual(row["claim"], "own")
+
+    def test_pr_claim_is_used_when_there_is_no_linked_issue(self):
+        row = pr_status.analyze(_pr(), "o/r", {"o/r#226": {"session": "own"}})
+        self.assertIsNone(row["linked_issue"])
+        self.assertEqual(row["claim"], "own")
+
+    def test_linked_issue_match_is_case_insensitive(self):
+        row = pr_status.analyze(
+            _pr(body="resolves #42"), "o/r", {"o/r#42": {"session": "linked"}}
+        )
+        self.assertEqual(row["linked_issue"], 42)
+        self.assertEqual(row["claim"], "linked")
+
 
 class ApprovalTests(unittest.TestCase):
     def test_approval_on_head(self):
@@ -248,6 +367,23 @@ class PreviewTests(unittest.TestCase):
         row = pr_status.analyze(pr, "o/r")
         self.assertEqual(row["latest_comment"]["login"], "new")
 
+    def _long_review(self):
+        return {
+            "author": {"login": "alice"},
+            "state": "COMMENTED",
+            "submittedAt": "2026-01-01T00:00:00Z",
+            "body": self.LONG,
+        }
+
+    def test_review_text_is_truncated_by_default(self):
+        row = pr_status.analyze(_pr(reviews=[self._long_review()]), "o/r")
+        self.assertLessEqual(len(row["latest_reviews"][0]["body"]), 160)
+        self.assertTrue(row["latest_reviews"][0]["body"].endswith("…"))
+
+    def test_full_keeps_the_whole_review_text(self):
+        row = pr_status.analyze(_pr(reviews=[self._long_review()]), "o/r", full=True)
+        self.assertEqual(row["latest_reviews"][0]["body"], " ".join(self.LONG.split()))
+
 
 class MainTests(unittest.TestCase):
     def _run(self, argv, prs, claims=None, warning=None):
@@ -272,6 +408,52 @@ class MainTests(unittest.TestCase):
             "claim=holder-1  comments=1  Add the queue view",
             text,
         )
+
+    def test_text_lists_the_detail_lines(self):
+        pr = _pr(
+            body="Body text.",
+            reviews=[_review("alice", "APPROVED", "2026-01-01T00:00:00Z")],
+            comments=[
+                {
+                    "author": {"login": "bob"},
+                    "createdAt": "2026-01-02T00:00:00Z",
+                    "body": "Looks good.",
+                }
+            ],
+            reviewRequests=[{"login": "carol"}, {"name": "Core"}],
+        )
+        code, text = self._run([], [pr])
+        self.assertEqual(code, 0)
+        self.assertIn("   desc: Body text.", text)
+        self.assertIn("   reviews: alice APPROVED 2026-01-01T00:00:00Z", text)
+        self.assertIn("   comment: bob 2026-01-02T00:00:00Z: Looks good.", text)
+        self.assertIn("   reviewers: carol, Core", text)
+
+    def test_text_omits_detail_lines_without_data(self):
+        code, text = self._run([], [_pr(body="")])
+        self.assertEqual(code, 0)
+        self.assertNotIn("   desc:", text)
+        self.assertNotIn("   reviews:", text)
+        self.assertNotIn("   comment:", text)
+        self.assertNotIn("   reviewers:", text)
+
+    def test_full_changes_the_long_detail_lines(self):
+        long = PreviewTests.LONG
+        pr = _pr(
+            body=long,
+            comments=[
+                {
+                    "author": {"login": "bob"},
+                    "createdAt": "2026-01-02T00:00:00Z",
+                    "body": long,
+                }
+            ],
+        )
+        _, short = self._run([], [pr])
+        _, full = self._run(["--full"], [pr])
+        self.assertNotEqual(short, full)
+        self.assertIn("…", short)
+        self.assertNotIn("…", full)
 
     def test_claim_absent_is_a_dash(self):
         code, text = self._run([], [_pr()])
@@ -302,8 +484,57 @@ class MainTests(unittest.TestCase):
             "comments_count",
             "description",
             "latest_comment",
+            "linked_issue",
         ):
             self.assertIn(field, row)
+
+    def test_connection_flags_are_passed_to_the_claim_read(self):
+        with mock.patch.object(pr_status, "_fetch_prs", return_value=([], None)), \
+             mock.patch.object(pr_status, "_read_claims", return_value=({}, None)) as read, \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = pr_status.main(
+                [
+                    "--repo", "o/r",
+                    "--redis-host", "redis.example",
+                    "--redis-port", "6380",
+                    "--redis-username", "user",
+                    "--redis-password", "secret",
+                    "--config-path", "/tmp/fleet.json",
+                ]
+            )
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            read.call_args.args[1],
+            {
+                "redis_host": "redis.example",
+                "redis_port": 6380,
+                "redis_username": "user",
+                "redis_password": "secret",
+                "config_path": "/tmp/fleet.json",
+            },
+        )
+
+    def test_read_claims_resolves_the_connection_before_the_lookup(self):
+        resolved = {
+            "redis_host": "redis.example",
+            "redis_port": 6380,
+            "redis_username": None,
+            "redis_password": None,
+        }
+        with mock.patch.object(
+            pr_status.machines, "resolve_connection", return_value=resolved
+        ) as resolve, mock.patch.object(
+            pr_status.claims, "claims_for", return_value={"o/r#1": {"session": "s"}}
+        ) as lookup:
+            claims, warning = pr_status._read_claims(
+                "o/r", {"redis_host": "redis.example", "config_path": "/tmp/fleet.json"}
+            )
+        self.assertIsNone(warning)
+        self.assertEqual(claims, {"o/r#1": {"session": "s"}})
+        resolve.assert_called_once_with(
+            redis_host="redis.example", config_path="/tmp/fleet.json"
+        )
+        lookup.assert_called_once_with(["o/r"], **resolved)
 
     def test_json_full_keeps_the_long_text(self):
         code, text = self._run(["--json", "--full"], [_pr(body=PreviewTests.LONG)])
@@ -383,6 +614,23 @@ class CliRegistrationTests(unittest.TestCase):
         self.assertEqual(args.repo, "o/r")
         self.assertTrue(args.json)
         self.assertTrue(args.full)
+
+    def test_parser_accepts_the_fleet_connection_flags(self):
+        args = cli._build_parser().parse_args(
+            [
+                "pr-status", "--repo", "o/r",
+                "--redis-host", "redis.example",
+                "--redis-port", "6380",
+                "--redis-username", "user",
+                "--redis-password", "secret",
+                "--config-path", "/tmp/fleet.json",
+            ]
+        )
+        self.assertEqual(args.redis_host, "redis.example")
+        self.assertEqual(args.redis_port, 6380)
+        self.assertEqual(args.redis_username, "user")
+        self.assertEqual(args.redis_password, "secret")
+        self.assertEqual(args.config_path, "/tmp/fleet.json")
 
 
 if __name__ == "__main__":

@@ -343,8 +343,9 @@ def _pr_status_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--full",
         action="store_true",
-        help="do not truncate the description or the latest comment",
+        help="do not truncate the description, comment, or review text",
     )
+    _fleet_connection_args(parser)
 
 
 def _review_route_args(parser: argparse.ArgumentParser) -> None:

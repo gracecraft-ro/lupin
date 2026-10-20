@@ -10,12 +10,16 @@ the same facts for every open pull request.
 The command reads claims from Redis. It does not fail when Redis is
 unavailable. The claim column shows `unknown` and a warning follows the
 table instead.
+
+`gh pr list` returns at most 100 comments and 100 reviews for each pull
+request. This view shows what it returns; it does not page or fetch more.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -38,7 +42,14 @@ _TOKEN_RE = re.compile(r"(?:gh[oprsu]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)")
 FAILING_CHECKS = frozenset(
     {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
 )
-PENDING_CHECKS = frozenset({"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "EXPECTED"})
+PENDING_CHECKS = frozenset(
+    {"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "EXPECTED", "STALE"}
+)
+
+# A pull request body links its issue with `Closes #N`, `Fixes #N`, or
+# `Resolves #N`. The claim column follows that link because that is where
+# the loop's claim lives.
+LINKED_ISSUE_RE = re.compile(r"\b(?:closes|fixes|resolves)\s+#(\d+)\b", re.IGNORECASE)
 
 # An informal approval is a comment line that says "Review verdict: APPROVE"
 # or "Verdict: ship" (case-insensitive). The matched line is kept in the
@@ -114,11 +125,11 @@ def _fetch_prs(repo: str):
     )
 
 
-def _read_claims(repo: str):
+def _read_claims(repo: str, connection: dict | None = None):
     """Return `(claims, warning)`; a Redis failure never fails the command."""
     try:
-        connection = machines.resolve_connection()
-        return claims.claims_for([repo], **connection), None
+        resolved = machines.resolve_connection(**(connection or {}))
+        return claims.claims_for([repo], **resolved), None
     except (
         CoordinatorUnreachable,
         redis.exceptions.NoPermissionError,
@@ -154,8 +165,35 @@ def _merge(pr: dict) -> str:
     return "unknown"
 
 
+def _check_time(check: dict) -> str:
+    return _when(check.get("completedAt")) or _when(check.get("startedAt"))
+
+
+def _dedupe_checks(rollup: list) -> list:
+    """Keep the newest entry per `(workflowName, name)`.
+
+    `statusCheckRollup` can hold an older FAILURE and a newer SUCCESS for
+    the same check. Entries without a name cannot be grouped; they are
+    kept as they are. Ties and entries with no time keep the last one.
+    """
+    newest: dict[tuple[str, str], dict] = {}
+    unnamed: list = []
+    for check in rollup:
+        if not isinstance(check, dict):
+            unnamed.append(check)
+            continue
+        key = (check.get("workflowName") or "", check.get("name") or "")
+        if key == ("", ""):
+            unnamed.append(check)
+            continue
+        current = newest.get(key)
+        if current is None or _check_time(check) >= _check_time(current):
+            newest[key] = check
+    return [*newest.values(), *unnamed]
+
+
 def _checks(pr: dict) -> str:
-    rollup = pr.get("statusCheckRollup") or []
+    rollup = _dedupe_checks(list(pr.get("statusCheckRollup") or []))
     pending = False
     for check in rollup:
         if not isinstance(check, dict):
@@ -171,7 +209,7 @@ def _checks(pr: dict) -> str:
     return "pass" if rollup else "none"
 
 
-def _latest_reviews(reviews: list) -> list[dict]:
+def _latest_reviews(reviews: list, *, full: bool = False) -> list[dict]:
     """Keep the newest review for each reviewer."""
     newest: dict[str, dict] = {}
     for review in reviews or []:
@@ -187,6 +225,7 @@ def _latest_reviews(reviews: list) -> list[dict]:
                 "login": _login(review.get("author")),
                 "state": review.get("state") or "none",
                 "submitted_at": _when(review.get("submittedAt")),
+                "body": _preview(review.get("body"), full=full),
             }
             for review in newest.values()
         ),
@@ -260,14 +299,27 @@ def _review_requests(pr: dict) -> list[str]:
     return names
 
 
+def _linked_issue(pr: dict) -> int | None:
+    match = LINKED_ISSUE_RE.search(str(pr.get("body") or ""))
+    if not match:
+        return None
+    return int(match.group(1))
+
+
 def analyze(pr: dict, repo: str, claim_map: dict | None = None, *, full: bool = False) -> dict:
     """Turn one `gh pr list` entry into the row this command prints."""
     claim_map = claim_map or {}
-    target = f"{repo}#{pr.get('number')}"
-    claim = (claim_map.get(target) or {}).get("session") or "-"
+    number = pr.get("number")
+    target = f"{repo}#{number}"
+    linked_issue = _linked_issue(pr)
+    own_claim = (claim_map.get(target) or {}).get("session")
+    claim = None
+    if linked_issue is not None:
+        claim = (claim_map.get(f"{repo}#{linked_issue}") or {}).get("session")
+    claim = claim or own_claim or "-"
     approval_at_head, approval = _approval(pr)
     return {
-        "number": pr.get("number"),
+        "number": number,
         "title": pr.get("title") or "",
         "head_ref_name": pr.get("headRefName") or "",
         "head_ref_oid": pr.get("headRefOid") or "",
@@ -276,14 +328,39 @@ def analyze(pr: dict, repo: str, claim_map: dict | None = None, *, full: bool = 
         "review": pr.get("reviewDecision") or "none",
         "approval": approval,
         "approval_at_head": approval_at_head,
-        "latest_reviews": _latest_reviews(pr.get("reviews")),
+        "latest_reviews": _latest_reviews(pr.get("reviews"), full=full),
         "informal_approvals": _informal_approvals(pr),
         "comments_count": len(pr.get("comments") or []),
         "latest_comment": _latest_comment(pr, full=full),
         "description": _preview(pr.get("body"), full=full),
         "claim": claim,
+        "linked_issue": linked_issue,
         "review_requests": _review_requests(pr),
     }
+
+
+def _review_text(review: dict) -> str:
+    text = f"{review['login']} {review['state']} {review['submitted_at']}".rstrip()
+    if review.get("body"):
+        text += f": {review['body']}"
+    return text
+
+
+def _render_details(row: dict) -> list[str]:
+    """The indented lines under one PR line; only lines that have data."""
+    lines = []
+    if row["description"]:
+        lines.append(f"   desc: {row['description']}")
+    if row["latest_reviews"]:
+        lines.append("   reviews: " + "; ".join(_review_text(r) for r in row["latest_reviews"]))
+    comment = row["latest_comment"]
+    if comment:
+        lines.append(
+            f"   comment: {comment['login']} {comment['created_at']}: {comment['body']}"
+        )
+    if row["review_requests"]:
+        lines.append("   reviewers: " + ", ".join(row["review_requests"]))
+    return lines
 
 
 def render_text(rows: list[dict], warnings: list[str]) -> str:
@@ -294,6 +371,7 @@ def render_text(rows: list[dict], warnings: list[str]) -> str:
             f"review={row['review']}  approval={row['approval']}  "
             f"claim={row['claim']}  comments={row['comments_count']}  {row['title']}"
         )
+        lines.extend(_render_details(row))
     for warning in warnings:
         lines.append(f"warning: {warning}")
     for row in rows:
@@ -319,7 +397,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--full",
         action="store_true",
-        help="do not truncate the description or the latest comment",
+        help="do not truncate the description, comment, or review text",
+    )
+    # The claim column reads Redis, so this parses the same fleet
+    # connection flags as `roadmap`. None of them is required: the
+    # defaults come from the environment and the fleet config, and `gh`
+    # resolves `--repo`.
+    parser.add_argument("--redis-host", default=os.environ.get("LUPIN_REDIS_HOST"))
+    parser.add_argument(
+        "--redis-port",
+        type=int,
+        default=int(os.environ["LUPIN_REDIS_PORT"]) if os.environ.get("LUPIN_REDIS_PORT") else None,
+    )
+    parser.add_argument("--redis-username", default=os.environ.get("LUPIN_REDIS_USERNAME"))
+    parser.add_argument("--redis-password", default=os.environ.get("LUPIN_REDIS_PASSWORD"))
+    parser.add_argument(
+        "--config-path",
+        default=os.environ.get("LUPIN_FLEET_CONFIG"),
+        help="fleet config file (default: $LUPIN_FLEET_CONFIG or ~/.config/lupin/fleet.json)",
     )
     return parser.parse_args(argv)
 
@@ -342,7 +437,14 @@ def main(argv: list[str] | None = None) -> int:
         print("lupin: gh returned an unexpected pull request list", file=sys.stderr)
         return 1
 
-    claim_map, claim_warning = _read_claims(repo)
+    connection = {
+        "redis_host": args.redis_host,
+        "redis_port": args.redis_port,
+        "redis_username": args.redis_username,
+        "redis_password": args.redis_password,
+        "config_path": args.config_path,
+    }
+    claim_map, claim_warning = _read_claims(repo, connection)
     warnings = [claim_warning] if claim_warning else []
     rows = [
         analyze(pr, repo, claim_map, full=args.full)
