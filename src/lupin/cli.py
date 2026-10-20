@@ -587,6 +587,15 @@ def _pause_resume_args(parser: argparse.ArgumentParser) -> None:
     _fleet_connection_args(parser)
 
 
+def _version() -> str:
+    """The package version. `pyproject.toml` is the only place it is set.
+
+    `machines.package_version` reads the installed metadata, or the file in
+    a source checkout.
+    """
+    return machines.package_version()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="lupin",
@@ -594,6 +603,7 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog=ROOT_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     sub = parser.add_subparsers(dest="cmd", required=True)
     _route_args(sub.add_parser("route", help="pick a {model, effort} for a (category, size) pair"))
     _classify_args(sub.add_parser("classify", help="sort an issue into (category, size)"))
