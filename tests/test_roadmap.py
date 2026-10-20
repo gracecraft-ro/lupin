@@ -488,6 +488,57 @@ class RoadmapTests(unittest.TestCase):
         self.assertIn("setTimeout(function(){location.reload()},305000)", page)
         self.assertIn("Latest handoff: HANDOFF, not a finish.", page)
 
+    def test_warning_cards_can_be_dismissed_and_stay_dismissed_after_a_reload(self):
+        # The owner asked for dismissible warnings (PR #250). The dismissal
+        # happens in the browser, so the reader needs no round trip to the
+        # server, and the warning must not come back on the next reload.
+        model = roadmap.build_model(
+            [],
+            {},
+            [],
+            warnings=[
+                "GitHub issue data is unavailable: denied",
+                "Recent GitHub comments are unavailable: denied",
+            ],
+            repo="nix",
+        )
+        render = lambda title, body, css, js: body + js
+
+        page = roadmap.render_page("nix", ["nix"], model, render)
+
+        # The warning text stays in the page source.
+        self.assertIn("GitHub issue data is unavailable: denied", page)
+        self.assertIn("Recent GitHub comments are unavailable: denied", page)
+        # Every warning card has a way to dismiss it.
+        self.assertEqual(page.count("class='warning-dismiss'"), 2)
+        # Each card carries its own warning text, so one dismissal does not
+        # hide another warning.
+        self.assertIn("data-warning='GitHub issue data is unavailable: denied'", page)
+        self.assertIn("data-warning='Recent GitHub comments are unavailable: denied'", page)
+        # The browser keeps the dismissed text, so the warning stays gone
+        # after a reload. The dismissal never lives in the URL (issue #87).
+        self.assertIn("lupin-roadmap-dismissed-warning:", page)
+        self.assertIn("localStorage", page)
+        self.assertNotIn("dismiss=", page)
+
+    def test_completed_page_warning_cards_can_be_dismissed(self):
+        closed_issue = {
+            "number": 4, "title": "Done issue", "body": "", "labels": [],
+            "url": "https://github.com/acme/repo/issues/4",
+        }
+        render = lambda title, body, css, js: body + js
+
+        page = roadmap.render_completed_page(
+            "repo",
+            ["repo"],
+            {"repo": ([closed_issue], {}, ["GitHub issue data is unavailable: denied"])},
+            render,
+        )
+
+        self.assertIn("GitHub issue data is unavailable: denied", page)
+        self.assertIn("class='warning-dismiss'", page)
+        self.assertIn("lupin-roadmap-dismissed-warning:", page)
+
     def test_repo_roadmap_orders_issue_details_by_recency(self):
         issues = [
             {

@@ -1298,6 +1298,52 @@ def _escape_attr(value: str) -> str:
     return html.escape(str(value), quote=True)
 
 
+WARNING_DISMISS_KEY = "lupin-roadmap-dismissed-warning:"
+
+
+def warning_card(message: str) -> str:
+    """A warning card the reader can dismiss.
+
+    The warning text stays in the page source. The button hides the card on
+    screen and the browser remembers the text, so the same warning stays
+    gone after a reload. A different warning still shows.
+    """
+    text = html.escape(message)
+    return (
+        f"<div class='card warning' data-warning='{_escape_attr(message)}'>"
+        f"<span class='warning-text'>{text}</span>"
+        "<button type='button' class='warning-dismiss'>Dismiss</button></div>"
+    )
+
+
+def _warning_dismiss_script() -> str:
+    """Hide warnings the reader already dismissed. The browser keeps the
+    dismissed text, so a reload does not bring the warning back."""
+    return """
+(function(){
+  const storageKey='lupin-roadmap-dismissed-warning:';
+  function dismissed(text){
+    try{return localStorage.getItem(storageKey+text)!==null;}catch(_){return false;}
+  }
+  function hide(element){
+    element.style.display='none';
+  }
+  document.querySelectorAll('[data-warning]').forEach(function(element){
+    if(dismissed(element.getAttribute('data-warning')))hide(element);
+  });
+  document.addEventListener('click',function(event){
+    const button=event.target.closest('.warning-dismiss');
+    if(!button)return;
+    const element=button.closest('[data-warning]');
+    if(!element)return;
+    const text=element.getAttribute('data-warning');
+    try{localStorage.setItem(storageKey+text,'1');}catch(_){}
+    hide(element);
+  });
+})();
+"""
+
+
 def _render_body(body: str) -> str:
     body = str(body or "")
     if not body:
@@ -2063,8 +2109,12 @@ def _render_quest_section(repo: str | None, quest_state: dict | None) -> str:
         "<button type='submit'>Stop quest</button></form>"
     )
     warning = skipped_warning(quest_state.get("skipped", []))
+    warning_text = f"{warning}. Progress may be wrong."
     warning_html = (
-        f"<p class='dim'>{_escape_attr(warning)}. Progress may be wrong.</p>" if warning else ""
+        f"<p class='dim' data-warning='{_escape_attr(warning_text)}'>{_escape_attr(warning_text)}"
+        "<button type='button' class='warning-dismiss'>Dismiss</button></p>"
+        if warning
+        else ""
     )
     return f"<div class='card'><h2>Quest</h2>{progress}{warning_html}{stop_form}{start_form}</div>"
 
@@ -2099,12 +2149,11 @@ def render_page(
     issue_map = {node["number"]: node for node in model["nodes"]}
     svg = _render_queue_graph_svg(repo, model)
 
-    warnings = "".join(
-        f"<div class='card warning'>{html.escape(message)}</div>"
-        for message in model["warnings"]
-    )
+    warnings = "".join(warning_card(message) for message in model["warnings"])
     if not model["acyclic"]:
-        warnings += "<div class='card warning'>The dependency graph has a cycle. Check the issue links before dispatch.</div>"
+        warnings += warning_card(
+            "The dependency graph has a cycle. Check the issue links before dispatch."
+        )
     handoff = model.get("handoffStatus")
     handoff_fact = (
         f"<span class='pill'>Latest handoff: {html.escape(handoff)}</span>"
@@ -2190,12 +2239,14 @@ def render_page(
 .browse-search input{flex:1;min-width:12rem}
 .browse-more{font:inherit;margin:.3rem 0;padding:.3rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}
 .warning{border-color:var(--warn);color:var(--warn)}
+.warning-text{vertical-align:middle}
+.warning-dismiss{font:inherit;font-size:12px;margin-left:.6rem;padding:.2rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}
 .queue-comment-list{display:grid;gap:.35rem}
 .issue-body img.image-attachment{display:block;max-width:100%;max-height:640px;height:auto;object-fit:contain;margin:.6rem 0;border-radius:6px}
 .quest-pick{display:inline-flex;align-items:center;gap:.25rem;font-size:.8rem;color:var(--ink2);margin-right:.4rem}
 """
     css += DIGEST_CSS
-    return page_fn(title, body, css, _browse_script())
+    return page_fn(title, body, css, _browse_script() + _warning_dismiss_script())
 
 def render_completed_page(repo: str | None, repos: list[str], issues_by_repo: dict, page_fn) -> bytes:
     selected_repos = [repo] if repo else repos
@@ -2221,10 +2272,7 @@ def render_completed_page(repo: str | None, repos: list[str], issues_by_repo: di
         if repo
         else "Completed issues across repositories"
     )
-    warning_cards = "".join(
-        f"<div class='card warning'>{html.escape(warning)}</div>"
-        for warning in warnings
-    )
+    warning_cards = "".join(warning_card(warning) for warning in warnings)
     body = (
         f"<header><h1>{heading}</h1><span class='sp'></span>"
         "<a href='/roadmap'>all repositories</a></header>"
@@ -2233,8 +2281,8 @@ def render_completed_page(repo: str | None, repos: list[str], issues_by_repo: di
         "<input id='roadmap-search' type='search' placeholder='Titles, labels, descriptions'></div>"
         f"{warning_cards}{''.join(groups) or '<p class=dim>No completed issues.</p>'}"
     )
-    css = ".browse-search{display:flex;gap:.6rem;align-items:center;margin:1rem 0}.browse-search input{flex:1;min-width:12rem;font:inherit;padding:.35rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}.queue-comment-list{display:grid;gap:.35rem}.browse-more{font:inherit;margin:.3rem 0;padding:.3rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}"
-    return page_fn(heading, body, css, _browse_script())
+    css = ".browse-search{display:flex;gap:.6rem;align-items:center;margin:1rem 0}.browse-search input{flex:1;min-width:12rem;font:inherit;padding:.35rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}.queue-comment-list{display:grid;gap:.35rem}.browse-more{font:inherit;margin:.3rem 0;padding:.3rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}.warning-text{vertical-align:middle}.warning-dismiss{font:inherit;font-size:12px;margin-left:.6rem;padding:.2rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}"
+    return page_fn(heading, body, css, _browse_script() + _warning_dismiss_script())
 
 
 # Larger backlogs open in List. The Board stays readable with a few dozen issues.
