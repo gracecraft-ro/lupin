@@ -85,6 +85,15 @@ A value of `LUPIN_REDIS_PORT` that is not an integer stops every `lupin`
 command with a `ValueError`. The parser reads the variable for all
 subcommands when it starts.
 
+### `LUPIN_CLAIM_HOLDER`
+
+- **Default**: unset; claim commands require `--holder` unless this variable is set.
+- **Effect**: Lupin sets this in each loop agent's shell to
+  `<host>:<repo>:<run branch>`. `claim`, `renew-claim`, and `release-claim`
+  use it as the holder when `--holder` is omitted.
+- **Read by**: `cli.py` (`_holder_arg`).
+- **Set by**: the loop runtime for each agent.
+
 ### `LUPIN_REDIS_HOST`
 
 - **Default**: none. The fleet group and debriefs then use `redis_host`
