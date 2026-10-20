@@ -8,7 +8,7 @@ This is the data model `lupin` uses once the `redis` backend exists
 | Key | Type | Holds | Replaces |
 | --- | --- | --- | --- |
 | `slot:<name>` | sorted set (member = holder, score = expiry in ms) | `bmo`, the declared `repo:<repo>` UI cap, and enforced `loop-<repo>` fleet locks (one active worker per repo). | `omp.lock` |
-| `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since), with a TTL | one claim per GitHub issue | nothing today |
+| `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since), with a TTL | one claim per GitHub issue; the loop monitor renews the claims of its run's holder (`LUPIN_CLAIM_HOLDER`) | nothing today |
 | `ledger:<owner>/<repo>` | stream (`XADD`/`XRANGE`) | `ts host event issue status branch summary highlights evidence decisions next children` | `.loop/loop-state.json` is ignored; no local fallback |
 | `machine:<name>` | string (JSON), with a TTL | one fleet machine's status — see Fleet keys below | nothing today |
 | `focus:<quest>` | string (JSON), no TTL | which machine a quest is pinned to — see Fleet keys below | nothing today |
@@ -22,7 +22,8 @@ This is the data model `lupin` uses once the `redis` backend exists
 | `model-snapshot` | string (JSON), with a TTL | latest model list and prices from `lupin fetch-models`; a subscription whose fetch failed keeps its last verified list, marked stale (`model_fetch._merge_previous_subscriptions`) | nothing today |
 | `gh-cache:<owner>/<repo>:<cache-key>` | string (JSON: `{"data": ...}`), with a TTL | one read-only `gh` lookup's cached result — see Fleet keys below | each machine's own direct `gh` call for the same lookup |
 | `gh-lock:<owner>/<repo>:<cache-key>` | string (holder ID), with a TTL | the lock for one `gh-cache` key: the caller that holds it fetches — see Fleet keys below | nothing today |
-| `quota-snapshot` | string (JSON), with a TTL | one fleet-wide quota reading per provider — see Fleet keys below | nothing today |
+| `quota-accounts` | string (JSON), with a TTL | one fleet-wide quota reading per provider, with account labels — see Fleet keys below | `quota-snapshot` |
+| `quota-snapshot` | string (JSON), with a TTL | the same, from `lupin` versions before issue #169, with no account labels. Read only. | nothing today |
 | `usage-snapshot:<machine>` | string (JSON), with a TTL | one machine's 7-day usage rows — see Fleet keys below | nothing today |
 | `debrief-digest:<machine>:<repo>:<file>` | string (JSON), with a TTL | one debrief's text and its model-written digest — see Fleet keys below | each machine shows only its own debrief files |
 | `debrief-window:<repo>:<period>:<window end>` | string, with a TTL | the claim for one periodic debrief window: the machine that holds it writes the window for the whole fleet — see Fleet keys below | each machine writes its own |
@@ -322,9 +323,10 @@ used in three cases:
 While the pinned machine is online, no other machine takes the lock. On a
 miss, it reports "no data yet" and does not call `gh`.
 
-### `quota-snapshot`
+### `quota-accounts`
 
-Backs `lupin quota` and `serve.py`'s `/usage` page (issue #38). Every
+The `quota-accounts` key stores the quota of each provider for
+`lupin quota` and the `/usage` page (issue #38). Every
 machine sees the same accounts (Claude, opencode-go, OpenAI/Codex — issue
 #36), so one real reading per provider is the fleet's answer. Do not merge
 readings from different machines.
@@ -344,19 +346,33 @@ readings from different machines.
 }
 ```
 
-One key, one entry per provider — each provider goes stale/fresh on its
-own, so each carries its own `fetched_at`/`fetched_by`. `rows` is
-`quota.quota_usage()`'s own row shape for that provider (one row per
-window: 5 hours, 7 days, 30 days), kept whole rather than collapsed to one
-number, so a reader can show duration, percent left, and time to reset —
-not just one of them. When a provider has more than one login, each row
-has an `account` label: the plan name (`free`, `plus`), or the plan name
-and six hex characters when two logins have the same plan. A provider with
-one login has no `account` key. The label never holds an email or an
-account ID. One machine writes the whole entry, so that machine must have
-every login for the provider. A provider's `duration` is written as the plain
-string `quota.QuotaDuration`'s own value serializes to (`"PT5H"` etc.);
-`quota_cache.py` converts it back to the real enum on read.
+One key, one entry per provider. Each entry has its own `fetched_at` and
+`fetched_by`, because each provider becomes stale at a different time.
+
+- `rows` has one row for each login and quota window (5 hours, 7 days,
+  30 days). The row shape is the shape of `quota.quota_usage()`.
+- When a provider has more than one login, each row has an `account`
+  label. The label is the plan name (`free`, `plus`). When two logins
+  have the same plan, the label also has six hex characters. They come
+  from a hash of the email and the account ID.
+- A provider with one login has no `account` key.
+- The label never holds an email or an account ID.
+- One machine writes the whole entry. That machine must have every login
+  for the provider.
+- `duration` is a string, for example `"PT5H"`. `quota_cache.py` changes
+  it back to `quota.QuotaDuration` when it reads the row.
+
+### `quota-snapshot` (old versions)
+
+`lupin` versions before issue #169 write to `quota-snapshot`, with the
+same shape and no `account` labels. Two logins can then look like one
+blocked login. The current version never writes this key. It reads the
+key and adds an entry only for a provider that `quota-accounts` does not
+have. It marks that entry `"old_writer": true`. Such an entry is never
+fresh, so a loop start does not use it, and the `/usage` page marks it
+stale. An old version never reads `quota-accounts`, so it never sees
+labeled rows. Update every machine that runs `lupin quota`. After that,
+no machine writes `quota-snapshot`, and the key expires after 24 hours.
 
 Unlike `gh-cache`'s pin, there is no fixed canonical
 machine here: credentials for different providers can live on different
@@ -757,7 +773,7 @@ numbers.
 | `model-snapshot` | n/a — not renewed | 7 days (retention only) |
 | GitHub data cache (`gh-cache:...`) | n/a — not renewed | 5 min |
 | GitHub fetch lock (`gh-lock:<owner>/<repo>:<cache-key>`) | n/a — held only for one fetch | 2 min |
-| `quota-snapshot` | n/a — not renewed | 24 hours (retention only; freshness is per-provider, 5 min, see above) |
+| `quota-accounts`, `quota-snapshot` | n/a — not renewed | 24 hours (retention only; freshness is per-provider, 5 min, see above) |
 | `debrief-digest:...` | n/a — written once, rewritten only to add a digest | 30 days |
 | `debrief-digest-claim:...` | n/a — written once | 30 days |
 | `debrief-window:...` | n/a — written twice (claim, then done) | 1 hour while writing, 8 days when done |

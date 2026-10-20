@@ -18,7 +18,7 @@ from contextlib import closing, redirect_stderr, redirect_stdout
 from datetime import date, timedelta
 from unittest import mock
 
-from lupin import quota
+from lupin import pace, quota
 
 
 class UsageReaderFixtures(unittest.TestCase):
@@ -308,6 +308,20 @@ class QuotaUsageTests(unittest.TestCase):
         # Same logins, same labels on the next read.
         self.assertEqual(first, self._omp_rows(*reports)[0]["account"])
 
+    def test_two_users_in_one_workspace_get_different_labels(self):
+        # Issue #169, case 1: two users share one workspace `accountId`.
+        reports = (
+            self._codex_report("plus", "shared-ws", [("5 hours", 18_000_000, 1.0)], email="a@example.com"),
+            self._codex_report("plus", "shared-ws", [("5 hours", 18_000_000, 0.01)], email="b@example.com"),
+        )
+        rows = self._omp_rows(*reports)
+
+        self.assertNotEqual(rows[0]["account"], rows[1]["account"])
+        self.assertFalse(pace.blocked(rows, "openai", now_ms=0))
+        text = json.dumps(rows, default=str)
+        for secret in ("a@example.com", "b@example.com", "shared-ws"):
+            self.assertNotIn(secret, text)
+
     def test_two_logins_with_no_metadata_still_get_different_labels(self):
         bare = {
             "provider": "openai-codex",
@@ -386,7 +400,9 @@ class OpencodeGoQuotaTests(UsageReaderFixtures):
         )
 
 
-REAL_OMP_TOKEN = quota._omp_token  # `conftest.py` replaces it for each test
+# `conftest.py` replaces `_omp_token` for each test. `getattr` lets this file load
+# on old source that has no `_omp_token`.
+REAL_OMP_TOKEN = getattr(quota, "_omp_token", None)
 SECRET_KEY = "sk-test-SECRET-0123456789"
 EXPIRED_NOTE = "OpenCode Go API key expired -- get a new key in the OpenCode Console"
 USAGE_PAYLOAD = {"usage": {"rolling": {"percent": 12, "resetsAt": "2030-01-01T00:00:00Z"}}}
@@ -411,7 +427,7 @@ class OpencodeGoKeyTests(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(quota, "OPENCODE_GO_AUTH_FILE", self.auth_path).start()
         mock.patch.dict(os.environ, {"OPENCODE_API_KEY": ""}).start()
-        mock.patch.object(quota, "_omp_token", REAL_OMP_TOKEN).start()
+        mock.patch.object(quota, "_omp_token", REAL_OMP_TOKEN, create=True).start()
         # `omp` is missing unless a test says otherwise.
         self.omp = mock.patch.object(
             quota.subprocess, "run", side_effect=FileNotFoundError("omp")
@@ -532,6 +548,20 @@ class OpencodeGoKeyTests(unittest.TestCase):
         )
 
 
+class OmpTokenOutputTests(unittest.TestCase):
+    """`_omp_token` with a fake `omp` program on PATH. No real `omp` runs."""
+
+    @unittest.skipIf(REAL_OMP_TOKEN is None, "old source has no _omp_token")
+    def test_output_that_is_not_utf8_gives_no_key(self):
+        with tempfile.TemporaryDirectory() as bin_dir:
+            fake = os.path.join(bin_dir, "omp")
+            with open(fake, "w", encoding="utf-8") as script:
+                script.write("#!/bin/sh\nprintf '\\377\\376abc'\n")
+            os.chmod(fake, 0o700)
+            with mock.patch.dict(os.environ, {"PATH": bin_dir}):
+                self.assertEqual(REAL_OMP_TOKEN("opencode-go"), "")
+
+
 class ClaudeOauthQuotaTests(unittest.TestCase):
     def test_fallback_reads_live_usage(self):
         payload = {
@@ -619,6 +649,30 @@ class SnapshotTests(unittest.TestCase):
             result = quota.snapshot()
         self.assertEqual(result["openai"]["pct_left"], 99)
         self.assertEqual(result["openai"]["resets_at"], 7)
+
+    def test_skips_a_login_that_is_blocked_on_another_window(self):
+        # Issue #169, case 3: login "a" has room on 5 hours but none on 7 days.
+        later = int(time.time() * 1000) + 10 * 24 * 60 * 60 * 1000
+        rows = [
+            {"provider": "openai", "account": "a", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 1, "resets_at": later},
+            {"provider": "openai", "account": "a", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 100, "resets_at": later},
+            {"provider": "openai", "account": "b", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 50, "resets_at": later},
+            {"provider": "openai", "account": "b", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 20, "resets_at": later},
+        ]
+        with mock.patch.object(quota, "quota_usage", return_value=rows):
+            result = quota.snapshot()
+        self.assertEqual(result["openai"]["pct_left"], 50)
+
+    def test_one_blocked_login_still_reports_its_five_hour_row(self):
+        # One login: the result is the same as before issue #169.
+        later = int(time.time() * 1000) + 10 * 24 * 60 * 60 * 1000
+        rows = [
+            {"provider": "openai", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 1, "resets_at": later},
+            {"provider": "openai", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 100, "resets_at": later},
+        ]
+        with mock.patch.object(quota, "quota_usage", return_value=rows):
+            result = quota.snapshot()
+        self.assertEqual(result["openai"]["pct_left"], 99)
 
     def test_an_account_with_data_beats_an_account_with_only_a_note(self):
         rows = [

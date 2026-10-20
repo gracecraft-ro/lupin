@@ -926,6 +926,18 @@ def _running(pid: int) -> bool:
     return bool(state) and not state.startswith("Z")
 
 
+def _gone(pid: int, seconds: float = 5.0) -> bool:
+    """True when `pid` stops running within `seconds`.
+
+    SIGKILL ends a process a little later, when the system next runs it.
+    Under heavy load, `ps` can still show the process right after the kill.
+    """
+    deadline = time.monotonic() + seconds
+    while _running(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not _running(pid)
+
+
 @pytest.fixture
 def fake_browser(tmp_path: Path, monkeypatch):
     """Put a fake browser first on PATH. Return a function that writes its script."""
@@ -1011,7 +1023,7 @@ def test_browser_timeout_kills_the_whole_process_group(tmp_path: Path, fake_brow
     child = int(pid_file.read_text(encoding="utf-8"))
     try:
         assert reason == "browser timed out"
-        assert not _running(child)
+        assert _gone(child)
     finally:
         if _running(child):
             os.kill(child, signal.SIGKILL)

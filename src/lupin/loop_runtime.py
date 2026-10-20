@@ -12,12 +12,15 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import slots, slots_redis
+import redis
+
+from . import claims, slots, slots_redis
 
 # A loop id is a repo name. `repo~2` is a second loop on the same repo on this
 # machine, `repo~3` a third, and so on. There is no `repo~1`: that is `repo`.
@@ -54,6 +57,8 @@ PANE_READ_TIMEOUT = 60.0
 SYSTEMCTL_CHECK_TIMEOUT = 3.0
 SYSTEMCTL_STOP_TIMEOUT = 30.0
 LEASE_TTL = 60.0
+# The monitor renews the run's claims this often. A claim lasts 10 minutes.
+CLAIM_RENEW_INTERVAL = 120.0
 HANDOFF_GRACE_S = 600.0
 HANDOFF_TEXT = (
     "Lupin will stop this loop shortly. Run /handoff now: write an entry to the "
@@ -1081,22 +1086,37 @@ def _metadata_for_session(repo: str, session: str) -> dict:
     return value
 
 
-def _workspace_env(session: str, repo: str) -> list[str]:
-    """The shared server has no per-repo token, so give the repo's token to its workspace."""
+def claim_holder(repo: str, metadata: dict) -> str | None:
+    """The claim holder of one run: this machine, the repo, and the run branch.
+
+    None when the run has no branch.
+    """
+    branch = metadata.get("branch")
+    if not isinstance(branch, str) or not branch:
+        return None
+    return f"{socket.gethostname()}:{repo}:{branch}"
+
+
+def _workspace_env(session: str, repo: str, holder: str | None = None) -> list[str]:
+    """The shared server has no per-repo token, so give the repo's token to its workspace.
+
+    The agent also gets the run's claim holder as LUPIN_CLAIM_HOLDER.
+    """
+    holder_env = ["--env", f"LUPIN_CLAIM_HOLDER={holder}"] if holder else []
     if session != SESSION_NAME:
-        return []
+        return holder_env
     path = _runtime_paths(repo).get("gh-token")
     if not path:
-        return []
+        return holder_env
     token = Path(path).read_text(encoding="utf-8").strip()
-    return ["--env", f"GH_TOKEN={token}"] if token else []
+    return (["--env", f"GH_TOKEN={token}"] if token else []) + holder_env
 
 
-def _create_workspace(session: str, directory: Path, repo: str) -> dict:
+def _create_workspace(session: str, directory: Path, repo: str, holder: str | None = None) -> dict:
     result = _herdr_json(
         session,
         "workspace", "create", "--cwd", str(directory), "--label", repo, "--no-focus",
-        *_workspace_env(session, repo),
+        *_workspace_env(session, repo, holder),
     )
     workspace = result.get("workspace")
     root = result.get("root_pane")
@@ -1220,6 +1240,31 @@ def _run_worktree(repo: str, metadata: dict) -> Path:
     return Path(value)
 
 
+def _renew_claims(holder: str, stop: threading.Event) -> None:
+    """Renew the claims of `holder` each CLAIM_RENEW_INTERVAL until `stop` is set.
+
+    An error does not stop the loop. The monitor log gets one line for each
+    new error. The line does not contain the password.
+    """
+    reported = None
+    while not stop.wait(CLAIM_RENEW_INTERVAL):
+        what = f"renewing the claims of {holder}"
+        try:
+            claims.renew_holder_claims(holder, ttl=claims.DEFAULT_TTL, **_redis_kwargs())
+        except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
+            line = slots_redis.refusal_message(exc, what, fleet=True)
+        except slots.CoordinatorUnreachable:
+            line = f"cannot reach the redis coordinator for {what}"
+        except redis.exceptions.RedisError as exc:
+            line = f"redis error for {what}: {exc}"
+        else:
+            reported = None
+            continue
+        if line != reported:
+            print(f"lupin: {line}", file=sys.stderr, flush=True)
+            reported = line
+
+
 def _monitor_loop(
     repo: str, platform: str, session: str, prompt_file: str, resume: bool
 ) -> int:
@@ -1231,8 +1276,9 @@ def _monitor_loop(
         _write_metadata(repo, metadata)
         raise LoopError(f"saved Herdr workspace for {repo} is missing; review it before starting again")
     launch = workspace is None
+    holder = claim_holder(repo, metadata)
     if launch:
-        workspace = _create_workspace(session, _run_worktree(repo, metadata), repo)
+        workspace = _create_workspace(session, _run_worktree(repo, metadata), repo, holder)
         metadata = _record_workspace(repo, metadata, workspace)
     else:
         workspace_id = _workspace_id(workspace)
@@ -1254,40 +1300,52 @@ def _monitor_loop(
         if platform == "claude" else 1
     )
     wait_s = 0.0 if launch and platform == "claude" else 10800.0
+    # Renew the run's claims until the workspace closes or the Herdr server
+    # stops (issue #156). `hold` returns when the agent is `done`, but the
+    # agent is still alive then and waits for input.
+    stop_renewing = threading.Event()
+    renewer = threading.Thread(target=_renew_claims, args=(holder, stop_renewing), daemon=True)
+    if holder:
+        renewer.start()
     try:
-        rc = slots.hold(
-            command, slot=platform, holder=unit_name(repo), wait=wait_s,
-            ttl=LEASE_TTL, max_holders=max_holders,
-        )
-    except slots.SlotFull:
-        if launch:
-            _herdr_json(session, "workspace", "close", workspace_id)
-            metadata["state"] = "failed"
-            metadata["workspace_id"] = None
-            metadata["pane_id"] = None
-            removed_note = ""
-            try:
-                _, removed_note = _remove_worktree(repo, metadata)
-            except LoopError as exc:
-                removed_note = f"; {exc}"
-            _write_metadata(repo, metadata)
-            raise LoopError(f"{platform} slot is full{removed_note}")
-        raise LoopError(f"{platform} slot is full")
-    if rc:
-        metadata["state"] = "needs_attention"
-        _write_metadata(repo, metadata)
-        raise LoopError(f"Herdr agent for {repo} stopped with status {rc}")
-    while True:
-        if not _server_running(session):
+        try:
+            rc = slots.hold(
+                command, slot=platform, holder=unit_name(repo), wait=wait_s,
+                ttl=LEASE_TTL, max_holders=max_holders,
+            )
+        except slots.SlotFull:
+            if launch:
+                _herdr_json(session, "workspace", "close", workspace_id)
+                metadata["state"] = "failed"
+                metadata["workspace_id"] = None
+                metadata["pane_id"] = None
+                removed_note = ""
+                try:
+                    _, removed_note = _remove_worktree(repo, metadata)
+                except LoopError as exc:
+                    removed_note = f"; {exc}"
+                _write_metadata(repo, metadata)
+                raise LoopError(f"{platform} slot is full{removed_note}")
+            raise LoopError(f"{platform} slot is full")
+        if rc:
             metadata["state"] = "needs_attention"
             _write_metadata(repo, metadata)
-            return 1
-        if _workspace_by_id(session, workspace_id) is None:
-            metadata["state"] = "stopped"
-            metadata["stopped_at"] = _now()
-            _write_metadata(repo, metadata)
-            return 0
-        time.sleep(2)
+            raise LoopError(f"Herdr agent for {repo} stopped with status {rc}")
+        while True:
+            if not _server_running(session):
+                metadata["state"] = "needs_attention"
+                _write_metadata(repo, metadata)
+                return 1
+            if _workspace_by_id(session, workspace_id) is None:
+                metadata["state"] = "stopped"
+                metadata["stopped_at"] = _now()
+                _write_metadata(repo, metadata)
+                return 0
+            time.sleep(2)
+    finally:
+        stop_renewing.set()
+        if holder:
+            renewer.join(timeout=5)
 
 
 def worker(

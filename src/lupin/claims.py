@@ -185,6 +185,43 @@ def renew_claim(
     return bool(result)
 
 
+def renew_holder_claims(
+    holder: str,
+    *,
+    ttl: float = DEFAULT_TTL,
+    redis_host: str | None = None,
+    redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
+) -> list[str]:
+    """Renew each claim that `holder` holds. Return the renewed targets.
+
+    A loop uses this to keep its own claims (issue #156). It uses only
+    `SCAN` and the renew script (`EVAL`, with `GET` and `SET`). These are on
+    the fleet ACL list. The script renews a claim only when `holder` holds
+    it, so this never renews a claim of another holder. Errors are the same
+    as for `renew_claim`.
+    """
+    client = _client(redis_host, redis_port, redis_username, redis_password)
+    prefix = f"{PREFIX}claim:"
+    value = _value(holder)
+    renewed = []
+    try:
+        keys = _call_with_retry(
+            lambda: list(client.scan_iter(match=f"{prefix}*", count=SCAN_COUNT))
+        )
+        for key in keys:
+            if _call_with_retry(
+                lambda k=key: client.eval(_RENEW_SCRIPT, 1, k, holder, value, int(ttl * 1000))
+            ):
+                renewed.append(key[len(prefix) :])
+    except redis.exceptions.AuthenticationError as exc:
+        raise _auth_failed(exc) from exc
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
+        raise CoordinatorUnreachable(f"claims of {holder}") from exc
+    return renewed
+
+
 def release_claim(
     target: str,
     holder: str,
