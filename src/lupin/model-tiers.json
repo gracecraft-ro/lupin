@@ -2,7 +2,7 @@
   "_comment": "Model-tier matrix for delegation-loop review calls. Row = task category, each tier is an ordered list of {model, effort} fallbacks. See issue #179 for the research behind these picks and #182 for the schema.",
   "coding": {
     "source": "Artificial Analysis Coding Agent Index",
-    "last_verified": "2026-10-03",
+    "last_verified": "2026-10-20",
     "tiers": {
       "tier0": [
         {
@@ -22,100 +22,9 @@
         {
           "model": "sonnet",
           "effort": "high"
-        }
-      ],
-      "tier2": [
-        {
-          "model": "opus",
-          "effort": "high"
         },
         {
-          "model": "opus",
-          "effort": "xhigh"
-        },
-        {
-          "model": "opencode-go/qwen3.8-max",
-          "effort": "high"
-        }
-      ]
-    },
-    "note": "AA's Coding Agent Index number for \"qwen3.8-flash-next\" (73.1) was cited to justify bmo's tier0 placement here. CORRECTION (2026-10-03): the AA score above is for \"qwen3.8-flash-next\" by name, but bmo's live /v1/models endpoint actually serves \"swift-1.5-iq3_xxs\" -- a heavily-quantized (iq3_xxs) fine-tune of Qwen, a different artifact AA never scored. The AA number does not verify the real served model's quality. Treat bmo's tier0 placement here as unverified until something benchmarks swift-1.5-iq3_xxs directly on a real task, not qwen3.8-flash-next's published score."
-  },
-  "general": {
-    "source": "Artificial Analysis Intelligence Index",
-    "last_verified": "2026-10-03",
-    "tiers": {
-      "tier0": [
-        {
-          "model": "bmo:qwen3.8-flash-next",
-          "effort": "low"
-        }
-      ],
-      "tier1": [
-        {
-          "model": "opencode-go/deepseek-v4.1-flash",
-          "effort": "high"
-        },
-        {
-          "model": "haiku",
-          "effort": "xhigh"
-        },
-        {
-          "model": "sonnet",
-          "effort": "high"
-        }
-      ],
-      "tier2": [
-        {
-          "model": "opus",
-          "effort": "high"
-        },
-        {
-          "model": "opus",
-          "effort": "xhigh"
-        },
-        {
-          "model": "opencode-go/qwen3.8-max",
-          "effort": "high"
-        }
-      ]
-    },
-    "note": "AA's Intelligence Index number for \"qwen3.8-flash-next\" (39.8) was cited to justify bmo's tier0 placement here. CORRECTION (2026-10-03): the AA score above is for \"qwen3.8-flash-next\" by name, but bmo's live /v1/models endpoint actually serves \"swift-1.5-iq3_xxs\" -- a heavily-quantized (iq3_xxs) fine-tune of Qwen, a different artifact AA never scored. The AA number does not verify the real served model's quality. Treat bmo's tier0 placement here as unverified until something benchmarks swift-1.5-iq3_xxs directly on a real task, not qwen3.8-flash-next's published score."
-  },
-  "frontend-ui": {
-    "source": "manual (mirrors ship/SKILL.md step 8 screenshot rule and delegation-loop/SKILL.md's visible-change effort floor)",
-    "last_verified": "2026-10-03",
-    "tiers": {
-      "tier1": [
-        {
-          "model": "opencode-go/deepseek-v4.1-flash",
-          "effort": "high"
-        },
-        {
-          "model": "sonnet",
-          "effort": "high"
-        }
-      ],
-      "tier2": [
-        {
-          "model": "opus",
-          "effort": "high"
-        },
-        {
-          "model": "opus",
-          "effort": "xhigh"
-        }
-      ]
-    },
-    "note": "no tier0: UI review always escalates to tier2 on any user-visible change; there is no free-tier lane for this category"
-  },
-  "translation": {
-    "source": "Alconost Translation Quality Index + Linguist Evaluation (2025-2026 sample, alconost.com/en/blog/best-llm-for-translation-2026)",
-    "last_verified": "2026-10-03",
-    "tiers": {
-      "tier1": [
-        {
-          "model": "sonnet",
+          "model": "openai-codex/gpt-6-sol",
           "effort": "medium"
         }
       ],
@@ -123,14 +32,137 @@
         {
           "model": "opus",
           "effort": "high"
+        },
+        {
+          "model": "opus",
+          "effort": "xhigh"
+        },
+        {
+          "model": "opencode-go/qwen3.8-max",
+          "effort": "high"
+        },
+        {
+          "model": "openai-codex/gpt-6.1-sol",
+          "effort": "high"
         }
       ]
     },
-    "note": "Missing GPT"
+    "note": "AA's Coding Agent Index number for \"qwen3.8-flash-next\" (73.1) was cited to justify bmo's tier0 placement here. CORRECTION (2026-10-03): the AA score above is for \"qwen3.8-flash-next\" by name, but bmo's live /v1/models endpoint actually serves \"swift-1.5-iq3_xxs\" -- a heavily-quantized (iq3_xxs) fine-tune of Qwen, a different artifact AA never scored. The AA number does not verify the real served model's quality. Treat bmo's tier0 placement here as unverified until something benchmarks swift-1.5-iq3_xxs directly on a real task, not qwen3.8-flash-next's published score. tier1 uses opencode-go/glm-5.3 and Sonnet. tier2 uses Opus and opencode-go/qwen3.8-max. The OpenAI picks are fallbacks: tier1 has openai-codex/gpt-6-sol and tier2 has openai-codex/gpt-6.1-sol. AA has no Coding Agent Index score for these OpenAI models, so they sit in the same tiers as the other paid models (Sonnet in tier1, Opus in tier2). They come after the Claude and opencode-go picks, so they run only when those accounts are blocked. No OpenAI model sits in tier0: the OpenAI quota window is shared with other work."
+  },
+  "general": {
+    "source": "Artificial Analysis Intelligence Index",
+    "last_verified": "2026-10-20",
+    "tiers": {
+      "tier0": [
+        {
+          "model": "bmo:qwen3.8-flash-next",
+          "effort": "low"
+        }
+      ],
+      "tier1": [
+        {
+          "model": "opencode-go/deepseek-v4.1-flash",
+          "effort": "high"
+        },
+        {
+          "model": "haiku",
+          "effort": "xhigh"
+        },
+        {
+          "model": "sonnet",
+          "effort": "high"
+        },
+        {
+          "model": "openai-codex/gpt-6-sol",
+          "effort": "medium"
+        }
+      ],
+      "tier2": [
+        {
+          "model": "opus",
+          "effort": "high"
+        },
+        {
+          "model": "opus",
+          "effort": "xhigh"
+        },
+        {
+          "model": "opencode-go/qwen3.8-max",
+          "effort": "high"
+        },
+        {
+          "model": "openai-codex/gpt-6.1-sol",
+          "effort": "high"
+        }
+      ]
+    },
+    "note": "AA's Intelligence Index number for \"qwen3.8-flash-next\" (39.8) was cited to justify bmo's tier0 placement here. CORRECTION (2026-10-03): the AA score above is for \"qwen3.8-flash-next\" by name, but bmo's live /v1/models endpoint actually serves \"swift-1.5-iq3_xxs\" -- a heavily-quantized (iq3_xxs) fine-tune of Qwen, a different artifact AA never scored. The AA number does not verify the real served model's quality. Treat bmo's tier0 placement here as unverified until something benchmarks swift-1.5-iq3_xxs directly on a real task, not qwen3.8-flash-next's published score. tier1 uses opencode-go/glm-5.3 and Sonnet. tier2 uses Opus and opencode-go/qwen3.8-max. The OpenAI picks are fallbacks: tier1 has openai-codex/gpt-6-sol and tier2 has openai-codex/gpt-6.1-sol. AA has no Intelligence Index score for these OpenAI models, so they sit in the same tiers as the other paid models (Sonnet in tier1, Opus in tier2). They come after the Claude and opencode-go picks, so they run only when those accounts are blocked. No OpenAI model sits in tier0: the OpenAI quota window is shared with other work."
+  },
+  "frontend-ui": {
+    "source": "manual (mirrors ship/SKILL.md step 8 screenshot rule and delegation-loop/SKILL.md's visible-change effort floor)",
+    "last_verified": "2026-10-20",
+    "tiers": {
+      "tier1": [
+        {
+          "model": "opencode-go/deepseek-v4.1-flash",
+          "effort": "high"
+        },
+        {
+          "model": "sonnet",
+          "effort": "high"
+        },
+        {
+          "model": "openai-codex/gpt-5.6-terra",
+          "effort": "high"
+        }
+      ],
+      "tier2": [
+        {
+          "model": "opus",
+          "effort": "high"
+        },
+        {
+          "model": "opus",
+          "effort": "xhigh"
+        },
+        {
+          "model": "openai-codex/gpt-6.1-sol",
+          "effort": "high"
+        }
+      ]
+    },
+    "note": "no tier0: UI review always escalates to tier2 on any user-visible change; there is no free-tier lane for this category. tier1 uses opencode-go/glm-5.3 and Sonnet. tier2 uses Opus. The OpenAI picks are fallbacks: tier1 has openai-codex/gpt-5.6-terra and tier2 has openai-codex/gpt-6.1-sol. There is no public score for this category, so the OpenAI models sit in the same tiers as the other paid models (Sonnet in tier1, Opus in tier2). They come after the Claude and opencode-go picks, so they run only when those accounts are blocked."
+  },
+  "translation": {
+    "source": "Alconost Translation Quality Index + Linguist Evaluation (2025-2026 sample, alconost.com/en/blog/best-llm-for-translation-2026)",
+    "last_verified": "2026-10-20",
+    "tiers": {
+      "tier1": [
+        {
+          "model": "sonnet",
+          "effort": "medium"
+        },
+        {
+          "model": "openai-codex/gpt-5.6-terra",
+          "effort": "medium"
+        }
+      ],
+      "tier2": [
+        {
+          "model": "opus",
+          "effort": "high"
+        },
+        {
+          "model": "openai-codex/gpt-6-sol",
+          "effort": "high"
+        }
+      ]
+    },
+    "note": "No tier0 route. Alconost reports provider-family scores, not exact model-version scores. Gemini scores higher than Claude in the sample, but there is no Gemini provider config here. GPT scores higher than Claude too, so the OpenAI picks sit with the paid Claude models: tier1 has openai-codex/gpt-5.6-terra and tier2 has openai-codex/gpt-6-sol. tier1 also uses Sonnet, tier2 also uses Opus. The sample gives no score for these exact OpenAI model versions. They come after the Claude picks, so they run only when the Claude account is blocked. DeepSeek ranks fourth of five in the sample; this does not verify any exact DeepSeek model. The sample is general-purpose; its separate subtitle benchmark found different leaders."
   },
   "prose": {
-    "source": "Owner order (2026-10-19) for digests, plus LMArena Creative Writing leaderboard (BenchLeader snapshot, 2026-09-29) and EQ-Bench Creative Writing (Sept 2026) for tier1",
-    "last_verified": "2026-10-19",
+    "source": "LMArena Creative Writing leaderboard (BenchLeader snapshot, 2026-09-29) and EQ-Bench Creative Writing (Sept 2026) -- the two agree on a leader, unlike the translation sources",
+    "last_verified": "2026-10-20",
     "tiers": {
       "tier0": [
         {
@@ -139,6 +171,10 @@
         },
         {
           "model": "opencode-go/deepseek-v4.1-flash",
+          "effort": "high"
+        },
+        {
+          "model": "openai-codex/gpt-6-sol",
           "effort": "high"
         }
       ],
@@ -151,6 +187,10 @@
       "tier2": [
         {
           "model": "opus",
+          "effort": "high"
+        },
+        {
+          "model": "openai-codex/gpt-6-astra",
           "effort": "high"
         }
       ]
@@ -159,7 +199,7 @@
   },
   "cad-spatial": {
     "source": "P3D-Bench (arxiv 2606.11152)",
-    "last_verified": "2026-10-03",
+    "last_verified": "2026-10-20",
     "tiers": {
       "tier0": [
         {
@@ -174,7 +214,11 @@
         },
         {
           "model": "sonnet",
-          "effort": "xhigh"
+          "effort": "high"
+        },
+        {
+          "model": "openai-codex/gpt-5.6-terra",
+          "effort": "high"
         }
       ],
       "tier2": [
@@ -185,9 +229,13 @@
         {
           "model": "opus",
           "effort": "xhigh"
+        },
+        {
+          "model": "openai-codex/gpt-6.1-sol",
+          "effort": "high"
         }
       ]
     },
-    "note": "P3D-Bench compares Claude Opus 4.6, DeepSeek V4 Pro, and Qwen3.6-Plus on parametric 3D generation. These are different model versions from the routed models, so their scores do not verify this tier. GPT-5.5 and Gemini 3.1 Pro score highest but have no provider config here. The remaining tier0 route is bmo; its actual served model is not identified by this benchmark. Tier0 means the lowest-cost routed option, not a model validated for CAD work."
+    "note": "P3D-Bench compares Claude Opus 4.6, DeepSeek V4 Pro, and Qwen3.6-Plus on parametric 3D generation. These are different model versions from the routed models, so their scores do not verify this tier. The remaining tier0 route is bmo; its actual served model is not identified by this benchmark. Tier0 means the lowest-cost routed option, not a model validated for CAD work. tier1 uses opencode-go/mimo-v2.5-pro and Sonnet. tier2 uses Opus. The OpenAI picks are fallbacks: tier1 has openai-codex/gpt-5.6-terra and tier2 has openai-codex/gpt-6.1-sol. P3D-Bench has no score for an OpenAI model, so the OpenAI models sit in the same tiers as the other paid models (Sonnet in tier1, Opus in tier2). They come after the Claude and opencode-go picks, so they run only when those accounts are blocked. No OpenAI model sits in tier0: the OpenAI quota window is shared with other work."
   }
 }
