@@ -9,6 +9,9 @@ on:
 
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name }}-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: true
 
 jobs:
   flake-check:
@@ -36,6 +39,26 @@ jobs:
       # Otherwise, the check passes but skips the target system.
       - name: Check system
         run: test "$(nix eval --raw --impure --expr builtins.currentSystem)" = "${{ matrix.system }}"
+
+      - name: nix flake check
+        run: nix flake check
+
+  # Ralpha is Linux ARM64. Skip fork PRs on this self-hosted runner.
+  flake-check-aarch64-linux:
+    name: nix flake check (aarch64-linux)
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, ARM64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+
+      # Fail the job if the runner has the wrong system.
+      # Otherwise, the check passes but skips the target system.
+      - name: Check system
+        run: test "$(nix eval --raw --impure --expr builtins.currentSystem)" = "aarch64-linux"
 
       - name: nix flake check
         run: nix flake check
