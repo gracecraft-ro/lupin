@@ -372,7 +372,8 @@ journey, and a preview is ready, dispatch a separate QA task with
 `ui-pressure-test`. Keep the test agent read-only with respect to source code,
 and keep its browser data separate from implementation work. Ask for evidence,
 prioritized tickets, and a list of untested items. Do not ask the test agent to
-fix findings.
+fix findings. See "Run a standing pressure test" below for the schedule.
+
 A worker that opens a new branch uses the runner's worktree isolation feature
 when it has one. Otherwise, it creates a separate worktree and verifies its
 working directory. On a Herdr worker, it uses the Herdr worktree commands:
@@ -694,6 +695,47 @@ not run a server for a feature branch.
 7. A PR does not need a tunnel command. The PR body says whether the change is
    visible only after the merge.
 
+## Run a standing pressure test
+
+This is a queue item, not an option. Do it for every repo with a web UI.
+
+Start a run when one of these is true:
+
+- 5 or more UI pull requests merged since the last run;
+- the last run is more than 24 hours old, and a UI pull request merged since
+  it;
+- a release pull request is about to open.
+
+First read the repo's ledger (`lupin ledger read OWNER/REPO --json`) and find
+the newest `pressure-test` event. Its `status` is `running` or `done`. A
+`running` event younger than 4 hours means a director is active. Do not start
+a second one. If the ledger exits 3, do not start a run. Report it and take
+the next queue item.
+
+Record the start:
+
+```sh
+lupin ledger append OWNER/REPO --event pressure-test --status running \
+  --summary "director=SESSION; reason=5-prs|24h|release"
+```
+
+Check that the browser starts before you dispatch. Playwright cannot launch on
+some hosts. If it does not start, file or update an environment issue in
+`gracecraft/nix` with label `environment`, then run the test on a host where it
+works. Do not skip the run without a record.
+
+Dispatch `/ui-pressure-test` as the only director for that repo. The test
+agent stays read-only for source code, has its own browser data, and writes
+prioritized tickets. After it posts the tickets, record the end:
+
+```sh
+lupin ledger append OWNER/REPO --event pressure-test --status done \
+  --summary "tickets=N; untested=M"
+```
+
+Then dispatch fix workers for the tickets through the review-fix cycle in
+`/code-review`. Do not ask the director to fix findings.
+
 ## Monitor and finish
 
 Use `lupin machines`, `lupin peek`, and `lupin attach` to check live work. On
@@ -741,6 +783,8 @@ true:
 - Every PR that the loop owns is ready for production.
 - No PR waits for a review.
 - No research, docs, or triage item is open that a worker can do.
+- No repo with a web UI is due a pressure test. See "Run a standing pressure
+  test".
 
 Then run `/handoff`. State the exact next action and any missing owner input.
 Before that, do not ask the owner whether to go on. Never write "tell me if you
