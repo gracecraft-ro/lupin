@@ -5,13 +5,13 @@ can run without it. Read the root `AGENTS.md` first.
 
 ## Where this repo lives
 
-This repo is `gracecraft-software/lupin`. The owner clones it to
-`~/Code/Projects/lupin` and OrbStack mounts it into the `jesus` sandbox at
-`/code/lupin`, the same way `ghostbook.nix` is mounted at
-`/code/ghostbook.nix`.
+This repo is `OWNER/REPO`. The owner clones it to a local checkout and mounts
+it into the sandbox at `/code/<checkout>`, the same way `ghostbook.nix` is
+mounted at `/code/ghostbook.nix`.
 
-A loop agent does not edit the main checkout in `/code/lupin`. Each run gets
-its own Git worktree in the loop state directory. See "State" in `AGENTS.md`.
+A loop agent does not edit the main checkout in `/code/<checkout>`. Each run
+gets its own Git worktree in the loop state directory. See "State" in
+`AGENTS.md`.
 
 ## Lupin commands for a pass
 
@@ -146,8 +146,7 @@ At the end of a session, run `/handoff`.
 This repo follows "Preview server" in the `delegation-loop` skill. For this
 repo:
 
-- The start command and port are in "Preview server" in `AGENTS.md`. The
-  machine is `ralpha`.
+- The start command, port, and machine are in "Preview server" in `AGENTS.md`.
 - Set `LUPIN_LOOP_STATE_DIR` to a preview-only path. The default is
   `/var/lib/delegation-loop`, which is the real fleet state.
 - Do not point the preview at the fleet Redis. Use a scratch Redis.
