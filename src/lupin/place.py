@@ -118,6 +118,11 @@ _SIZE_LABELS = {
 
 _ISSUE_NUMBER_RE = re.compile(r"^#?(\d+)$")
 
+# Local/shared-GPU inference: these providers run on the machine itself, so
+# they have no cloud quota row. The fleet's `bmo` slot limits concurrency,
+# not which machine can serve the model.
+_NO_QUOTA_PROVIDERS = frozenset({"bmo", "local"})
+
 
 def quest_focus_for(issue_number: str | None, connection: dict) -> str | None:
     """Which machine, if any, is quest-focused for this task.
@@ -277,10 +282,21 @@ def _filter_candidates(
     that provider's credentials and can read its quota. Recommending a
     machine without them would send the work to a machine that cannot make
     the call, so the heartbeat's own data decides who can serve what.
+
+    `bmo` and `local` are the exception: they have no cloud quota row at
+    all. They are local/shared-GPU inference, and the fleet `bmo` slot
+    limits concurrency rather than the machine choice. For them only
+    `offline` skips a machine; the quota entry is ignored.
     """
     skipped = {"offline": 0, "other_provider": 0, "no_key": 0, "read_failed": 0}
     matched = []
     for record in records:
+        if provider in _NO_QUOTA_PROVIDERS:
+            if record["state"] == "offline":
+                skipped["offline"] += 1
+            else:
+                matched.append(record)
+            continue
         entry = (record.get("quota") or {}).get(provider)
         if entry is None:
             skipped["other_provider"] += 1

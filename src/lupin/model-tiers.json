@@ -61,12 +61,12 @@
       ],
       "tier1": [
         {
-          "model": "opencode-go/glm-5.3",
+          "model": "opencode-go/deepseek-v4.1-flash",
           "effort": "high"
         },
         {
-          "model": "sonnet",
-          "effort": "medium"
+          "model": "haiku",
+          "effort": "xhigh"
         },
         {
           "model": "sonnet",
@@ -104,7 +104,7 @@
     "tiers": {
       "tier1": [
         {
-          "model": "opencode-go/glm-5.3",
+          "model": "opencode-go/deepseek-v4.1-flash",
           "effort": "high"
         },
         {
@@ -164,14 +164,24 @@
     "source": "LMArena Creative Writing leaderboard (BenchLeader snapshot, 2026-09-29) and EQ-Bench Creative Writing (Sept 2026) -- the two agree on a leader, unlike the translation sources",
     "last_verified": "2026-10-20",
     "tiers": {
-      "tier1": [
+      "tier0": [
         {
-          "model": "sonnet",
+          "model": "bmo:qwen3.8-flash-next",
+          "effort": "low"
+        },
+        {
+          "model": "opencode-go/deepseek-v4.1-flash",
           "effort": "high"
         },
         {
           "model": "openai-codex/gpt-6-sol",
           "effort": "high"
+        }
+      ],
+      "tier1": [
+        {
+          "model": "haiku",
+          "effort": "xhigh"
         }
       ],
       "tier2": [
@@ -185,7 +195,7 @@
         }
       ]
     },
-    "note": "No tier0: these public creative-writing leaderboards do not score a model currently routed by this repo, so tier0 quality is unknown. Fable is not listed. A route must not pick it without the user's approval (issue #114). tier1 uses Sonnet. tier2 uses Opus. The OpenAI picks are fallbacks: tier1 has openai-codex/gpt-6-sol and tier2 has openai-codex/gpt-6-astra. EQ-Bench Creative Writing v3 scores gpt-6-astra at 84.0 on the rubric and 2163.9 on Elo. Opus 5.5 scores 85.35 on the rubric and 2120.6 on Elo. So gpt-6-astra leads on Elo and sits just under Opus on the rubric. It is the second pick in tier2, right after Opus."
+    "note": "The owner set this order for digests: bmo, then DeepSeek V4.1 Flash, then Claude. No public creative-writing score covers the model that bmo serves, and bmo can sleep. So a failed bmo call falls to the next tier0 entry. Fable is not listed. A route must not pick it without the user's approval (issue #114)."
   },
   "cad-spatial": {
     "source": "P3D-Bench (arxiv 2606.11152)",

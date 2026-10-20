@@ -24,7 +24,9 @@ The `delegation-loop` skill gives the full steps. The short list:
 | Show dependencies | `lupin roadmap --repo lupin --dag` |
 | Select a model and a machine | `lupin place N --explain` |
 | Show provider quota | `lupin quota` |
+| Show every open PR in one view | `lupin pr-status` |
 | Claim an issue | `lupin claim OWNER/REPO#N --holder SESSION` |
+| Brief and start one issue or PR (unless no-start is passed) | `lupin dispatch OWNER/REPO#N` |
 | Claim related issues together | `lupin quest start --issue N --issue M` |
 | See machines and loops | `lupin machines`, `lupin loops`, `lupin peek lupin` |
 | Write a handoff | `/handoff`. It runs `lupin ledger append`. |
