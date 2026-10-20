@@ -701,15 +701,22 @@ These rules keep a loop moving when no person is present.
    minutes after it starts, ask it for the result. If it has none, write that
    on the issue. Start it with `Loop:`. Then stop the worker. The
    `delegation-loop` skill shows how to ask a worker (`herdr agent prompt`).
-6. **Log environment problems in the ledger.** On ralpha, `lupin roadmap`
-   fails. The Redis user `lupin-ralpha` has no permission to run `MULTI`.
-   `MULTI` is a Redis command that runs several commands as one unit. Also,
-   on ralpha, `gh` cannot see `gracecraft/nix`. That repo tracks environment
-   problems. Write each problem to the ledger instead. `OWNER/REPO` is
-   `gracecraft/nix`:
+6. **File environment problems in the issue tracker.** The tracker is
+   `gracecraft/ghostbook.nix`. The old name, `gracecraft/nix`, redirects
+   there. On ralpha, `GH_TOKEN` cannot read it. Use the saved `gracecraft-ro`
+   login for that command:
 
    ```sh
-   lupin ledger append OWNER/REPO --event env-friction --summary "<problem>"
+   TOKEN="$(env -u GH_TOKEN -u GITHUB_TOKEN gh auth token --user gracecraft-ro)"
+   env GH_TOKEN="$TOKEN" gh issue create --repo gracecraft/ghostbook.nix \
+     --label environment --title "<machine>: <problem>" --body-file -
+   ```
+
+   If `gh` cannot write, log the problem in the ledger:
+
+   ```sh
+   lupin ledger append gracecraft/ghostbook.nix --event env-friction \
+     --summary "<problem>"
    ```
 
 7. **Do not stop after a review.** A review with findings starts the next
