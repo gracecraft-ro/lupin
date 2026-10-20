@@ -212,7 +212,7 @@ snapshot, so there is no `benchmark-snapshot:<machine>` variant.
 {
   "fetched_at": "2026-10-08T04:20:00+00:00",
   "live": true,
-  "source": "omp -p opencode-go/step-5-preview-free thinking=max, web search",
+  "source": "omp -p opencode-go/beam-free thinking=xhigh, web search",
   "scores": [
     {"id": "qwen3.7-max", "score": 29, "scale": "Artificial Analysis Intelligence Index, 0-100",
      "source": "https://artificialanalysis.ai/models/qwen3-7-max", "as_of": "2026-10-08",
@@ -245,8 +245,8 @@ window (`benchmark_fetch.CACHE_FRESH_SECONDS`), not by the key expiring;
 the same "stored timestamp, not Redis TTL" convention as `machine:<name>`'s
 offline detection above.
 
-The lookup worker is a free opencode-go model (`step-5-preview-free`) run
-through `omp -p` with `--thinking max` and two tools, `read` and
+The lookup worker is a free opencode-go model (`beam-free`) run
+through `omp -p` with `--thinking xhigh` and two tools, `read` and
 `web_search`: `read` fetches each model's own `artificialanalysis.ai`
 page, which states the Intelligence Index in plain text and costs no
 search quota, and `web_search` is the fallback for a model the site does
@@ -420,7 +420,7 @@ when it collected that data, so missing data never counts as quiet. The entry ha
 A model call writes the digest. It is a short story with a title, a few themes and
 up to 3 pictures. It is not a list of pull requests. A picture must be a GitHub
 attachment that the debrief itself holds. The page shows it through `/image`. The model gets no tools and no MCP servers, because the
-text can hold PR titles that other people wrote. `lupin route prose size-s` picks a model. If it picks Claude and Claude cannot run, the worker uses `openai-codex/gpt-5.6-luna`. A quota or rate-limit error does not use a try.
+text can hold PR titles that other people wrote. `lupin route prose size-s` picks a model. The digest tries bmo first, then `opencode-go/deepseek-v4.1-flash`, then Claude (`Haiku`). It reserves the fleet `bmo` slot and waits up to 300 s, because bmo can sleep. A failed model moves to the next one. A quota or rate-limit error does not use a try.
 The agent's digest thread runs this every 5 minutes. It makes at most 3 digests
 in one run, newest debrief first. A debrief past that limit is stored with no
 digest and gets one in a later run. A failed model call adds 1 to the try
