@@ -91,17 +91,17 @@ Commit the change. If the commit fails, report the error. Then go to "Report and
 release" below.
 
 1. First apply the repo rule. If the repo's `AGENTS.md` has a rule for where
-   to push and open the PR, follow it, including its fallback to the fork when
+   to push and open the PR, follow it. Include its fallback to the fork when
    upstream denies the push. It takes precedence over steps 1 to 4. In the
-   Lupin loop it is rule 1 under "Pull requests, review, and handoff", and it
-   opens the PR on upstream, the repo that the PR belongs to. A PR on a fork
+   Lupin loop it is rule 1 under "Pull requests, review, and handoff". It opens
+   the PR on upstream, the repo that the PR belongs to. A PR on a fork
    does not get reviewed. After the PR opens, go to step 5. The rest of this
    step and steps 2 to 4 are the flow for a repo with no such rule.
 
-   Run `git remote get-url fork` (the fork is the GitHub copy you push to).
-   `FORK_OWNER` is the account in that URL. The URL must be
-   `https://github.com/FORK_OWNER/<repo>.git`. Read `FORK_OWNER` from it. If
-   there is no `fork` remote, stop and report. Never run `git remote add`.
+   Run `git remote get-url fork`. The URL must be
+   `https://github.com/<owner>/<repo>.git` and must not be the upstream
+   repository. If it is not, stop and report. `FORK_OWNER` is `<owner>`.
+   If there is no `fork` remote, stop and report. Never run `git remote add`.
 
    With no repo rule, workers never push to `origin` or `main`. Push the
    feature branch to the fork. Open the PR on the fork. Then request review.
