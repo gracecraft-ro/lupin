@@ -540,10 +540,11 @@ def snapshot() -> dict[str, dict]:
     heartbeat, eventually `place`) decide what to do with missing data.
 
     With more than one account, this picks one row for each account as
-    above. Then it keeps the row with the most quota left, because `omp`
-    sends work to an account that has quota. An account that is blocked on
-    any window (`pace.blocked`) is not used when another account is not
-    blocked.
+    above. Then it keeps the account with the most quota left on its
+    most-used window, as `pace.headroom` does, because `omp` sends work to
+    an account that has quota. The reported row stays the 5-hour row. An
+    account that is blocked on any window (`pace.blocked`) is not used when
+    another account is not blocked.
     """
     # `pace` imports this module, so import it here, not at the top.
     from . import pace
@@ -551,29 +552,32 @@ def snapshot() -> dict[str, dict]:
     rows = quota_usage()
     now_ms = time.time() * 1000
     per_account: dict[tuple[str, str | None], dict] = {}
+    account_rows: dict[tuple[str, str | None], list[dict]] = {}
     for row in rows:
         provider = row.get("provider")
         if not provider:
             continue
         key = (provider, row.get("account"))
+        account_rows.setdefault(key, []).append(row)
         if key not in per_account or row.get("duration") == QuotaDuration.FIVE_HOURS:
             per_account[key] = row
 
     blocked_accounts = {
-        (provider, account) for provider, account in per_account
-        if pace.blocked(
-            [row for row in rows if row.get("provider") == provider and row.get("account") == account],
-            provider, now_ms,
-        )
+        key for key in per_account
+        if pace.blocked(account_rows[key], key[0], now_ms)
     }
 
-    def _left(row: dict) -> float:
-        used = row.get("used_pct")
-        return max(0.0, 100 - used) if isinstance(used, (int, float)) else -1.0
+    def _left(key: tuple[str, str | None]) -> float:
+        # The most-used window decides. That is the number `pace.headroom` uses.
+        values = [
+            max(0.0, 100 - row["used_pct"]) for row in account_rows[key]
+            if isinstance(row.get("used_pct"), (int, float))
+        ]
+        return min(values) if values else -1.0
 
     def _rank(key: tuple[str, str | None]) -> tuple[bool, float]:
         # An open account comes before a blocked one. Then most quota left.
-        return (key not in blocked_accounts, _left(per_account[key]))
+        return (key not in blocked_accounts, _left(key))
 
     best: dict[str, tuple[str, str | None]] = {}
     for key in per_account:
