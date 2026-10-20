@@ -262,8 +262,9 @@ lupin place 123 --json
 ```
 
 The roadmap ranks issues. The DAG view shows dependencies. Prefetch gets the
-latest issue or pull request text and comments. Placement recommends a model,
-effort, and machine. It does not claim work or start an agent.
+latest issue or pull request text and comments as markdown; add `--json` when
+a script needs the keyed object. Placement recommends a model, effort, and
+machine. It does not claim work or start an agent.
 
 Use `/triage` to decide what is ready. Read the latest comments and repo
 instructions. Check likely files and live work before you run issues in
@@ -348,6 +349,20 @@ agent. Do not claim those issues again.
 Do not dispatch a worker on a new issue until you dispatch the PR work for
 this cycle. See "Pull requests come first". A reviewer, a sync worker, or a
 fix worker for an open PR is not new work.
+
+The orchestrator claims a PR before it dispatches a reviewer.
+
+For one issue or PR, run:
+
+```sh
+lupin dispatch OWNER/REPO#N
+```
+
+It claims the item, writes a markdown brief with the body and every comment
+(and, for a PR, every review and the changed files), and starts the loop with
+that brief. Add `--no-start` to write the brief only. Pass `--holder` or set
+`LUPIN_CLAIM_HOLDER` as for `lupin claim`. Do not start a second worker on an
+item whose claim is held (exit 2).
 
 Give each worker a short brief with:
 

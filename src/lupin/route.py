@@ -102,7 +102,7 @@ def _load_tiers(source: str | None = None) -> dict:
 def _resolve_tier(tiers: dict, tier: str) -> str:
     """Return `tier` if this category has it, else the next higher one.
 
-    Some rows (frontend-ui, prose) skip tier0 on purpose -- see the "note"
+    Some rows (frontend-ui) skip tier0 on purpose -- see the "note"
     field in model-tiers.json. Escalating up is the safe direction; there is
     no silent downgrade to a cheaper model the matrix didn't ask for.
     """

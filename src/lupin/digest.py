@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 
 import redis
@@ -40,6 +41,12 @@ SYNC_MAX_AGE_S = KEY_TTL_S - 24 * 60 * 60
 CATEGORY = "prose"  # `lupin route` category. Prose is what a digest is.
 SIZE = "size-s"
 LLM_TIMEOUT_S = 300.0
+# bmo can sleep for about 300 s before it answers. Wait this long for its slot,
+# and give the call this long in total.
+BMO_SLOT = "bmo"
+BMO_WAIT_S = 300.0
+BMO_TIMEOUT_S = BMO_WAIT_S + LLM_TIMEOUT_S
+BMO_LEASE_S = BMO_TIMEOUT_S + 60.0  # Longer than the call, so the lease lives until the call ends.
 RAW_MAX_BYTES = 60_000  # More UTF-8 bytes than this are cut. One argument may be 128 KB on Linux.
 MAX_NEW_PER_SYNC = 3  # Model calls in one `sync`. The rest wait for the next one.
 MAX_TRIES = 3  # After this many failed model calls, `sync` stops trying for that debrief.
@@ -238,6 +245,23 @@ def is_quiet(raw: str) -> bool:
     return all(bullets.get(name) == ["- None."] for name in QUIET_SECTIONS)
 
 
+def _error_chain() -> list[tuple[str, str]]:
+    """The digest model order: tier0 entries in order, then tier1's first entry.
+
+    The order is the prose row in `model-tiers.json`. Tier2 (Opus) is not a
+    digest fallback. A custom tiers file that has no tier0 for prose still
+    gets a chain, from tier1's first entry.
+    """
+    row = route._load_tiers()[CATEGORY]["tiers"]
+    entries = list(row.get("tier0", [])) + list(row.get("tier1", []))[:1]
+    chain: list[tuple[str, str]] = []
+    for entry in entries:
+        pair = (entry["model"], entry["effort"])
+        if pair not in chain:
+            chain.append(pair)
+    return chain
+
+
 def pick_model() -> tuple[str, str]:
     """Return (model, effort) from `lupin route`. Raise `DigestError` if none can run."""
     try:
@@ -247,12 +271,25 @@ def pick_model() -> tuple[str, str]:
     if "wait_seconds" in choice:
         raise DigestBlocked("every model for digests is out of quota")
     model = choice["model"]
-    if model.startswith(("bmo:", "local:")):
+    if model.startswith("local:"):
         raise DigestError(f"model {model} cannot run a digest here")
     return model, choice["effort"]
 
 
-FALLBACK_MODEL = "openai-codex/gpt-5.6-luna"
+def _candidates() -> list[tuple[str, str]]:
+    """The models to try, in the order the prose row lists them.
+
+    `route`'s pick is already in that row. A custom tiers file that picks a
+    model outside the row gets that pick first.
+    """
+    pick = pick_model()
+    try:
+        chain = _error_chain()
+    except Exception as exc:
+        raise DigestError(f"model tiers: {exc}") from exc
+    if pick[0] not in {model for model, _ in chain}:
+        chain.insert(0, pick)
+    return chain
 
 
 def _quota_error(error: str) -> bool:
@@ -260,17 +297,45 @@ def _quota_error(error: str) -> bool:
     return "429" in lowered or "quota" in lowered or "rate limit" in lowered or "rate_limit" in lowered
 
 
+def _bmo_lease(connection: dict) -> str | None:
+    """Reserve the fleet `bmo` slot. Return the lease id, or None if it is not free.
+
+    The lease outlives the call, so another machine cannot use bmo during a
+    cold sleep. A slot problem falls through to the next model and is printed.
+    """
+    try:
+        return slots_redis.acquire(
+            BMO_SLOT,
+            f"digest-{socket.gethostname()}",
+            wait=BMO_WAIT_S,
+            ttl=BMO_LEASE_S,
+            redis_host=connection.get("redis_host"),
+            redis_port=connection.get("redis_port"),
+            redis_username=connection.get("redis_username"),
+            redis_password=connection.get("redis_password"),
+            state_root=connection.get("state_root"),
+        )
+    except (
+        slots_redis.SlotFull,
+        slots_redis.CoordinatorUnreachable,
+        redis.exceptions.NoPermissionError,
+    ) as exc:
+        print(f"lupin digest: bmo slot: {exc}; use the next model", file=sys.stderr)
+        return None
+
+
 def _run_digest(model: str, effort: str, prompt: str) -> str:
-    argv = _argv(model, effort, prompt)
+    timeout = BMO_TIMEOUT_S if model.startswith("bmo:") else LLM_TIMEOUT_S
+    argv = _argv(model, effort, prompt, timeout)
     try:
         with tempfile.TemporaryDirectory() as cwd:
             proc = subprocess.run(
-                argv, capture_output=True, text=True, timeout=LLM_TIMEOUT_S, cwd=cwd
+                argv, capture_output=True, text=True, timeout=timeout, cwd=cwd
             )
     except FileNotFoundError:
         raise DigestError(f"{argv[0]} not found") from None
     except subprocess.TimeoutExpired:
-        raise DigestError(f"{argv[0]} timed out after {LLM_TIMEOUT_S:.0f}s") from None
+        raise DigestError(f"{argv[0]} timed out after {timeout:.0f}s") from None
     except (OSError, ValueError) as exc:
         raise DigestError(f"{argv[0]} could not start: {exc}") from None
     if proc.returncode != 0:
@@ -288,48 +353,85 @@ def _run_digest(model: str, effort: str, prompt: str) -> str:
     return text
 
 
-def make_digest(repo: str, name: str, raw: str) -> tuple[str, str]:
-    """Return (digest markdown, model). Raise `DigestError` on any failure."""
-    try:
-        model, effort = pick_model()
-    except DigestBlocked:
-        model, effort = FALLBACK_MODEL, "high"
+def make_digest(
+    repo: str, name: str, raw: str, *, connection: dict | None = None
+) -> tuple[str, str]:
+    """Return (digest markdown, model). Raise `DigestError` on any failure.
+
+    Tries each model in `_candidates()`: bmo, then DeepSeek V4.1 Flash, then
+    Claude. A quota error moves to the next model. Only when no model gave
+    text is the failure returned. If every failure was a quota error, the
+    error is `DigestBlocked`, so `sync` does not count it as a try.
+    """
     cut = raw.encode("utf-8")[:RAW_MAX_BYTES].decode("utf-8", errors="ignore")
     prompt = PROMPT.format(
         repo=repo, name=name, raw=cut, counts=count_shipped(raw), max_images=MAX_IMAGES,
         window=window_label(raw),
     )
-    if "/" not in model:
+    candidates = _candidates()
+    errors: list[str] = []
+    attempted = 0
+    blocked = 0
+    for model, effort in candidates:
+        lease = None
+        if model.startswith("bmo:"):
+            lease = _bmo_lease(connection or {})
+            if lease is None:
+                continue
+        attempted += 1
         try:
             text = _run_digest(model, effort, prompt)
-        except DigestError:
-            # A Claude alias can be unavailable or out of quota; use the authenticated Codex login.
-            model = FALLBACK_MODEL
-            effort = "high"
-            text = _run_digest(model, effort, prompt)
-    else:
-        text = _run_digest(model, effort, prompt)
-    return limit_images(text, raw), model
+        except DigestBlocked as exc:
+            blocked += 1
+            errors.append(str(exc))
+            continue
+        except DigestError as exc:
+            errors.append(str(exc))
+            continue
+        finally:
+            if lease:
+                try:
+                    slots_redis.release(
+                        lease,
+                        redis_host=(connection or {}).get("redis_host"),
+                        redis_port=(connection or {}).get("redis_port"),
+                        redis_username=(connection or {}).get("redis_username"),
+                        redis_password=(connection or {}).get("redis_password"),
+                        state_root=(connection or {}).get("state_root"),
+                    )
+                except (slots_redis.CoordinatorUnreachable, redis.exceptions.NoPermissionError) as exc:
+                    print(f"lupin digest: bmo release: {exc}", file=sys.stderr)
+        return limit_images(text, raw), model
+    message = "; ".join(errors) or "no digest model is available"
+    if attempted and blocked == attempted:
+        raise DigestBlocked(message)
+    raise DigestError(message)
 
 
-def _argv(model: str, effort: str, prompt: str) -> list[str]:
-    """A `provider/model` selector runs with `omp`. A bare name is a Claude alias.
+def _argv(model: str, effort: str, prompt: str, timeout: float | None = None) -> list[str]:
+    """A `provider/model` or `bmo:` selector runs with `omp`. A bare name is a Claude alias.
+
+    The tiers file names bmo as `bmo:MODEL`, because that is also the slot
+    name. `omp` names the same model `bmo/MODEL`.
 
     The prompt holds text that other people wrote (PR titles, commit messages). So the
     model gets no tools: no built-in tools, no MCP servers, no extensions, no skills.
     `--auto-approve` is not used, because no tool call should happen.
     `omp` has no flag that turns MCP off. It may still connect MCP servers, but with
-    no `--auto-approve` a tool call has no one to approve it. `omp` runs the
-    Codex fallback when a Claude model cannot run.
+    no `--auto-approve` a tool call has no one to approve it.
 
     `claude --tools` takes a list. A flag must follow `--tools ""`, or `claude`
     reads the prompt as a tool name and fails with "Input must be provided".
     """
-    if "/" in model:
+    is_bmo = model.startswith("bmo:")
+    if timeout is None:
+        timeout = BMO_TIMEOUT_S if is_bmo else LLM_TIMEOUT_S
+    if is_bmo or "/" in model:
+        selector = "bmo/" + model[4:] if is_bmo else model
         return [
-            "omp", "-p", "--model", model, "--thinking", effort, "--no-tools",
+            "omp", "-p", "--model", selector, "--thinking", effort, "--no-tools",
             "--no-extensions", "--no-skills", "--no-rules", "--no-session",
-            "--max-time", str(int(LLM_TIMEOUT_S)), prompt,
+            "--max-time", str(int(timeout)), prompt,
         ]
     return [
         "claude", "-p", "--model", model, "--effort", effort, "--tools", "",
@@ -510,7 +612,8 @@ def sync(
     Returns the number of digests written.
     """
     machine = machine or socket.gethostname()
-    make = make or make_digest  # Looked up here, not in the signature, so a test can replace it.
+    default_make = partial(make_digest, connection=connection)
+    make = make or default_make  # Looked up here, not in the signature, so a test can replace it.
     now = now or datetime.now(timezone.utc)
     written = 0
     calls = 0
