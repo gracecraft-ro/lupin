@@ -420,7 +420,7 @@ when it collected that data, so missing data never counts as quiet. The entry ha
 A model call writes the digest. It is a short story with a title, a few themes and
 up to 3 pictures. It is not a list of pull requests. A picture must be a GitHub
 attachment that the debrief itself holds. The page shows it through `/image`. The model gets no tools and no MCP servers, because the
-text can hold PR titles that other people wrote. `lupin route prose size-s` picks a model. The digest tries bmo first, then `opencode-go/deepseek-v4.1-flash`, then Claude (`sonnet`). It reserves the fleet `bmo` slot and waits up to 300 s, because bmo can sleep. A failed model moves to the next one. A quota or rate-limit error does not use a try.
+text can hold PR titles that other people wrote. `lupin route prose size-s` picks a model. The digest tries bmo first, then `opencode-go/deepseek-v4.1-flash`, then Claude (`Haiku`). It reserves the fleet `bmo` slot and waits up to 300 s, because bmo can sleep. A failed model moves to the next one. A quota or rate-limit error does not use a try.
 The agent's digest thread runs this every 5 minutes. It makes at most 3 digests
 in one run, newest debrief first. A debrief past that limit is stored with no
 digest and gets one in a later run. A failed model call adds 1 to the try
