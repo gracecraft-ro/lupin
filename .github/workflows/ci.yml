@@ -6,28 +6,44 @@
 # for those systems, so this workflow does not check them.
 name: CI
 
+# `pull_request_target` runs the workflow from the base branch, not from the
+# pull request. A fork pull request cannot change this guard and then run code
+# on the self-hosted runner. The job checks out the pull request head only
+# after the guard allows it. `permissions: contents: read` keeps the token
+# read-only. This workflow uses no secrets.
 on:
-  pull_request:
+  pull_request_target:
     branches: [main, release/next]
 
 permissions:
   contents: read
 
-# One run per branch. A new push stops the older run, so the loops that share
-# ralpha do not wait behind stale work.
+# One run per pull request. A new push stops the older run, so the loops that
+# share ralpha do not wait behind stale work.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   flake-check:
     name: nix flake check (${{ matrix.system }})
-    # A self-hosted runner must not run code from a fork pull request.
-    # The loop token cannot read the repository setting "Fork pull request
-    # workflows" (the REST endpoint answers 403). This condition is the safe
-    # default: only a branch in this repository runs on the runner.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # A self-hosted runner must not run code from an untrusted fork. These two
+    # repositories are trusted: the upstream repository, and the owner's fork
+    # that the loops push to. Any other fork is skipped. The loop token cannot
+    # read the repository setting "Fork pull request workflows" (HTTP 403), so
+    # this list is the guard. Add a repository here only after the owner
+    # approves it in Actions -> General -> Fork pull request workflows.
+    if: >-
+      contains(
+        fromJSON('["gracecraft-software/lupin","gracecraft-ro/lupin"]'),
+        github.event.pull_request.head.repo.full_name
+      )
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    env:
+      # The runner is NixOS and has Nix. It may not enable flakes for a
+      # non-interactive shell, so set the feature here.
+      NIX_CONFIG: experimental-features = nix-command flakes
     strategy:
       fail-fast: false
       matrix:
@@ -37,8 +53,12 @@ jobs:
           - system: aarch64-linux
             runner: [self-hosted, linux, ARM64]
     steps:
+      # The event runs on the base branch. Check out the pull request head to
+      # test the change. The head can be in the trusted fork.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
 
       # Fail the job if the runner has the wrong system.
