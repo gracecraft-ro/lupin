@@ -35,6 +35,7 @@ lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
 lupin hold (--lease ID | <slot> --holder H --wait S) [--ttl SECONDS] -- <command>
 lupin release --lease ID
 lupin status [--json]
+lupin dispatch OWNER/REPO#N [--holder HOLDER] [--json] [--no-start]
 lupin ledger append OWNER/REPO --event EVENT [--issue N] [--status S] \
   [--branch B] [--summary TEXT] [--highlights TEXT] [--evidence TEXT] \
   [--decisions TEXT] [--next TEXT] [--child N] [--json]
@@ -80,10 +81,19 @@ ledger annotations and a warning. It ignores `.loop/loop-state.json`.
 
 `review-route --prefetch` fetches issue/PR text up front -- body, comments,
 and (for a PR) reviews and a diff stat (changed files, additions/deletions,
-no diff text) -- one JSON blob keyed by number, always printed as JSON (no
-plain form; the output is nested data, not a one-line result). A number
-that is neither an issue nor a PR gets `{"error": ...}` in its own slot
-instead of failing the whole batch.
+no diff text). It prints markdown by default, one `brief_markdown` section
+per item separated by a blank line. Add `--json` for the keyed object,
+trimmed to the fields a worker reads: comments keep
+`author.login`/`createdAt`/`body`, reviews keep
+`author.login`/`state`/`submittedAt`/`body`, and the item keeps `kind`,
+`body`, and `diff_stat`. A number that is neither an issue nor a PR gets
+`{"error": ...}` in its own slot instead of failing the whole batch.
+
+`dispatch OWNER/REPO#N` claims the item, writes a markdown brief with its
+body and every comment (plus reviews and changed files for a PR) under the
+loop state directory's `notes/`, and starts the loop with that brief. Add
+`--no-start` to only write the brief, or `--json` for its path and claim.
+The brief is never committed to the repository.
 
 `acquire` prints a lease ID on success. Exit code 2 means the slot is full.
 The caller must skip and try again later. Exit code 3 means the `redis`
@@ -533,6 +543,8 @@ per-machine limit or add controls that the current code cannot support.
   file for routing, the Models page, and benchmark fallback.
 - `src/lupin/claims.py` — `claim`/`renew-claim`/`release-claim`: one GitHub
   issue claimed by one host at a time.
+- `src/lupin/dispatch.py` — `dispatch`: claims one issue or PR, writes its
+  markdown brief outside the repo, and starts its loop.
 - `src/lupin/digest.py` — writes a digest for each debrief and shares both
   through Redis.
 - `src/lupin/ledger.py` — appends and reads shared repository events in Redis.

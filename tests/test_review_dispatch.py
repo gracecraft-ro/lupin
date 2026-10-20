@@ -156,19 +156,35 @@ class PrefetchTests(unittest.TestCase):
         self.assertIn("error", result["999"])
         self.assertNotIn("kind", result["999"])
 
-    def test_main_prefetch_prints_one_json_blob_keyed_by_number(self):
+    def test_main_prefetch_json_prints_one_blob_keyed_by_number(self):
         import contextlib
         import io
 
         buf = io.StringIO()
         with mock.patch.object(review_dispatch, "_run_gh_json", side_effect=_fake_run_gh_json):
             with contextlib.redirect_stdout(buf):
-                rc = review_dispatch.main(["--prefetch", "1,2"])
+                rc = review_dispatch.main(["--prefetch", "1,2", "--json"])
         self.assertEqual(rc, 0)
         payload = json.loads(buf.getvalue())
         self.assertEqual(set(payload), {"1", "2"})
         self.assertEqual(payload["1"]["kind"], "issue")
         self.assertEqual(payload["2"]["kind"], "pr")
+
+    def test_main_prefetch_defaults_to_markdown(self):
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with mock.patch.object(review_dispatch, "_run_gh_json", side_effect=_fake_run_gh_json):
+            with contextlib.redirect_stdout(buf):
+                rc = review_dispatch.main(["--prefetch", "1,2", "--repo", "o/r"])
+        self.assertEqual(rc, 0)
+        text = buf.getvalue()
+        self.assertTrue(text.startswith("# Issue o/r#1\n"))
+        self.assertIn("# PR o/r#2\n", text)
+        self.assertIn("## Comments (1)", text)
+        self.assertIn("## Reviews (0)", text)
+        self.assertIn("- a.py (+3 -1)", text)
 
     def test_prefetch_is_exclusive_of_category_requirement(self):
         # --prefetch alone must not trip the "one of --category or

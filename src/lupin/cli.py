@@ -25,6 +25,7 @@ from . import benchmark_fetch
 from . import claims
 from . import classify as classify_mod
 from . import commands
+from . import dispatch as dispatch_mod
 from . import ledger
 from . import loops as loops_mod
 from . import machines
@@ -272,6 +273,23 @@ def _release_claim_args(parser: argparse.ArgumentParser) -> None:
     _redis_conn_args(parser)
 
 
+def _dispatch_args(parser: argparse.ArgumentParser) -> None:
+    """`lupin dispatch`: claim one item, brief its worker, start its loop."""
+    parser.add_argument("item", help="OWNER/REPO#N")
+    # Unlike `claim`, a missing holder is a runtime error (exit 1, one line)
+    # rather than an argparse usage error (exit 2).
+    parser.add_argument(
+        "--holder", default=os.environ.get("LUPIN_CLAIM_HOLDER") or None,
+        help="default: $LUPIN_CLAIM_HOLDER",
+    )
+    parser.add_argument(
+        "--no-start", action="store_true",
+        help="write the brief and print its path, but start no worker",
+    )
+    parser.add_argument("--json", action="store_true")
+    _redis_conn_args(parser)
+
+
 def _ledger_args(parser: argparse.ArgumentParser) -> None:
     modes = parser.add_subparsers(dest="ledger_action", required=True)
 
@@ -335,9 +353,10 @@ def _review_route_args(parser: argparse.ArgumentParser) -> None:
     """`lupin review-route` — route a pair and report which lock it needs.
 
     Or, with `--prefetch`, fetch issue/PR text instead of routing (#1) --
-    see review_dispatch.py's own `_parse_args` for this command's real
-    argument parsing; this copy is only for `--help` output, since `main()`
-    hands `review-route`'s raw argv to `review_dispatch.main()` directly.
+    markdown by default, or the trimmed keyed object with `--json`. See
+    review_dispatch.py's own `_parse_args` for this command's real argument
+    parsing; this copy is only for `--help` output, since `main()` hands
+    `review-route`'s raw argv to `review_dispatch.main()` directly.
     """
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--category", help="task category, with --size")
@@ -367,6 +386,11 @@ def _review_route_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--repo", default=None, help="OWNER/REPO for --prefetch (default: gh's own resolution)"
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="with --prefetch: print the trimmed keyed object instead of markdown",
     )
 
 
@@ -570,6 +594,11 @@ def _build_parser() -> argparse.ArgumentParser:
     _claim_args(sub.add_parser("claim", help="atomically take a GitHub issue, so no other loop works it"))
     _claim_args(sub.add_parser("renew-claim", help="push a claim's TTL back out"))
     _release_claim_args(sub.add_parser("release-claim", help="give up a claim (compare-and-delete)"))
+    _dispatch_args(
+        sub.add_parser(
+            "dispatch", help="claim an issue or PR, brief its worker, and start its loop"
+        )
+    )
     _ledger_args(sub.add_parser("ledger", help="append or read shared repository events"))
     _review_route_args(
         sub.add_parser("review-route", help="route a pair and report which lock it needs")
@@ -961,6 +990,45 @@ def _cmd_release_claim(args: argparse.Namespace) -> int:
     if not released:
         print(f"{args.target!r} is not held by {args.holder!r}", file=sys.stderr)
         return 1
+    return 0
+
+
+def _cmd_dispatch(args: argparse.Namespace) -> int:
+    try:
+        result = dispatch_mod.dispatch(
+            args.item, args.holder, no_start=args.no_start, **_claim_kwargs(args)
+        )
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except dispatch_mod.DispatchError as exc:
+        print(exc, file=sys.stderr)
+        return exc.code
+    except claims.ClaimHeld as exc:
+        print(exc, file=sys.stderr)
+        return 2
+    except _REDIS_REFUSED as exc:
+        _print_auth_failed(exc, f"dispatch of {args.item!r}")
+        return 3
+    except slots.CoordinatorUnreachable:
+        print(
+            f"cannot reach the redis coordinator for dispatch of {args.item!r}",
+            file=sys.stderr,
+        )
+        return 3
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    key: result[key]
+                    for key in ("item", "kind", "brief_path", "claim", "started")
+                }
+            )
+        )
+    elif args.no_start:
+        print(result["brief_path"])
+    else:
+        print(result["message"])
     return 0
 
 
@@ -2143,6 +2211,8 @@ def _main(argv: list[str] | None = None) -> int:
         return _cmd_renew_claim(args)
     if args.cmd == "release-claim":
         return _cmd_release_claim(args)
+    if args.cmd == "dispatch":
+        return _cmd_dispatch(args)
     if args.cmd == "ledger":
         return _cmd_ledger(args)
     if args.cmd == "join":
