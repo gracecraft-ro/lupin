@@ -164,6 +164,10 @@ class LoopError(Exception):
     """A loop action cannot continue safely."""
 
 
+class EnvValueError(LoopError):
+    """A `LUPIN_*` environment value is malformed."""
+
+
 class HerdrError(LoopError):
     """Herdr returned an error or an unsupported response."""
 
@@ -274,6 +278,11 @@ def _sudo_argv(*args: str) -> list[str]:
         if NIXOS_SUDO_WRAPPER.is_file() and os.access(NIXOS_SUDO_WRAPPER, os.X_OK)
         else "sudo"
     )
+    # The module grants NOPASSWD to a validating wrapper, never to
+    # systemd-run itself, because systemd-run can change the unit user.
+    wrapper = os.environ.get("LUPIN_SYSTEMD_RUN")
+    if wrapper and args and args[0] == "systemd-run":
+        return [executable, "-n", wrapper, *args[1:]]
     return [executable, "-n", *args]
 
 
@@ -575,6 +584,7 @@ def _service_environment() -> list[str]:
         "LUPIN_LOOP_DEFAULT_REPOS", "LUPIN_LOOP_CLAUDE_MAX_CONCURRENT",
         "LUPIN_LOOP_CREDENTIALS_FILE", "LUPIN_LOOP_REDIS_PASSWORD_FILE",
         "LUPIN_LOOP_PROMPT_FILE", "LUPIN_LOOP_PATH", "ANTHROPIC_BASE_URL",
+        "LUPIN_SYSTEMD_RUN",
         "HEADROOM_TELEMETRY_DISABLED", "RTK_TELEMETRY_DISABLED", "CODEGRAPH_TELEMETRY",
         "DO_NOT_TRACK",
     )
@@ -1031,11 +1041,20 @@ def _load_credential(name: str) -> str | None:
     return value or None
 
 
+def _env_int(name: str, default: int) -> int:
+    """A whole number from `name`, or a clean `EnvValueError`."""
+    value = os.environ.get(name, str(default))
+    try:
+        return int(value)
+    except ValueError:
+        raise EnvValueError(f"{name} needs a whole number, got {value!r}") from None
+
+
 def _redis_kwargs() -> dict:
     password = _load_credential("redis-password") or os.environ.get("LUPIN_REDIS_PASSWORD")
     return {
         "redis_host": os.environ.get("LUPIN_REDIS_HOST", "localhost"),
-        "redis_port": int(os.environ.get("LUPIN_REDIS_PORT", "6379")),
+        "redis_port": _env_int("LUPIN_REDIS_PORT", 6379),
         "redis_username": os.environ.get("LUPIN_REDIS_USERNAME"),
         "redis_password": password,
     }
@@ -1306,7 +1325,7 @@ def _monitor_loop(
         provider=metadata.get("provider"), model=metadata.get("model"),
     )
     max_holders = (
-        int(os.environ.get("LUPIN_LOOP_CLAUDE_MAX_CONCURRENT", "1"))
+        _env_int("LUPIN_LOOP_CLAUDE_MAX_CONCURRENT", 1)
         if platform == "claude" else 1
     )
     wait_s = 0.0 if launch and platform == "claude" else 10800.0

@@ -30,7 +30,8 @@ lupin fetch-models [--snapshot-file FILE] [--no-write] [--json]
 lupin fetch-benchmarks [--force] [--json]
 lupin quota [--json]
 lupin review-route (--category C --size S | --issue-json FILE) [--mode M]
-lupin review-route --prefetch N[,N...] [--repo OWNER/REPO] [--json]
+1: lupin review-route --prefetch N[,N...] [--repo OWNER/REPO] [--json]
+lupin pr-status [--repo OWNER/REPO] [--json] [--full]
 lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
 lupin hold (--lease ID | <slot> --holder H --wait S) [--ttl SECONDS] -- <command>
 lupin release --lease ID
@@ -529,6 +530,9 @@ per-machine limit or add controls that the current code cannot support.
 - `src/lupin/_lease_runtime.py` — the `hold` subprocess/lease-renewal code
   shared by both slot backends above.
 - `src/lupin/review_dispatch.py` — picks which lock a routed model needs.
+- `src/lupin/pr_status.py` — `pr-status`: one read-only view of every open
+  pull request. It makes one `gh pr list` call. It shows merge, checks,
+  review, approval, claim, comments, description and reviewers.
 - `src/lupin/free_gate.py` — routes, then reserves the fleet `bmo` Redis
   slot for a `bmo:` pick before calling it final (issue #37).
 - `src/lupin/serve.py`, `src/lupin/roadmap.py` — the dashboard. Moved from
@@ -577,8 +581,8 @@ per-machine limit or add controls that the current code cannot support.
 Full gate (the repo's gate, used by the merge rules):
 
 ```
-nix flake check                                    # build + test, all systems
-nix shell nixpkgs#python3Packages.pytest -c pytest -v
+nix flake check                                    # build + test, current system
+nix develop -c python3 -m pytest -v
 ```
 
 `nix develop <dir> -c <command>` runs `<command>` in the current directory. It
