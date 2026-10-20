@@ -164,14 +164,43 @@ def enabled_repos() -> list[str]:
     return list(_repo_platforms().keys())
 
 
-def write_enabled_repos(names: list[str]) -> None:
-    """Write enabled repo names in the legacy one-name-per-line format.
+def _schedule_file_lines() -> list[str]:
+    """The lines of the schedule file, without their line endings."""
+    try:
+        with open(REPOS_FILE, encoding="utf-8") as fh:
+            return fh.read().splitlines()
+    except OSError:
+        return []
 
-    The loop runtime also writes `REPOS_FILE` with repo platforms.
+
+def write_enabled_repos(values: dict[str, str]) -> None:
+    """Write the schedule file, one `repo platform` line per repo.
+
+    The platform column matters. The loop runtime reads `REPOS_FILE` as
+    `repo platform` pairs, and a repo without a platform runs on
+    `claude`. So every repo keeps the platform it has (issue #65).
+
+    The file is read back first. The repos that are already in it keep
+    their place, and lines that are not repo entries, such as comments,
+    stay as they are.
     """
     os.makedirs(STATE_DIR, exist_ok=True)
+    lines: list[str] = []
+    written: set[str] = set()
+    for line in _schedule_file_lines():
+        fields = line.split()
+        if not fields or fields[0].startswith("#"):
+            lines.append(line)
+            continue
+        repo = fields[0]
+        if repo in values and repo not in written:
+            lines.append(f"{repo} {values[repo]}")
+            written.add(repo)
+    for repo, platform in values.items():
+        if repo not in written:
+            lines.append(f"{repo} {platform}")
     with open(REPOS_FILE, "w", encoding="utf-8") as fh:
-        fh.writelines(f"{name}\n" for name in names)
+        fh.writelines(f"{line}\n" for line in lines)
 
 
 # A per-repo loop concurrency cap uses the existing Redis slot schema.
@@ -199,6 +228,30 @@ def _delegation_doc_template(repo: str) -> str:
         "TODO: anything a loop must know before it starts -- how to test,\n"
         "what not to touch, where to push its work.\n"
     )
+
+
+def _doc_line_ending(data: bytes) -> str:
+    """The line ending a doc file uses, taken from its first line.
+
+    A doc keeps the line endings it has. A save must not turn every line
+    of the file into a change (issue #66).
+    """
+    index = data.find(b"\n")
+    if index > 0 and data[index - 1 : index] == b"\r":
+        return "\r\n"
+    return "\n"
+
+
+def _with_line_ending(text: str, ending: str) -> str:
+    """Text with every line ending set to `ending`.
+
+    A browser sends the text of a textarea with CRLF line endings, so the
+    endings of the file decide what is written (issue #66).
+    """
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    if ending == "\n":
+        return normalized
+    return normalized.replace("\n", ending)
 
 
 def code_repos() -> list[dict]:
@@ -1035,11 +1088,15 @@ function tick(){var now=Date.now()/1000;
    var d=parseFloat(e.dataset.until)-now;
    e.textContent=d>0?("in "+fmt(d)):("overdue by "+fmt(-d));});}
 setInterval(tick,1000);tick();
+// A page with an open editor sets this to true while it holds text that
+// is not saved. The auto-refresh then waits instead of reloading the page
+// (issue #70).
+window.lupinUnsavedChanges=window.lupinUnsavedChanges||function(){return false;};
 var box=document.getElementById("auto");
 if(box){box.checked=localStorage.getItem("lupin-auto")==="1";
  box.addEventListener("change",function(){
    localStorage.setItem("lupin-auto",box.checked?"1":"0");});
- setInterval(function(){if(box.checked)location.reload();},10000);}
+ setInterval(function(){if(box.checked&&!window.lupinUnsavedChanges())location.reload();},10000);}
 document.querySelectorAll("[data-once-repo]").forEach(function(row){
  var when=row.querySelector("input"),command=row.querySelector("code"),
      status=row.querySelector("[data-copy-status]");
@@ -1068,6 +1125,27 @@ var t=localStorage.getItem("lupin-theme");
 if(!t){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
 document.documentElement.setAttribute("data-theme",t);
 }catch(e){}})();</script>"""
+
+# The doc editor on the Repos page. The browser's own leave-page prompt
+# covers a reload or a link click. The auto-refresh box reloads the page
+# every 10 seconds, so the editor also tells the page that it holds text
+# the person has not saved (issue #70). A save is not a loss, so the form
+# marks the text as saved when it goes.
+DOC_EDITOR_JS = """
+(function(){
+var area=document.querySelector("textarea[name=text]");
+if(!area)return;
+var saved=area.value;
+function dirty(){return area.value!==saved;}
+window.lupinUnsavedChanges=dirty;
+window.addEventListener("beforeunload",function(event){
+ if(!dirty())return;
+ event.preventDefault();
+ event.returnValue="You have unsaved changes";
+ return "";});
+if(area.form){area.form.addEventListener("submit",function(){saved=area.value;});}
+})();
+"""
 
 # (nav key, path, label, icon path data) -- icon paths are the same ones the
 # design mockup uses for these pages, so the sidebar and page headers agree.
@@ -2459,7 +2537,7 @@ def render_repos(
             "(loop status and concurrency caps below are limited to this machine).</p>"
         )
 
-    return page("Repos", "".join(body), active="repos")
+    return page("Repos", "".join(body), active="repos", extra_js=DOC_EDITOR_JS)
 
 
 TIMER_WINDOW_S = 4 * 3600  # the mockup's 4-hour timeline strip
@@ -3370,9 +3448,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self._repo_exists(repo):
             self.reply(render_error("unknown repository"), 400)
             return
-        enabled = enabled_repos()
+        enabled = _repo_platforms()
         if repo not in enabled:
-            write_enabled_repos(sorted(set(enabled) | {repo}))
+            enabled[repo] = "claude"
+            write_enabled_repos(enabled)
         self.redirect(f"/repos?sent={quote(f'{repo} added to the schedule', safe='')}")
 
     def do_repos_generate_docs(self, form: dict) -> None:
@@ -3391,7 +3470,9 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             self.reply(render_error(f"could not write doc: {exc}"), 500)
             return
-        write_enabled_repos(sorted(set(enabled_repos()) | {repo}))
+        enabled = _repo_platforms()
+        enabled.setdefault(repo, "claude")
+        write_enabled_repos(enabled)
         self.redirect(f"/repos?sent={quote(f'generated docs and added {repo}', safe='')}")
 
     def do_repos_remove(self, form: dict) -> None:
@@ -3420,9 +3501,12 @@ class Handler(BaseHTTPRequestHandler):
         if len(text) > 200_000:
             self.reply(render_error("doc is too long"), 400)
             return
+        doc_path = os.path.join(CODE_DIR, repo, LOOP_DOC)
         try:
-            with open(os.path.join(CODE_DIR, repo, LOOP_DOC), "w", encoding="utf-8") as fh:
-                fh.write(text)
+            with open(doc_path, "rb") as fh:
+                ending = _doc_line_ending(fh.read())
+            with open(doc_path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(_with_line_ending(text, ending))
         except OSError as exc:
             self.reply(render_error(f"could not save doc: {exc}"), 500)
             return
