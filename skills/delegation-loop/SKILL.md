@@ -613,11 +613,14 @@ The fix worker that resolves a conflict follows these steps:
 4. Run `git diff --stat`. It must print nothing. If it prints a file, your last
    edit is not staged. Run `git add FILE` for that file and run the check
    again.
-5. Run `git commit`.
-6. Run `git diff --stat HEAD`. It must print nothing. If it prints a file, the
-   commit does not have your last edit. Run `git add FILE`, commit again, and
-   run the check again.
-7. Run `git push <remote> HEAD:<branch>`.
+5. Run `git diff --stat HEAD`. It must list only the files you changed. This
+   is the working tree against the last commit. It shows what the commit will
+   hold.
+6. Run `git commit`.
+7. Run `git diff --stat HEAD` again. It must print nothing. If it prints a
+   file, the commit does not have your last edit. Run `git add FILE`, commit
+   again, and run the check again.
+8. Run `git push <remote> HEAD:<branch>`.
 
 An approval binds to the head SHA. If the sync changed the head, get a new
 approval at the new head before you merge. The reviewer may limit that review
