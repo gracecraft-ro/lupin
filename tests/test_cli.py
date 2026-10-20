@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest import mock
 
@@ -980,3 +983,121 @@ def test_place_reports_a_missing_model_category(monkeypatch, tmp_path, capsys):
 
 
 
+
+
+def test_supervise_parses_every_and_passes_flags(monkeypatch, capsys):
+    parser = cli._build_parser()
+    assert parser.parse_args(["supervise"]).every is None
+    assert parser.parse_args(["supervise", "--every"]).every == 3600
+    assert parser.parse_args(["supervise", "--every", "600"]).every == 600
+    assert cli.main(["supervise", "--every", "0"]) == 2
+    assert cli.main(["supervise", "--every", "599"]) == 2
+    assert "at least 600 seconds" in capsys.readouterr().err
+
+    seen = {}
+
+    def fake_supervise(**kwargs):
+        seen.update(kwargs)
+        return 0
+
+    from lupin import supervise
+    monkeypatch.setattr(supervise, "supervise", fake_supervise)
+    assert cli.main(["supervise", "--dry-run", "--json", "--redis-host", "127.0.0.1"]) == 0
+    assert seen["dry_run"] is True and seen["every"] is None
+    assert set(supervise.real_sources({})) <= set(seen)
+
+# --- a wrong LUPIN_* value gives one line and exit code 2 (issue #222) ---
+
+
+def test_a_bad_env_value_does_not_crash_the_import():
+    root = Path(__file__).resolve().parents[1]
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(root / "src"),
+        "LUPIN_REDIS_PORT": "abc",
+        "LUPIN_ROADMAP_FRAGMENT_TTL": "abc",
+    }
+
+    proc = subprocess.run(
+        [sys.executable, "-c", "import lupin.cli, lupin.serve"],
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_a_bad_redis_port_stops_the_command_with_exit_two(monkeypatch, capsys):
+    monkeypatch.setenv("LUPIN_REDIS_PORT", "abc")
+    parser = cli._build_parser()
+
+    with pytest.raises(SystemExit) as caught:
+        parser.parse_args(["status"])
+
+    assert caught.value.code == 2
+    err = capsys.readouterr().err
+    assert "LUPIN_REDIS_PORT" in err and "abc" in err
+
+
+def test_help_still_works_with_a_bad_redis_port(monkeypatch, capsys):
+    monkeypatch.setenv("LUPIN_REDIS_PORT", "abc")
+
+    with pytest.raises(SystemExit) as caught:
+        cli._build_parser().parse_args(["--help"])
+
+    assert caught.value.code == 0
+    assert "Routing:" in capsys.readouterr().out
+
+
+def test_a_bad_backend_flag_and_env_give_the_same_error(monkeypatch, capsys):
+    with pytest.raises(SystemExit) as caught:
+        cli._build_parser().parse_args(["status", "--backend", "foo"])
+    assert caught.value.code == 2
+    flag_error = capsys.readouterr().err.strip().splitlines()[-1]
+
+    monkeypatch.setenv("LUPIN_BACKEND", "foo")
+    with pytest.raises(SystemExit) as caught:
+        cli._build_parser().parse_args(["status"])
+    assert caught.value.code == 2
+    env_error = capsys.readouterr().err.strip().splitlines()[-1]
+
+    assert flag_error == env_error
+    assert "invalid choice: 'foo'" in env_error
+
+
+def test_a_bad_fragment_ttl_stops_serve_with_exit_two(monkeypatch, capsys):
+    from lupin import serve
+
+    monkeypatch.setenv("LUPIN_ROADMAP_FRAGMENT_TTL", "abc")
+
+    assert serve.main(["--roadmap", "x"]) == 2
+    err = capsys.readouterr().err
+    assert "LUPIN_ROADMAP_FRAGMENT_TTL" in err and "abc" in err
+
+
+def test_a_bad_loop_redis_port_raises_env_value_error(monkeypatch):
+    from lupin import loop_runtime
+
+    monkeypatch.setenv("LUPIN_REDIS_PORT", "abc")
+
+    with pytest.raises(loop_runtime.EnvValueError, match="LUPIN_REDIS_PORT"):
+        loop_runtime._redis_kwargs()
+
+
+def test_a_bad_redis_port_stops_once_with_exit_two(monkeypatch, capsys, tmp_path):
+    from lupin import loop_runtime
+
+    monkeypatch.setenv("LUPIN_REDIS_PORT", "abc")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", tmp_path)
+    (tmp_path / "repo").mkdir()
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {})
+    monkeypatch.setattr(loop_runtime, "_lock_file", lambda repo: (tmp_path / "lock").open("a+"))
+    monkeypatch.setattr(loop_runtime, "_run", lambda *args, **kwargs: (1, ""))
+    monkeypatch.setattr(loop_runtime, "_legacy_tmux_exists", lambda repo: False)
+    monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: None)
+    monkeypatch.setattr(loop_runtime, "_session_info", lambda session: None)
+    monkeypatch.setattr(loop_runtime, "orchestrator_profiles", lambda: {"repo": ["claude"]})
+
+    assert cli.main(["once", "now", "repo"]) == 2
+    err = capsys.readouterr().err
+    assert "LUPIN_REDIS_PORT" in err and "abc" in err
+    assert len(err.strip().splitlines()) == 1

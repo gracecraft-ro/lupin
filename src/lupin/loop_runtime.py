@@ -12,12 +12,15 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import slots, slots_redis
+import redis
+
+from . import claims, slots, slots_redis
 
 # A loop id is a repo name. `repo~2` is a second loop on the same repo on this
 # machine, `repo~3` a third, and so on. There is no `repo~1`: that is `repo`.
@@ -27,6 +30,9 @@ AGENT_NAME = "lupin-loop"
 # One Herdr session per machine. Each loop is one workspace in it.
 SESSION_NAME = "lupin-loops"
 STATE_DIR = Path(os.environ.get("LUPIN_LOOP_STATE_DIR", "/var/lib/delegation-loop"))
+# The longest note a start request accepts. `lupin dispatch` uses this to
+# decide when a brief is too long to pass as the note itself.
+MAX_NOTE_CHARS = 8000
 CODE_DIR = Path(os.environ.get("LUPIN_LOOP_CODE_DIR", "/code"))
 REPOS_FILE = STATE_DIR / "repos"
 ORCHESTRATORS_FILE = STATE_DIR / "orchestrators.json"
@@ -54,6 +60,8 @@ PANE_READ_TIMEOUT = 60.0
 SYSTEMCTL_CHECK_TIMEOUT = 3.0
 SYSTEMCTL_STOP_TIMEOUT = 30.0
 LEASE_TTL = 60.0
+# The monitor renews the run's claims this often. A claim lasts 10 minutes.
+CLAIM_RENEW_INTERVAL = 120.0
 HANDOFF_GRACE_S = 600.0
 HANDOFF_TEXT = (
     "Lupin will stop this loop shortly. Run /handoff now: write an entry to the "
@@ -70,10 +78,10 @@ def validate_orchestrator(selector: str) -> str:
     if selector == "claude":
         return selector
     provider, separator, model = selector.partition("/")
-    if not separator or provider not in {"openai", "opencode-go"}:
-        raise LoopError("orchestrator must be claude, openai/MODEL, or opencode-go/MODEL")
-    validate_omp_options("omp", provider, model)
-    return selector
+    if not separator or provider not in {"openai", "openai-codex", "opencode-go"}:
+        raise LoopError("orchestrator must be claude, openai/MODEL, openai-codex/MODEL, or opencode-go/MODEL")
+    provider, model = validate_omp_options("omp", provider, model)
+    return f"{provider}/{model}"
 
 
 def orchestrator_profiles() -> dict[str, list[str]]:
@@ -127,8 +135,11 @@ def select_orchestrator(
             provider, model = "claude", None
             platform = "claude"
         else:
-            provider, model = selector.split("/", 1)[0], selector
             platform = "omp"
+            provider, _ = selector.split("/", 1)
+            quota_provider = "openai" if provider == "openai-codex" else provider
+            provider = quota_provider
+            model = selector
         entry = snapshot.get(provider)
         if not isinstance(entry, dict) or not quota_cache.is_fresh(entry, now):
             continue
@@ -141,7 +152,7 @@ def select_orchestrator(
             continue
         choices.append((headroom, -index, {
             "platform": platform,
-            "provider": provider if platform == "omp" else None,
+            "provider": ("openai-codex" if provider == "openai" else provider) if platform == "omp" else None,
             "model": model,
         }))
     if not choices:
@@ -151,6 +162,10 @@ def select_orchestrator(
 
 class LoopError(Exception):
     """A loop action cannot continue safely."""
+
+
+class EnvValueError(LoopError):
+    """A `LUPIN_*` environment value is malformed."""
 
 
 class HerdrError(LoopError):
@@ -263,6 +278,11 @@ def _sudo_argv(*args: str) -> list[str]:
         if NIXOS_SUDO_WRAPPER.is_file() and os.access(NIXOS_SUDO_WRAPPER, os.X_OK)
         else "sudo"
     )
+    # The module grants NOPASSWD to a validating wrapper, never to
+    # systemd-run itself, because systemd-run can change the unit user.
+    wrapper = os.environ.get("LUPIN_SYSTEMD_RUN")
+    if wrapper and args and args[0] == "systemd-run":
+        return [executable, "-n", wrapper, *args[1:]]
     return [executable, "-n", *args]
 
 
@@ -564,6 +584,7 @@ def _service_environment() -> list[str]:
         "LUPIN_LOOP_DEFAULT_REPOS", "LUPIN_LOOP_CLAUDE_MAX_CONCURRENT",
         "LUPIN_LOOP_CREDENTIALS_FILE", "LUPIN_LOOP_REDIS_PASSWORD_FILE",
         "LUPIN_LOOP_PROMPT_FILE", "LUPIN_LOOP_PATH", "ANTHROPIC_BASE_URL",
+        "LUPIN_SYSTEMD_RUN",
         "HEADROOM_TELEMETRY_DISABLED", "RTK_TELEMETRY_DISABLED", "CODEGRAPH_TELEMETRY",
         "DO_NOT_TRACK",
     )
@@ -676,9 +697,9 @@ def validate_omp_options(
     platform: str, provider: str | None, model: str | None
 ) -> tuple[str | None, str | None]:
     if provider is not None and (
-        not isinstance(provider, str) or provider not in {"openai", "opencode-go"}
+        not isinstance(provider, str) or provider not in {"openai", "openai-codex", "opencode-go"}
     ):
-        raise LoopError("OMP provider must be openai or opencode-go")
+        raise LoopError("OMP provider must be openai, openai-codex, or opencode-go")
     if model is not None and (
         not isinstance(model, str)
         or not model
@@ -688,6 +709,10 @@ def validate_omp_options(
         raise LoopError("invalid OMP model")
     if platform != "omp" and (provider is not None or model is not None):
         raise LoopError("--provider and --model require --platform omp")
+    if provider == "openai":
+        provider = "openai-codex"
+    if model and model.startswith("openai/"):
+        model = "openai-codex/" + model.split("/", 1)[1]
     return provider, model
 
 
@@ -904,7 +929,7 @@ def start_loop(
     if not checkout.is_dir():
         return False, f"skip {repo}: no checkout at {checkout}"
     if note is not None and (
-        not isinstance(note, str) or len(note) > 8000 or "\x00" in note
+        not isinstance(note, str) or len(note) > MAX_NOTE_CHARS or "\x00" in note
     ):
         raise LoopError("note is invalid or too long")
     session = session_name(repo)
@@ -1016,11 +1041,20 @@ def _load_credential(name: str) -> str | None:
     return value or None
 
 
+def _env_int(name: str, default: int) -> int:
+    """A whole number from `name`, or a clean `EnvValueError`."""
+    value = os.environ.get(name, str(default))
+    try:
+        return int(value)
+    except ValueError:
+        raise EnvValueError(f"{name} needs a whole number, got {value!r}") from None
+
+
 def _redis_kwargs() -> dict:
     password = _load_credential("redis-password") or os.environ.get("LUPIN_REDIS_PASSWORD")
     return {
         "redis_host": os.environ.get("LUPIN_REDIS_HOST", "localhost"),
-        "redis_port": int(os.environ.get("LUPIN_REDIS_PORT", "6379")),
+        "redis_port": _env_int("LUPIN_REDIS_PORT", 6379),
         "redis_username": os.environ.get("LUPIN_REDIS_USERNAME"),
         "redis_password": password,
     }
@@ -1081,22 +1115,37 @@ def _metadata_for_session(repo: str, session: str) -> dict:
     return value
 
 
-def _workspace_env(session: str, repo: str) -> list[str]:
-    """The shared server has no per-repo token, so give the repo's token to its workspace."""
+def claim_holder(repo: str, metadata: dict) -> str | None:
+    """The claim holder of one run: this machine, the repo, and the run branch.
+
+    None when the run has no branch.
+    """
+    branch = metadata.get("branch")
+    if not isinstance(branch, str) or not branch:
+        return None
+    return f"{socket.gethostname()}:{repo}:{branch}"
+
+
+def _workspace_env(session: str, repo: str, holder: str | None = None) -> list[str]:
+    """The shared server has no per-repo token, so give the repo's token to its workspace.
+
+    The agent also gets the run's claim holder as LUPIN_CLAIM_HOLDER.
+    """
+    holder_env = ["--env", f"LUPIN_CLAIM_HOLDER={holder}"] if holder else []
     if session != SESSION_NAME:
-        return []
+        return holder_env
     path = _runtime_paths(repo).get("gh-token")
     if not path:
-        return []
+        return holder_env
     token = Path(path).read_text(encoding="utf-8").strip()
-    return ["--env", f"GH_TOKEN={token}"] if token else []
+    return (["--env", f"GH_TOKEN={token}"] if token else []) + holder_env
 
 
-def _create_workspace(session: str, directory: Path, repo: str) -> dict:
+def _create_workspace(session: str, directory: Path, repo: str, holder: str | None = None) -> dict:
     result = _herdr_json(
         session,
         "workspace", "create", "--cwd", str(directory), "--label", repo, "--no-focus",
-        *_workspace_env(session, repo),
+        *_workspace_env(session, repo, holder),
     )
     workspace = result.get("workspace")
     root = result.get("root_pane")
@@ -1220,6 +1269,31 @@ def _run_worktree(repo: str, metadata: dict) -> Path:
     return Path(value)
 
 
+def _renew_claims(holder: str, stop: threading.Event) -> None:
+    """Renew the claims of `holder` each CLAIM_RENEW_INTERVAL until `stop` is set.
+
+    An error does not stop the loop. The monitor log gets one line for each
+    new error. The line does not contain the password.
+    """
+    reported = None
+    while not stop.wait(CLAIM_RENEW_INTERVAL):
+        what = f"renewing the claims of {holder}"
+        try:
+            claims.renew_holder_claims(holder, ttl=claims.DEFAULT_TTL, **_redis_kwargs())
+        except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
+            line = slots_redis.refusal_message(exc, what, fleet=True)
+        except slots.CoordinatorUnreachable:
+            line = f"cannot reach the redis coordinator for {what}"
+        except redis.exceptions.RedisError as exc:
+            line = f"redis error for {what}: {exc}"
+        else:
+            reported = None
+            continue
+        if line != reported:
+            print(f"lupin: {line}", file=sys.stderr, flush=True)
+            reported = line
+
+
 def _monitor_loop(
     repo: str, platform: str, session: str, prompt_file: str, resume: bool
 ) -> int:
@@ -1231,8 +1305,9 @@ def _monitor_loop(
         _write_metadata(repo, metadata)
         raise LoopError(f"saved Herdr workspace for {repo} is missing; review it before starting again")
     launch = workspace is None
+    holder = claim_holder(repo, metadata)
     if launch:
-        workspace = _create_workspace(session, _run_worktree(repo, metadata), repo)
+        workspace = _create_workspace(session, _run_worktree(repo, metadata), repo, holder)
         metadata = _record_workspace(repo, metadata, workspace)
     else:
         workspace_id = _workspace_id(workspace)
@@ -1250,44 +1325,56 @@ def _monitor_loop(
         provider=metadata.get("provider"), model=metadata.get("model"),
     )
     max_holders = (
-        int(os.environ.get("LUPIN_LOOP_CLAUDE_MAX_CONCURRENT", "1"))
+        _env_int("LUPIN_LOOP_CLAUDE_MAX_CONCURRENT", 1)
         if platform == "claude" else 1
     )
     wait_s = 0.0 if launch and platform == "claude" else 10800.0
+    # Renew the run's claims until the workspace closes or the Herdr server
+    # stops (issue #156). `hold` returns when the agent is `done`, but the
+    # agent is still alive then and waits for input.
+    stop_renewing = threading.Event()
+    renewer = threading.Thread(target=_renew_claims, args=(holder, stop_renewing), daemon=True)
+    if holder:
+        renewer.start()
     try:
-        rc = slots.hold(
-            command, slot=platform, holder=unit_name(repo), wait=wait_s,
-            ttl=LEASE_TTL, max_holders=max_holders,
-        )
-    except slots.SlotFull:
-        if launch:
-            _herdr_json(session, "workspace", "close", workspace_id)
-            metadata["state"] = "failed"
-            metadata["workspace_id"] = None
-            metadata["pane_id"] = None
-            removed_note = ""
-            try:
-                _, removed_note = _remove_worktree(repo, metadata)
-            except LoopError as exc:
-                removed_note = f"; {exc}"
-            _write_metadata(repo, metadata)
-            raise LoopError(f"{platform} slot is full{removed_note}")
-        raise LoopError(f"{platform} slot is full")
-    if rc:
-        metadata["state"] = "needs_attention"
-        _write_metadata(repo, metadata)
-        raise LoopError(f"Herdr agent for {repo} stopped with status {rc}")
-    while True:
-        if not _server_running(session):
+        try:
+            rc = slots.hold(
+                command, slot=platform, holder=unit_name(repo), wait=wait_s,
+                ttl=LEASE_TTL, max_holders=max_holders,
+            )
+        except slots.SlotFull:
+            if launch:
+                _herdr_json(session, "workspace", "close", workspace_id)
+                metadata["state"] = "failed"
+                metadata["workspace_id"] = None
+                metadata["pane_id"] = None
+                removed_note = ""
+                try:
+                    _, removed_note = _remove_worktree(repo, metadata)
+                except LoopError as exc:
+                    removed_note = f"; {exc}"
+                _write_metadata(repo, metadata)
+                raise LoopError(f"{platform} slot is full{removed_note}")
+            raise LoopError(f"{platform} slot is full")
+        if rc:
             metadata["state"] = "needs_attention"
             _write_metadata(repo, metadata)
-            return 1
-        if _workspace_by_id(session, workspace_id) is None:
-            metadata["state"] = "stopped"
-            metadata["stopped_at"] = _now()
-            _write_metadata(repo, metadata)
-            return 0
-        time.sleep(2)
+            raise LoopError(f"Herdr agent for {repo} stopped with status {rc}")
+        while True:
+            if not _server_running(session):
+                metadata["state"] = "needs_attention"
+                _write_metadata(repo, metadata)
+                return 1
+            if _workspace_by_id(session, workspace_id) is None:
+                metadata["state"] = "stopped"
+                metadata["stopped_at"] = _now()
+                _write_metadata(repo, metadata)
+                return 0
+            time.sleep(2)
+    finally:
+        stop_renewing.set()
+        if holder:
+            renewer.join(timeout=5)
 
 
 def worker(
@@ -1876,7 +1963,9 @@ def schedule_once(
     provider: str | None = None,
     model: str | None = None,
 ) -> str:
-    if note is not None and (not isinstance(note, str) or len(note) > 8000 or "\x00" in note):
+    if note is not None and (
+        not isinstance(note, str) or len(note) > MAX_NOTE_CHARS or "\x00" in note
+    ):
         raise LoopError("note is invalid or too long")
     selected = validate_platform(platform) if platform else None
     provider, model = validate_omp_options(selected, provider, model) if selected else (provider, model)
@@ -2060,7 +2149,7 @@ def main(argv: list[str] | None = None) -> int:
     launch_parser.add_argument("--workspace", required=True)
     launch_parser.add_argument("--platform", required=True)
     launch_parser.add_argument("--prompt-file", required=True)
-    launch_parser.add_argument("--provider", choices=("openai", "opencode-go"))
+    launch_parser.add_argument("--provider", choices=("openai", "openai-codex", "opencode-go"))
     launch_parser.add_argument("--model")
     launch_parser.add_argument("--resume", action="store_true")
     wait_parser = sub.add_parser("wait-agent", help=argparse.SUPPRESS)

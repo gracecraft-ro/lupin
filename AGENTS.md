@@ -17,7 +17,7 @@
    `heartbeat`, `drain`, `undrain`, `machines`, `place`, `quest`, `reconcile`,
    `roadmap`, `ledger`, `fleet-run`.
    Loop lifecycle: `run`, `once`, `enable`, `disable`, `loops`, `stop`, `peek`,
-   `attach`, `schedule`, `pause`, `resume`.
+   `attach`, `schedule`, `pause`, `resume`, `supervise`.
 
 One program, `lupin`, with subcommands. Run `lupin --help` for the full list.
 
@@ -30,11 +30,13 @@ lupin fetch-models [--snapshot-file FILE] [--no-write] [--json]
 lupin fetch-benchmarks [--force] [--json]
 lupin quota [--json]
 lupin review-route (--category C --size S | --issue-json FILE) [--mode M]
-lupin review-route --prefetch N[,N...] [--repo OWNER/REPO]
+1: lupin review-route --prefetch N[,N...] [--repo OWNER/REPO] [--json]
+lupin pr-status [--repo OWNER/REPO] [--json] [--full]
 lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
 lupin hold (--lease ID | <slot> --holder H --wait S) [--ttl SECONDS] -- <command>
 lupin release --lease ID
 lupin status [--json]
+lupin dispatch OWNER/REPO#N [--holder HOLDER] [--json] [--no-start]
 lupin ledger append OWNER/REPO --event EVENT [--issue N] [--status S] \
   [--branch B] [--summary TEXT] [--highlights TEXT] [--evidence TEXT] \
   [--decisions TEXT] [--next TEXT] [--child N] [--json]
@@ -43,6 +45,7 @@ lupin serve [--bind 127.0.0.1] [--port 8788] [--roadmap REPO]
 lupin agent [--machine M] [--batch N] [--poll-interval S]
 lupin run <repo> [--machine M] [--platform claude|omp] [--provider P] [--model M] [--note TEXT] [--resume]
 lupin fleet-run [--json]
+lupin supervise [--every [SECONDS]] [--dry-run] [--json]
 lupin once <when> [repo ...] [--platform claude|omp] [--provider P] [--model M] [--note TEXT] [--resume]
 lupin enable <repo> [--platform claude|omp] [--orchestrator SELECTOR ...] [--clear-orchestrators]
 lupin disable <repo>
@@ -69,17 +72,32 @@ Use `--limit N` to choose another positive count. `_decode` in
 `src/lupin/ledger.py` turns one entry's ID and decoded fields into a dict.
 `read_events` decodes each entry on its own. It skips an entry when a
 field is not valid UTF-8. It also skips an entry when `_decode` raises
-KeyError, ValueError, or RecursionError. It reports each skipped entry on
-stderr. A skipped entry still counts toward the limit. Both commands exit 3
+KeyError, ValueError, or RecursionError. `_decode` raises ValueError when
+a list field nests brackets more than 8 levels deep. A real field has 1 level.
+The check does not use the C stack, so all platforms give the same result.
+It reports each skipped entry on stderr. A skipped entry still counts toward
+the limit. Both commands exit 3
 if Redis is unavailable. When Redis is unavailable, the roadmap shows no
 ledger annotations and a warning. It ignores `.loop/loop-state.json`.
 
 `review-route --prefetch` fetches issue/PR text up front -- body, comments,
 and (for a PR) reviews and a diff stat (changed files, additions/deletions,
-no diff text) -- one JSON blob keyed by number, always printed as JSON (no
-plain form; the output is nested data, not a one-line result). A number
-that is neither an issue nor a PR gets `{"error": ...}` in its own slot
-instead of failing the whole batch.
+no diff text). It prints markdown by default, one `brief_markdown` section
+per item separated by a blank line. Add `--json` for the keyed object,
+trimmed to the fields a worker reads: comments keep
+`author.login`/`createdAt`/`body`, reviews keep
+`author.login`/`state`/`submittedAt`/`body`, and the item keeps `kind`,
+`body`, and `diff_stat`. A number that is neither an issue nor a PR gets
+`{"error": ...}` in its own slot instead of failing the whole batch.
+
+`dispatch OWNER/REPO#N` claims the item, writes a markdown brief with its
+body and every comment (plus reviews and changed files for a PR) under the
+loop state directory's `notes/`, and starts the loop with that brief. Add
+`--no-start` to only write the brief; the claim stays with the holder.
+`--json` prints the brief's path and the claim. A brief over 8,000
+characters is passed to the loop as a short note naming its path, because
+the loop's note field has a cap. The brief is never committed to the
+repository.
 
 `acquire` prints a lease ID on success. Exit code 2 means the slot is full.
 The caller must skip and try again later. Exit code 3 means the `redis`
@@ -109,7 +127,10 @@ what they cost. It saves the result to
 also publishes the snapshot to Redis, so the PiHome dashboard shows pulls
 from other fleet machines. A Redis error leaves the local file in place and
 prints a warning. Model lists for opencode-go and claude come from live
-provider calls. Codex uses `omp models` when available; otherwise it uses
+provider calls. For opencode-go, `fetch-models` finds the API key in the same
+order as `quota` (see the opencode-go key order below). It never prints or
+logs the key. If the key is expired, the row says "OpenCode Go API key
+expired". Codex uses `omp models` when available; otherwise it uses
 models.dev and is marked `live: false`. Prices
 come from models.dev, matched by model ID. A model with no match has
 `price: null`. Promo pricing has no live source, so `promo` stays `null`.
@@ -124,6 +145,17 @@ in a new Git worktree, not in the main checkout (see "State"). `run` refuses
 to start if the main checkout has an unfinished Git operation. `run --all`
 starts every enabled repo. Add `--machine M` to use the signed fleet queue
 on another machine; `run --all --machine M` starts its enabled repos.
+
+Each run has one claim holder: `<host>:<repo>:<run branch>`. The agent's
+shell gets it as `LUPIN_CLAIM_HOLDER`. `claim`, `renew-claim`, and
+`release-claim` use it when you do not give `--holder`. The monitor renews
+each claim of that holder every 2 minutes, until the run's workspace closes
+or the Herdr server stops. It also renews while the agent waits for input
+(state `done`). It renews no claim of another holder. When the renewals
+stop, the claims expire within 10 minutes. So a finished loop whose
+workspace is still open keeps its claims until `lupin stop`. A renew error
+does not stop the loop. The monitor log gets one line for each new error.
+
 Without a profile, Lupin uses the repo's configured platform. To let Lupin
 choose among orchestrators, add a profile when you enable the repo. Repeat
 `--orchestrator` for each allowed choice:
@@ -131,7 +163,7 @@ choose among orchestrators, add a profile when you enable the repo. Repeat
 ```
 lupin enable my-repo --platform omp \
   --orchestrator openai/gpt-5 \
-  --orchestrator opencode-go/step-5-preview-free:xhigh \
+  --orchestrator opencode-go/beam-free:xhigh \
   --orchestrator claude
 ```
 
@@ -146,9 +178,11 @@ has fresh, usable quota, Lupin refuses to start the loop.
 
 Explicit `--platform`, `--provider`, or `--model` options select a fixed
 orchestrator for that run and skip profile routing. For OMP, use
-`--platform omp` and optionally `--provider openai|opencode-go` or
-`--model MODEL`. For example, use
-`--model opencode-go/step-5-preview-free:xhigh`. Set auto-compaction for the
+`--platform omp` and optionally `--provider openai-codex|opencode-go` or
+`--model MODEL`. `openai` and `openai/MODEL` remain accepted aliases for
+`openai-codex` and `openai-codex/MODEL`. For example, use
+`--model openai-codex/gpt-5.6-luna` or
+`--model opencode-go/beam-free:xhigh`. Set auto-compaction for the
 selected model in OMP, near 200k tokens. Lupin passes the model to OMP; it
 does not set or check OMP's compaction settings. These options work with
 `run` and `once`; future one-off runs keep them. `run --all` applies them to
@@ -173,6 +207,70 @@ files from `LUPIN_CMD_SIGNING_KEYS_DIR`, or from systemd's
 `CREDENTIALS_DIRECTORY` when the first variable is unset. Each file name is
 the worker name. Each worker needs `lupin agent` and its matching key. The
 command queues runs but does not wait for them to start.
+
+`supervise` checks the Lupin loops on this machine. It uses fixed rules and
+no model. For each loop, it reads the Herdr state of the loop's pane, the
+Lupin loop state, the systemd unit, the last 20 pane lines and the newest
+handoff from this run. If Herdr does not list the loop's own pane, the Herdr
+state is `unknown`. It gives each loop one verdict. The first rule that
+matches gives the verdict:
+
+1. `stopped`, reason "waiting for the owner": Herdr says `blocked`, or the
+   loop needs attention (Lupin state `needs_attention`). It flags the loop. It
+   does not send a nudge.
+2. `stopped`: work is left and the unit is `inactive` or `failed`. It flags
+   the loop. It sends the nudge only when Herdr says `idle` or `done`.
+3. `busywork`: Herdr says `working` and the pane text is the same as in the
+   last pass. It flags the loop. It does not send a nudge.
+4. `idle`: work is left and Herdr says `idle` or `done`. It sends the nudge.
+   If the pane or the handoff contains "tell me if you want" or "if you want
+   me to", the verdict is `stopped` and it sends the nudge.
+5. `repeated`: the last 3 ledger events (not `supervise`) have one issue and
+   one status. It flags the loop. It does not send a nudge. Other machines
+   write to the same ledger, so rule 4 comes first.
+6. `ok`: none of the above.
+
+Work left is the count of `ready` issues from `lupin roadmap` (open, not
+claimed, not blocked) plus the count of open pull requests that are not
+drafts. An open pull request that waits for the owner to merge it also counts,
+so `--every` does not end while a repo has one. If Redis refuses the claim read
+with a permission error, each issue counts as not claimed, and the event says
+`claims: unreadable`. If a count cannot be read, work left is not known. Then
+rules 2 and 4 do not apply, and `--every` does not end. The pull request count
+uses the shared `gh` cache key `open-prs`. Only `supervise` fills that key. If
+`LUPIN_GH_CANONICAL_FETCHER` names a machine that does not run `supervise`,
+the other machines cannot read the count, and their work left is not known.
+
+The nudge is a fixed text that starts with `Supervisor:`. Lupin sends it to the
+loop's pane ID with `herdr agent prompt`. A loop with no pane ID gets no nudge.
+Before it sends, the supervisor takes the loop's lock without a wait. If
+`lupin stop` holds the lock, it skips the nudge (`nudge=busy`). Under the lock,
+it reads the loop state again and runs `herdr agent get` on the pane. If the
+loop is not `running` in the same pane, or the agent is not `idle` or `done`
+now, it skips the nudge (`nudge=stale`). Only one pass runs at a time. A second pass
+prints "another supervise pass is running" and exits 0. A `--dry-run` pass does
+not take this lock. A loop gets at most one nudge try in 3600 seconds. A failed
+try also counts. If the clock goes back, a stored time in the future counts as
+recent while it is less than 3600 seconds ahead.
+
+The supervisor writes one `supervise` event to the ledger for each repo. The
+event has no pane or handoff text. The supervisor module
+itself calls only `systemctl is-active`, `herdr agent prompt`, `herdr agent
+get` and, through the shared `gh` cache, `gh pr list`. A test checks this. It also uses Lupin's read
+functions, which run read-only `herdr`, `gh` and `git` commands. It keeps a hash
+of each pane and the time of each nudge try in
+`$XDG_STATE_HOME/lupin/supervise.json` (default
+`~/.local/state/lupin/supervise.json`).
+
+Without `--every`, it makes one pass. With `--every`, it makes a pass every
+SECONDS (default 3600, minimum 600) and ends on the first pass with no work
+left. With no loops on the machine, it prints "no loops on this machine" and
+exits 0. `--dry-run` sends no nudge and writes no ledger event, state file or
+lock file. It shows `nudge=would-be-stale` when the loop is not `running` in
+the same pane. It still reads Redis for claims, the ledger and the `gh` cache. Exit
+code 3 means a ledger event was not written because Redis is unavailable, or
+Redis refused the login. A host timer can
+run `lupin supervise` once an hour. This repo does not ship one.
 
 On PiHome, the systemd timer runs `fleet-run` every 5h15m. The dashboard can
 start or stop that timer.
@@ -252,11 +350,17 @@ loop stops) are records.
 The Debriefs page (`/debrief`) shows the debriefs of all workers, so
 PiHome shows them too. Redis holds text only. A screenshot file stays on its
 worker. A GitHub attachment image is shown through the dashboard.
-If no model can run, the debrief shows with no digest and the agent tries again
-(3 tries at most).
+The digest uses these models in this order: bmo (`bmo:qwen3.8-flash-next`,
+tier0 in `model-tiers.json`), then `opencode-go/deepseek-v4.1-flash`, then
+Claude (`sonnet`). The worker reserves the fleet `bmo` slot and waits up to
+300 s, because bmo can sleep. A failed or out-of-quota model moves to the next
+one. Quota and rate-limit errors do not use a try; other failed model calls
+count (3 tries at most).
+If every model is blocked, the debrief shows with no digest and Lupin tries
+again later.
 
 `fetch-benchmarks` gets public benchmark scores. It does not run models.
-The lookup worker is a free opencode-go model (`step-5-preview-free`) run
+The lookup worker is a free opencode-go model (`beam-free`) run
 through `omp -p` with maximum thinking. It reads each model's own
 Artificial Analysis page directly -- the page states the Intelligence
 Index score in plain text, and one page read costs no search quota --
@@ -291,14 +395,31 @@ per-machine Redis snapshots. The page adds totals by provider and marks a
 snapshot stale after five minutes. Each snapshot expires after 24 hours.
 Systemd runs `lupin quota` every five minutes on Jesus and Ralpha.
 
+For opencode-go, Lupin looks for the API key in this order:
+`~/.local/share/opencode/auth.json`, the `OPENCODE_API_KEY` variable, then the
+output of `omp token opencode-go` (it waits 10 seconds at most). Lupin never
+prints or logs the key. A provider with no cached usage rows shows its note
+instead, for example "OpenCode Go API key expired" or "no OpenCode Go API key
+available". `lupin quota` shows the note in plain output and in `--json`.
+`lupin quota` does not publish a provider that has only notes.
+
 A provider can have more than one login, for example a free and a paid
-OpenAI account. `omp usage` reports each login. Lupin labels each row with
-the plan name (`free`, `plus`). The `/usage` page and `lupin quota` show
-the label. Lupin never shows an email or account ID. `omp` chooses the
-login for each session. So a provider is blocked only when all of its
-logins are blocked. The most quota left is the best open login. A machine
-that publishes a provider replaces the whole entry for that provider, so
-each machine that publishes it needs every login for it.
+OpenAI account. `omp usage` reports each login. Lupin adds an account
+label when a provider has more than one login. The label is the plan name
+(`free`, `plus`). When two logins have the same plan, the label also has a
+short hash of the email and the account ID. The `/usage` page and
+`lupin quota` show the label. Lupin never shows an email or account ID.
+`omp` chooses the login for each session. So a provider is blocked only
+when all of its logins are blocked. Lupin does not select a blocked login.
+It selects the open login with the most quota left. A machine that
+publishes a provider replaces the whole entry for that provider, so each
+machine that publishes it needs every login for it.
+
+Lupin versions before issue #169 write quota rows with no labels to a
+different Redis key. Lupin shows those rows on the `/usage` page as
+stale. A loop start does not use them. Update every machine that runs
+`lupin quota`. Until you do, a loop start can refuse a provider that only
+an old machine publishes.
 
 ## How a slot's limit (`max`) works
 
@@ -332,8 +453,11 @@ even when the checkout folder has another name.
 `LUPIN_GH_CANONICAL_FETCHER` names the one machine that runs `gh` on a cache
 miss. Set it to that machine's hostname on every machine that reads the cache.
 The named machine also fetches when Redis is down. When the variable is unset,
-no machine is pinned. Each machine then fetches on a miss, but only while Redis
-is reachable.
+no machine is pinned. A machine fetches on a miss only while Redis is
+reachable, and only when it gets the lock for that cache key. A machine that
+cannot get the lock reads the cache again. If the cache is still empty, it
+returns a "fetch in progress" error and does not fetch. The lock is a plain
+Redis key with a TTL, not a slot. It does not show on the Machines page.
 
 Each run has its own Git worktree in `worktrees/<repo>/` in the loop state
 directory. A worktree is a second working copy of the repo, with its own files
@@ -409,6 +533,9 @@ per-machine limit or add controls that the current code cannot support.
 - `src/lupin/_lease_runtime.py` — the `hold` subprocess/lease-renewal code
   shared by both slot backends above.
 - `src/lupin/review_dispatch.py` — picks which lock a routed model needs.
+- `src/lupin/pr_status.py` — `pr-status`: one read-only view of every open
+  pull request. It makes one `gh pr list` call. It shows merge, checks,
+  review, approval, claim, comments, description and reviewers.
 - `src/lupin/free_gate.py` — routes, then reserves the fleet `bmo` Redis
   slot for a `bmo:` pick before calling it final (issue #37).
 - `src/lupin/serve.py`, `src/lupin/roadmap.py` — the dashboard. Moved from
@@ -426,6 +553,8 @@ per-machine limit or add controls that the current code cannot support.
   file for routing, the Models page, and benchmark fallback.
 - `src/lupin/claims.py` — `claim`/`renew-claim`/`release-claim`: one GitHub
   issue claimed by one host at a time.
+- `src/lupin/dispatch.py` — `dispatch`: claims one issue or PR, writes its
+  markdown brief outside the repo, and starts its loop.
 - `src/lupin/digest.py` — writes a digest for each debrief and shares both
   through Redis.
 - `src/lupin/ledger.py` — appends and reads shared repository events in Redis.
@@ -439,6 +568,8 @@ per-machine limit or add controls that the current code cannot support.
   issues worked together on one machine.
 - `src/lupin/place.py` — `place`: picks which fleet machine should run a
   task.
+- `src/lupin/supervise.py` — `supervise`: checks this machine's loops with
+  fixed rules and nudges idle loops.
 - `src/lupin/reconcile.py` — `reconcile`: applies the automatic claim/
   focus/quest release rules.
 - `src/lupin/roadmap_cli.py` — the `roadmap` subcommand's own CLI surface
@@ -453,8 +584,8 @@ per-machine limit or add controls that the current code cannot support.
 Full gate (the repo's gate, used by the merge rules):
 
 ```
-nix flake check                                    # build + test, all systems
-nix shell nixpkgs#python3Packages.pytest -c pytest -v
+nix flake check                                    # build + test, current system
+nix develop -c python3 -m pytest -v
 ```
 
 `nix develop <dir> -c <command>` runs `<command>` in the current directory. It
@@ -540,3 +671,57 @@ sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
 - Do not use the start, stop, or run controls on this dashboard. New runs use
   the `lupin-loops` session. Older loops may use an old session until they
   stop.
+
+## Rules for unattended loops
+
+These rules keep a loop moving when no person is present.
+
+1. **Do not use the question menu.** The menu asks a person to choose. No
+   person is there, so the loop waits forever. Write the question as a comment
+   on the issue. Start it with `Loop:`. Then take the next item.
+2. **Do not stop while work exists.** An unmerged pull request is not a reason
+   to stop. Reviews, research, and docs are work. Do them.
+3. **Use the fork login for fork pushes.** A fork is your own copy of a repo.
+   On ralpha, `GH_TOKEN` cannot push to the fork. The saved `gracecraft-ro`
+   login can. `FORK_OWNER` is `gracecraft-ro` on ralpha. Put `env -u GH_TOKEN`
+   before each command. It removes `GH_TOKEN` for that one command only. Do not
+   run `unset GH_TOKEN`:
+
+   <!-- markdownlint-disable MD013 -->
+   ```sh
+   env -u GH_TOKEN git push -u fork <branch>
+   env -u GH_TOKEN gh pr create --repo OWNER/REPO --base main --head FORK_OWNER:<branch> --title "<title>" --body-file <file>
+   ```
+   <!-- markdownlint-enable MD013 -->
+
+4. **Do not run `rm` with a glob.** A glob is a pattern such as `*`. It can
+   delete more files than you mean. Do not delete old files with a pattern.
+   Give each new file a new name.
+5. **Ask a worker with no result for it.** If a worker has no result 30
+   minutes after it starts, ask it for the result. If it has none, write that
+   on the issue. Start it with `Loop:`. Then stop the worker. The
+   `delegation-loop` skill shows how to ask a worker (`herdr agent prompt`).
+6. **Log environment problems in the ledger.** On ralpha, `lupin roadmap`
+   fails. The Redis user `lupin-ralpha` has no permission to run `MULTI`.
+   `MULTI` is a Redis command that runs several commands as one unit. Also,
+   on ralpha, `gh` cannot see `gracecraft/nix`. That repo tracks environment
+   problems. Write each problem to the ledger instead. `OWNER/REPO` is
+   `gracecraft/nix`:
+
+   ```sh
+   lupin ledger append OWNER/REPO --event env-friction --summary "<problem>"
+   ```
+
+7. **Do not stop after a review.** A review with findings starts the next
+   round. Send the findings to a fix worker. Then get a new review at the new
+   head. Repeat until the pull request is ready for production. Ready for
+   production means three things. A reviewer approved the current head. The
+   full gate passes. The branch contains `main`. There is no limit on rounds.
+   If the same finding comes back for 3 rounds, give the fix worker a model
+   one tier higher.
+8. **Work the queue until nothing is left.** Nothing is left when all of these
+   are true. No open issue that you may take is unclaimed. Every pull request
+   you own is ready for production. No pull request waits for a review. No
+   research, docs, or triage item is left. Waiting for the owner is not the
+   end. Write the question as a comment on the issue. Start it with `Loop:`.
+   Then take the next item. Never write "tell me if you want me to continue".

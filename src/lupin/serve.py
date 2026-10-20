@@ -11,6 +11,7 @@ control access to write routes.
 
 from __future__ import annotations
 
+import argparse
 import html
 import ipaddress
 import json
@@ -267,7 +268,31 @@ def _roadmap_models(repos: list[str], connection: dict) -> dict:
 # query, because every filter changes the output. The lifetime stays short
 # so ledger events and GitHub data remain near-live, while a reload inside
 # the window costs nothing -- including no GitHub call.
-_FRAGMENT_TTL = float(os.environ.get("LUPIN_ROADMAP_FRAGMENT_TTL", "30"))
+def _fragment_ttl() -> float:
+    """The fragment cache lifetime in seconds.
+
+    Read when the value is used, not at import. A wrong value names the
+    variable and stops `lupin serve` with exit code 2.
+    """
+    value = os.environ.get("LUPIN_ROADMAP_FRAGMENT_TTL", "30")
+    try:
+        return float(value)
+    except ValueError:
+        raise ValueError(
+            f"LUPIN_ROADMAP_FRAGMENT_TTL needs a number of seconds, got {value!r}"
+        ) from None
+
+
+def _serve_port(value: str) -> int:
+    """A Redis port from `--redis-port` or `LUPIN_REDIS_PORT`."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(
+            f"LUPIN_REDIS_PORT or --redis-port needs a whole number, got {value!r}"
+        ) from None
+
+
 _FRAGMENT_MAX = 64
 _FRAGMENT_CACHE: dict[tuple, tuple[float, bytes]] = {}
 _FRAGMENT_LOCK = threading.Lock()
@@ -281,7 +306,7 @@ def _cached_fragment(key: tuple, build) -> bytes:
     now = time.monotonic()
     with _FRAGMENT_LOCK:
         cached = _FRAGMENT_CACHE.get(key)
-        if cached and now - cached[0] < _FRAGMENT_TTL:
+        if cached and now - cached[0] < _fragment_ttl():
             return cached[1]
     body = build()
     with _FRAGMENT_LOCK:
@@ -1641,7 +1666,7 @@ def model_tiers() -> list[dict]:
     return rows
 
 
-_ALIAS_PREFIX = re.compile(r"^(?:bmo|local):|^(?:opencode-go|openai)/")
+_ALIAS_PREFIX = re.compile(r"^(?:bmo|local):|^(?:opencode-go|openai-codex|openai)/")
 
 
 def load_model_snapshot(connection: dict | None = None) -> dict | None:
@@ -1690,10 +1715,10 @@ def match_live_model(alias: str, models: list[dict]) -> dict | None:
       two are never found -- `model_fetch` only covers the claude,
       opencode-go, and codex subscriptions, not bmo's or a local model
       server's own catalog. Those aliases always report "no live data".
-    - An "opencode-go/" or "openai/" prefix is stripped too, because the
-      snapshot's own `subscription` field already says which service a
-      model id belongs to -- the tier file repeats it in the alias, and
-      the badge would otherwise never match.
+    - An "opencode-go/", "openai-codex/" or "openai/" prefix is stripped
+      too, because the snapshot's own `subscription` field already says
+      which service a model id belongs to -- the tier file repeats it in
+      the alias, and the badge would otherwise never match.
     - What remains is looked up as a case-insensitive substring of a
       snapshot model's id or display name, first match wins. Good enough
       to flag "known reachable today" without pretending to be a precise
@@ -4101,8 +4126,7 @@ def main(argv: list[str] | None = None) -> int:
     # docstring) and importing cli.py here would be circular.
     ap.add_argument("--redis-host", default=os.environ.get("LUPIN_REDIS_HOST"))
     ap.add_argument(
-        "--redis-port", type=int,
-        default=int(os.environ["LUPIN_REDIS_PORT"]) if os.environ.get("LUPIN_REDIS_PORT") else None,
+        "--redis-port", type=_serve_port, default=os.environ.get("LUPIN_REDIS_PORT"),
     )
     ap.add_argument("--redis-username", default=os.environ.get("LUPIN_REDIS_USERNAME"))
     ap.add_argument("--redis-password", default=os.environ.get("LUPIN_REDIS_PASSWORD"))
@@ -4119,6 +4143,11 @@ def main(argv: list[str] | None = None) -> int:
         help="directory with one file per target machine",
     )
     args, _unknown = ap.parse_known_args(argv)
+    try:
+        _fragment_ttl()
+    except ValueError as exc:
+        print(f"lupin: {exc}", file=sys.stderr)
+        return 2
 
     if args.roadmap:
         repos = roadmap.repository_names(code_repos())

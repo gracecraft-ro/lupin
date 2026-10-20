@@ -15,6 +15,8 @@ import time
 import pytest
 import redis as redis_lib
 
+from lupin import quota
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -62,6 +64,16 @@ def flush_redis(redis_port):
     client.flushall()
     yield
     client.flushall()
+
+
+@pytest.fixture(autouse=True)
+def no_real_omp_token(monkeypatch):
+    """No test may run the real `omp token`. It prints a secret key.
+
+    A test of `_omp_token` itself mocks `subprocess.run`, or puts a fake `omp`
+    program on PATH.
+    """
+    monkeypatch.setattr(quota, "_omp_token", lambda provider: "", raising=False)
 
 
 @pytest.fixture

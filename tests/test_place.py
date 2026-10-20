@@ -437,6 +437,24 @@ def test_place_counts_a_read_failure_apart_from_a_missing_key(
     assert result["skipped"] == {"offline": 0, "other_provider": 0, "no_key": 0, "read_failed": 1}
 
 
+def test_place_picks_a_machine_for_bmo_without_a_quota_row(redis_port, flush_redis, monkeypatch):
+    """`bmo` is local inference and has no cloud quota row, so a prose task
+    routed to it must not be filtered out for lacking one. Only `offline`
+    skips a machine here; both online machines are candidates.
+    """
+    monkeypatch.setattr(place.classify_mod, "classify", lambda *a, **kw: ("prose", "size-s"))
+    _write_machine(redis_port, "mac-studio", quota=_CLAUDE_QUOTA)
+    _write_machine(redis_port, "claude-only")
+
+    result = place.place("write a haiku about retries", _kw(redis_port))
+
+    assert result["model"].startswith("bmo:")
+    assert result["provider"] == "bmo"
+    assert result["pick"] is not None
+    assert result["pick"] in {"mac-studio", "claude-only"}
+    assert result["skipped"] == {"offline": 0, "other_provider": 0, "no_key": 0, "read_failed": 0}
+
+
 def test_place_size_m_coding_with_readable_quota_picks_glm_on_that_machine(
     redis_port, flush_redis, monkeypatch
 ):

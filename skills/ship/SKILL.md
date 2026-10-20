@@ -11,6 +11,7 @@ compatibility: Requires the repository's tools and GitHub CLI. Lupin and Redis a
 
 Use this skill to implement an issue or fix a finding on an open pull request.
 Follow the repository's `AGENTS.md`, issue workflow, and release rules.
+Start every GitHub comment that you post with `Loop:`.
 
 ## Check the issue and checkout
 
@@ -89,28 +90,31 @@ copies out of commits. You attach the images to the PR after you open it. See
 Commit the change. If the commit fails, report the error. Then go to "Report and
 release" below.
 
-The repo's `AGENTS.md` may have a rule for where to push and open the PR. In
-the Lupin loop it is rule 1 under "Pull requests, review, and handoff". If it
-exists, follow it, including its fallback to the fork when upstream denies the
-push. It takes precedence over the next paragraph and over steps 1 to 4. In
-the Lupin loop, it opens the PR on upstream, the repo that the PR belongs to. A
-PR on a fork does not get reviewed. After the PR opens, go to step 5.
+1. First apply the repo rule. If the repo's `AGENTS.md` has a rule for where
+   to push and open the PR, follow it. Include its fallback to the fork when
+   upstream denies the push. It takes precedence over steps 1 to 4. In the
+   Lupin loop it is rule 1 under "Pull requests, review, and handoff". It opens
+   the PR on upstream, the repo that the PR belongs to. A PR on a fork
+   does not get reviewed. After the PR opens, go to step 5. The rest of this
+   step and steps 2 to 4 are the flow for a repo with no such rule.
 
-Workers never push to `origin` or `main`. Push the feature
-branch to the fork. Open the PR on the fork. Then request review.
+   Run `git remote get-url fork`. The URL must be
+   `https://github.com/<owner>/<repo>.git` and must not be the upstream
+   repository. If it is not, stop and report. `FORK_OWNER` is `<owner>`.
+   If there is no `fork` remote, stop and report. Never run `git remote add`.
 
-1. Run `git remote get-url fork` (the fork is the GitHub copy you push to). It
-   must print `https://github.com/gracecraft-ro/<repo>.git`. If it does not, stop
-   and report. Never run `git remote add`.
+   With no repo rule, workers never push to `origin` or `main`. Push the
+   feature branch to the fork. Open the PR on the fork. Then request review.
 2. Push only the feature branch. Find it with `git branch --show-current`.
    If the branch is empty, detached (no branch name), or `main`, stop. Report
    it.
    Then run `git push -u fork <branch>`. Never push any other ref.
 3. Open the PR on the fork. Set `<repo>` to the repo name in the fork URL
-   from step 1. Look for an open PR on the branch first. Run:
+   from step 1, and `FORK_OWNER` to its account. Look for an open PR on the
+   branch first. Run:
 
    ```sh
-   gh pr list --repo gracecraft-ro/<repo> --head <branch> --state open \
+   gh pr list --repo FORK_OWNER/<repo> --head <branch> --state open \
      --json number --jq '.[0].number // empty'
    ```
 
@@ -121,7 +125,7 @@ branch to the fork. Open the PR on the fork. Then request review.
    `<PR_NUMBER>`. If it exits 0 and is empty, run:
 
    ```sh
-   gh pr create --repo gracecraft-ro/<repo> --base main \
+   gh pr create --repo FORK_OWNER/<repo> --base main \
      --head <branch> --title "..." --body "Closes #<issue>. ..."
    ```
 
@@ -132,8 +136,8 @@ branch to the fork. Open the PR on the fork. Then request review.
 4. Request review with one comment on the PR. Run:
 
    ```sh
-   gh pr comment <PR_NUMBER> --repo gracecraft-ro/<repo> \
-     --body "Review requested. Head: <sha>."
+   gh pr comment <PR_NUMBER> --repo FORK_OWNER/<repo> \
+     --body "Loop: Review requested. Head: <sha>."
    ```
 
    If it fails, report the error and the PR number. Then go to step 5.
@@ -172,6 +176,7 @@ screenshots, follow it. Otherwise follow this section.
    with no before, show the new screen. Say what the reader should look at. Use
    the same path in the body and in `--attach`:
    ```md
+   Loop: Screenshots for PR #123.
    Before: ![before](./evidence/123/before.png)
    After: ![after](./evidence/123/after.png)
    ```

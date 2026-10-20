@@ -43,18 +43,21 @@ def test_strip_images_names_the_machine_that_keeps_the_file():
     assert "(shot: kept on jesus)" in out
 
 
-def test_argv_uses_omp_for_a_provider_model_and_claude_for_a_bare_name():
-    omp = digest._argv("opencode-go/step-5-preview-free", "high", "P")
+def test_argv_uses_omp_for_a_provider_model_and_a_bmo_model_and_claude_for_a_bare_name():
+    omp = digest._argv("opencode-go/deepseek-v4.1-flash", "high", "P")
+    bmo = digest._argv("bmo:qwen3.8-flash-next", "low", "P")
     claude = digest._argv("sonnet", "high", "P")
 
-    assert omp[:2] == ["omp", "-p"] and omp[omp.index("--model") + 1] == "opencode-go/step-5-preview-free"
+    assert omp[:2] == ["omp", "-p"] and omp[omp.index("--model") + 1] == "opencode-go/deepseek-v4.1-flash"
+    assert bmo[:2] == ["omp", "-p"] and bmo[bmo.index("--model") + 1] == "bmo/qwen3.8-flash-next"
+    assert bmo[bmo.index("--max-time") + 1] == str(int(digest.BMO_TIMEOUT_S))
     assert claude[:2] == ["claude", "-p"] and claude[claude.index("--model") + 1] == "sonnet"
-    assert omp[-1] == claude[-1] == "P"
+    assert omp[-1] == bmo[-1] == claude[-1] == "P"
     # No tools: the model only reads text and writes text. PR titles in the prompt are not trusted.
     assert claude[claude.index("--tools") + 1] == ""
     assert "--strict-mcp-config" in claude and "--disable-slash-commands" in claude
-    assert "--no-tools" in omp and "--no-extensions" in omp
-    assert "--auto-approve" not in omp
+    assert "--no-tools" in omp and "--no-extensions" in bmo
+    assert "--auto-approve" not in omp and "--auto-approve" not in bmo
     # `claude --tools` takes a list, so a flag must come right after it.
     assert claude[claude.index("--tools") + 2].startswith("--")
 
@@ -63,12 +66,23 @@ def test_prompt_tells_the_model_that_missing_data_is_not_an_empty_result():
     assert "Missing data is not an empty result" in " ".join(digest.PROMPT.split())
 
 
-def _run_returning(monkeypatch, *, stdout="", returncode=0, stderr="", raises=None):
-    monkeypatch.setattr(digest, "pick_model", lambda: ("sonnet", "high"))
+def test_digest_model_order_is_bmo_then_deepseek_then_claude():
+    chain = [(model, effort) for model, effort in digest._error_chain()]
+
+    assert [model for model, _effort in chain] == [
+        "bmo:qwen3.8-flash-next", "opencode-go/deepseek-v4.1-flash", "sonnet"
+    ]
+    assert chain[0][1] == "low"
+
+
+def _run_returning(monkeypatch, *, stdout="", returncode=0, stderr="", raises=None,
+                   candidates=(("sonnet", "high"),)):
+    monkeypatch.setattr(digest, "_candidates", lambda: list(candidates))
     seen = {}
 
     def run(argv, **kwargs):
         seen["argv"] = argv
+        seen.setdefault("calls", []).append(argv[0])
         if raises:
             raise raises
         return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
@@ -102,17 +116,96 @@ def test_make_digest_raises_digest_error_for_each_model_failure(monkeypatch, kwa
         digest.make_digest("widgets", "20261010-120000-12h.md", RAW)
 
 
-def test_pick_model_refuses_a_blocked_route_and_a_local_model(monkeypatch):
+BMO = ("bmo:qwen3.8-flash-next", "low")
+DEEPSEEK = ("opencode-go/deepseek-v4.1-flash", "high")
+SONNET = ("sonnet", "high")
+
+
+def test_make_digest_tries_bmo_then_deepseek_then_claude(monkeypatch):
+    calls = []
+    released = []
+
+    def run(argv, **kwargs):
+        calls.append(argv[argv.index("--model") + 1])
+        if argv[0] == "omp" and len(calls) == 1:
+            raise FileNotFoundError()  # bmo is asleep or not reachable.
+        if argv[0] == "omp":
+            return subprocess.CompletedProcess(argv, 1, "", "429 rate limit")  # deepseek has no quota.
+        return subprocess.CompletedProcess(argv, 0, "# Summary\n\nDone.", "")
+
+    monkeypatch.setattr(digest, "_candidates", lambda: [BMO, DEEPSEEK, SONNET])
+    monkeypatch.setattr(digest, "_bmo_lease", lambda connection: "bmo:digest")
+    monkeypatch.setattr(digest.slots_redis, "release", lambda lease, **kw: released.append(lease))
+    monkeypatch.setattr(digest.subprocess, "run", run)
+
+    text, model = digest.make_digest("widgets", "20261010-120000-12h.md", RAW)
+
+    assert (text, model) == ("# Summary\n\nDone.", "sonnet")
+    assert calls == ["bmo/qwen3.8-flash-next", "opencode-go/deepseek-v4.1-flash", "sonnet"]
+    assert released == ["bmo:digest"]
+
+
+def test_make_digest_skips_bmo_when_its_slot_is_full(monkeypatch):
+    seen = _run_returning(monkeypatch, stdout="# Summary\n\nDone.", candidates=[BMO, SONNET])
+    monkeypatch.setattr(digest, "_bmo_lease", lambda connection: None)
+
+    text, model = digest.make_digest("widgets", "20261010-120000-12h.md", RAW)
+
+    assert (text, model) == ("# Summary\n\nDone.", "sonnet")
+    assert seen["calls"] == ["claude"]
+
+
+def test_make_digest_does_not_count_quota_errors_across_the_chain(monkeypatch):
+    def run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "429 rate limit")
+
+    monkeypatch.setattr(digest, "_candidates", lambda: [BMO, DEEPSEEK, SONNET])
+    monkeypatch.setattr(digest, "_bmo_lease", lambda connection: "bmo:digest")
+    monkeypatch.setattr(digest.slots_redis, "release", lambda lease, **kw: True)
+    monkeypatch.setattr(digest.subprocess, "run", run)
+
+    with pytest.raises(digest.DigestBlocked):
+        digest.make_digest("widgets", "20261010-120000-12h.md", RAW)
+
+
+def test_bmo_lease_uses_the_fleet_slot_and_a_ttl_past_the_call(monkeypatch):
+    seen = {}
+
+    def acquire(slot, holder, **kw):
+        seen.update({"slot": slot, "holder": holder, **kw})
+        return "bmo:digest"
+
+    monkeypatch.setattr(digest.slots_redis, "acquire", acquire)
+    monkeypatch.setattr(digest.socket, "gethostname", lambda: "jesus")
+
+    lease = digest._bmo_lease({"redis_host": "h", "redis_port": 1, "redis_username": "u", "redis_password": "p"})
+
+    assert lease == "bmo:digest"
+    assert seen["slot"] == "bmo" and seen["holder"] == "digest-jesus"
+    assert seen["wait"] == digest.BMO_WAIT_S and seen["ttl"] >= digest.BMO_TIMEOUT_S
+    assert (seen["redis_host"], seen["redis_port"], seen["redis_username"]) == ("h", 1, "u")
+
+
+def test_bmo_lease_returns_none_when_the_slot_is_full(monkeypatch):
+    def full(*args, **kwargs):
+        raise digest.slots_redis.SlotFull("bmo")
+
+    monkeypatch.setattr(digest.slots_redis, "acquire", full)
+
+    assert digest._bmo_lease({}) is None
+
+
+def test_pick_model_allows_bmo_and_refuses_a_local_model(monkeypatch):
     monkeypatch.setattr(digest.route, "route", lambda *a, **k: {"model": "sonnet", "effort": "high", "wait_seconds": 60})
     with pytest.raises(digest.DigestBlocked):
         digest.pick_model()
 
-    monkeypatch.setattr(digest.route, "route", lambda *a, **k: {"model": "bmo:x", "effort": "high"})
+    monkeypatch.setattr(digest.route, "route", lambda *a, **k: {"model": "local:x", "effort": "high"})
     with pytest.raises(digest.DigestError, match="cannot run"):
         digest.pick_model()
 
-    monkeypatch.setattr(digest.route, "route", lambda *a, **k: {"model": "sonnet", "effort": "high"})
-    assert digest.pick_model() == ("sonnet", "high")
+    monkeypatch.setattr(digest.route, "route", lambda *a, **k: {"model": "bmo:qwen3.8-flash-next", "effort": "low"})
+    assert digest.pick_model() == ("bmo:qwen3.8-flash-next", "low")
 
 
 def test_sync_publishes_raw_text_and_digest_once(tmp_path, redis_port, flush_redis):
@@ -314,7 +407,7 @@ def test_publish_debrief_digests_reads_the_agents_redis_settings_and_state_dir(t
     _write(tmp_path, "widgets", "20261010-120000-12h.md")
     monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
     monkeypatch.setattr(debrief, "_redis_connection", lambda: ("127.0.0.1", redis_port, None, None))
-    monkeypatch.setattr(digest, "make_digest", lambda repo, name, raw: ("## Summary\n\nOk.", "sonnet"))
+    monkeypatch.setattr(digest, "make_digest", lambda repo, name, raw, **kw: ("## Summary\n\nOk.", "sonnet"))
     monkeypatch.setattr(digest.socket, "gethostname", lambda: "jesus")
     monkeypatch.setattr(digest, "_too_old", lambda name, now: False)  # The file name date is fixed. The clock is not.
 

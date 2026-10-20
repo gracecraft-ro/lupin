@@ -10,14 +10,15 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 import tempfile
 import time
 import unittest
-from contextlib import closing
+from contextlib import closing, redirect_stderr, redirect_stdout
 from datetime import date, timedelta
 from unittest import mock
 
-from lupin import quota
+from lupin import pace, quota
 
 
 class UsageReaderFixtures(unittest.TestCase):
@@ -307,6 +308,20 @@ class QuotaUsageTests(unittest.TestCase):
         # Same logins, same labels on the next read.
         self.assertEqual(first, self._omp_rows(*reports)[0]["account"])
 
+    def test_two_users_in_one_workspace_get_different_labels(self):
+        # Issue #169, case 1: two users share one workspace `accountId`.
+        reports = (
+            self._codex_report("plus", "shared-ws", [("5 hours", 18_000_000, 1.0)], email="a@example.com"),
+            self._codex_report("plus", "shared-ws", [("5 hours", 18_000_000, 0.01)], email="b@example.com"),
+        )
+        rows = self._omp_rows(*reports)
+
+        self.assertNotEqual(rows[0]["account"], rows[1]["account"])
+        self.assertFalse(pace.blocked(rows, "openai", now_ms=0))
+        text = json.dumps(rows, default=str)
+        for secret in ("a@example.com", "b@example.com", "shared-ws"):
+            self.assertNotIn(secret, text)
+
     def test_two_logins_with_no_metadata_still_get_different_labels(self):
         bare = {
             "provider": "openai-codex",
@@ -383,6 +398,168 @@ class OpencodeGoQuotaTests(UsageReaderFixtures):
         self.assertEqual(
             fetch.call_args.args[0].get_header("Authorization"), "Bearer test-key"
         )
+
+
+# `conftest.py` replaces `_omp_token` for each test. `getattr` lets this file load
+# on old source that has no `_omp_token`.
+REAL_OMP_TOKEN = getattr(quota, "_omp_token", None)
+SECRET_KEY = "sk-test-SECRET-0123456789"
+EXPIRED_NOTE = "OpenCode Go API key expired -- get a new key in the OpenCode Console"
+USAGE_PAYLOAD = {"usage": {"rolling": {"percent": 12, "resetsAt": "2030-01-01T00:00:00Z"}}}
+
+
+def _http_error(code: int, body: str) -> quota.urllib.error.HTTPError:
+    return quota.urllib.error.HTTPError(
+        quota.OPENCODE_GO_USAGE_URL, code, "error", {}, io.BytesIO(body.encode())
+    )
+
+
+class OpencodeGoKeyTests(unittest.TestCase):
+    """Where `opencode_go_quota()` finds its key, and what it says when the
+    key fails. The HTTP call and `omp` are always mocked: these tests never
+    contact opencode.ai and never run the real `omp token`.
+    """
+
+    def setUp(self):
+        tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tempdir.cleanup)
+        self.auth_path = os.path.join(tempdir.name, "auth.json")  # absent by default
+        self.addCleanup(mock.patch.stopall)
+        mock.patch.object(quota, "OPENCODE_GO_AUTH_FILE", self.auth_path).start()
+        mock.patch.dict(os.environ, {"OPENCODE_API_KEY": ""}).start()
+        mock.patch.object(quota, "_omp_token", REAL_OMP_TOKEN, create=True).start()
+        # `omp` is missing unless a test says otherwise.
+        self.omp = mock.patch.object(
+            quota.subprocess, "run", side_effect=FileNotFoundError("omp")
+        ).start()
+        self.fetch = mock.patch.object(
+            quota.urllib.request,
+            "urlopen",
+            side_effect=lambda *args, **kwargs: io.BytesIO(json.dumps(USAGE_PAYLOAD).encode()),
+        ).start()
+
+    def write_auth_file(self, key):
+        with open(self.auth_path, "w", encoding="utf-8") as auth_file:
+            json.dump({"opencode-go": {"type": "api", "key": key}}, auth_file)
+
+    def sent_key(self):
+        header = self.fetch.call_args.args[0].get_header("Authorization")
+        return header.removeprefix("Bearer ")
+
+    def omp_prints(self, stdout, returncode=0, stderr=""):
+        self.omp.side_effect = None
+        self.omp.return_value = subprocess.CompletedProcess(
+            ["omp", "token", "opencode-go"], returncode, stdout, stderr
+        )
+
+    def assert_no_key_note(self, rows):
+        self.assertEqual(rows, [{"provider": "opencode-go", "note": quota.NO_OPENCODE_GO_KEY}])
+        self.fetch.assert_not_called()
+
+    def test_key_from_auth_file_wins_and_omp_is_not_run(self):
+        self.write_auth_file(SECRET_KEY)
+        with mock.patch.dict(os.environ, {"OPENCODE_API_KEY": "env-key"}):
+            rows = quota.opencode_go_quota()
+        self.assertEqual(self.sent_key(), SECRET_KEY)
+        self.assertEqual(rows[0]["used_pct"], 12)
+        self.omp.assert_not_called()
+
+    def test_key_from_env_when_no_auth_file(self):
+        with mock.patch.dict(os.environ, {"OPENCODE_API_KEY": f" {SECRET_KEY} "}):
+            rows = quota.opencode_go_quota()
+        self.assertEqual(self.sent_key(), SECRET_KEY)
+        self.assertEqual(rows[0]["used_pct"], 12)
+        self.omp.assert_not_called()
+
+    def test_key_only_from_omp_token(self):
+        self.omp_prints(SECRET_KEY + "\n")
+        rows = quota.opencode_go_quota()
+        self.assertEqual(self.sent_key(), SECRET_KEY)
+        self.assertEqual(rows[0]["used_pct"], 12)
+        self.assertEqual(self.omp.call_args.args[0], ["omp", "token", "opencode-go"])
+        self.assertEqual(self.omp.call_args.kwargs["timeout"], 10)
+        self.assertFalse(self.omp.call_args.kwargs.get("shell", False))
+
+    def test_omp_stderr_is_not_part_of_the_key(self):
+        self.omp_prints(SECRET_KEY + "\n", stderr="warning: update available\n")
+        quota.opencode_go_quota()
+        self.assertEqual(self.sent_key(), SECRET_KEY)
+
+    def test_omp_missing_gives_the_no_key_note(self):
+        self.assert_no_key_note(quota.opencode_go_quota())
+
+    def test_omp_timeout_gives_the_no_key_note_without_the_key(self):
+        self.omp.side_effect = subprocess.TimeoutExpired(
+            ["omp", "token", "opencode-go"], 10, output=SECRET_KEY.encode()
+        )
+        rows = quota.opencode_go_quota()
+        self.assert_no_key_note(rows)
+        self.assertNotIn(SECRET_KEY, repr(rows))
+
+    def test_omp_nonzero_exit_gives_the_no_key_note(self):
+        # Even if it printed something, a failed command gives no key.
+        self.omp_prints(SECRET_KEY, returncode=1, stderr="not logged in")
+        self.assert_no_key_note(quota.opencode_go_quota())
+
+    def test_omp_prints_nothing_gives_the_no_key_note(self):
+        for label, stdout in (("empty", ""), ("blank", "  \n")):
+            with self.subTest(label):
+                self.omp_prints(stdout)
+                self.assert_no_key_note(quota.opencode_go_quota())
+
+    def test_omp_output_that_is_not_one_word_is_not_used_as_a_key(self):
+        self.omp_prints("error: no such provider\n")
+        self.assert_no_key_note(quota.opencode_go_quota())
+
+    def test_expired_key_gives_a_note_and_the_key_stays_secret(self):
+        self.omp_prints(SECRET_KEY)
+        body = json.dumps({"error": {"code": "api_key_expired", "message": "API key expired"}})
+        self.fetch.side_effect = _http_error(401, body)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rows = quota.opencode_go_quota()
+        self.assertEqual(rows, [{"provider": "opencode-go", "note": EXPIRED_NOTE}])
+        for text in (out.getvalue(), err.getvalue(), repr(rows)):
+            self.assertNotIn(SECRET_KEY, text)
+
+    def test_other_http_errors_keep_the_unavailable_note(self):
+        self.write_auth_file(SECRET_KEY)
+        cases = [
+            ("401 other code", 401, '{"error": {"code": "invalid_api_key"}}'),
+            ("401 no body", 401, ""),
+            ("403", 403, '{"error": {"code": "api_key_expired"}}'),
+            ("500", 500, "oops"),
+        ]
+        for label, code, body in cases:
+            with self.subTest(label):
+                self.fetch.side_effect = _http_error(code, body)
+                rows = quota.opencode_go_quota()
+                self.assertEqual(
+                    rows, [{"provider": "opencode-go", "note": "quota unavailable (HTTPError)"}]
+                )
+                self.assertNotIn(SECRET_KEY, repr(rows))
+
+    def test_network_error_keeps_the_unavailable_note(self):
+        self.write_auth_file(SECRET_KEY)
+        self.fetch.side_effect = quota.urllib.error.URLError("no route")
+        self.assertEqual(
+            quota.opencode_go_quota(),
+            [{"provider": "opencode-go", "note": "quota unavailable (URLError)"}],
+        )
+
+
+class OmpTokenOutputTests(unittest.TestCase):
+    """`_omp_token` with a fake `omp` program on PATH. No real `omp` runs."""
+
+    @unittest.skipIf(REAL_OMP_TOKEN is None, "old source has no _omp_token")
+    def test_output_that_is_not_utf8_gives_no_key(self):
+        with tempfile.TemporaryDirectory() as bin_dir:
+            fake = os.path.join(bin_dir, "omp")
+            with open(fake, "w", encoding="utf-8") as script:
+                script.write("#!/bin/sh\nprintf '\\377\\376abc'\n")
+            os.chmod(fake, 0o700)
+            with mock.patch.dict(os.environ, {"PATH": bin_dir}):
+                self.assertEqual(REAL_OMP_TOKEN("opencode-go"), "")
 
 
 class ClaudeOauthQuotaTests(unittest.TestCase):
@@ -472,6 +649,65 @@ class SnapshotTests(unittest.TestCase):
             result = quota.snapshot()
         self.assertEqual(result["openai"]["pct_left"], 99)
         self.assertEqual(result["openai"]["resets_at"], 7)
+
+    def test_ranks_logins_by_their_most_used_window(self):
+        # Issue #207: login "a" has room on 5 hours but almost none on 7 days.
+        # Login "b" has the same room on both windows. `pace.headroom` picks b,
+        # so the summary must pick b too.
+        later = int(time.time() * 1000) + 10 * 24 * 60 * 60 * 1000
+        rows = [
+            {"provider": "openai", "account": "a", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 1, "resets_at": later},
+            {"provider": "openai", "account": "a", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 90, "resets_at": later},
+            {"provider": "openai", "account": "b", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 50, "resets_at": later},
+            {"provider": "openai", "account": "b", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 50, "resets_at": later},
+        ]
+        with mock.patch.object(quota, "quota_usage", return_value=rows):
+            result = quota.snapshot()
+
+        self.assertEqual(result["openai"]["pct_left"], 50)
+        self.assertEqual(result["openai"]["pct_left"], pace.headroom(rows, "openai", later))
+
+    def test_ignores_a_window_with_no_reset_when_ranking_logins(self):
+        # Issue #207, review finding 1: login "a" has room on both windows.
+        # Login "b" has more room on 5 hours, but its 7-day row has no
+        # `resets_at`. `pace.headroom` drops that row as unknown; the summary
+        # must drop it too, or it picks a different login than routing does.
+        later = int(time.time() * 1000) + 10 * 24 * 60 * 60 * 1000
+        rows = [
+            {"provider": "openai", "account": "a", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 30, "resets_at": later},
+            {"provider": "openai", "account": "a", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 30, "resets_at": later},
+            {"provider": "openai", "account": "b", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 20, "resets_at": later},
+            {"provider": "openai", "account": "b", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 90, "resets_at": None},
+        ]
+        with mock.patch.object(quota, "quota_usage", return_value=rows):
+            result = quota.snapshot()
+
+        self.assertEqual(result["openai"]["pct_left"], 80)
+        self.assertEqual(result["openai"]["pct_left"], pace.headroom(rows, "openai", later))
+
+    def test_skips_a_login_that_is_blocked_on_another_window(self):
+        # Issue #169, case 3: login "a" has room on 5 hours but none on 7 days.
+        later = int(time.time() * 1000) + 10 * 24 * 60 * 60 * 1000
+        rows = [
+            {"provider": "openai", "account": "a", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 1, "resets_at": later},
+            {"provider": "openai", "account": "a", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 100, "resets_at": later},
+            {"provider": "openai", "account": "b", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 50, "resets_at": later},
+            {"provider": "openai", "account": "b", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 20, "resets_at": later},
+        ]
+        with mock.patch.object(quota, "quota_usage", return_value=rows):
+            result = quota.snapshot()
+        self.assertEqual(result["openai"]["pct_left"], 50)
+
+    def test_one_blocked_login_still_reports_its_five_hour_row(self):
+        # One login: the result is the same as before issue #169.
+        later = int(time.time() * 1000) + 10 * 24 * 60 * 60 * 1000
+        rows = [
+            {"provider": "openai", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 1, "resets_at": later},
+            {"provider": "openai", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 100, "resets_at": later},
+        ]
+        with mock.patch.object(quota, "quota_usage", return_value=rows):
+            result = quota.snapshot()
+        self.assertEqual(result["openai"]["pct_left"], 99)
 
     def test_an_account_with_data_beats_an_account_with_only_a_note(self):
         rows = [

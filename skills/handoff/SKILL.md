@@ -11,7 +11,8 @@ compatibility: Requires Lupin and GitHub CLI. The ledger needs Redis.
 # Hand off a loop session
 
 Run this skill when you stop work. The next agent reads the ledger and the
-GitHub issue. It does not read this conversation.
+GitHub issue. It does not read this conversation. Start every GitHub comment
+that you post with `Loop:`.
 
 1. Decide what happened in this session: what you finished, what you
    dispatched, what is still running, and which decisions the next agent must
