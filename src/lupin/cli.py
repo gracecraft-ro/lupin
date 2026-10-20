@@ -167,7 +167,8 @@ def _redis_args(parser: argparse.ArgumentParser) -> None:
 
 def _backend_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--backend", type=_backend_name, default=os.environ.get("LUPIN_BACKEND", "local"),
+        "--backend", type=_backend_name, metavar="{local,redis}",
+        default=os.environ.get("LUPIN_BACKEND", "local"),
         help="slot-lease backend (default: $LUPIN_BACKEND or local)",
     )
     _redis_args(parser)
@@ -1550,6 +1551,8 @@ def _start_loop_with_result(repo: str, args: argparse.Namespace) -> tuple[bool, 
             note=args.note,
             resume=args.resume,
         )
+    except loop_runtime.EnvValueError:
+        raise
     except loop_runtime.LoopError as exc:
         return False, f"could not start loop for {repo}: {exc}"
 
@@ -1629,6 +1632,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
             ok, message = _start_loop_with_result(repo, args)
             results.append({"repo": repo, "started": ok, "message": message})
             failed |= not ok and not message.startswith("skip ")
+    except loop_runtime.EnvValueError:
+        raise
     except loop_runtime.LoopError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1675,6 +1680,8 @@ def _cmd_fleet_run(args: argparse.Namespace) -> int:
     except slots.CoordinatorUnreachable as exc:
         print(f"cannot reach the redis coordinator: {exc}", file=sys.stderr)
         return 3
+    except loop_runtime.EnvValueError:
+        raise
     except loop_runtime.LoopError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1728,6 +1735,8 @@ def _cmd_once(args: argparse.Namespace) -> int:
             args.when, targets, platform=args.platform, provider=args.provider,
             model=args.model, note=args.note, resume=args.resume
         )
+    except loop_runtime.EnvValueError:
+        raise
     except loop_runtime.LoopError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1746,6 +1755,8 @@ def _cmd_enable(args: argparse.Namespace) -> int:
             args.orchestrator,
             clear_orchestrators=args.clear_orchestrators,
         )
+    except loop_runtime.EnvValueError:
+        raise
     except loop_runtime.LoopError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1756,6 +1767,8 @@ def _cmd_enable(args: argparse.Namespace) -> int:
 def _cmd_disable(args: argparse.Namespace) -> int:
     try:
         loop_runtime.disable_repo(args.repo)
+    except loop_runtime.EnvValueError:
+        raise
     except loop_runtime.LoopError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1776,6 +1789,8 @@ def _cmd_loops(args: argparse.Namespace) -> int:
                 rows = [loop_runtime.loop_state(args.repo)]
             else:
                 rows = loop_runtime.status_rows()
+        except loop_runtime.EnvValueError:
+            raise
         except loop_runtime.LoopError as exc:
             print(str(exc), file=sys.stderr)
             return 1
@@ -1969,6 +1984,8 @@ def _cmd_attach(args: argparse.Namespace) -> int:
     target = loops_mod.ssh_target_for(machine) if machine != local_host else None
     try:
         argv = loop_runtime.attach_argv(args.repo, machine, local_host, target)
+    except loop_runtime.EnvValueError:
+        raise
     except loop_runtime.LoopError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -2120,6 +2137,9 @@ def main(argv: list[str] | None = None) -> int:
     except _REDIS_REFUSED as exc:
         _print_auth_failed(exc, "a Redis step in this command", fleet=True)
         return 3
+    except loop_runtime.EnvValueError as exc:
+        print(f"lupin: {exc}", file=sys.stderr)
+        return 2
     except route_mod.RouteInputError as exc:
         print(f"lupin: {exc}", file=sys.stderr)
         return 2

@@ -81,9 +81,8 @@ debriefs use the debrief path and read `fleet.json` when their connection
 variables are unset. The queue needs `LUPIN_REDIS_PASSWORD` or
 `--redis-password`; the systemd credential alone is not enough.
 
-A value of `LUPIN_REDIS_PORT` that is not an integer stops every `lupin`
-command with a `ValueError`. The parser reads the variable for all
-subcommands when it starts.
+A value of `LUPIN_REDIS_PORT` that is not an integer gives one line and
+exit code 2 on the commands that use it. `--help` still works.
 
 ### `LUPIN_CLAIM_HOLDER`
 
@@ -115,10 +114,15 @@ subcommands when it starts.
 - **Default**: none. The fleet group and debriefs then use `redis_port`
   from `fleet.json`, then `6379`. The local group, `roadmap`, and the loop
   worker use `6379`.
-- **Effect**: Lupin connects to this port.
-- **Read by**: the same functions as `LUPIN_REDIS_HOST`.
+- **Effect**: Lupin connects to this port. A value that is not a whole
+  number gives one line and exit code 2 and names the variable.
+- **Read by**: `src/lupin/cli.py` (`_redis_port`, `_redis_args`,
+  `_redis_conn_args`, `_fleet_connection_args`), `src/lupin/serve.py`
+  (`_serve_port`, `main`), `src/lupin/loop_runtime.py` (`_env_int` via
+  `_redis_kwargs`), `src/lupin/debrief.py` (`_redis_connection`).
   `debrief._redis_connection` ignores a value that is not all digits.
-  The other paths raise `ValueError`.
+  `loop_runtime._env_int` raises `EnvValueError`, which `cli.main` reports
+  as the same one line and exit code 2.
 - **Set by**: the user or the host config. `lupin run` copies it into loop
   units.
 - **Option**: `--redis-port`.
@@ -187,9 +191,11 @@ subcommands when it starts.
 - **Purpose**: the slot-lease backend for `acquire`, `hold`, `release`, and
   `status`.
 - **Default**: `local`.
-- **Effect**: `redis` selects the Redis backend. Any other value selects the
-  `local` backend. The parser does not check the value of the variable.
-- **Read by**: `src/lupin/cli.py` (`_backend_args`, `_backend_module`).
+- **Effect**: `redis` selects the Redis backend. Any value except `local`
+  or `redis` gives exit code 2 with `invalid choice`, the same error as a
+  bad `--backend` value.
+- **Read by**: `src/lupin/cli.py` (`_backend_args`, `_backend_name`,
+  `_backend_module`).
 - **Set by**: the user or the host config. `lupin run` copies it into loop
   units.
 - **Option**: `--backend local|redis`.
@@ -438,11 +444,11 @@ with `LUPIN_CMD_SIGNING_KEY` or `--signing-key`.
 - **Purpose**: how long the dashboard keeps a rendered roadmap fragment.
 - **Default**: `30` (seconds).
 - **Effect**: `/roadmap/board` uses a kept fragment for this many seconds.
-  Lupin reads the value one time, when `serve.py` loads. A value that is
-  not a number stops every `lupin` command with a `ValueError`, because
-  `cli.py` loads `serve.py`.
-- **Read by**: `src/lupin/serve.py` (module constant `_FRAGMENT_TTL`,
-  used by `_cached_fragment`).
+  Lupin reads the value when it is used. `lupin serve` checks it at
+  startup and exits 2 with one line that names the variable. Other
+  commands do not read it.
+- **Read by**: `src/lupin/serve.py` (`_fragment_ttl`, used by
+  `_cached_fragment`; checked by `main`).
 - **Set by**: the user or the host config.
 
 ## Models and quota

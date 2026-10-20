@@ -1074,10 +1074,30 @@ def test_a_bad_fragment_ttl_stops_serve_with_exit_two(monkeypatch, capsys):
     assert "LUPIN_ROADMAP_FRAGMENT_TTL" in err and "abc" in err
 
 
-def test_a_bad_loop_redis_port_raises_loop_error(monkeypatch):
+def test_a_bad_loop_redis_port_raises_env_value_error(monkeypatch):
     from lupin import loop_runtime
 
     monkeypatch.setenv("LUPIN_REDIS_PORT", "abc")
 
-    with pytest.raises(loop_runtime.LoopError, match="LUPIN_REDIS_PORT"):
+    with pytest.raises(loop_runtime.EnvValueError, match="LUPIN_REDIS_PORT"):
         loop_runtime._redis_kwargs()
+
+
+def test_a_bad_redis_port_stops_once_with_exit_two(monkeypatch, capsys, tmp_path):
+    from lupin import loop_runtime
+
+    monkeypatch.setenv("LUPIN_REDIS_PORT", "abc")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", tmp_path)
+    (tmp_path / "repo").mkdir()
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {})
+    monkeypatch.setattr(loop_runtime, "_lock_file", lambda repo: (tmp_path / "lock").open("a+"))
+    monkeypatch.setattr(loop_runtime, "_run", lambda *args, **kwargs: (1, ""))
+    monkeypatch.setattr(loop_runtime, "_legacy_tmux_exists", lambda repo: False)
+    monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: None)
+    monkeypatch.setattr(loop_runtime, "_session_info", lambda session: None)
+    monkeypatch.setattr(loop_runtime, "orchestrator_profiles", lambda: {"repo": ["claude"]})
+
+    assert cli.main(["once", "now", "repo"]) == 2
+    err = capsys.readouterr().err
+    assert "LUPIN_REDIS_PORT" in err and "abc" in err
+    assert len(err.strip().splitlines()) == 1

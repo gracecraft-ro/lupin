@@ -161,6 +161,10 @@ class LoopError(Exception):
     """A loop action cannot continue safely."""
 
 
+class EnvValueError(LoopError):
+    """A `LUPIN_*` environment value is malformed."""
+
+
 class HerdrError(LoopError):
     """Herdr returned an error or an unsupported response."""
 
@@ -1029,12 +1033,12 @@ def _load_credential(name: str) -> str | None:
 
 
 def _env_int(name: str, default: int) -> int:
-    """A whole number from `name`, or a clean `LoopError`."""
+    """A whole number from `name`, or a clean `EnvValueError`."""
     value = os.environ.get(name, str(default))
     try:
         return int(value)
     except ValueError:
-        raise LoopError(f"{name} needs a whole number, got {value!r}") from None
+        raise EnvValueError(f"{name} needs a whole number, got {value!r}") from None
 
 
 def _redis_kwargs() -> dict:
