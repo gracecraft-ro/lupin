@@ -149,7 +149,7 @@ gh api repos/OWNER/REPO/pulls/<number>/reviews \
 
 Use `-f event=REQUEST_CHANGES` when the review asks for changes. GitHub refuses
 an approval or a change request from the PR's author. If your login opened the
-PR, use the `gracecraft` account for the approval or change request. If that
+PR, when provisioned, use a separate account for the approval or change request. If that
 account is unavailable, post the verdict with `-f event=COMMENT`. If your verdict
 is `Ship`, ask the owner in a `Loop:` PR comment to approve or merge the PR.
 
