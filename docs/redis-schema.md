@@ -246,7 +246,7 @@ the same "stored timestamp, not Redis TTL" convention as `machine:<name>`'s
 offline detection above.
 
 The lookup worker is a free opencode-go model (`beam-free`) run
-through `omp -p` with `--thinking max` and two tools, `read` and
+through `omp -p` with `--thinking xhigh` and two tools, `read` and
 `web_search`: `read` fetches each model's own `artificialanalysis.ai`
 page, which states the Intelligence Index in plain text and costs no
 search quota, and `web_search` is the fallback for a model the site does

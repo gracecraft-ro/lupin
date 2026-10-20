@@ -269,7 +269,7 @@ def _build_argv(prompt: str) -> list[str]:
       shape, same as the `claude -p` call this replaces.
     - `--model opencode-go/beam-free` is the zero-price subscription model
       (see `OMP_MODEL`'s comment).
-    - `--thinking max` spends the most reasoning the provider offers.
+    - `--thinking xhigh` spends the most reasoning this model offers.
       A web lookup that gives up early is the failure mode here, not cost.
     - `--tools web_search,read` exposes two built-in tools. `read` fetches
       the model's own Artificial Analysis page as text -- the page states
