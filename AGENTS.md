@@ -637,12 +637,13 @@ sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
 
 - Port: `8789`. Check it is free with `ss -ltn` first. The `ss` command lists
   listening ports.
-- Machine: not set yet. The owner names it.
+- Machine: `ralpha`. The preview serves `main` there on `127.0.0.1:8789`.
 - Owner tunnel command: `ssh -N -L 8789:127.0.0.1:8789 MACHINE`. A tunnel
   forwards a port on your computer to the machine.
 - Local URL: `http://localhost:8789`.
-- Keep it running: a Herdr pane, or `systemd-run --user`. The `systemd-run`
-  command starts a command as a background service.
+- Keep it running: a Herdr pane, or a detached process (`setsid nohup`). The
+  `systemd-run --user` command also starts a background service, but it needs
+  a user bus. ralpha has none for the loop user.
 - To bind means to choose the address a server listens on. Never bind to
   `0.0.0.0`. This is a security rule.
 - Do not set `LUPIN_REDIS_HOST` to the fleet Redis unless the test needs it.
