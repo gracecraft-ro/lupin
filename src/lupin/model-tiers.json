@@ -129,9 +129,19 @@
     "note": "No tier0 route. Alconost reports provider-family scores, not exact model-version scores. Gemini and GPT score higher than Claude but have no provider config here, so Claude is the best routed option for tier1/2. DeepSeek ranks fourth of five in the sample; this does not verify any exact DeepSeek model. The sample is general-purpose; its separate subtitle benchmark found different leaders."
   },
   "prose": {
-    "source": "LMArena Creative Writing leaderboard (BenchLeader snapshot, 2026-09-29) and EQ-Bench Creative Writing (Sept 2026) -- the two agree on a leader, unlike the translation sources",
-    "last_verified": "2026-10-03",
+    "source": "Owner order (2026-10-19) for digests, plus LMArena Creative Writing leaderboard (BenchLeader snapshot, 2026-09-29) and EQ-Bench Creative Writing (Sept 2026) for tier1",
+    "last_verified": "2026-10-19",
     "tiers": {
+      "tier0": [
+        {
+          "model": "bmo:qwen3.8-flash-next",
+          "effort": "low"
+        },
+        {
+          "model": "opencode-go/deepseek-v4.1-flash",
+          "effort": "high"
+        }
+      ],
       "tier1": [
         {
           "model": "sonnet",
@@ -145,7 +155,7 @@
         }
       ]
     },
-    "note": "No tier0: these public creative-writing leaderboards do not score a model currently routed by this repo, so tier0 quality is unknown. Fable is not listed. A route must not pick it without the user's approval (issue #114)."
+    "note": "The owner set this order for digests: bmo, then DeepSeek V4.1 Flash, then Claude. No public creative-writing score covers the model that bmo serves, and bmo can sleep. So a failed bmo call falls to the next tier0 entry. Fable is not listed. A route must not pick it without the user's approval (issue #114)."
   },
   "cad-spatial": {
     "source": "P3D-Bench (arxiv 2606.11152)",
