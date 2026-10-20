@@ -276,16 +276,26 @@ def _review_commit(review: dict) -> str:
     return ""
 
 
+FORMAL_REVIEW_STATES = ("APPROVED", "CHANGES_REQUESTED")
+
+
 def _approval(pr: dict) -> tuple[bool, str]:
-    """Return `(approval_at_head, text value)` for the newest approval."""
-    approvals = [
+    """Return `(approval_at_head, text value)` for the last formal review.
+
+    A formal review is `APPROVED` or `CHANGES_REQUESTED`. Other states do not
+    count. A later change request clears an earlier approval.
+    """
+    formal = [
         review
         for review in pr.get("reviews") or []
-        if isinstance(review, dict) and review.get("state") == "APPROVED"
+        if isinstance(review, dict)
+        and review.get("state") in FORMAL_REVIEW_STATES
     ]
-    if not approvals:
+    if not formal:
         return False, "none"
-    newest = max(approvals, key=lambda review: _when(review.get("submittedAt")))
+    newest = max(formal, key=lambda review: _when(review.get("submittedAt")))
+    if newest.get("state") != "APPROVED":
+        return False, "changes-requested"
     at_head = bool(pr.get("headRefOid")) and _review_commit(newest) == pr.get("headRefOid")
     return at_head, "head" if at_head else "stale"
 

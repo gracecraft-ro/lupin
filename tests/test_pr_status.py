@@ -300,13 +300,44 @@ class ApprovalTests(unittest.TestCase):
         self.assertFalse(row["approval_at_head"])
         self.assertEqual(row["approval"], "stale")
 
-    def test_no_approval_is_none(self):
+    def test_no_formal_review_is_none(self):
+        row = pr_status.analyze(_pr(reviews=[]), "o/r")
+        self.assertFalse(row["approval_at_head"])
+        self.assertEqual(row["approval"], "none")
+
+    def test_changes_requested_without_approval_is_reported(self):
         row = pr_status.analyze(
             _pr(reviews=[_review("alice", "CHANGES_REQUESTED", "2026-01-01T00:00:00Z")]),
             "o/r",
         )
         self.assertFalse(row["approval_at_head"])
-        self.assertEqual(row["approval"], "none")
+        self.assertEqual(row["approval"], "changes-requested")
+
+    def test_later_changes_requested_clears_approval(self):
+        row = pr_status.analyze(
+            _pr(
+                reviews=[
+                    _review("alice", "APPROVED", "2026-01-01T00:00:00Z"),
+                    _review("bob", "CHANGES_REQUESTED", "2026-01-02T00:00:00Z"),
+                ]
+            ),
+            "o/r",
+        )
+        self.assertFalse(row["approval_at_head"])
+        self.assertEqual(row["approval"], "changes-requested")
+
+    def test_newer_approval_after_changes_requested_wins(self):
+        row = pr_status.analyze(
+            _pr(
+                reviews=[
+                    _review("alice", "CHANGES_REQUESTED", "2026-01-01T00:00:00Z", "old-sha"),
+                    _review("bob", "APPROVED", "2026-01-02T00:00:00Z"),
+                ]
+            ),
+            "o/r",
+        )
+        self.assertTrue(row["approval_at_head"])
+        self.assertEqual(row["approval"], "head")
 
     def test_newest_approval_decides(self):
         row = pr_status.analyze(
