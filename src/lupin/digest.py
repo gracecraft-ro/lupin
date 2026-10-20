@@ -204,7 +204,7 @@ def window_label(raw: str) -> str:
     """A prompt line that names the window in Los Angeles time. Empty if the debrief has no window."""
     found = {}
     for key in ("From", "To"):
-        match = re.search(rf"^- {key}: (\S+)$", raw, re.MULTILINE)
+        match = re.search(rf"^- {key}: (\S+)", raw, re.MULTILINE)
         found[key] = debrief._parse(match.group(1)) if match else None
     if not found["From"] or not found["To"]:
         return ""

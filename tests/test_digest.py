@@ -841,6 +841,21 @@ def test_window_label_names_the_window_in_los_angeles_time():
     assert "Friday 09 October 18:00 to Saturday 10 October 00:00 Los Angeles time" in label
 
 
+def test_window_label_reads_the_utc_and_los_angeles_format():
+    # The Window line now carries both clocks. The label must still find the
+    # UTC value and convert it.
+    raw = (
+        "# Debrief: o/r\n\n## Window\n"
+        "- From: 2026-10-02T09:00:00Z (2026-10-02 02:00 PDT)\n"
+        "- To: 2026-10-02T17:00:00Z (2026-10-02 10:00 PDT)\n"
+    )
+
+    label = digest.window_label(raw)
+
+    assert "02:00" in label and "10:00" in label
+    assert "Los Angeles time" in label
+
+
 @pytest.mark.parametrize("raw", ["", "# nothing", "- From: not a date\n- To: 2026-10-10T07:00:00Z\n", "- From: 2026-10-10T01:00:00Z\n"])
 def test_window_label_is_empty_when_the_debrief_has_no_usable_window(raw):
     assert digest.window_label(raw) == ""
