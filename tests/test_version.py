@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
 import pytest
 
-from lupin import cli
+from lupin import cli, machines
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,4 +26,10 @@ def test_the_flake_does_not_hardcode_the_version():
     flake = (ROOT / "flake.nix").read_text(encoding="utf-8")
 
     assert "builtins.fromTOML (builtins.readFile ./pyproject.toml)" in flake
-    assert 'version = "0.1.0"' not in flake
+    assert not re.search(r'\bversion = "', flake)
+
+
+def test_the_package_version_uses_the_same_source():
+    version = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+
+    assert machines.package_version() == version

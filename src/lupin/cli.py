@@ -549,21 +549,10 @@ def _pause_resume_args(parser: argparse.ArgumentParser) -> None:
 def _version() -> str:
     """The package version. `pyproject.toml` is the only place it is set.
 
-    An installed package has metadata. A source checkout has the file.
+    `machines.package_version` reads the installed metadata, or the file in
+    a source checkout.
     """
-    try:
-        from importlib.metadata import version
-
-        return version("lupin")
-    except Exception:
-        import tomllib
-        from pathlib import Path
-
-        path = Path(__file__).resolve().parents[2] / "pyproject.toml"
-        try:
-            return tomllib.loads(path.read_text(encoding="utf-8"))["project"]["version"]
-        except Exception:
-            return "unknown"
+    return machines.package_version()
 
 
 def _build_parser() -> argparse.ArgumentParser:
