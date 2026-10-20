@@ -3975,6 +3975,14 @@ DEBRIEF_TEXT = (
 )
 
 
+DEBRIEF_WINDOW_TEXT = (
+    "# Debrief: acme/widgets\n"
+    "## Window\n"
+    "- From: 2026-10-02T09:00:00Z (2026-10-02 02:00 PDT)\n"
+    "- To: 2026-10-02T17:00:00Z (2026-10-02 10:00 PDT)\n"
+)
+
+
 def _write_debrief_file(root, repo, name, text):
     folder = root / "debriefs" / repo
     folder.mkdir(parents=True, exist_ok=True)
@@ -4030,6 +4038,27 @@ def test_debrief_page_renders_markdown_escapes_text_and_maps_images(tmp_path, mo
     assert "<h1>Debrief: acme/widgets</h1>" in body
     assert "<li>PR #11: Shipped feature &lt;b&gt;x&lt;/b&gt;</li>" in body
     assert f"<img src='/image?id={DEBRIEF_ATTACHMENT}'" in body
+
+
+def test_debrief_page_shows_the_window_in_the_readers_own_time_zone(tmp_path, monkeypatch):
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    _write_debrief_file(tmp_path, "widgets", "20261002-090000.md", DEBRIEF_WINDOW_TEXT)
+
+    handler = _get_handler("/debrief?repo=widgets&file=20261002-090000.md", {})
+    handler.do_GET()
+
+    body = handler.reply.call_args.args[0].decode()
+    # The UTC instant stays in the file. The page hands it to the browser.
+    assert "data-lupin-utc='2026-10-02T09:00:00Z'" in body
+    assert "data-lupin-utc='2026-10-02T17:00:00Z'" in body
+    # The page says the time is UTC until the browser gives a time zone.
+    assert "2026-10-02 09:00 UTC" in body
+    assert "2026-10-02 17:00 UTC" in body
+    # The Los Angeles time of the file does not reach the page.
+    assert "02:00 PDT" not in body
+    assert "10:00 PDT" not in body
+    # The browser does the conversion.
+    assert "resolvedOptions().timeZone" in body
 
 
 @pytest.mark.parametrize("query", [

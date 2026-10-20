@@ -2889,6 +2889,50 @@ def render_debrief_index(items: list[dict]) -> bytes:
     )
 
 
+DEBRIEF_TZ_JS = """
+// Show the debrief window in the reader's own time zone.
+function lupinLocalTime(when,zone){
+ var parts=new Intl.DateTimeFormat("en-CA",{timeZone:zone,year:"numeric",month:"2-digit",
+  day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false,timeZoneName:"short"}).formatToParts(when);
+ var part={};
+ parts.forEach(function(p){part[p.type]=p.value;});
+ return part.year+"-"+part.month+"-"+part.day+" "+part.hour+":"+part.minute+" "+part.timeZoneName;}
+document.querySelectorAll("[data-lupin-utc]").forEach(function(el){
+ var iso=el.getAttribute("data-lupin-utc");
+ var when=new Date(iso);
+ if(!when||isNaN(when.getTime()))return;
+ var zone=null;
+ try{zone=Intl.DateTimeFormat().resolvedOptions().timeZone;}catch(e){zone=null;}
+ if(!zone)return;
+ var local=null;
+ try{local=lupinLocalTime(when,zone);}catch(e){local=null;}
+ if(!local)return;
+ el.textContent=local+" ("+el.getAttribute("data-lupin-utc-label")+")";});
+"""
+
+_WINDOW_TIME_HTML = re.compile(
+    r"<li>(From|To): (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)(?: \([^<]*\))?</li>"
+)
+
+
+def render_window_times(html: str) -> str:
+    """Mark the window times so the page can show them in the reader's time zone.
+
+    The file keeps the UTC instant. The page shows the reader's local time and
+    keeps the UTC time next to it. Without a time zone from the browser the
+    page shows the UTC time and says so.
+    """
+    def replace(match: re.Match) -> str:
+        key, iso = match.group(1), match.group(2)
+        label = f"{iso[:10]} {iso[11:16]} UTC"
+        return (
+            f"<li>{key}: <span data-lupin-utc='{iso}' data-lupin-utc-label='{label}'>"
+            f"{label}</span></li>"
+        )
+
+    return _WINDOW_TIME_HTML.sub(replace, html)
+
+
 def _debrief_stamp(name: str) -> str:
     """`20261010-120000.md` -> `2026-10-10 12:00:00 UTC`. Periodic files keep the suffix. Name is pre-checked."""
     stamp = name[:15]
@@ -3246,8 +3290,9 @@ class Handler(BaseHTTPRequestHandler):
                 "<header><h1>Debrief</h1><span class=sp></span>"
                 "<a href='/debrief'>all debriefs</a></header>"
                 f"<div class=card>{remote_note}{summary}"
-                f"<div class=debrief>{debrief.render_html(markdown, repo)}</div></div>",
+                f"<div class=debrief>{render_window_times(debrief.render_html(markdown, repo))}</div></div>",
                 debrief.CSS,
+                extra_js=DEBRIEF_TZ_JS,
                 active="debriefs",
             )
         )
