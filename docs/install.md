@@ -166,9 +166,12 @@ Do these steps on each worker. A worker must run Linux with systemd.
 3. Make the loop state directory. The default is
    `/var/lib/delegation-loop`. Set `LUPIN_LOOP_STATE_DIR` to use another
    directory. The loop user must be able to write it.
-4. Let the user that runs `lupin run` and `lupin agent` run `sudo -n
-   systemd-run` and `sudo -n systemctl` with no password. Lupin starts loop
-   units and timers with these commands.
+4. Let the user that runs `lupin run` and `lupin agent` control loop units
+   without a password. The NixOS module grants `NOPASSWD` to a validating
+   `systemd-run` wrapper and to the `systemctl` unit patterns, and sets
+   `LUPIN_SYSTEMD_RUN` to the wrapper. Do not add a `systemd-run *` rule:
+   it matches any arguments, including `--uid=0`, which lets the user run
+   a command as root.
 5. Set the loop user with `LUPIN_LOOP_USER`, or make sure that `USER` is
    set. Set `LUPIN_LOOP_GROUP` if the group is not `users`.
 6. Give each repo a GitHub token. Write the path of each token file in a

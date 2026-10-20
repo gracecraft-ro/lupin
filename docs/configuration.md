@@ -256,6 +256,22 @@ subcommands when it starts.
 - **Set by**: the user or the host config. `lupin run` copies it into loop
   units.
 
+### `LUPIN_SYSTEMD_RUN`
+
+- **Purpose**: a wrapper that validates `systemd-run` arguments before it
+  runs `systemd-run`.
+- **Default**: none. Lupin runs `sudo -n systemd-run` directly.
+- **Effect**: when set, Lupin runs `sudo -n <wrapper>` in place of
+  `sudo -n systemd-run` for loop units, the Herdr server, and one-off
+  timers. The wrapper gets the `systemd-run` arguments without the command
+  name. The NixOS module sets this to a wrapper that accepts only the
+  options Lupin uses, so the loop user does not need `NOPASSWD` on
+  `systemd-run` itself.
+- **Read by**: `src/lupin/loop_runtime.py` (`_sudo_argv`).
+- **Set by**: the host config. The NixOS module sets it for `lupin agent`,
+  `lupin serve`, and `lupin fleet-run`. Those services copy it into loop
+  units.
+
 ### `LUPIN_LOOP_USER`
 
 - **Purpose**: the user that loop units run as.

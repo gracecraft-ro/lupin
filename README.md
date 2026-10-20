@@ -149,7 +149,11 @@ The module needs these secret files:
   its environment. Skip this option if the coordinator has no password.
 - `signingKeysDir`: a directory with one command-queue key for each worker.
   The file name is the worker name and the file holds that worker's key.
-  The module reads the key of the local machine from this directory.
+  `lupin serve` and `fleet-run` read every key. `lupin agent` sees only the
+  key of the local machine; the module hides the rest of the directory.
+- `credentialsFile`: a JSON file that maps a repository name to its GitHub
+  token file, for `LUPIN_LOOP_CREDENTIALS_FILE`. The agent, the dashboard,
+  and `fleet-run` read it.
 
 The default `serve.bind` is `127.0.0.1` and cannot be `0.0.0.0`. The default
 `serve.port` is 8788. The default package is the flake's
@@ -160,7 +164,12 @@ Without `fleetConfig`, the module writes `/etc/lupin/fleet.json` from the
 that file.
 
 The module also writes the sudo rules for the loop control path. The loop
-user can start and stop `lupin-*` units and the `delegation-loop` timer.
+user can start and stop `lupin-*` units and the `delegation-loop` timer. The
+`systemd-run` rule names a wrapper, not `systemd-run` itself: the wrapper
+accepts only the options Lupin uses and the Lupin command, so the loop user
+cannot pass `--uid=0` or `--property=User=root`. Set `role = "dispatch"` to
+set `LUPIN_LOOP_COORDINATOR_ONLY` for `lupin serve` and `fleet-run`, which
+hides the local loop start control.
 
 ## Dashboard
 

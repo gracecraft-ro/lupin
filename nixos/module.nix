@@ -60,10 +60,160 @@ let
     LoadCredential = [ "redis-password:${toString cfg.redis.passwordFile}" ];
   };
 
-  # The command queue signing keys are read from this directory. Mount it
-  # read-only; the service user never writes a key.
+  # The command queue signing keys are read from this directory. Serve and
+  # `fleet-run` sign commands for every worker; the agent only needs the key
+  # of this worker. Mount the keys read-only; the service user never writes
+  # one.
   signingKeyMount = lib.optionalAttrs (cfg.signingKeysDir != null) {
     BindReadOnlyPaths = [ (toString cfg.signingKeysDir) ];
+  };
+
+  agentSigningKeyMount = lib.optionalAttrs (cfg.signingKeysDir != null) {
+    # The tmpfs hides the other workers' keys; the bind makes this worker's
+    # key readable. Binding the file alone would leave its siblings visible.
+    TemporaryFileSystem = [ "${toString cfg.signingKeysDir}:ro" ];
+    BindReadOnlyPaths = [ "${toString cfg.signingKeysDir}/${config.networking.hostName}" ];
+  };
+
+  # `systemd-run` can become root with `--uid=0` or `--property=User=root`,
+  # so the NOPASSWD rule names this validator, not `systemd-run`. It accepts
+  # only the options Lupin passes and only the Lupin command.
+  systemdRunWrapper = pkgs.writeShellScript "lupin-systemd-run" ''
+    set -eu
+
+    systemd_run="${pkgs.systemd}/bin/systemd-run"
+    lupin="${package}/bin/lupin"
+    allowed_user="${cfg.user}"
+    allowed_group="${cfg.group}"
+    code_dir="$(${pkgs.coreutils}/bin/realpath -m -- "${cfg.codeDir}")"
+
+    fail() {
+      printf 'lupin-systemd-run: %s\n' "$*" >&2
+      exit 1
+    }
+
+    check_unit() {
+      [ -n "$1" ] || fail "empty unit name"
+      case "$1" in
+        *[!A-Za-z0-9_.@:-]*) fail "invalid unit name: $1" ;;
+      esac
+    }
+
+    check_credential_name() {
+      [ -n "$1" ] || fail "empty credential name"
+      case "$1" in
+        *[!A-Za-z0-9_.-]*) fail "invalid credential name: $1" ;;
+      esac
+    }
+
+    check_working_directory() {
+      [ -n "$1" ] || fail "empty working directory"
+      local resolved
+      resolved="$(${pkgs.coreutils}/bin/realpath -m -- "$1")"
+      case "$resolved" in
+        "$code_dir" | "$code_dir"/*) ;;
+        *) fail "working directory is outside $code_dir: $1" ;;
+      esac
+    }
+
+    original=("$@")
+    seen_command=0
+    after_separator=0
+
+    while [ "$#" -gt 0 ]; do
+      arg="$1"
+      shift
+
+      if [ "$after_separator" = 1 ]; then
+        if [ "$seen_command" = 0 ]; then
+          [ "$arg" = "$lupin" ] || fail "command must be $lupin"
+          seen_command=1
+        fi
+        continue
+      fi
+
+      case "$arg" in
+        --)
+          after_separator=1
+          ;;
+        --collect)
+          ;;
+        --unit=*)
+          check_unit "''${arg#--unit=}"
+          ;;
+        --uid=*)
+          [ "''${arg#--uid=}" = "$allowed_user" ] || fail "refusing --uid"
+          ;;
+        --gid=*)
+          [ "''${arg#--gid=}" = "$allowed_group" ] || fail "refusing --gid"
+          ;;
+        --property=*)
+          property="''${arg#--property=}"
+          [ "$property" != "''${property%%=*}" ] || fail "property without a value: $arg"
+          key="''${property%%=*}"
+          value="''${property#*=}"
+          case "$key" in
+            KillMode | TimeoutStopSec | Restart | RestartSec | StartLimitIntervalSec | StartLimitBurst | OOMPolicy | MemoryMax)
+              ;;
+            LoadCredential)
+              name="''${value%%:*}"
+              source="''${value#"$name:"}"
+              [ "$name" != "$value" ] || fail "LoadCredential needs name:path"
+              check_credential_name "$name"
+              [ -n "$source" ] || fail "LoadCredential needs a path"
+              ;;
+            *)
+              fail "refusing property: $key"
+              ;;
+          esac
+          ;;
+        --setenv=*)
+          assignment="''${arg#--setenv=}"
+          [ "$assignment" != "''${assignment%%=*}" ] || fail "setenv without a value: $arg"
+          name="''${assignment%%=*}"
+          case "$name" in
+            PATH | HOME | ANTHROPIC_BASE_URL | HEADROOM_TELEMETRY_DISABLED | RTK_TELEMETRY_DISABLED | CODEGRAPH_TELEMETRY | DO_NOT_TRACK | LUPIN_*)
+              ;;
+            *)
+              fail "refusing setenv: $name"
+              ;;
+          esac
+          ;;
+        --working-directory=*)
+          check_working_directory "''${arg#--working-directory=}"
+          ;;
+        --working-directory)
+          [ "$#" -gt 0 ] || fail "--working-directory needs a path"
+          check_working_directory "$1"
+          shift
+          ;;
+        --timer-property=AccuracySec=*)
+          ;;
+        --on-active=* | --on-calendar=*)
+          ;;
+        *)
+          fail "refusing argument: $arg"
+          ;;
+      esac
+    done
+
+    [ "$seen_command" = 1 ] || fail "missing the $lupin command"
+    exec "$systemd_run" "''${original[@]}"
+  '';
+
+  # The agent, the dashboard, and `fleet-run` start loop units with the
+  # validated `systemd-run` wrapper and read the per-repository token map.
+  controllerEnvironment = {
+    LUPIN_SYSTEMD_RUN = "${systemdRunWrapper}";
+  }
+  // lib.optionalAttrs (cfg.credentialsFile != null) {
+    LUPIN_LOOP_CREDENTIALS_FILE = toString cfg.credentialsFile;
+  };
+
+  # A dispatch-only machine does not run loops itself. The dashboard uses
+  # this to hide the loop start control.
+  dispatchEnvironment = lib.optionalAttrs (cfg.role == "dispatch") {
+    LUPIN_LOOP_COORDINATOR_ONLY = "1";
   };
 
   commonServiceConfig = {
@@ -71,8 +221,7 @@ let
     Group = cfg.group;
   }
   // stateDirectory
-  // credentials
-  // signingKeyMount;
+  // credentials;
 in
 {
   options.services.lupin = {
@@ -165,8 +314,18 @@ in
       default = null;
       description = ''
         A directory with one command-queue signing key for each worker. Each
-        file name is a worker name. The module binds the directory into the
-        units as a read-only path.
+        file name is a worker name. `lupin serve` and `fleet-run` get the
+        directory read-only. The agent gets only the key of this machine.
+      '';
+    };
+
+    credentialsFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        A JSON object that maps a repository name to the path of its GitHub
+        token file. The agent, the dashboard, and `fleet-run` read it as
+        `LUPIN_LOOP_CREDENTIALS_FILE`.
       '';
     };
 
@@ -257,8 +416,10 @@ in
     systemd.tmpfiles.rules = [
       "d ${cfg.stateDir} 0750 ${cfg.user} ${cfg.group} -"
       "d ${cfg.codeDir} 0750 ${cfg.user} ${cfg.group} -"
-      # `lupin schedule` writes its timer override here.
+      # `lupin schedule` writes its timer override here. The module links the
+      # directory into systemd so a daemon-reload picks the override up.
       "d ${cfg.stateDir}/timer-dropin.d 0750 ${cfg.user} ${cfg.group} -"
+      "L+ /etc/systemd/system/delegation-loop.timer.d - - - - ${cfg.stateDir}/timer-dropin.d"
     ];
 
     # When no existing file is given, the module writes the fleet location.
@@ -285,8 +446,8 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      environment = commonEnvironment;
-      serviceConfig = commonServiceConfig // {
+      environment = commonEnvironment // controllerEnvironment;
+      serviceConfig = commonServiceConfig // agentSigningKeyMount // {
         ExecStart = "${package}/bin/lupin agent";
         Restart = "always";
         RestartSec = 5;
@@ -318,8 +479,8 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      environment = commonEnvironment;
-      serviceConfig = commonServiceConfig // {
+      environment = commonEnvironment // controllerEnvironment // dispatchEnvironment;
+      serviceConfig = commonServiceConfig // signingKeyMount // {
         ExecStart = "${package}/bin/lupin serve --bind ${cfg.serve.bind} --port ${toString cfg.serve.port}";
         Restart = "always";
         RestartSec = 5;
@@ -332,8 +493,8 @@ in
       description = "Dispatch enabled Lupin loops to fleet workers";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      environment = commonEnvironment;
-      serviceConfig = commonServiceConfig // {
+      environment = commonEnvironment // controllerEnvironment // dispatchEnvironment;
+      serviceConfig = commonServiceConfig // signingKeyMount // {
         Type = "oneshot";
         ExecStart = "${package}/bin/lupin fleet-run";
       };
@@ -350,13 +511,15 @@ in
 
     # This is the loop's control path: `loop_runtime.py` starts loop units and
     # controls the `delegation-loop` timer with `sudo -n`. The rules name each
-    # command and the `lupin-*` and `delegation-loop.*` units only.
+    # command and the `lupin-*` and `delegation-loop.*` units only. The
+    # `systemd-run` entry is the validating wrapper above; `systemd-run`
+    # itself never gets NOPASSWD.
     security.sudo.extraRules = [
       {
         users = [ cfg.user ];
         commands = [
           {
-            command = "/run/current-system/sw/bin/systemd-run *";
+            command = "${systemdRunWrapper}";
             options = [ "NOPASSWD" ];
           }
           {

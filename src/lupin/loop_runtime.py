@@ -271,6 +271,11 @@ def _sudo_argv(*args: str) -> list[str]:
         if NIXOS_SUDO_WRAPPER.is_file() and os.access(NIXOS_SUDO_WRAPPER, os.X_OK)
         else "sudo"
     )
+    # The module grants NOPASSWD to a validating wrapper, never to
+    # systemd-run itself, because systemd-run can change the unit user.
+    wrapper = os.environ.get("LUPIN_SYSTEMD_RUN")
+    if wrapper and args and args[0] == "systemd-run":
+        return [executable, "-n", wrapper, *args[1:]]
     return [executable, "-n", *args]
 
 
@@ -572,6 +577,7 @@ def _service_environment() -> list[str]:
         "LUPIN_LOOP_DEFAULT_REPOS", "LUPIN_LOOP_CLAUDE_MAX_CONCURRENT",
         "LUPIN_LOOP_CREDENTIALS_FILE", "LUPIN_LOOP_REDIS_PASSWORD_FILE",
         "LUPIN_LOOP_PROMPT_FILE", "LUPIN_LOOP_PATH", "ANTHROPIC_BASE_URL",
+        "LUPIN_SYSTEMD_RUN",
         "HEADROOM_TELEMETRY_DISABLED", "RTK_TELEMETRY_DISABLED", "CODEGRAPH_TELEMETRY",
         "DO_NOT_TRACK",
     )
