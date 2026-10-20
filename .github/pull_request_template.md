@@ -11,7 +11,7 @@ The problem that this change fixes, or the behavior that it adds.
 ## Checks
 
 - [ ] `nix flake check` passes. Result:
-- [ ] `nix shell nixpkgs#python3Packages.pytest -c pytest -v` passes. Result:
+- [ ] `nix develop -c python3 -m pytest -v` passes. Result:
 - [ ] The branch contains the current `main`.
 - [ ] I ran the changed path and observed the result.
 

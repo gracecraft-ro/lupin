@@ -562,8 +562,8 @@ per-machine limit or add controls that the current code cannot support.
 Full gate (the repo's gate, used by the merge rules):
 
 ```
-nix flake check                                    # build + test, all systems
-nix shell nixpkgs#python3Packages.pytest -c pytest -v
+nix flake check                                    # build + test, current system
+nix develop -c python3 -m pytest -v
 ```
 
 `nix develop <dir> -c <command>` runs `<command>` in the current directory. It

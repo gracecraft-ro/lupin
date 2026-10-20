@@ -1,7 +1,7 @@
 # Contribute to Lupin
 
 Lupin is a Python program with a Nix flake. This guide is for a person who
-changes the code. It is not the agent loop rules; those are in `AGENTS.md`.
+changes the code. It is not the agent loop rules. Those are in `AGENTS.md`.
 
 ## Set up
 
@@ -12,7 +12,7 @@ changes the code. It is not the agent loop rules; those are in `AGENTS.md`.
    nix develop
    ```
 
-   The shell has Python, `pytest`, `redis-server`, and the runtime tools.
+   The shell has Python, `pytest`, and `redis-server`.
 3. Run one test file:
 
    ```sh
@@ -25,7 +25,7 @@ Every pull request must pass the repo gate:
 
 ```sh
 nix flake check
-nix shell nixpkgs#python3Packages.pytest -c pytest -v
+nix develop -c python3 -m pytest -v
 ```
 
 `nix flake check` builds the package and runs the tests in the Nix sandbox.
@@ -47,7 +47,8 @@ It checks only the host system. Put the exact result in the pull request.
   An approval of an older commit does not count.
 - The branch must contain the current `main`. Merge `origin/main` into the
   branch; do not rebase.
-- A reviewer never merges. The owner merges.
+- A reviewer never merges. The owner merges. The orchestrator can also merge
+  when the four conditions in `AGENTS.md` rule 2 are true.
 - Fix each blocking finding and ask for a new review at the new head.
 
 ## Style

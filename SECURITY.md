@@ -10,9 +10,8 @@ Use GitHub private vulnerability reporting:
 2. Select **Advisories**.
 3. Select **Report a vulnerability**.
 
-The report is visible only to the maintainers. If the form is not available,
-open a public issue that asks the owner for a private channel. Do not include
-the details in that issue.
+The report is visible only to the maintainers. The form is enabled for this
+repository.
 
 ## In scope
 
