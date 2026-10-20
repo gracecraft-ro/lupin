@@ -212,7 +212,7 @@ snapshot, so there is no `benchmark-snapshot:<machine>` variant.
 {
   "fetched_at": "2026-10-08T04:20:00+00:00",
   "live": true,
-  "source": "omp -p opencode-go/step-5-preview-free thinking=max, web search",
+  "source": "omp -p opencode-go/beam-free thinking=xhigh, web search",
   "scores": [
     {"id": "qwen3.7-max", "score": 29, "scale": "Artificial Analysis Intelligence Index, 0-100",
      "source": "https://artificialanalysis.ai/models/qwen3-7-max", "as_of": "2026-10-08",
@@ -245,8 +245,8 @@ window (`benchmark_fetch.CACHE_FRESH_SECONDS`), not by the key expiring;
 the same "stored timestamp, not Redis TTL" convention as `machine:<name>`'s
 offline detection above.
 
-The lookup worker is a free opencode-go model (`step-5-preview-free`) run
-through `omp -p` with `--thinking max` and two tools, `read` and
+The lookup worker is a free opencode-go model (`beam-free`) run
+through `omp -p` with `--thinking xhigh` and two tools, `read` and
 `web_search`: `read` fetches each model's own `artificialanalysis.ai`
 page, which states the Intelligence Index in plain text and costs no
 search quota, and `web_search` is the fallback for a model the site does
