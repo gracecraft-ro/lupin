@@ -154,6 +154,74 @@ class ChecksTests(unittest.TestCase):
             "pass",
         )
 
+    def test_zero_completed_at_rerun_replaces_old_failure(self):
+        # `gh` sends the zero time for a check that has not completed; the
+        # re-run's real `startedAt` must still win over the old FAILURE.
+        self.assertEqual(
+            self._checks(
+                [
+                    {
+                        "workflowName": "ci",
+                        "name": "tests",
+                        "conclusion": "FAILURE",
+                        "completedAt": "2026-01-01T00:00:00Z",
+                    },
+                    {
+                        "workflowName": "ci",
+                        "name": "tests",
+                        "status": "IN_PROGRESS",
+                        "conclusion": "",
+                        "startedAt": "2026-01-02T00:00:00Z",
+                        "completedAt": "0001-01-01T00:00:00Z",
+                    },
+                ]
+            ),
+            "pending",
+        )
+
+    def test_zero_completed_at_rerun_replaces_old_success(self):
+        self.assertEqual(
+            self._checks(
+                [
+                    {
+                        "workflowName": "ci",
+                        "name": "tests",
+                        "conclusion": "SUCCESS",
+                        "completedAt": "2026-01-01T00:00:00Z",
+                    },
+                    {
+                        "workflowName": "ci",
+                        "name": "tests",
+                        "status": "IN_PROGRESS",
+                        "conclusion": "",
+                        "startedAt": "2026-01-02T00:00:00Z",
+                        "completedAt": "0001-01-01T00:00:00Z",
+                    },
+                ]
+            ),
+            "pending",
+        )
+
+    def test_status_context_dedupes_by_context(self):
+        # A StatusContext entry has `context` instead of `name`.
+        self.assertEqual(
+            self._checks(
+                [
+                    {
+                        "context": "ci/verify",
+                        "state": "FAILURE",
+                        "createdAt": "2026-01-01T00:00:00Z",
+                    },
+                    {
+                        "context": "ci/verify",
+                        "state": "SUCCESS",
+                        "createdAt": "2026-01-02T00:00:00Z",
+                    },
+                ]
+            ),
+            "pass",
+        )
+
     def test_same_name_in_different_workflows_is_not_deduped(self):
         self.assertEqual(
             self._checks(

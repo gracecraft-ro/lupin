@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 import redis
 
@@ -165,16 +166,36 @@ def _merge(pr: dict) -> str:
     return "unknown"
 
 
-def _check_time(check: dict) -> str:
-    return _when(check.get("completedAt")) or _when(check.get("startedAt"))
+def _check_time(check: dict) -> datetime | None:
+    """Return the check's newest real time, or `None` when it has none.
+
+    `gh` reports `completedAt` as `"0001-01-01T00:00:00Z"` for a check that
+    has not completed, so the sentinel must not outrank a re-run's real
+    `startedAt`. The precedence is `startedAt`, then `completedAt`, then
+    `createdAt`; an empty, zero, or unparsable value counts as no time.
+    """
+    for field in ("startedAt", "completedAt", "createdAt"):
+        value = str(check.get(field) or "").strip()
+        if not value or value.startswith("0001-01-01T"):
+            continue
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    return None
 
 
 def _dedupe_checks(rollup: list) -> list:
-    """Keep the newest entry per `(workflowName, name)`.
+    """Keep the newest entry per `(workflowName, name or context)`.
 
     `statusCheckRollup` can hold an older FAILURE and a newer SUCCESS for
-    the same check. Entries without a name cannot be grouped; they are
-    kept as they are. Ties and entries with no time keep the last one.
+    the same check. A `StatusContext` entry has `context` instead of
+    `name`/`workflowName`, so it groups by its `context`. Entries with
+    neither cannot be grouped; they are kept as they are. Ties keep the
+    last one, and so do entries that have no time at all.
     """
     newest: dict[tuple[str, str], dict] = {}
     unnamed: list = []
@@ -182,12 +203,23 @@ def _dedupe_checks(rollup: list) -> list:
         if not isinstance(check, dict):
             unnamed.append(check)
             continue
-        key = (check.get("workflowName") or "", check.get("name") or "")
+        key = (
+            check.get("workflowName") or "",
+            check.get("name") or check.get("context") or "",
+        )
         if key == ("", ""):
             unnamed.append(check)
             continue
         current = newest.get(key)
-        if current is None or _check_time(check) >= _check_time(current):
+        if current is None:
+            newest[key] = check
+            continue
+        check_time = _check_time(check)
+        current_time = _check_time(current)
+        if check_time is None:
+            if current_time is None:
+                newest[key] = check
+        elif current_time is None or check_time >= current_time:
             newest[key] = check
     return [*newest.values(), *unnamed]
 
