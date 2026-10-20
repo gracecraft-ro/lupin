@@ -53,12 +53,12 @@
       ],
       "tier1": [
         {
-          "model": "opencode-go/glm-5.3",
+          "model": "opencode-go/deepseek-v4.1-flash",
           "effort": "high"
         },
         {
-          "model": "sonnet",
-          "effort": "medium"
+          "model": "haiku",
+          "effort": "xhigh"
         },
         {
           "model": "sonnet",
@@ -88,7 +88,7 @@
     "tiers": {
       "tier1": [
         {
-          "model": "opencode-go/glm-5.3",
+          "model": "opencode-go/deepseek-v4.1-flash",
           "effort": "high"
         },
         {
@@ -126,7 +126,7 @@
         }
       ]
     },
-    "note": "No tier0 route. Alconost reports provider-family scores, not exact model-version scores. Gemini and GPT score higher than Claude but have no provider config here, so Claude is the best routed option for tier1/2. DeepSeek ranks fourth of five in the sample; this does not verify any exact DeepSeek model. The sample is general-purpose; its separate subtitle benchmark found different leaders."
+    "note": "Missing GPT"
   },
   "prose": {
     "source": "Owner order (2026-10-19) for digests, plus LMArena Creative Writing leaderboard (BenchLeader snapshot, 2026-09-29) and EQ-Bench Creative Writing (Sept 2026) for tier1",
@@ -144,8 +144,8 @@
       ],
       "tier1": [
         {
-          "model": "sonnet",
-          "effort": "high"
+          "model": "haiku",
+          "effort": "xhigh"
         }
       ],
       "tier2": [
@@ -174,7 +174,7 @@
         },
         {
           "model": "sonnet",
-          "effort": "high"
+          "effort": "xhigh"
         }
       ],
       "tier2": [
