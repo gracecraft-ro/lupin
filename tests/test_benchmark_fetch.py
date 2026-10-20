@@ -147,6 +147,11 @@ class BuildArgvTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--max-time") + 1], str(int(benchmark_fetch.SHARD_TIMEOUT)))
         self.assertEqual(argv[-1], "a prompt")
 
+    def test_the_lookup_worker_is_a_free_model(self):
+        # The lookup is a daily job. A paid model turns it into a cost leak.
+        # The 2026-10-20 model snapshot lists this ID at $0.00 input and output.
+        self.assertEqual(benchmark_fetch.OMP_MODEL, "opencode-go/beam-free")
+
     def test_argv_grants_no_shell_or_edit_tools(self):
         argv = benchmark_fetch._build_argv("a prompt")
         joined = " ".join(argv)
