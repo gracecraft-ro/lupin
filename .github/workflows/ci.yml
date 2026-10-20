@@ -15,7 +15,7 @@ name: CI
 #
 # GitHub's default Actions event policy blocks `pull_request_target` in public
 # repositories from 2026-11-02 unless the owner configures an applicable
-# policy under Settings -> Actions -> General. The loop token cannot read the
+# policy under Settings -> Actions -> Policies. The loop token cannot read the
 # policy endpoints (HTTP 403), so the owner must confirm the policy allows it.
 # This is a note only; the trigger below and the behavior do not change.
 on:
@@ -46,7 +46,6 @@ jobs:
         github.event.pull_request.head.repo.full_name
       )
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
     env:
       # The self-hosted runner is NixOS and has Nix. It may not enable flakes
       # for a non-interactive shell, so set the feature here for every leg.
@@ -88,5 +87,10 @@ jobs:
       - name: Check system
         run: test "$(nix eval --raw --impure --expr builtins.currentSystem)" = "${{ matrix.system }}"
 
+      # Only the self-hosted runner needs a cap. A hosted leg may run long
+      # (the aarch64-darwin check took nearly an hour), and its job keeps the
+      # default GitHub timeout. The self-hosted runner has no such default, so
+      # cap its check so a stuck build cannot hold ralpha forever.
       - name: nix flake check
+        timeout-minutes: ${{ matrix.system == 'aarch64-linux' && 60 || 360 }}
         run: nix flake check
