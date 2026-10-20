@@ -220,19 +220,17 @@ issue. Work that is already running continues.
 ## Install skills on loop hosts
 
 The `skills/` tree is the source. Installing the Lupin command does not
-install these files. A Nix host flake maps the five required directories from
+install these files. A Nix host flake maps the six required directories from
 its pinned Lupin input into each runner's skill set. A rebuild creates or
 updates the links; do not copy the files by hand. The `ui-pressure-test`
-skill is required on any host that serves a repo with a web UI. Add it to
-those hosts.
+skill is required on every loop host.
 
 - Claude Code: `~/.claude/skills/`
 - Pi: `~/.pi/agent/skills/`
 - OMP: `~/.omp/agent/skills/`
 
-Add all five required names to each host's skill set, including any curated
-subset. Add `ui-pressure-test` to each host that serves a repo with a web UI.
-After a rebuild, check that every required `SKILL.md` is readable:
+Add all six required names to each host's skill set, including any curated
+subset. After a rebuild, check that every required `SKILL.md` is readable:
 
 ```sh
 for root in "$HOME/.claude/skills" "$HOME/.pi/agent/skills" "$HOME/.omp/agent/skills"; do
@@ -246,9 +244,8 @@ done
 ```
 
 Start a new agent session and confirm it loads `/delegation-loop`, `/triage`,
-`/ship`, `/code-review`, and `/handoff`. If the task needs UI pressure testing, also
-confirm it loads `/ui-pressure-test`. Do not start a worker if a skill it
-needs is missing.
+`/ship`, `/code-review`, `/handoff`, and `/ui-pressure-test`. Do not start a
+worker if a skill it needs is missing.
 
 ## Read the backlog
 
@@ -736,7 +733,7 @@ younger than 4 hours means a director is active. Do not start a second one.
 A run can take 4 hours or more. The director writes the `running` event again
 before 4 hours pass. This keeps the guard true. If the orchestrator cannot see
 the director's live session, it does not treat an old `running` event as
-inactive. `lupin machines` and `herdr agent list` show live sessions. If the
+inactive. `lupin loops` and `herdr agent list` show live sessions. If the
 ledger exits 3, do not start a run. Report it and take the next queue item.
 
 Record the start:
@@ -771,9 +768,9 @@ Dispatch `/ui-pressure-test` as the only director for that repo. The test
 agent stays read-only for source code, has its own browser data, and writes
 prioritized tickets. The test agent also writes a coverage report. The report
 has Result, Coverage, Tickets, Not tested, and Risks. Write the report to the
-QA task issue. If there is no QA task issue, write it to
-`./evidence/<issue-number>/report.md`. After the agent posts the tickets,
-record the end:
+QA task issue. If there is no QA task issue, put the coverage report in the
+handoff, and link the handoff entry with `--evidence`. After the agent posts
+the tickets, record the end:
 
 ```sh
 lupin ledger append OWNER/REPO --event pressure-test --status done \
