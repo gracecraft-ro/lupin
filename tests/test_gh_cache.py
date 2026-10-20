@@ -556,3 +556,29 @@ def test_unset_setting_never_fetches_when_redis_is_down(closed_port, monkeypatch
     assert data is None
     assert "LUPIN_GH_CANONICAL_FETCHER is unset" in error
     fetch.assert_not_called()
+
+
+def test_a_refused_login_is_reported_once(auth_redis_port, monkeypatch, capsys):
+    """Issue #115: a refused login is an answer, not an empty cache.
+
+    The read still falls back to "no cache" (the caller must keep working),
+    but the user sees one line that names the setting.
+    """
+    monkeypatch.delenv("LUPIN_GH_CANONICAL_FETCHER")
+    monkeypatch.setattr(gh_cache, "_AUTH_WARNED", False)
+    monkeypatch.setattr(machines, "hostname", lambda: "worker")
+    connection = {
+        "redis_host": "127.0.0.1",
+        "redis_port": auth_redis_port,
+        "redis_password": "wrong",
+    }
+
+    for _ in range(2):
+        data, error = gh_cache.cached_gh_json(
+            "o", "r", "issues:open", lambda: ([], None), connection=connection
+        )
+        assert data is None and "unreachable" in error
+
+    err = capsys.readouterr().err
+    assert err.count("Redis refused the GitHub cache login") == 1
+    assert "--redis-password" in err
