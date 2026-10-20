@@ -252,6 +252,66 @@ def pick_model() -> tuple[str, str]:
     return model, choice["effort"]
 
 
+FALLBACK_MODEL = "openai-codex/gpt-5.6-luna"
+
+
+def _quota_error(error: str) -> bool:
+    lowered = error.lower()
+    return "429" in lowered or "quota" in lowered or "rate limit" in lowered or "rate_limit" in lowered
+
+
+def _run_digest(model: str, effort: str, prompt: str) -> str:
+    argv = _argv(model, effort, prompt)
+    try:
+        with tempfile.TemporaryDirectory() as cwd:
+            proc = subprocess.run(
+                argv, capture_output=True, text=True, timeout=LLM_TIMEOUT_S, cwd=cwd
+            )
+    except FileNotFoundError:
+        raise DigestError(f"{argv[0]} not found") from None
+    except subprocess.TimeoutExpired:
+        raise DigestError(f"{argv[0]} timed out after {LLM_TIMEOUT_S:.0f}s") from None
+    except (OSError, ValueError) as exc:
+        raise DigestError(f"{argv[0]} could not start: {exc}") from None
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()[:300]
+        message = f"{argv[0]} exited {proc.returncode}: {detail}"
+        if _quota_error(message):
+            raise DigestBlocked(message)
+        raise DigestError(message)
+    text = proc.stdout.strip()
+    fenced = _FENCE_RE.match(text)
+    if fenced:
+        text = fenced.group(1).strip()
+    if not text:
+        raise DigestError(f"{argv[0]} gave no text")
+    return text
+
+
+def make_digest(repo: str, name: str, raw: str) -> tuple[str, str]:
+    """Return (digest markdown, model). Raise `DigestError` on any failure."""
+    try:
+        model, effort = pick_model()
+    except DigestBlocked:
+        model, effort = FALLBACK_MODEL, "high"
+    cut = raw.encode("utf-8")[:RAW_MAX_BYTES].decode("utf-8", errors="ignore")
+    prompt = PROMPT.format(
+        repo=repo, name=name, raw=cut, counts=count_shipped(raw), max_images=MAX_IMAGES,
+        window=window_label(raw),
+    )
+    if "/" not in model:
+        try:
+            text = _run_digest(model, effort, prompt)
+        except DigestError:
+            # A Claude alias can be unavailable or out of quota; use the authenticated Codex login.
+            model = FALLBACK_MODEL
+            effort = "high"
+            text = _run_digest(model, effort, prompt)
+    else:
+        text = _run_digest(model, effort, prompt)
+    return limit_images(text, raw), model
+
+
 def _argv(model: str, effort: str, prompt: str) -> list[str]:
     """A `provider/model` selector runs with `omp`. A bare name is a Claude alias.
 
@@ -259,8 +319,8 @@ def _argv(model: str, effort: str, prompt: str) -> list[str]:
     model gets no tools: no built-in tools, no MCP servers, no extensions, no skills.
     `--auto-approve` is not used, because no tool call should happen.
     `omp` has no flag that turns MCP off. It may still connect MCP servers, but with
-    no `--auto-approve` a tool call has no one to approve it. `route` gives a Claude
-    alias for this category today, so the `omp` branch is not used yet.
+    no `--auto-approve` a tool call has no one to approve it. `omp` runs the
+    Codex fallback when a Claude model cannot run.
 
     `claude --tools` takes a list. A flag must follow `--tools ""`, or `claude`
     reads the prompt as a tool name and fails with "Input must be provided".
@@ -277,36 +337,6 @@ def _argv(model: str, effort: str, prompt: str) -> list[str]:
     ]
 
 
-def make_digest(repo: str, name: str, raw: str) -> tuple[str, str]:
-    """Return (digest markdown, model). Raise `DigestError` on any failure."""
-    model, effort = pick_model()
-    cut = raw.encode("utf-8")[:RAW_MAX_BYTES].decode("utf-8", errors="ignore")
-    prompt = PROMPT.format(
-        repo=repo, name=name, raw=cut, counts=count_shipped(raw), max_images=MAX_IMAGES,
-        window=window_label(raw),
-    )
-    argv = _argv(model, effort, prompt)
-    try:
-        with tempfile.TemporaryDirectory() as cwd:
-            proc = subprocess.run(
-                argv, capture_output=True, text=True, timeout=LLM_TIMEOUT_S, cwd=cwd
-            )
-    except FileNotFoundError:
-        raise DigestError(f"{argv[0]} not found") from None
-    except subprocess.TimeoutExpired:
-        raise DigestError(f"{argv[0]} timed out after {LLM_TIMEOUT_S:.0f}s") from None
-    except (OSError, ValueError) as exc:  # No permission, argument too long, a NUL byte in the prompt.
-        raise DigestError(f"{argv[0]} could not start: {exc}") from None
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()[:300]
-        raise DigestError(f"{argv[0]} exited {proc.returncode}: {detail}")
-    text = proc.stdout.strip()
-    fenced = _FENCE_RE.match(text)
-    if fenced:
-        text = fenced.group(1).strip()
-    if not text:
-        raise DigestError(f"{argv[0]} gave no text")
-    return limit_images(text, raw), model
 
 
 def _publish(client, machine: str, repo: str, name: str, raw: str, **fields) -> dict:

@@ -590,7 +590,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("repo", nargs="?", help="repository to run (omit with --all)")
     run_parser.add_argument("--all", action="store_true")
     run_parser.add_argument("--platform", choices=("claude", "omp"))
-    run_parser.add_argument("--provider", choices=("openai", "opencode-go"))
+    run_parser.add_argument("--provider", choices=("openai", "openai-codex", "opencode-go"))
     run_parser.add_argument("--model")
     run_parser.add_argument("--note")
     run_parser.add_argument("--resume", action="store_true")
@@ -618,7 +618,7 @@ def _build_parser() -> argparse.ArgumentParser:
     once_parser.add_argument("when", help="when to start or schedule the run")
     once_parser.add_argument("repos", nargs="*", help="repositories to run (default: enabled repos)")
     once_parser.add_argument("--platform", choices=("claude", "omp"))
-    once_parser.add_argument("--provider", choices=("openai", "opencode-go"))
+    once_parser.add_argument("--provider", choices=("openai", "openai-codex", "opencode-go"))
     once_parser.add_argument("--model")
     once_parser.add_argument("--note")
     once_parser.add_argument("--resume", action="store_true")
@@ -629,7 +629,7 @@ def _build_parser() -> argparse.ArgumentParser:
     enable_parser.add_argument(
         "--orchestrator",
         action="append",
-        help="eligible model: claude, openai/MODEL, or opencode-go/MODEL; repeat to add choices",
+        help="eligible model: claude, openai/MODEL, openai-codex/MODEL, or opencode-go/MODEL; repeat to add choices",
     )
     enable_parser.add_argument(
         "--clear-orchestrators",

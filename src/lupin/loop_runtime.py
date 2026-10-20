@@ -75,10 +75,10 @@ def validate_orchestrator(selector: str) -> str:
     if selector == "claude":
         return selector
     provider, separator, model = selector.partition("/")
-    if not separator or provider not in {"openai", "opencode-go"}:
-        raise LoopError("orchestrator must be claude, openai/MODEL, or opencode-go/MODEL")
-    validate_omp_options("omp", provider, model)
-    return selector
+    if not separator or provider not in {"openai", "openai-codex", "opencode-go"}:
+        raise LoopError("orchestrator must be claude, openai/MODEL, openai-codex/MODEL, or opencode-go/MODEL")
+    provider, model = validate_omp_options("omp", provider, model)
+    return f"{provider}/{model}"
 
 
 def orchestrator_profiles() -> dict[str, list[str]]:
@@ -132,8 +132,11 @@ def select_orchestrator(
             provider, model = "claude", None
             platform = "claude"
         else:
-            provider, model = selector.split("/", 1)[0], selector
             platform = "omp"
+            provider, _ = selector.split("/", 1)
+            quota_provider = "openai" if provider == "openai-codex" else provider
+            provider = quota_provider
+            model = selector
         entry = snapshot.get(provider)
         if not isinstance(entry, dict) or not quota_cache.is_fresh(entry, now):
             continue
@@ -146,7 +149,7 @@ def select_orchestrator(
             continue
         choices.append((headroom, -index, {
             "platform": platform,
-            "provider": provider if platform == "omp" else None,
+            "provider": ("openai-codex" if provider == "openai" else provider) if platform == "omp" else None,
             "model": model,
         }))
     if not choices:
@@ -681,9 +684,9 @@ def validate_omp_options(
     platform: str, provider: str | None, model: str | None
 ) -> tuple[str | None, str | None]:
     if provider is not None and (
-        not isinstance(provider, str) or provider not in {"openai", "opencode-go"}
+        not isinstance(provider, str) or provider not in {"openai", "openai-codex", "opencode-go"}
     ):
-        raise LoopError("OMP provider must be openai or opencode-go")
+        raise LoopError("OMP provider must be openai, openai-codex, or opencode-go")
     if model is not None and (
         not isinstance(model, str)
         or not model
@@ -693,6 +696,10 @@ def validate_omp_options(
         raise LoopError("invalid OMP model")
     if platform != "omp" and (provider is not None or model is not None):
         raise LoopError("--provider and --model require --platform omp")
+    if provider == "openai":
+        provider = "openai-codex"
+    if model and model.startswith("openai/"):
+        model = "openai-codex/" + model.split("/", 1)[1]
     return provider, model
 
 
@@ -2118,7 +2125,7 @@ def main(argv: list[str] | None = None) -> int:
     launch_parser.add_argument("--workspace", required=True)
     launch_parser.add_argument("--platform", required=True)
     launch_parser.add_argument("--prompt-file", required=True)
-    launch_parser.add_argument("--provider", choices=("openai", "opencode-go"))
+    launch_parser.add_argument("--provider", choices=("openai", "openai-codex", "opencode-go"))
     launch_parser.add_argument("--model")
     launch_parser.add_argument("--resume", action="store_true")
     wait_parser = sub.add_parser("wait-agent", help=argparse.SUPPRESS)

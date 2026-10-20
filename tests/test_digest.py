@@ -89,7 +89,7 @@ def test_make_digest_returns_text_with_a_code_fence_removed(monkeypatch):
 @pytest.mark.parametrize(
     "kwargs, message",
     [
-        ({"raises": FileNotFoundError()}, "claude not found"),
+        ({"raises": FileNotFoundError()}, "omp not found"),
         ({"raises": subprocess.TimeoutExpired("claude", 1)}, "timed out"),
         ({"returncode": 3, "stderr": "boom"}, "exited 3: boom"),
         ({"stdout": "  \n"}, "gave no text"),
@@ -101,6 +101,41 @@ def test_make_digest_raises_digest_error_for_each_model_failure(monkeypatch, kwa
     with pytest.raises(digest.DigestError, match=message):
         digest.make_digest("widgets", "20261010-120000-12h.md", RAW)
 
+
+def test_make_digest_falls_back_to_codex_when_claude_is_unavailable(monkeypatch):
+    monkeypatch.setattr(digest, "pick_model", lambda: ("sonnet", "high"))
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv[0])
+        if argv[0] == "claude":
+            raise FileNotFoundError()
+        return subprocess.CompletedProcess(argv, 0, "# Summary\n\nDone.", "")
+
+    monkeypatch.setattr(digest.subprocess, "run", run)
+
+    text, model = digest.make_digest("widgets", "20261010-120000-12h.md", RAW)
+
+    assert (text, model) == ("# Summary\n\nDone.", digest.FALLBACK_MODEL)
+    assert calls == ["claude", "omp"]
+
+
+def test_make_digest_uses_codex_when_claude_is_out_of_quota(monkeypatch):
+    monkeypatch.setattr(digest, "pick_model", lambda: ("sonnet", "high"))
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv[0])
+        if argv[0] == "claude":
+            return subprocess.CompletedProcess(argv, 1, "", "429 rate limit")
+        return subprocess.CompletedProcess(argv, 0, "# Summary\n\nDone.", "")
+
+    monkeypatch.setattr(digest.subprocess, "run", run)
+
+    text, model = digest.make_digest("widgets", "20261010-120000-12h.md", RAW)
+
+    assert (text, model) == ("# Summary\n\nDone.", digest.FALLBACK_MODEL)
+    assert calls == ["claude", "omp"]
 
 def test_pick_model_refuses_a_blocked_route_and_a_local_model(monkeypatch):
     monkeypatch.setattr(digest.route, "route", lambda *a, **k: {"model": "sonnet", "effort": "high", "wait_seconds": 60})

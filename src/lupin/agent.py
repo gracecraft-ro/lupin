@@ -190,9 +190,11 @@ def _validate_omp_options(params: dict, platform: str | None) -> list[str]:
     provider = params.get("provider")
     model = params.get("model")
     if provider is not None and (
-        not isinstance(provider, str) or provider not in {"openai", "opencode-go"}
+        not isinstance(provider, str) or provider not in {"openai", "openai-codex", "opencode-go"}
     ):
-        raise RejectedCommand("provider must be openai or opencode-go")
+        raise RejectedCommand("provider must be openai, openai-codex, or opencode-go")
+    if provider == "openai":
+        provider = "openai-codex"
     if model is not None and (
         not isinstance(model, str)
         or not model
@@ -200,6 +202,8 @@ def _validate_omp_options(params: dict, platform: str | None) -> list[str]:
         or any(ord(character) < 32 or ord(character) == 127 for character in model)
     ):
         raise RejectedCommand("invalid OMP model")
+    if model and model.startswith("openai/"):
+        model = "openai-codex/" + model.split("/", 1)[1]
     if (provider is not None or model is not None) and platform != "omp":
         raise RejectedCommand("provider and model require platform omp")
     flags = []
