@@ -180,6 +180,16 @@ def _iso(when: datetime) -> str:
     return when.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _window_time(when: datetime) -> str:
+    """The UTC time and the Los Angeles time, for the Window section.
+
+    The digest spec asks for the Los Angeles clock. The UTC value stays in
+    the file, so the record is unambiguous.
+    """
+    local = when.astimezone(CLOCK)
+    return f"{_iso(when)} ({local.strftime('%Y-%m-%d %H:%M %Z')})"
+
+
 def _in_window(value, start: datetime, end: datetime, *, closed_end: bool = True) -> bool:
     """Return True when `value` is in `[start, end]`, or in `[start, end)` if `closed_end` is False."""
     when = _parse(value)
@@ -250,7 +260,7 @@ def build_markdown(
         [] if forced or events is None
         else [e for e in events if _well_formed(e) and in_window(e.get("timestamp"))]
     )
-    lines = [f"# Debrief: {full_name}", "", "## Window", f"- From: {_iso(start)}", f"- To: {_iso(end)}"]
+    lines = [f"# Debrief: {full_name}", "", "## Window", f"- From: {_window_time(start)}", f"- To: {_window_time(end)}"]
     if period is None:
         lines.append("- Stop: forced, no handoff" if forced else "- Stop: normal")
     else:
