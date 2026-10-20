@@ -210,8 +210,8 @@ requests into `main`. The loop orchestrator can also merge, when the four
 conditions in `AGENTS.md` are true. A reviewer who did not write the change must
 approve it. `AGENTS.md` gives the full rules.
 
-By opening a pull request, you agree that the owner may license your change
-under the terms in `LICENSE` and under other terms.
+By opening a pull request, you agree to license your change under the terms in
+`LICENSE`.
 
 ## License
 
@@ -220,10 +220,12 @@ Lupin uses the Functional Source License, Version 1.1, MIT Future License
 
 - You may use, copy, change, and share Lupin for any purpose, except a
   competing use. A competing use is a commercial product or service that
-  replaces Lupin or does the same job.
+  replaces Lupin, does the same job, or substitutes for another product or
+  service we offer using Lupin.
 - Running Lupin for your own work is always allowed.
 - Two years after a version is released, that version also becomes available
   under the MIT license.
+- If this summary and `LICENSE` differ, `LICENSE` applies.
 
 `THIRD_PARTY_NOTICES.md` lists text from other projects. Those projects keep
 their own licenses.
