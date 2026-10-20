@@ -69,6 +69,10 @@ event. A blocked attempt is not a completed test.
 
 ## Build the coverage plan
 
+Start with all due rows from the register and the selected long-tail sample.
+Add new items that you find in the app. Do not drop a register item because
+this run will not test it.
+
 Inventory the app's user-facing tasks and visible modes before testing. Use the
 repo's docs and app navigation, then confirm the list against the running app.
 Include all relevant items, such as:
