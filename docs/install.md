@@ -11,8 +11,9 @@ Terms:
 - **Dispatch machine**: a machine that runs `lupin serve` and sends work to
   workers. It runs no loops. A fleet can have no dispatch machine.
 - **Host config**: the configuration of a machine, for example its NixOS
-  modules. This repo does not supply systemd units. The host config owns
-  them. The flake has an empty `nixosModules.default`.
+  modules. This repo supplies `nixosModules.default`, which writes the
+  systemd units and the service user. The host config sets the secrets and
+  the Redis location.
 
 ## Required tools
 
@@ -130,18 +131,24 @@ key of the target worker.
    openssl rand -hex 32
    ```
 
-2. Give the key of each worker to `lupin agent` on that worker. Use
+2. Give the key of each worker to `lupin agent` on that worker. Put the key
+   of the worker in the directory from step 3, or use
    `LUPIN_CMD_SIGNING_KEY` in the environment of that process only. Use a
    secret manager. Do not put the key in a command line. Do not put it in
-   a global environment file. `lupin agent` does not read
-   `LUPIN_CMD_SIGNING_KEYS_DIR`.
+   a global environment file.
 3. On each machine that sends commands to many workers (`lupin serve`,
    `lupin fleet-run`), put the keys in one directory. Use one file for each
    worker. The file name is the machine name of the worker. The machine
    name is the host name, unless the worker runs `lupin agent --machine
    NAME`.
-4. Make the directory and its files readable only by the user that runs
-   Lupin.
+4. On a worker, keep only the worker's own key, make the directory
+   root-owned with mode `0700`, and make each key file mode `0400`. The
+   agent loads its key as a systemd credential, and loop units cannot read
+   the directory (`InaccessiblePaths=`). On a machine that runs
+   `lupin serve` or `lupin fleet-run`, `cfg.user` must be able to read the
+   directory. With `role = "both"`, `serve` exposes the directory to
+   `cfg.user`; use `worker` and `dispatch` on separate machines when the
+   keys must stay apart.
 5. Set `LUPIN_CMD_SIGNING_KEYS_DIR` to the directory. As an alternative,
    load each file as a systemd credential with the worker name as the
    credential name. Lupin then reads it from `$CREDENTIALS_DIRECTORY`.
@@ -165,9 +172,27 @@ Do these steps on each worker. A worker must run Linux with systemd.
 3. Make the loop state directory. The default is
    `/var/lib/delegation-loop`. Set `LUPIN_LOOP_STATE_DIR` to use another
    directory. The loop user must be able to write it.
-4. Let the user that runs `lupin run` and `lupin agent` run `sudo -n
-   systemd-run` and `sudo -n systemctl` with no password. Lupin starts loop
-   units and timers with these commands.
+4. Let the user that runs `lupin run` and `lupin agent` control loop units
+   without a password. The NixOS module grants `NOPASSWD` to a validating
+   `systemd-run` wrapper and to the `systemctl` unit patterns, and sets
+   `LUPIN_SYSTEMD_RUN` to the wrapper. Do not add a `systemd-run *` rule:
+   it matches any arguments, including `--uid=0`, which lets the user run
+   a command as root.
+
+   A manual `sudo -u <user> lupin run ...` does not inherit the service
+   environment. Set `LUPIN_SYSTEMD_RUN` to the wrapper path in your shell
+   first; otherwise `lupin run` calls plain `sudo -n systemd-run`, which
+   the sudo rule denies. `systemctl show lupin-agent.service -p Environment`
+   prints the path that the module set. For example:
+
+   ```sh
+   sudo -u lupin env LUPIN_SYSTEMD_RUN=/nix/store/.../bin/lupin-systemd-run \
+     lupin run REPO
+   ```
+
+   The wrapper accepts a `LoadCredential` only for the `redis-password`
+   credential (with the configured password file as its source) and only
+   `lupin-` unit names.
 5. Set the loop user with `LUPIN_LOOP_USER`, or make sure that `USER` is
    set. Set `LUPIN_LOOP_GROUP` if the group is not `users`.
 6. Give each repo a GitHub token. Write the path of each token file in a
@@ -200,12 +225,10 @@ Do these steps on each worker. A worker must run Linux with systemd.
     (`LoadCredential=redis-password:PATH`).
 11. Run `lupin agent` as a long-running service. It polls the command queue
     and writes the periodic debriefs. The host config must supply the unit.
-    The command queue does not read the credential `redis-password`. Put
-    the password in `LUPIN_REDIS_PASSWORD` in the environment of this
-    process only. For example, a wrapper script reads
-    `$CREDENTIALS_DIRECTORY/redis-password` and then starts `lupin agent`.
-    Do not put the password in a global environment file or in a command
-    line.
+    Give the unit the credential `redis-password`
+    (`LoadCredential=redis-password:PATH`). You can also set
+    `LUPIN_REDIS_PASSWORD` in the environment of this process only. Do not
+    put the password in a global environment file or in a command line.
 12. Optional: run `lupin quota` at a fixed interval on each machine that
     has provider logins. The host config must supply the timer. Give the
     unit the credential `redis-password`.
