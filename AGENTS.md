@@ -163,7 +163,7 @@ choose among orchestrators, add a profile when you enable the repo. Repeat
 ```
 lupin enable my-repo --platform omp \
   --orchestrator openai/gpt-5 \
-  --orchestrator opencode-go/beam-free:xhigh \
+  --orchestrator opencode-go/deepseek-v4.1-flash:xhigh \
   --orchestrator claude
 ```
 
@@ -182,7 +182,7 @@ orchestrator for that run and skip profile routing. For OMP, use
 `--model MODEL`. `openai` and `openai/MODEL` remain accepted aliases for
 `openai-codex` and `openai-codex/MODEL`. For example, use
 `--model openai-codex/gpt-5.6-luna` or
-`--model opencode-go/beam-free:xhigh`. Set auto-compaction for the
+`--model opencode-go/deepseek-v4.1-flash:xhigh`. Set auto-compaction for the
 selected model in OMP, near 200k tokens. Lupin passes the model to OMP; it
 does not set or check OMP's compaction settings. These options work with
 `run` and `once`; future one-off runs keep them. `run --all` applies them to
@@ -360,12 +360,19 @@ If every model is blocked, the debrief shows with no digest and Lupin tries
 again later.
 
 `fetch-benchmarks` gets public benchmark scores. It does not run models.
-The lookup worker is a free opencode-go model (`beam-free`) run
-through `omp -p` with maximum thinking. It reads each model's own
-Artificial Analysis page directly -- the page states the Intelligence
-Index score in plain text, and one page read costs no search quota --
-and falls back to web search for a model the site does not list. The
-model list is split into calls of 6 models, up to 2 at a time, and each
+The lookup worker is picked at run time, not named in the code. It
+comes from the newest model snapshot: the opencode-go models whose
+input price and output price are both zero, sorted by id, up to four of
+them. Each one is tried in turn, and the first that answers does the
+work. When the snapshot has no zero-price model, the cheapest priced
+model is used instead, and one line says so. When there is no snapshot
+at all, the run stops with one line that says to run `lupin
+`fetch-models`. The worker runs through `omp -p` with maximum thinking.
+It reads each model's own Artificial Analysis page directly -- the page
+states the Intelligence Index score in plain text, and one page read costs
+no search quota -- and falls back to web search for a model the site does
+not list. The model list is split into calls of 6 models, up to 2 at a
+time, and each
 score is cached with its own timestamp, so a refresh asks only about the
 models whose score is missing, unscored, or older than 20 hours, and a
 failed call loses only its own models. A lookup that finds nothing does

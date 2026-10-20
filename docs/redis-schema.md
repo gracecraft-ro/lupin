@@ -212,7 +212,7 @@ snapshot, so there is no `benchmark-snapshot:<machine>` variant.
 {
   "fetched_at": "2026-10-08T04:20:00+00:00",
   "live": true,
-  "source": "omp -p opencode-go/beam-free thinking=xhigh, web search",
+  "source": "omp -p thinking=xhigh, web search + page reads",
   "scores": [
     {"id": "qwen3.7-max", "score": 29, "scale": "Artificial Analysis Intelligence Index, 0-100",
      "source": "https://artificialanalysis.ai/models/qwen3-7-max", "as_of": "2026-10-08",
@@ -245,8 +245,15 @@ window (`benchmark_fetch.CACHE_FRESH_SECONDS`), not by the key expiring;
 the same "stored timestamp, not Redis TTL" convention as `machine:<name>`'s
 offline detection above.
 
-The lookup worker is a free opencode-go model (`beam-free`) run
-through `omp -p` with `--thinking xhigh` and two tools, `read` and
+The lookup worker is picked at run time, not named in the code. It
+comes from the newest model snapshot: the opencode-go models whose
+input price and output price are both zero, sorted by id, up to four of
+them. Each one is tried in turn and the first that answers does the
+work, so a model that was replaced overnight does not sink the fetch.
+When the snapshot has no zero-price model, the cheapest priced model is
+used instead and one line says so. When there is no snapshot at all,
+the run stops with one line that says to run `lupin fetch-models`.
+The call is `omp -p` with `--thinking xhigh` and two tools, `read` and
 `web_search`: `read` fetches each model's own `artificialanalysis.ai`
 page, which states the Intelligence Index in plain text and costs no
 search quota, and `web_search` is the fallback for a model the site does

@@ -105,6 +105,21 @@ def read_shared_snapshot(**connection) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def latest_snapshot(**connection) -> dict | None:
+    """The newest model snapshot: the fleet's shared one first, then this
+    machine's file.
+
+    The shared copy is the one every machine sees, so it comes first.
+    The local file is the fallback for a machine that cannot reach Redis,
+    and it holds the same shape. `None` when there is neither.
+    """
+    shared = read_shared_snapshot(**connection)
+    if isinstance(shared, dict):
+        return shared
+    local = _read_local_snapshot()
+    return local if isinstance(local, dict) else None
+
+
 def publish_snapshot(data: dict, **connection) -> bool:
     """Publish this pull for the dashboard and other fleet machines."""
     try:

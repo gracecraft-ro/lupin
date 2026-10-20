@@ -25,6 +25,38 @@ def _kw(redis_port):
     return {"redis_host": "127.0.0.1", "redis_port": redis_port}
 
 
+def _worker_snapshot(models=None):
+    """A model snapshot with zero-price opencode-go workers to call."""
+    return {
+        "subscriptions": {
+            "opencode-go": {
+                "live": True,
+                "models": models
+                if models is not None
+                else [{"id": "worker-one", "price": {"input": 0, "output": 0}}],
+            }
+        }
+    }
+
+
+class _WorkerSnapshotMixin:
+    """Give a fetch test a snapshot with a zero-price worker to call.
+
+    A test that needs a different snapshot sets `self.worker_snapshot`
+    before the call.
+    """
+
+    def setUp(self):
+        self.worker_snapshot = _worker_snapshot()
+        patcher = mock.patch.object(
+            model_fetch,
+            "latest_snapshot",
+            side_effect=lambda **kwargs: self.worker_snapshot,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
 class ModelIdsForScoringTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -131,12 +163,12 @@ class PromptTests(unittest.TestCase):
 
 
 class BuildArgvTests(unittest.TestCase):
-    def test_argv_uses_free_model_max_thinking_and_web_search_only(self):
-        argv = benchmark_fetch._build_argv("a prompt")
+    def test_argv_uses_the_given_worker_max_thinking_and_web_search_only(self):
+        argv = benchmark_fetch._build_argv("a prompt", "opencode-go/worker-one")
         self.assertEqual(argv[0], benchmark_fetch.OMP_BINARY)
         self.assertEqual(argv[1], "-p")
         model_index = argv.index("--model")
-        self.assertEqual(argv[model_index + 1], benchmark_fetch.OMP_MODEL)
+        self.assertEqual(argv[model_index + 1], "opencode-go/worker-one")
         thinking_index = argv.index("--thinking")
         self.assertEqual(argv[thinking_index + 1], benchmark_fetch.OMP_THINKING)
         tools_index = argv.index("--tools")
@@ -147,20 +179,15 @@ class BuildArgvTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--max-time") + 1], str(int(benchmark_fetch.SHARD_TIMEOUT)))
         self.assertEqual(argv[-1], "a prompt")
 
-    def test_the_lookup_worker_is_a_free_model(self):
-        # The lookup is a daily job. A paid model turns it into a cost leak.
-        # The 2026-10-20 model snapshot lists this ID at $0.00 input and output.
-        self.assertEqual(benchmark_fetch.OMP_MODEL, "opencode-go/beam-free")
-
     def test_argv_grants_no_shell_or_edit_tools(self):
-        argv = benchmark_fetch._build_argv("a prompt")
+        argv = benchmark_fetch._build_argv("a prompt", "opencode-go/worker-one")
         joined = " ".join(argv)
         for denied in ("bash", "edit", "write", "dangerously-skip-permissions", "--allowedTools"):
             self.assertNotIn(denied, joined)
         self.assertNotIn("--no-tools", argv)  # web_search must stay reachable
 
 
-class ShardTests(unittest.TestCase):
+class ShardTests(_WorkerSnapshotMixin, unittest.TestCase):
     def test_models_split_into_shards_of_shard_size(self):
         ids = [f"m{index}" for index in range(13)]
         shards = benchmark_fetch._shards(ids)
@@ -209,7 +236,7 @@ def _fake(stdout, returncode=0, stderr=""):
     return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
 
 
-class FetchBenchmarkScoresTests(unittest.TestCase):
+class FetchBenchmarkScoresTests(_WorkerSnapshotMixin, unittest.TestCase):
     def test_empty_model_list_is_unavailable_without_a_subprocess_call(self):
         with mock.patch.object(subprocess, "run") as run:
             result = benchmark_fetch.fetch_benchmark_scores([])
@@ -304,6 +331,144 @@ class FetchBenchmarkScoresTests(unittest.TestCase):
                 {"id": "no-source", "score": 82, "fetched_at": result["scores"][0]["fetched_at"]},
             ],
         )
+
+
+class LatestSnapshotTests(unittest.TestCase):
+    """The newest snapshot: the fleet's shared copy first, then the file."""
+
+    def test_the_shared_snapshot_wins_over_the_local_file(self):
+        shared = _worker_snapshot([{"id": "worker-shared", "price": {"input": 0, "output": 0}}])
+        local = _worker_snapshot([{"id": "worker-local", "price": {"input": 0, "output": 0}}])
+        with (
+            mock.patch.object(model_fetch, "read_shared_snapshot", return_value=shared),
+            mock.patch.object(model_fetch, "_read_local_snapshot", return_value=local),
+        ):
+            self.assertIs(model_fetch.latest_snapshot(), shared)
+
+    def test_the_local_file_is_used_when_the_shared_snapshot_is_missing(self):
+        local = _worker_snapshot([{"id": "worker-local", "price": {"input": 0, "output": 0}}])
+        with (
+            mock.patch.object(model_fetch, "read_shared_snapshot", return_value=None),
+            mock.patch.object(model_fetch, "_read_local_snapshot", return_value=local),
+        ):
+            self.assertIs(model_fetch.latest_snapshot(), local)
+
+    def test_no_snapshot_at_all_is_none(self):
+        with (
+            mock.patch.object(model_fetch, "read_shared_snapshot", return_value=None),
+            mock.patch.object(model_fetch, "_read_local_snapshot", return_value=None),
+        ):
+            self.assertIsNone(model_fetch.latest_snapshot())
+
+
+class WorkerChoiceTests(_WorkerSnapshotMixin, unittest.TestCase):
+    """The lookup worker is picked at run time, not named in the code."""
+
+    def test_the_next_worker_answers_when_the_first_one_fails(self):
+        self.worker_snapshot = _worker_snapshot([
+            {"id": "worker-one", "price": {"input": 0, "output": 0}},
+            {"id": "worker-two", "price": {"input": 0, "output": 0}},
+        ])
+        called = []
+
+        def side_effect(argv, **kwargs):
+            called.append(argv[argv.index("--model") + 1])
+            if len(called) == 1:
+                # The first worker is gone; the next one must be tried.
+                return _fake("", returncode=1, stderr="model not available")
+            return _fake(_omp_result([{"id": "a", "score": 42.0}]))
+
+        with mock.patch.object(subprocess, "run", side_effect=side_effect):
+            result = benchmark_fetch.fetch_benchmark_scores(["a"])
+
+        self.assertEqual(called, ["opencode-go/worker-one", "opencode-go/worker-two"])
+        self.assertTrue(result["live"])
+        self.assertEqual(result["scores"][0]["score"], 42.0)
+
+    def test_the_next_worker_answers_when_the_first_one_times_out(self):
+        self.worker_snapshot = _worker_snapshot([
+            {"id": "worker-one", "price": {"input": 0, "output": 0}},
+            {"id": "worker-two", "price": {"input": 0, "output": 0}},
+        ])
+        called = []
+
+        def side_effect(argv, **kwargs):
+            called.append(argv[argv.index("--model") + 1])
+            if len(called) == 1:
+                raise subprocess.TimeoutExpired(cmd=argv, timeout=1)
+            return _fake(_omp_result([{"id": "a", "score": 7.0}]))
+
+        with mock.patch.object(subprocess, "run", side_effect=side_effect):
+            result = benchmark_fetch.fetch_benchmark_scores(["a"])
+
+        self.assertEqual(called, ["opencode-go/worker-one", "opencode-go/worker-two"])
+        self.assertTrue(result["live"])
+
+    def test_the_worker_list_comes_from_the_snapshot(self):
+        self.worker_snapshot = _worker_snapshot(
+            [{"id": "worker-one", "price": {"input": 0, "output": 0}}]
+        )
+        workers, note = benchmark_fetch._resolve_workers()
+        self.assertEqual(workers, ["opencode-go/worker-one"])
+        self.assertIsNone(note)
+
+    def test_the_worker_list_is_sorted_by_id_so_it_is_the_same_every_run(self):
+        self.worker_snapshot = _worker_snapshot([
+            {"id": "worker-two", "price": {"input": 0, "output": 0}},
+            {"id": "worker-one", "price": {"input": 0, "output": 0}},
+        ])
+        workers, note = benchmark_fetch._resolve_workers()
+        self.assertEqual(workers, ["opencode-go/worker-one", "opencode-go/worker-two"])
+        self.assertIsNone(note)
+
+    def test_a_worker_with_a_price_is_not_a_candidate(self):
+        self.worker_snapshot = _worker_snapshot([
+            {"id": "worker-paid", "price": {"input": 1.0, "output": 2.0}},
+            {"id": "worker-one", "price": {"input": 0, "output": 0}},
+        ])
+        workers, note = benchmark_fetch._resolve_workers()
+        self.assertEqual(workers, ["opencode-go/worker-one"])
+        self.assertIsNone(note)
+
+    def test_the_cheapest_priced_model_is_used_when_no_model_is_free(self):
+        self.worker_snapshot = _worker_snapshot([
+            {"id": "worker-dear", "price": {"input": 3.0, "output": 4.0}},
+            {"id": "worker-cheap", "price": {"input": 1.0, "output": 2.0}},
+        ])
+        with (
+            mock.patch.object(subprocess, "run", return_value=_fake(_omp_result([{"id": "a", "score": 1}]))) as run,
+            mock.patch("builtins.print") as output,
+        ):
+            result = benchmark_fetch.fetch_benchmark_scores(["a"])
+
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index("--model") + 1], "opencode-go/worker-cheap")
+        # One line says the lookup is not free. It names no model.
+        self.assertEqual(output.call_count, 1)
+        line = output.call_args.args[0]
+        self.assertIn("cheapest", line)
+        self.assertNotIn("worker-cheap", line)
+        self.assertNotIn("worker-dear", line)
+        self.assertTrue(result["live"])
+
+    def test_no_snapshot_is_one_clear_line_and_no_agent_call(self):
+        self.worker_snapshot = None
+        with (
+            mock.patch.object(subprocess, "run") as run,
+            mock.patch("builtins.print") as output,
+        ):
+            result = benchmark_fetch.fetch_benchmark_scores(["a"])
+
+        run.assert_not_called()
+        self.assertFalse(result["live"])
+        self.assertIn("lupin fetch-models", result["stale_reason"])
+        self.assertEqual(output.call_count, 1)
+
+    def test_no_free_model_is_named_in_the_module(self):
+        with open(benchmark_fetch.__file__, encoding="utf-8") as handle:
+            source = handle.read()
+        for name in ("beam-free", "step-5-preview-free", "longcat-2.5-preview-free", "minimax-m3.1-flash-free"):
+            self.assertNotIn(name, source)
 
 
 class MergeScoresTests(unittest.TestCase):
@@ -482,7 +647,11 @@ def test_refresh_asks_only_for_the_models_that_need_it(redis_port, flush_redis):
     # "fresh" was fresh, "gone" left the live model list: only the models
     # with no usable recent score are asked about, and the cached scores
     # pass through as `previous` so they cannot be lost.
-    fetch.assert_called_once_with(["stale", "new"], previous=cached["scores"])
+    fetch.assert_called_once_with(
+        ["stale", "new"],
+        previous=cached["scores"],
+        connection={"redis_host": "127.0.0.1", "redis_port": redis_port},
+    )
     assert result == fresh
     assert json.loads(client.get(benchmark_fetch.REDIS_KEY)) == fresh
     assert slots_redis.status(**_kw(redis_port))[benchmark_fetch.LOCK_SLOT]["holders"] == 0

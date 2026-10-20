@@ -672,12 +672,12 @@ def test_launch_agent_passes_omp_provider_and_model(monkeypatch, tmp_path: Path)
 
     assert loop_runtime._launch_agent(
         session, "omp", workspace, str(prompt_file), resume=False,
-        provider="opencode-go", model="opencode-go/step-5-preview-free:xhigh",
+        provider="opencode-go", model="opencode-go/deepseek-v4.1-flash:xhigh",
     ) == 0
 
     assert calls[0][-5:] == [
         "--provider", "opencode-go",
-        "--model", "opencode-go/step-5-preview-free:xhigh",
+        "--model", "opencode-go/deepseek-v4.1-flash:xhigh",
         "finish the handoff",
     ]
 
@@ -1111,7 +1111,7 @@ def test_start_loop_selects_profile_candidate_and_persists_it_for_recovery(
     monkeypatch.setattr(
         loop_runtime,
         "orchestrator_profiles",
-        lambda: {"widgets": ["opencode-go/step-5-preview-free:xhigh"]},
+        lambda: {"widgets": ["opencode-go/deepseek-v4.1-flash:xhigh"]},
     )
     monkeypatch.setattr(loop_runtime.time, "time", lambda: 1735689600)
     now_ms = 1735689600 * 1000
@@ -1143,7 +1143,7 @@ def test_start_loop_selects_profile_candidate_and_persists_it_for_recovery(
     metadata = loop_runtime._read_metadata("widgets")
     assert metadata["platform"] == "omp"
     assert metadata["provider"] == "opencode-go"
-    assert metadata["model"] == "opencode-go/step-5-preview-free:xhigh"
+    assert metadata["model"] == "opencode-go/deepseek-v4.1-flash:xhigh"
 
 
 def test_disable_repo_removes_its_orchestrator_profile(monkeypatch, tmp_path):

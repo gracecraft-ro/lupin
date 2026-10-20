@@ -106,11 +106,11 @@ def test_loop_run_returns_after_starting_lupin_worker(redis_port, flush_redis, m
             {
                 "platform": "omp",
                 "provider": "opencode-go",
-                "model": "opencode-go/step-5-preview-free:xhigh",
+                "model": "opencode-go/deepseek-v4.1-flash:xhigh",
             },
             [
                 "lupin", "run", "--all", "--platform", "omp", "--provider", "opencode-go",
-                "--model", "opencode-go/step-5-preview-free:xhigh",
+                "--model", "opencode-go/deepseek-v4.1-flash:xhigh",
             ],
         ),
         (
