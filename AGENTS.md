@@ -650,9 +650,11 @@ sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
 - To bind means to choose the address a server listens on. Never bind to
   `0.0.0.0`. This is a security rule.
 - Do not point the preview at the fleet Redis. Start a scratch Redis and use
-  it, for example `redis-server --port 6399 --bind 127.0.0.1 --save ""`.
-  Inherited `LUPIN_REDIS_*` values from the loop shell reach the server, so
-  the start command removes them and sets the scratch values.
+  it, for example
+  `nix develop --command redis-server --port 6399 --bind 127.0.0.1 --save ""`.
+  Redis is not on the PATH outside the dev shell, so run it through
+  `nix develop`. Inherited `LUPIN_REDIS_*` values from the loop shell reach
+  the server, so the start command removes them and sets the scratch values.
 - Do not use the start, stop, or run controls on this dashboard. New runs use
   the `lupin-loops` session. Older loops may use an old session until they
   stop.
