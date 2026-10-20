@@ -790,7 +790,7 @@ browser, write the blocked event, report it, and take the next queue item:
 
 ```sh
 lupin ledger append OWNER/REPO --event pressure-test --status blocked \
-  --summary "sample_n=0; seed=none; browser did not start; see <issue or ledger entry>"
+  --summary "sample_n=N; seed=SEED; browser did not start; see <issue or ledger entry>"
 ```
 
 Dispatch `/ui-pressure-test` as the only director for that repo. The test
@@ -807,7 +807,6 @@ lupin ledger append OWNER/REPO --event pressure-test --status done \
   --summary "tickets=N; untested=M; sample_n=N; seed=SEED" \
   --evidence "<report link>"
 ```
-
 
 Then dispatch fix workers for the tickets. A pressure-test ticket has no pull
 request at first. Dispatch a normal implementation worker from "Dispatch work"

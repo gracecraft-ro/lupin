@@ -266,9 +266,9 @@ screenshot is not ready.
 
 Find the design system and mockup files in the repo first. Read the repo
 instructions and look for a design file, a token file, a component library, or
-a mockup page. In this repo they are `docs/ui.dc.html` and
+page. In Lupin, the mockups are `docs/ui.dc.html` and
 `docs/ui-mockups.md`. If the repo has no design system, say so in the report
-and check the mockup files alone.
+and check any mockup files that exist.
 
 Compare each screen with those files. Report:
 
@@ -352,20 +352,23 @@ to the PR". Do not commit the images to the repo.
 1. Get the pull request number and the repo that holds it. Use the pull
    request URL, not the fork name, unless the pull request is on the fork.
 2. Write the comment body in a file, such as
-   `evidence/<issue-number>/report.md`. Name each image in the body with the
-   same path that goes into `--attach`.
+   `evidence/<pull-request-number>/report.md`. Name each image in the body
+   with the same path that goes into `--attach`.
 3. Attach the images and post the comment:
 
    ```sh
-   gh pr comment <PR_NUMBER> --repo <owner>/<repo> \
-     --attach './evidence/246/phone-overview.png#phone overview' \
-     --attach './evidence/246/tablet-overview.png#tablet overview' \
-     --attach './evidence/246/desktop-overview.png#desktop overview' \
-     --body-file ./evidence/246/report.md
+   PR_NUMBER='<pull-request-number>'
+   REPO='<owner>/<repo>'
+   EVIDENCE_DIR="./evidence/$PR_NUMBER"
+   gh pr comment "$PR_NUMBER" --repo "$REPO" \
+     --attach "$EVIDENCE_DIR/phone-overview.png#phone overview" \
+     --attach "$EVIDENCE_DIR/tablet-overview.png#tablet overview" \
+     --attach "$EVIDENCE_DIR/desktop-overview.png#desktop overview" \
+     --body-file "$EVIDENCE_DIR/report.md"
    ```
 
    Text after `#` is the image's alt text. One command takes up to 50 files.
-4. Run `gh pr view <PR_NUMBER> --repo <owner>/<repo> --comments`. Each image
+4. Run `gh pr view "$PR_NUMBER" --repo "$REPO" --comments`. Each image
    must be a `https://github.com/user-attachments/...` link. A local path
    means the upload did not happen. Fix it and post again.
 
