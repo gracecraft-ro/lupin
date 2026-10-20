@@ -715,8 +715,8 @@ class RoadmapTests(unittest.TestCase):
 
         self.assertIn("Line key: solid lines show dependencies", repo_page)
         self.assertIn("dashed lines show parent or split links", repo_page)
-        self.assertIn("Next batch starts with the first eligible issue", board_page)
-        self.assertIn("In-flight status comes from the last ledger action.", board_page)
+        self.assertIn("Ready: the loop can take this issue next.", board_page)
+        self.assertIn("In progress: the loop sent this issue to a machine.", board_page)
         self.assertIn("<h2>Ready</h2>", board_page)
     def test_saved_filters_and_manual_queue_order_render_for_open_eligible_issues(self):
         issues = [
@@ -1169,6 +1169,222 @@ class RoadmapTests(unittest.TestCase):
 
         self.assertIn("Child 13", expanded)
         self.assertNotIn("Show 2 more", expanded)
+
+    def test_empty_board_and_list_keep_the_repositories_visible(self):
+        # Issue #46: a repo with no open issues must still show the repo and
+        # say that the repo has no open issues -- never that no repo exists.
+        model = roadmap.build_model([], {}, [], repo="alpha")
+        render = lambda title, body, css, js: body
+
+        board = roadmap.render_combined_page(["alpha"], {"alpha": model}, render)
+        listing = roadmap.render_list_page(["alpha"], {"alpha": model}, render, {})
+
+        for page in (board, listing):
+            self.assertIn("The selected repositories have no open issues: alpha.", page)
+            self.assertNotIn("No issues match these filters.", page)
+            self.assertIn("alpha", page)
+
+        # The no-repository message only appears without any repository.
+        no_repos = roadmap.render_combined_page([], {}, render)
+        self.assertIn("No repositories are configured for the roadmap.", no_repos)
+
+    def test_board_and_list_show_stage_tabs_with_counts(self):
+        # Issue #55: the stage tabs and their counts live on both views, and
+        # the blocked summary shows only when blocked issues are there.
+        issues = [
+            {
+                "number": 1,
+                "title": "Ready task",
+                "body": "",
+                "labels": ["priority/P1"],
+            },
+            {
+                "number": 2,
+                "title": "Needs a person",
+                "body": "",
+                "labels": ["priority/P1", "completely-blocked-on-human"],
+            },
+        ]
+        model = roadmap.build_model(issues, {}, [], repo="alpha")
+        render = lambda title, body, css, js: body
+
+        board = roadmap.render_combined_page(["alpha"], {"alpha": model}, render)
+        listing = roadmap.render_list_page(["alpha"], {"alpha": model}, render, {})
+
+        for page in (board, listing):
+            self.assertIn("Ready", page)
+            self.assertIn("Blocked", page)
+            self.assertIn("stage=Ready", page)
+        self.assertIn("Ready <span>1</span>", board)
+        self.assertIn("Blocked <span>1</span>", board)
+        self.assertIn("1 blocked need a person", listing)
+
+        ready = roadmap.render_combined_page(
+            ["alpha"], {"alpha": model}, render, {"stage": "Ready"}
+        )
+        self.assertIn("Ready task", ready)
+        self.assertNotIn("Needs a person", ready)
+
+        clean = roadmap.build_model(
+            [{"number": 3, "title": "Plain", "body": "", "labels": []}],
+            {},
+            [],
+            repo="alpha",
+        )
+        clean_listing = roadmap.render_list_page(["alpha"], {"alpha": clean}, render, {})
+        self.assertNotIn("blocked need a person", clean_listing)
+
+    def test_one_stage_vocabulary_on_board_list_detail_and_graph(self):
+        # Issue #72: the board, the list, the detail panel and the queue
+        # graph all name a stage the same way.
+        issues = [
+            {
+                "number": 1,
+                "title": "Ready task",
+                "body": "",
+                "labels": ["priority/P1"],
+            },
+        ]
+        model = roadmap.build_model(issues, {}, [], repo="alpha")
+        render = lambda title, body, css, js: body
+
+        board = roadmap.render_combined_page(
+            ["alpha"], {"alpha": model}, render, {"issue": "1", "issue_repo": "alpha"}
+        )
+        listing = roadmap.render_list_page(["alpha"], {"alpha": model}, render, {})
+        detail = roadmap.render_page("alpha", ["alpha"], model, render)
+
+        old_words = [
+            "Marked in flight",
+            "Next batch",
+            "Next up",
+            "Later queue",
+            "Blocked or held",
+        ]
+        for page in (board, listing, detail):
+            for word in old_words:
+                self.assertNotIn(word, page)
+
+        # The four words the page uses.
+        for word in ("In progress", "Ready", "Later", "Blocked"):
+            self.assertIn(word, board)
+        self.assertIn("Ready · 1", detail)
+        self.assertIn("<span class='dim'>Ready</span>", listing)
+
+    def test_quest_helper_points_at_the_issue_checkboxes(self):
+        # Issue #73: the quest card sits under the issue cards, so the
+        # helper must not tell a person to look below it.
+        model = roadmap.build_model(
+            [{"number": 1, "title": "Quest candidate", "body": "", "labels": []}],
+            {},
+            [],
+            repo="alpha",
+        )
+        render = lambda title, body, css, js: body
+
+        board = roadmap.render_combined_page(
+            ["alpha"], {"alpha": model}, render, {"repo": "alpha"}
+        )
+        detail = roadmap.render_page("alpha", ["alpha"], model, render)
+
+        for page in (board, detail):
+            self.assertIn("Tick the issues you want, then start.", page)
+            self.assertNotIn("Tick issues below, then start.", page)
+
+    def test_stage_note_is_plain_words_and_says_nothing_twice(self):
+        # Issue #74: the note explains the stages, the priorities and the
+        # sizes in words a new reader can follow.
+        model = roadmap.build_model(
+            [{"number": 1, "title": "Issue", "body": "", "labels": []}],
+            {},
+            [],
+            repo="alpha",
+        )
+        render = lambda title, body, css, js: body
+        board = roadmap.render_combined_page(["alpha"], {"alpha": model}, render)
+        note = roadmap.STAGE_NOTE
+
+        for jargon in (
+            "ledger",
+            "dispatch action",
+            "non-overlapping",
+            "bottleneck",
+            "worktree",
+            "handoff",
+        ):
+            self.assertNotIn(jargon, note.lower())
+        for word in ("In progress", "Ready", "Later", "Blocked"):
+            self.assertIn(f"{word}:", note)
+        self.assertIn("size-?", note)
+        self.assertIn("P0", note)
+        self.assertIn("P4", note)
+
+        sentences = [part.strip() for part in note.split(". ") if part.strip()]
+        self.assertEqual(len(sentences), len(set(sentences)))
+
+        self.assertIn("Ready: the loop can take this issue next.", board)
+        # The size token on a card says what it means.
+        self.assertIn("no size label on this issue", board)
+
+    def test_priority_filter_offers_every_priority_the_rows_can_show(self):
+        # Issue #75: P4 issues show up in the rows, so P4 is a filter choice.
+        issues = [
+            {
+                "number": 1,
+                "title": "Lowest priority",
+                "body": "",
+                "labels": [],
+            },
+        ]
+        model = roadmap.build_model(issues, {}, [], repo="alpha")
+        render = lambda title, body, css, js: body
+
+        listing = roadmap.render_list_page(["alpha"], {"alpha": model}, render, {})
+
+        self.assertIn("<option value='P4'>P4</option>", listing)
+        self.assertIn("P4</span>", listing)
+        self.assertEqual(roadmap.LIST_PRIORITIES, roadmap.PRIORITIES)
+        for labels in ([], ["priority/P0"], ["p4"], ["priority/P2"], ["prio/P3"]):
+            self.assertIn(roadmap._priority(labels), roadmap.LIST_PRIORITIES)
+
+        filtered = roadmap.render_list_page(
+            ["alpha"], {"alpha": model}, render, {"prio": "P4"}
+        )
+        self.assertIn("#1</a>", filtered)
+
+    def test_epics_footer_and_pager_read_the_same_way_when_empty(self):
+        # Issue #78: one epic is "1 epic", and an empty list reads like a
+        # full one.
+        epic = {
+            "number": 10,
+            "title": "Client resilience",
+            "body": "- #11 — Retry backoff",
+            "labels": ["epic"],
+            "url": "https://github.com/acme/alpha/issues/10",
+        }
+        child = {
+            "number": 11,
+            "title": "Retry backoff",
+            "body": "",
+            "labels": ["priority/P1"],
+            "url": "https://github.com/acme/alpha/issues/11",
+        }
+        model = roadmap.build_model([epic, child], {}, [], repo="alpha")
+        render = lambda title, body, css, js: body
+
+        grouped = roadmap.render_list_page(
+            ["alpha"], {"alpha": model}, render, {"group": "epic", "q": "backoff"}
+        )
+        self.assertIn("1 issue in 1 epic.", grouped)
+        self.assertNotIn("1 epics", grouped)
+        self.assertIn("Open an epic to see its issues.", grouped)
+
+        full = roadmap.render_list_page(["alpha"], {"alpha": model}, render, {})
+        empty = roadmap.render_list_page(
+            ["alpha"], {"alpha": model}, render, {"q": "zzzznomatch"}
+        )
+        self.assertIn("Showing <b>1–2</b> of 2 issues", full)
+        self.assertIn("Showing <b>0</b> of 0 issues", empty)
 
 
 class DependencyDagTests(unittest.TestCase):
