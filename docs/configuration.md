@@ -79,7 +79,7 @@ the username and password from the options or the variables only.
 `lupin agent` reads its command queue through the local group path. Its
 debriefs use the debrief path and read `fleet.json` when their connection
 variables are unset. The queue needs `LUPIN_REDIS_PASSWORD` or
-`--redis-password`; the systemd credential alone is not enough.
+`--redis-password`, or the systemd credential `redis-password`.
 
 A value of `LUPIN_REDIS_PORT` that is not an integer stops every `lupin`
 command with a `ValueError`. The parser reads the variable for all
@@ -256,6 +256,22 @@ subcommands when it starts.
 - **Set by**: the user or the host config. `lupin run` copies it into loop
   units.
 
+### `LUPIN_SYSTEMD_RUN`
+
+- **Purpose**: a wrapper that validates `systemd-run` arguments before it
+  runs `systemd-run`.
+- **Default**: none. Lupin runs `sudo -n systemd-run` directly.
+- **Effect**: when set, Lupin runs `sudo -n <wrapper>` in place of
+  `sudo -n systemd-run` for loop units, the Herdr server, and one-off
+  timers. The wrapper gets the `systemd-run` arguments without the command
+  name. The NixOS module sets this to a wrapper that accepts only the
+  options Lupin uses, so the loop user does not need `NOPASSWD` on
+  `systemd-run` itself.
+- **Read by**: `src/lupin/loop_runtime.py` (`_sudo_argv`).
+- **Set by**: the host config. The NixOS module sets it for `lupin agent`,
+  `lupin serve`, and `lupin fleet-run`. Those services copy it into loop
+  units.
+
 ### `LUPIN_LOOP_USER`
 
 - **Purpose**: the user that loop units run as.
@@ -363,7 +379,8 @@ subcommands when it starts.
 - **Purpose**: one signing key for the command queue.
 - **Default**: none.
 - **Effect**:
-  - `lupin agent` checks each command with this key.
+  - `lupin agent` checks each command with this key. When the key is unset,
+    the agent reads its own key from `LUPIN_CMD_SIGNING_KEYS_DIR`.
   - `cmd send` signs each command with this key.
   - Some commands sign with this key when they have a remote `--machine`:
     `run`, `stop`, `peek`, `loops`, `schedule`, `pause`, and `resume`.
@@ -384,8 +401,9 @@ subcommands when it starts.
 - **Format**: each file name is the machine name of a worker. The machine
   name is the host name (`socket.gethostname()`) unless the worker runs
   `lupin agent --machine NAME`. Lupin removes space at the start and end.
-- **Effect**: `fleet-run` and `lupin serve` read the key of each target
-  from this directory. Lupin finds the key in this order:
+- **Effect**: `fleet-run`, `lupin serve`, and `lupin agent` read a key from
+  this directory. `lupin agent` reads the key of its own machine. Lupin
+  finds the key in this order:
   1. When the variable is set, `<dir>/<machine>`. If that file is missing,
      the machine has no key.
   2. When the variable is not set, `$CREDENTIALS_DIRECTORY/<machine>`, if
@@ -396,8 +414,9 @@ subcommands when it starts.
 - **Set by**: the host config of the sending machine.
 - **Option**: `--cmd-signing-key-dir` (`serve` only).
 
-`lupin agent` does not read this directory. Give each worker its own key
-with `LUPIN_CMD_SIGNING_KEY` or `--signing-key`.
+`lupin agent` reads the key of its own machine from this directory. You can
+also give it one key with `LUPIN_CMD_SIGNING_KEY` or `--signing-key`. That
+key wins over the directory.
 
 ### `LUPIN_GH_CANONICAL_FETCHER`
 
@@ -507,8 +526,8 @@ systemd gives a credential to a service as a file in
 | Name | Content | Read by | Given by |
 | --- | --- | --- | --- |
 | `redis-password` | The Redis password. | `machines._redis_password`, `loop_runtime._redis_kwargs`, `loop_runtime.worker` | The host config, or `lupin run` from `LUPIN_LOOP_REDIS_PASSWORD_FILE`. |
-| `gh-token` | A GitHub token for one repo. | `loop_runtime.herdr_server` | `lupin run`, from `LUPIN_LOOP_CREDENTIALS_FILE`, for a per-repo Herdr session only. |
-| `<machine>` | The signing key of that worker. | `commands.signing_key_for` | The host config of the sending machine. |
+| `gh-token` | A GitHub token for one repo. | `loop_runtime.herdr_server` | `lupin run`, from `LUPIN_LOOP_CREDENTIALS_FILE`, for a per-repo Herdr session only. The NixOS module's `systemd-run` wrapper allows it only when the source is one of the absolute paths in that file. |
+| `<machine>` | The signing key of that worker. | `commands.signing_key_for` | The host config of the machine that reads or sends commands. The NixOS module gives the agent its own key this way. |
 <!-- markdownlint-enable MD013 -->
 
 ## Files
