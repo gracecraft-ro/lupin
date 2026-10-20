@@ -187,7 +187,7 @@ The fix cycle:
 5. Repeat until `Verdict: Ship`. Do not stop between rounds, except as items
    1 and 6 and step 2 of "Fix worker models" say.
 6. Stall rule: follow step 3 of "Fix worker models". For a blocked PR, post
-   its `Loop:` comment there, then report it to the orchestrator.
+   the `Loop:` comment that step 3 names, then report it to the orchestrator.
 
 Report the final verdict to the orchestrator. The orchestrator releases the PR
 claim and merges only after approval and required checks pass. You never merge.

@@ -681,7 +681,7 @@ These rules keep a loop moving when no person is present.
    Give each new file a new name.
 5. **Ask a worker with no result for it.** If a worker has no result 30
    minutes after it starts, ask it for the result. If it has none, write that
-   on the issue. Start it with `Loop:`. Then stop the worker. The
+   on the issue or the PR. Start it with `Loop:`. Then stop the worker. The
    `delegation-loop` skill shows how to ask a worker (`herdr agent prompt`).
 6. **Log environment problems in the ledger.** On ralpha, `lupin roadmap`
    fails. The Redis user `lupin-ralpha` has no permission to run `MULTI`.
