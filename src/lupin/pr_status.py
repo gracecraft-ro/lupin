@@ -167,12 +167,13 @@ def _merge(pr: dict) -> str:
 
 
 def _check_time(check: dict) -> datetime | None:
-    """Return the check's newest real time, or `None` when it has none.
+    """Return the time used to order two runs of one check, or `None`.
 
-    `gh` reports `completedAt` as `"0001-01-01T00:00:00Z"` for a check that
-    has not completed, so the sentinel must not outrank a re-run's real
-    `startedAt`. The precedence is `startedAt`, then `completedAt`, then
-    `createdAt`; an empty, zero, or unparsable value counts as no time.
+    The order is by start, as `gh pr checks` orders them. So `startedAt` is
+    first, then `completedAt`, then `createdAt`. `gh` reports `completedAt`
+    as `"0001-01-01T00:00:00Z"` for a check that has not completed, so the
+    sentinel must not outrank a re-run's real `startedAt`. An empty, zero, or
+    unparsable value counts as no time.
     """
     for field in ("startedAt", "completedAt", "createdAt"):
         value = str(check.get(field) or "").strip()

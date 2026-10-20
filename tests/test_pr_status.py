@@ -210,12 +210,12 @@ class ChecksTests(unittest.TestCase):
                     {
                         "context": "ci/verify",
                         "state": "FAILURE",
-                        "createdAt": "2026-01-01T00:00:00Z",
+                        "startedAt": "2026-01-01T00:00:00Z",
                     },
                     {
                         "context": "ci/verify",
                         "state": "SUCCESS",
-                        "createdAt": "2026-01-02T00:00:00Z",
+                        "startedAt": "2026-01-02T00:00:00Z",
                     },
                 ]
             ),
