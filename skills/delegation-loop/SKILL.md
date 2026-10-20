@@ -711,6 +711,10 @@ Start a run when one of these is true:
   it.
 - A release pull request is about to open.
 
+A `blocked` event counts as the last run for the due check. The repo is due
+again when one of the other triggers holds, or when the environment issue or
+ledger entry that the blocked event names is closed.
+
 Read the ledger and find the newest `pressure-test` event:
 
 ```sh
@@ -736,12 +740,14 @@ lupin ledger append OWNER/REPO --event pressure-test --status running \
 
 Check that the browser starts before you dispatch. Playwright cannot launch on
 some hosts. If it does not start, try to file or update an environment issue
-in `gracecraft/nix` with label `environment`. On ralpha, `gh` cannot see that
-repo (`AGENTS.md` rule 6). If `gh` cannot write, run this command. Say in the
-run report that the loop did not file the issue:
+in the environment repo with label `environment`. On ralpha, `gh` cannot see
+that repo (`AGENTS.md` rule 6). If `gh` cannot write, run this command. Say in
+the run report that the loop did not file the issue. `OWNER/REPO` is the
+environment repo that rule 6 of the repo's `AGENTS.md` names. The summary
+text names the repo that you test:
 
 ```sh
-lupin ledger append gracecraft/nix --event env-friction \
+lupin ledger append OWNER/REPO --event env-friction \
   --summary "browser did not start for OWNER/REPO pressure test: <detail>"
 ```
 
