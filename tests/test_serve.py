@@ -3214,7 +3214,7 @@ class ScheduleRunRouteUnitTests(unittest.TestCase):
         handler = _schedule_handler()
         _post_body(
             handler, "/schedule/run",
-            {"repo": "a-repo", "place": "h", "note": "read the notes first"},
+            {"repo": "a-repo", "place": "h", "note": "- focus on tests"},
         )
         with (
             mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
@@ -3224,7 +3224,7 @@ class ScheduleRunRouteUnitTests(unittest.TestCase):
         ):
             handler.do_POST()
         fake_run.assert_called_once_with(
-            ["lupin", "run", "a-repo", "--note=read the notes first"], timeout=20.0
+            ["lupin", "run", "a-repo", "--note=- focus on tests"], timeout=20.0
         )
 
     def test_no_note_leaves_the_loop_arguments_alone(self):
@@ -3238,6 +3238,29 @@ class ScheduleRunRouteUnitTests(unittest.TestCase):
         ):
             handler.do_POST()
         fake_run.assert_called_once_with(["lupin", "run", "a-repo"], timeout=20.0)
+
+    def test_nul_note_is_rejected_before_dispatch_or_enqueue(self):
+        handler = _schedule_handler()
+        _post_body(
+            handler, "/schedule/run",
+            {"repo": "a-repo", "place": "h", "note": "before\x00after"},
+        )
+        handler.reply = mock.Mock()
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
+            mock.patch.object(serve.machines, "hostname") as hostname,
+            mock.patch.object(serve.machines, "machines") as machines,
+            mock.patch.object(serve.loops, "dispatch_loop_action") as dispatch,
+            mock.patch.object(serve, "run") as run_local,
+            mock.patch.object(serve.commands, "enqueue") as enqueue,
+        ):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+        hostname.assert_not_called()
+        machines.assert_not_called()
+        dispatch.assert_not_called()
+        run_local.assert_not_called()
+        enqueue.assert_not_called()
 
 
 
@@ -3289,7 +3312,7 @@ class TestSchedulePageIntegration:
         kw = _kw(redis_port)
         _write_machine_record(redis_port, "jesus", state="online")
         handler = _post_handler(
-            "/schedule/run", b"repo=widgets&place=jesus&note=read+the+notes", kw
+            "/schedule/run", b"repo=widgets&place=jesus&note=-+focus+on+tests", kw
         )
         handler.cmd_signing_key = "secret"
         with (
@@ -3303,10 +3326,10 @@ class TestSchedulePageIntegration:
         assert len(queued) == 1
         stored = json.loads(raw.get(f"lupin:v1:cmd:{queued[0]}"))
         assert stored["action"] == "loop.run"
-        assert stored["params"] == {"repo": "widgets", "note": "read the notes"}
-        # The agent on the worker turns the note into a "--note" argument.
+        assert stored["params"] == {"repo": "widgets", "note": "- focus on tests"}
+        # The agent on the worker keeps the note in one argv element.
         assert agent.ACTIONS["loop.run"](stored["params"], "cmd-1") == [
-            "lupin", "run", "widgets", "--note", "read the notes",
+            "lupin", "run", "widgets", "--note=- focus on tests",
         ]
 
     def test_run_now_rejects_a_draining_named_machine(self, redis_port, flush_redis):

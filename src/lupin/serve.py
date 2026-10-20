@@ -3771,6 +3771,10 @@ class Handler(BaseHTTPRequestHandler):
         if len(note) > 500:
             self.reply(render_error("note is too long"), 400)
             return
+        if "\x00" in note:
+            self.reply(render_error("note has a NUL byte"), 400)
+            return
+
 
         local_host = machines.hostname()
         try:
