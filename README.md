@@ -126,10 +126,41 @@ systemd `CREDENTIALS_DIRECTORY`. The file name is the worker name.
 
 The Redis key layout is in `docs/redis-schema.md`.
 
-> The systemd units for `lupin agent`, the quota timer, and the
-> `delegation-loop.timer` are not in this repo yet. The flake has an empty
-> `nixosModules.default`. Until that module is complete, you must write
-> these units yourself.
+## NixOS module
+
+`nixosModules.default` writes the service user, `lupin-agent.service`,
+`lupin-serve.service`, the `lupin-quota` timer, and the `delegation-loop`
+timer. Set `role` to `worker`, `dispatch`, or `both`.
+
+```nix
+services.lupin = {
+  enable = true;
+  role = "worker";
+  redis.host = "COORDINATOR_HOST";
+  redis.passwordFile = "/run/secrets/redis-password";
+  signingKeysDir = "/run/secrets/lupin-keys";
+};
+```
+
+The module needs these secret files:
+
+- `redis.passwordFile`: a file with the Redis password. The module loads it
+  as the systemd credential `redis-password`. No unit gets the password in
+  its environment. Skip this option if the coordinator has no password.
+- `signingKeysDir`: a directory with one command-queue key for each worker.
+  The file name is the worker name and the file holds that worker's key.
+  The module reads the key of the local machine from this directory.
+
+The default `serve.bind` is `127.0.0.1` and cannot be `0.0.0.0`. The default
+`serve.port` is 8788. The default package is the flake's
+`packages.<system>.default`.
+
+Without `fleetConfig`, the module writes `/etc/lupin/fleet.json` from the
+`redis` options. To use one file for several machines, set `fleetConfig` to
+that file.
+
+The module also writes the sudo rules for the loop control path. The loop
+user can start and stop `lupin-*` units and the `delegation-loop` timer.
 
 ## Dashboard
 

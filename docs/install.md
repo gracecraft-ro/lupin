@@ -11,8 +11,9 @@ Terms:
 - **Dispatch machine**: a machine that runs `lupin serve` and sends work to
   workers. It runs no loops. A fleet can have no dispatch machine.
 - **Host config**: the configuration of a machine, for example its NixOS
-  modules. This repo does not supply systemd units. The host config owns
-  them. The flake has an empty `nixosModules.default`.
+  modules. This repo supplies `nixosModules.default`, which writes the
+  systemd units and the service user. The host config sets the secrets and
+  the Redis location.
 
 ## Required tools
 
@@ -130,11 +131,11 @@ key of the target worker.
    openssl rand -hex 32
    ```
 
-2. Give the key of each worker to `lupin agent` on that worker. Use
+2. Give the key of each worker to `lupin agent` on that worker. Put the key
+   of the worker in the directory from step 3, or use
    `LUPIN_CMD_SIGNING_KEY` in the environment of that process only. Use a
    secret manager. Do not put the key in a command line. Do not put it in
-   a global environment file. `lupin agent` does not read
-   `LUPIN_CMD_SIGNING_KEYS_DIR`.
+   a global environment file.
 3. On each machine that sends commands to many workers (`lupin serve`,
    `lupin fleet-run`), put the keys in one directory. Use one file for each
    worker. The file name is the machine name of the worker. The machine
@@ -200,12 +201,10 @@ Do these steps on each worker. A worker must run Linux with systemd.
     (`LoadCredential=redis-password:PATH`).
 11. Run `lupin agent` as a long-running service. It polls the command queue
     and writes the periodic debriefs. The host config must supply the unit.
-    The command queue does not read the credential `redis-password`. Put
-    the password in `LUPIN_REDIS_PASSWORD` in the environment of this
-    process only. For example, a wrapper script reads
-    `$CREDENTIALS_DIRECTORY/redis-password` and then starts `lupin agent`.
-    Do not put the password in a global environment file or in a command
-    line.
+    Give the unit the credential `redis-password`
+    (`LoadCredential=redis-password:PATH`). You can also set
+    `LUPIN_REDIS_PASSWORD` in the environment of this process only. Do not
+    put the password in a global environment file or in a command line.
 12. Optional: run `lupin quota` at a fixed interval on each machine that
     has provider logins. The host config must supply the timer. Give the
     unit the credential `redis-password`.

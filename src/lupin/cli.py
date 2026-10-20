@@ -1499,14 +1499,26 @@ def _cmd_cmd(args: argparse.Namespace) -> int:
 
 
 def _cmd_agent(args: argparse.Namespace) -> int:
-    if not args.signing_key:
-        print("agent needs --signing-key or $LUPIN_CMD_SIGNING_KEY", file=sys.stderr)
-        return 1
     machine = args.machine or machines.hostname()
+    # A fleet host can give the worker a directory with one key per worker
+    # (`LUPIN_CMD_SIGNING_KEYS_DIR`, or systemd's credential directory). The
+    # key of this machine has the machine name. `--signing-key` still wins.
+    signing_key = args.signing_key or commands.signing_key_for(machine)
+    if not signing_key:
+        print(
+            "agent needs --signing-key, $LUPIN_CMD_SIGNING_KEY, or its key in "
+            "$LUPIN_CMD_SIGNING_KEYS_DIR",
+            file=sys.stderr,
+        )
+        return 1
+    # `LoadCredential=redis-password` puts the secret in the unit's credential
+    # directory. The queue path does not read the fleet config.
+    redis_password = args.redis_password or machines._redis_password()
     try:
         agent_mod.run_forever(
-            machine, args.signing_key,
-            batch=args.batch, poll_interval=args.poll_interval, **_redis_kwargs(args),
+            machine, signing_key,
+            batch=args.batch, poll_interval=args.poll_interval,
+            **(_redis_kwargs(args) | {"redis_password": redis_password}),
         )
     except _REDIS_REFUSED as exc:
         _print_auth_failed(exc, f"agent {machine!r}")
