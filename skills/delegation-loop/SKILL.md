@@ -699,30 +699,59 @@ not run a server for a feature branch.
 
 This is a queue item, not an option. Do it for every repo with a web UI.
 
+A UI pull request changes a web UI. The repo's `frontend-ui` capability label
+marks it. If the repo has no such label, a change under the UI paths that the
+repo names marks it.
+
 Start a run when one of these is true:
 
-- 5 or more UI pull requests merged since the last run;
-- the last run is more than 24 hours old, and a UI pull request merged since
-  it;
-- a release pull request is about to open.
+- The repo has no `pressure-test` event. This is the first run, so it is due.
+- 5 or more UI pull requests merged since the last run.
+- The last run is more than 24 hours old, and a UI pull request merged since
+  it.
+- A release pull request is about to open.
 
-First read the repo's ledger (`lupin ledger read OWNER/REPO --json`) and find
-the newest `pressure-test` event. Its `status` is `running` or `done`. A
-`running` event younger than 4 hours means a director is active. Do not start
-a second one. If the ledger exits 3, do not start a run. Report it and take
-the next queue item.
+Read the ledger and find the newest `pressure-test` event:
+
+```sh
+lupin ledger read OWNER/REPO --limit 100000 --json
+```
+
+The default limit is 10 events. A recent `pressure-test` event can be older
+than the latest 10 events. With the default limit, you can miss it. Always
+give `--limit 100000`.
+
+The event `status` is `running`, `done`, or `blocked`. A `running` event
+younger than 4 hours means a director is active. Do not start a second one.
+A run can take 4 hours or more. Before 4 hours pass, write the `running`
+event again. This keeps the guard true. If the ledger exits 3, do not start a
+run. Report it and take the next queue item.
 
 Record the start:
 
 ```sh
 lupin ledger append OWNER/REPO --event pressure-test --status running \
-  --summary "director=SESSION; reason=5-prs|24h|release"
+  --summary "director=SESSION; reason=first|5-prs|24h|release"
 ```
 
 Check that the browser starts before you dispatch. Playwright cannot launch on
-some hosts. If it does not start, file or update an environment issue in
-`gracecraft/nix` with label `environment`, then run the test on a host where it
-works. Do not skip the run without a record.
+some hosts. If it does not start, try to file or update an environment issue
+in `gracecraft/nix` with label `environment`. On ralpha, `gh` cannot see that
+repo (`AGENTS.md` rule 6). If `gh` cannot write, run this command. Say in the
+run report that the loop did not file the issue:
+
+```sh
+lupin ledger append gracecraft/nix --event env-friction \
+  --summary "browser did not start for OWNER/REPO pressure test: <detail>"
+```
+
+Then run the test on a host where the browser works. If no host can launch the
+browser, write the blocked event, report it, and take the next queue item:
+
+```sh
+lupin ledger append OWNER/REPO --event pressure-test --status blocked \
+  --summary "browser did not start; see <issue or ledger entry>"
+```
 
 Dispatch `/ui-pressure-test` as the only director for that repo. The test
 agent stays read-only for source code, has its own browser data, and writes
@@ -733,8 +762,10 @@ lupin ledger append OWNER/REPO --event pressure-test --status done \
   --summary "tickets=N; untested=M"
 ```
 
-Then dispatch fix workers for the tickets through the review-fix cycle in
-`/code-review`. Do not ask the director to fix findings.
+Then dispatch fix workers for the tickets. A pressure-test ticket has no pull
+request at first. Dispatch a normal implementation worker from "Dispatch work"
+for the first fix. Then use the review-fix cycle in `/code-review` on the pull
+request that it opens. Do not ask the director to fix findings.
 
 ## Monitor and finish
 
