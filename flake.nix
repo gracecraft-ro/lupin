@@ -19,7 +19,8 @@
         withOmp:
         pkgs.python3Packages.buildPythonApplication {
           pname = "lupin";
-          version = "0.1.0";
+          # `pyproject.toml` is the only place the version is set.
+          version = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).project.version;
           pyproject = true;
           src = self;
           build-system = [ pkgs.python3Packages.setuptools ];

@@ -30,6 +30,9 @@ AGENT_NAME = "lupin-loop"
 # One Herdr session per machine. Each loop is one workspace in it.
 SESSION_NAME = "lupin-loops"
 STATE_DIR = Path(os.environ.get("LUPIN_LOOP_STATE_DIR", "/var/lib/delegation-loop"))
+# The longest note a start request accepts. `lupin dispatch` uses this to
+# decide when a brief is too long to pass as the note itself.
+MAX_NOTE_CHARS = 8000
 CODE_DIR = Path(os.environ.get("LUPIN_LOOP_CODE_DIR", "/code"))
 REPOS_FILE = STATE_DIR / "repos"
 ORCHESTRATORS_FILE = STATE_DIR / "orchestrators.json"
@@ -926,7 +929,7 @@ def start_loop(
     if not checkout.is_dir():
         return False, f"skip {repo}: no checkout at {checkout}"
     if note is not None and (
-        not isinstance(note, str) or len(note) > 8000 or "\x00" in note
+        not isinstance(note, str) or len(note) > MAX_NOTE_CHARS or "\x00" in note
     ):
         raise LoopError("note is invalid or too long")
     session = session_name(repo)
@@ -1960,7 +1963,9 @@ def schedule_once(
     provider: str | None = None,
     model: str | None = None,
 ) -> str:
-    if note is not None and (not isinstance(note, str) or len(note) > 8000 or "\x00" in note):
+    if note is not None and (
+        not isinstance(note, str) or len(note) > MAX_NOTE_CHARS or "\x00" in note
+    ):
         raise LoopError("note is invalid or too long")
     selected = validate_platform(platform) if platform else None
     provider, model = validate_omp_options(selected, provider, model) if selected else (provider, model)

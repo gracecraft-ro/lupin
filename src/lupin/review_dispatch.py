@@ -22,7 +22,9 @@ Three plans, matching the three cases in #185:
 `--prefetch` (issue #1) is a second, unrelated mode in the same command: it
 fetches issue/PR text up front so a delegation-loop orchestrator, and the
 subagent it dispatches, don't each spend a turn on their own `gh` calls. It
-does not route anything -- see `prefetch()` below.
+does not route anything -- see `prefetch()` below. Its default output is
+markdown via `brief_markdown()` (issue #181); `--json` keeps the keyed object
+for scripts, trimmed to the fields a worker actually reads.
 """
 
 from __future__ import annotations
@@ -103,34 +105,79 @@ def _run_gh_json(args: list[str], *, repo: str | None = None, timeout: int = 60)
         return None, f"invalid JSON from gh: {error}"
 
 
+def _trim_comment(comment: dict) -> dict:
+    """Keep only the fields a worker reads from a comment.
+
+    A raw `gh` comment carries eleven fields (URL, reaction counts, IDs);
+    the brief needs who wrote it, when, and what it says.
+    """
+    author = comment.get("author") or {}
+    return {
+        "author": {"login": author.get("login") or ""},
+        "createdAt": comment.get("createdAt") or "",
+        "body": comment.get("body") or "",
+    }
+
+
+def _trim_review(review: dict) -> dict:
+    """Keep only the fields a worker reads from a review."""
+    author = review.get("author") or {}
+    return {
+        "author": {"login": author.get("login") or ""},
+        "state": review.get("state") or "",
+        "submittedAt": review.get("submittedAt") or "",
+        "body": review.get("body") or "",
+    }
+
+
 def _fetch_item(item: str, *, repo: str | None = None) -> dict:
     """Fetch one issue or PR's text and (for a PR) its diff stat.
 
     An issue and a PR share one number counter in a GitHub repo, so there is
-    no way to tell which an item is without asking. Try `gh issue view`
-    first; if that fails, it's either a PR or nothing. Diff stat only --
-    the changed-file list plus additions/deletions -- never the full diff
-    text (out of scope, see issue #1: same cost whether lupin or the
-    dispatched agent fetches it).
+    no way to tell which an item is without asking. Ask `gh pr view` first:
+    current `gh` resolves a PR number in `gh issue view` too, so the issue
+    lookup cannot distinguish the two. Only when the PR lookup fails is the
+    item an issue or nothing. Diff stat only -- the changed-file list plus
+    additions/deletions -- never the full diff text (out of scope, see issue
+    #1: same cost whether lupin or the dispatched agent fetches it).
     """
-    issue_data, issue_error = _run_gh_json(
-        ["issue", "view", item, "--json", "body,comments"], repo=repo
-    )
-    if issue_data is not None:
-        return {"kind": "issue", **issue_data}
-
     pr_data, pr_error = _run_gh_json(
         ["pr", "view", item, "--json", "body,comments,reviews,files"], repo=repo
     )
-    if pr_data is None:
-        return {"error": f"not a fetchable issue or PR {item!r}: {issue_error}; {pr_error}"}
+    if pr_data is not None:
+        files = pr_data.pop("files", [])
+        return {
+            "kind": "pr",
+            "body": pr_data.get("body") or "",
+            "comments": [
+                _trim_comment(comment) for comment in pr_data.get("comments") or []
+            ],
+            "reviews": [
+                _trim_review(review) for review in pr_data.get("reviews") or []
+            ],
+            "diff_stat": [
+                {
+                    "path": f["path"],
+                    "additions": f["additions"],
+                    "deletions": f["deletions"],
+                }
+                for f in files
+            ],
+        }
 
-    files = pr_data.pop("files", [])
-    pr_data["diff_stat"] = [
-        {"path": f["path"], "additions": f["additions"], "deletions": f["deletions"]}
-        for f in files
-    ]
-    return {"kind": "pr", **pr_data}
+    issue_data, issue_error = _run_gh_json(
+        ["issue", "view", item, "--json", "body,comments"], repo=repo
+    )
+    if issue_data is None:
+        return {"error": f"not a fetchable issue or PR {item!r}: {pr_error}; {issue_error}"}
+
+    return {
+        "kind": "issue",
+        "body": issue_data.get("body") or "",
+        "comments": [
+            _trim_comment(comment) for comment in issue_data.get("comments") or []
+        ],
+    }
 
 
 def prefetch(items: list[str], *, repo: str | None = None) -> dict:
@@ -141,6 +188,53 @@ def prefetch(items: list[str], *, repo: str | None = None) -> dict:
     list doesn't lose the rest of the prefetch.
     """
     return {item: _fetch_item(item, repo=repo) for item in items}
+
+
+def brief_markdown(item: str, data: dict) -> str:
+    """Render one `_fetch_item()` result as the worker's markdown brief.
+
+    The worker reads this as text, so it carries no JSON escaping: a body's
+    newlines stay newlines. Every comment and review keeps its author login
+    and its timestamp -- a comment can correct the body, and the worker needs
+    to know who corrected it and when.
+    """
+    kind = data.get("kind") or "issue"
+    heading = "PR" if kind == "pr" else "Issue"
+    if "error" in data:
+        # A batch prefetch keeps a bad item in place instead of losing the
+        # rest; show the reason rather than an empty brief.
+        return f"# {heading} {item}\n\n{data['error']}\n"
+    parts = [f"# {heading} {item}", "", data.get("body") or ""]
+
+    if kind == "pr":
+        reviews = data.get("reviews") or []
+        parts += ["", f"## Reviews ({len(reviews)})"]
+        for review in reviews:
+            login = (review.get("author") or {}).get("login") or ""
+            parts += [
+                "",
+                f"### @{login} - {review.get('state') or ''} - {review.get('submittedAt') or ''}",
+                "",
+                review.get("body") or "",
+            ]
+        parts += ["", "## Changed files"]
+        for changed in data.get("diff_stat") or []:
+            parts.append(
+                f"- {changed['path']} "
+                f"(+{changed.get('additions', 0)} -{changed.get('deletions', 0)})"
+            )
+
+    comments = data.get("comments") or []
+    parts += ["", f"## Comments ({len(comments)})"]
+    for comment in comments:
+        login = (comment.get("author") or {}).get("login") or ""
+        parts += [
+            "",
+            f"### @{login} - {comment.get('createdAt') or ''}",
+            "",
+            comment.get("body") or "",
+        ]
+    return "\n".join(parts).rstrip("\n") + "\n"
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -174,6 +268,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--repo", default=None, help="OWNER/REPO for --prefetch (default: gh's own resolution)"
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="with --prefetch: print the trimmed keyed object instead of markdown",
+    )
     args = parser.parse_args(argv)
     if args.prefetch:
         return args
@@ -188,7 +287,15 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(sys.argv[1:] if argv is None else argv)
     if args.prefetch:
         items = [item.strip() for item in args.prefetch.split(",") if item.strip()]
-        print(json.dumps(prefetch(items, repo=args.repo)))
+        fetched = prefetch(items, repo=args.repo)
+        if args.json:
+            print(json.dumps(fetched))
+            return 0
+        sections = [
+            brief_markdown(f"{args.repo}#{item}" if args.repo else item, data)
+            for item, data in fetched.items()
+        ]
+        sys.stdout.write("\n".join(sections))
         return 0
     if args.issue_json:
         with open(args.issue_json, encoding="utf-8") as handle:
