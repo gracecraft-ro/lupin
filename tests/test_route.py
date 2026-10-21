@@ -362,6 +362,47 @@ class RoutePacingTests(unittest.TestCase):
         # sooner reset, not claude's (seen first).
         self.assertAlmostEqual(result["wait_seconds"], 20 * 60, delta=2)
 
+    def test_claude_weekly_over_90_uses_open_lower_tier_model(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [{"model": "openai-codex/gpt-6-luna", "effort": "high"}],
+                    "tier2": [{"model": "opus", "effort": "high"}],
+                }
+            }
+        }
+        rows = [
+            self._row("claude", 91, 6 * 24 * HOUR_MS, QuotaDuration.WEEKLY),
+            self._row("openai", 10, 6 * 24 * HOUR_MS, QuotaDuration.WEEKLY),
+        ]
+
+        result = route.route("coding", "size-l", tiers=tiers, quota_rows=rows)
+
+        self.assertEqual(result["model"], "openai-codex/gpt-6-luna")
+        self.assertEqual(
+            result["downgraded_from"], {"model": "opus", "effort": "high"}
+        )
+
+    def test_blocked_route_does_not_fall_back_to_a_higher_tier(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [{"model": "sonnet", "effort": "high"}],
+                    "tier2": [{"model": "opencode-go/qwen3.8-max", "effort": "high"}],
+                }
+            }
+        }
+        rows = [
+            self._row("claude", 100, 6 * 24 * HOUR_MS, QuotaDuration.WEEKLY),
+            self._row("opencode-go", 10, 6 * 24 * HOUR_MS, QuotaDuration.WEEKLY),
+        ]
+
+        result = route.route("coding", "size-m", tiers=tiers, quota_rows=rows)
+
+        self.assertEqual(result["model"], "sonnet")
+        self.assertIsNotNone(result["wait_seconds"])
+        self.assertEqual(result["reason"], "all allowed models are blocked by quota")
+
     def test_does_not_fall_back_to_a_local_or_bmo_model_to_dodge_a_wait(self):
         # coding's tier0 is bmo/local, tier1 sonnet (claude), both blocked.
         # Decision 3 forbids landing on tier0 to avoid the wait.
@@ -444,14 +485,18 @@ class RoutePacingTests(unittest.TestCase):
                 ],
                 glm,
             ),
-            "blocked provider falls to the first unblocked entry": (
+            "blocked provider defers instead of using a higher tier": (
                 self._row("opencode-go", 100, 10 * HOUR_MS),
                 [glm],
                 [
                     {"model": "sonnet", "effort": "high"},
                     {"model": "opus", "effort": "high"},
                 ],
-                {"model": "sonnet", "effort": "high", "downgraded_from": glm},
+                {
+                    "model": glm["model"],
+                    "effort": "high",
+                    "reason": "all allowed models are blocked by quota",
+                },
             ),
         }
         for name, (row, tier1, tier2, expected) in cases.items():
@@ -460,6 +505,8 @@ class RoutePacingTests(unittest.TestCase):
                 result = route.route("coding", "size-m", tiers=tiers, quota_rows=[row])
 
                 self.assertEqual({key: result.get(key) for key in expected}, expected)
+                if "reason" in expected:
+                    self.assertIsNotNone(result.get("wait_seconds"))
 
     def test_empty_quota_rows_is_a_no_op(self):
         result = route.route("coding", "size-m", tiers=_TIERS, quota_rows=[])
@@ -513,12 +560,13 @@ class RouteMultiAccountTests(unittest.TestCase):
 
         self.assertEqual(result, {"model": "openai/gpt-5", "effort": "high"})
 
-    def test_every_login_blocked_falls_back_to_another_provider(self):
+    def test_every_login_blocked_defers_instead_of_upgrading(self):
         rows = [self._free_used_up(), self._row("plus", 100, 4 * HOUR_MS)]
         result = route.route("coding", "size-m", tiers=_OPENAI_THEN_CLAUDE, quota_rows=rows)
 
-        self.assertEqual(result["model"], "opus")
-        self.assertEqual(result["downgraded_from"], {"model": "openai/gpt-5", "effort": "high"})
+        self.assertEqual(result["model"], "openai/gpt-5")
+        self.assertEqual(result["reason"], "all allowed models are blocked by quota")
+        self.assertIsNotNone(result["wait_seconds"])
 
     def test_wait_uses_the_soonest_reset_of_any_login(self):
         rows = [

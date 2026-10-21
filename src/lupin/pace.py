@@ -34,6 +34,7 @@ from .quota import QuotaDuration
 
 RESERVE_PCT = 95
 RESERVE_GRACE_MS = 3 * 60 * 60 * 1000  # 3 hours
+CLAUDE_WEEKLY_BLOCK_PCT = 90
 LEAN_IN_SOON_MS = 30 * 60 * 1000  # 30 minutes
 LEAN_IN_LOW_USE_PCT = 50
 LEAN_IN_LOW_USE_WINDOW_MS = 24 * 60 * 60 * 1000  # 24 hours
@@ -53,18 +54,23 @@ def _usable_rows(rows: list[dict], provider: str) -> list[dict]:
     ]
 
 
-def _window_blocked(used_pct: float, resets_at: float, now_ms: float) -> bool:
-    """Reserve rule for one window (Grace's decision 1).
+def _window_blocked(row: dict, now_ms: float) -> bool:
+    """True when one quota window is reserved or exhausted.
 
-    `used_pct >= 100` is always blocked. `used_pct >= 95` is blocked too,
-    unless under 3 hours remain until reset -- inside that grace period
-    there is no reserve left to protect, so fleet routing can use up to
-    (and including) 100%.
+    Claude's weekly window is blocked above 90%, with no reset grace.
+    Other windows use the 95% reserve unless under 3 hours remain; 100%
+    usage is always blocked.
     """
+    used_pct = row["used_pct"]
+    if (
+        row.get("provider") == "claude"
+        and row.get("duration") == QuotaDuration.WEEKLY
+    ):
+        return used_pct > CLAUDE_WEEKLY_BLOCK_PCT
     if used_pct >= 100:
         return True
     if used_pct >= RESERVE_PCT:
-        return (resets_at - now_ms) >= RESERVE_GRACE_MS
+        return (row["resets_at"] - now_ms) >= RESERVE_GRACE_MS
     return False
 
 
@@ -81,13 +87,13 @@ def _accounts(rows: list[dict], provider: str) -> list[list[dict]]:
 
 def _account_blocked(account_rows: list[dict], now_ms: float) -> bool:
     return any(
-        _window_blocked(row["used_pct"], row["resets_at"], now_ms)
+        _window_blocked(row, now_ms)
         for row in account_rows
     )
 
 
 def blocked(rows: list[dict], provider: str, now_ms: float) -> bool:
-    """True if every account of `provider` has a blocked window (reserve rule).
+    """True if every account of `provider` has a blocked window.
 
     An account with no usable rows is unknown, not blocked, and not counted.
     """
@@ -177,6 +183,6 @@ def earliest_reset(rows: list[dict], providers: list[str], now_ms: float) -> flo
         row["resets_at"]
         for provider in providers
         for row in _usable_rows(rows, provider)
-        if _window_blocked(row["used_pct"], row["resets_at"], now_ms)
+        if _window_blocked(row, now_ms)
     ]
     return min(waits) if waits else None

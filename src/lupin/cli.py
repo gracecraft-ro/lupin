@@ -629,7 +629,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    _route_args(sub.add_parser("route", help="pick a {model, effort} for a (category, size) pair"))
+    _route_args(sub.add_parser("route", help="pick a model or defer when quota blocks all options"))
     _classify_args(sub.add_parser("classify", help="sort an issue into (category, size)"))
     _fetch_models_args(
         sub.add_parser("fetch-models", help="fetch today's live model list and prices per subscription")
@@ -754,6 +754,13 @@ def _cmd_route(args: argparse.Namespace) -> int:
         return 2
     if args.json:
         print(json.dumps(result))
+    elif "reason" in result:
+        wait_seconds = result.get("wait_seconds")
+        wait = (
+            f"; wait {place_mod.format_duration(wait_seconds)}"
+            if wait_seconds is not None else ""
+        )
+        print(f"deferred: {result['reason']}{wait}")
     else:
         print(f"{result['model']} {result['effort']}")
     return 0

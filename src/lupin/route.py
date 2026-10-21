@@ -138,18 +138,13 @@ def _lean_in_entry(row: dict, tier: str, provider: str) -> dict | None:
 def _fallback_entries(row: dict, tier: str) -> list[dict]:
     """Other entries route() can try once `tier`'s own pick is blocked.
 
-    Order (Grace's decision 3, issue #36): the rest of `tier`'s own list
-    first, then lower tiers (nearest first), then higher tiers (nearest
-    first). Skips every bmo:/local: entry outright -- decision 3 is
-    explicit that a blocked cloud provider waits for its reset rather than
-    quietly falling back to a free local model.
+    Order: the rest of `tier`'s own list first, then lower tiers (nearest
+    first). A higher tier is not a fallback. If no allowed model is open,
+    route defers. Skip bmo:/local: entries so a blocked cloud provider waits
+    for its reset rather than quietly using a free local model.
     """
     tier_index = _TIER_ORDER.index(tier)
-    tier_walk = (
-        (tier,)
-        + tuple(reversed(_TIER_ORDER[:tier_index]))
-        + _TIER_ORDER[tier_index + 1 :]
-    )
+    tier_walk = (tier,) + tuple(reversed(_TIER_ORDER[:tier_index]))
     entries = []
     for candidate_tier in tier_walk:
         if candidate_tier not in row:
@@ -169,15 +164,14 @@ def _apply_pacing(row: dict, tier: str, quota_rows: list[dict]) -> dict:
     whether to pass live data. Otherwise: lean up one tier, to an
     entry on a provider's surplus (decision 2, skipped if blocked, and
     always staying on that same provider -- see `_lean_in_entry`), then, if
-    the resulting pick is blocked (decision 1), search for another viable
-    entry (decision 3).
+    the resulting pick is blocked (decision 1), search allowed entries in
+    the same or lower tiers (decision 3).
 
     Returns `{"model", "effort"}` on an ordinary pick, plus
-    `"downgraded_from"` when decision 3 had to move off a blocked pick, or
-    plus `"wait_seconds"` (and no change to `"model"`/`"effort"`) when
-    every entry decision 3 tried -- the original blocked pick included --
-    is itself blocked. Waiting for the reset is Grace's call for that case:
-    no silent fallback to a bmo: or local: model to dodge it.
+    `"downgraded_from"` when decision 3 moves off a blocked pick, or a
+    quota deferral with `wait_seconds` and `reason` when no allowed entry
+    has quota. A deferral keeps the blocked model as context; callers must
+    not run it.
     """
     choice = row[tier][0]
     if not quota_rows:
@@ -209,7 +203,11 @@ def _apply_pacing(row: dict, tier: str, quota_rows: list[dict]) -> dict:
 
     earliest = pace.earliest_reset(quota_rows, examined, now_ms)
     wait_seconds = max(0.0, (earliest - now_ms) / 1000) if earliest is not None else None
-    return {**blocked_choice, "wait_seconds": wait_seconds}
+    return {
+        **blocked_choice,
+        "wait_seconds": wait_seconds,
+        "reason": "all allowed models are blocked by quota",
+    }
 
 
 def route(
@@ -221,7 +219,7 @@ def route(
     tiers: dict | None = None,
     quota_rows: list[dict] | None = None,
 ) -> dict:
-    """Return `{"model": ..., "effort": ...}` for a (category, size) pair.
+    """Return a model and effort, or a quota deferral with its reason.
 
     `bmo_available=False` models a timed-out bmo lock: if tier0 has a bmo:
     entry, skip tier0 and use tier1. `primary_effort` is the primary
@@ -235,7 +233,7 @@ def route(
     reads live quota for real; pass `[]` for "no data, don't change
     anything" (every pre-#36 test does this, to keep testing this
     function's tier/bmo logic undisturbed by live quota). See
-    `_apply_pacing` for what a real `quota_rows` list does to the pick.
+    `_apply_pacing` for the quota behavior.
 
     Raises `RouteInputError` for a bad route input or model-tier file.
     """
