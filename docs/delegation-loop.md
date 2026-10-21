@@ -5,13 +5,13 @@ can run without it. Read the root `AGENTS.md` first.
 
 ## Where this repo lives
 
-This repo is `gracecraft-software/lupin`. The owner clones it to
-`~/Code/Projects/lupin` and OrbStack mounts it into the `jesus` sandbox at
-`/code/lupin`, the same way `ghostbook.nix` is mounted at
-`/code/ghostbook.nix`.
+This repo is `OWNER/REPO`. The owner clones it to a local checkout and mounts
+it into the sandbox at `/code/<checkout>`, the same way other repos are
+mounted under `/code/`.
 
-A loop agent does not edit the main checkout in `/code/lupin`. Each run gets
-its own Git worktree in the loop state directory. See "State" in `AGENTS.md`.
+A loop agent does not edit the main checkout in `/code/<checkout>`. Each run
+gets its own Git worktree in the loop state directory. See "State" in
+`AGENTS.md`.
 
 ## Lupin commands for a pass
 
@@ -146,11 +146,11 @@ At the end of a session, run `/handoff`.
 This repo follows "Preview server" in the `delegation-loop` skill. For this
 repo:
 
-- The start command and port are in "Preview server" in `AGENTS.md`. The
-  machine is not named yet.
+- The start command and port are in "Preview server" in `AGENTS.md`. The machine
+  is in the owner's own machine notes.
 - Set `LUPIN_LOOP_STATE_DIR` to a preview-only path. The default is
   `/var/lib/delegation-loop`, which is the real fleet state.
-- Do not set `LUPIN_REDIS_HOST` to the fleet Redis unless the test needs it.
+- Do not point the preview at the fleet Redis. Use a scratch Redis.
 - The state directory does not change the Herdr session. New runs use the
   `lupin-loops` session (`SESSION_NAME` in `src/lupin/loop_runtime.py`). Older
   loops may use an old session until they stop.
@@ -159,7 +159,7 @@ repo:
 ## Other rules
 
 This repo is a plain Python package and a Nix flake, not a live system
-config. It carries none of `ghostbook.nix`'s extra danger rules (no
+config. It carries none of an earlier system's extra danger rules (no
 activation scripts, no machine state to break). The one rule that still
 applies is rule 1 above — push the branch and open the PR upstream.
 

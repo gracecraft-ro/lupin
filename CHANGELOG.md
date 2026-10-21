@@ -22,6 +22,11 @@ All notable changes to Lupin. The version has one source:
 - Roadmap repo-fetch warnings can be dismissed on Board and List. A dismissal
   stays hidden after a reload and applies to one repo and warning.
 
+### Fixed
+
+- "Run now" passes dash-leading notes as one argument, and rejects notes
+  with a NUL byte before dispatch.
+
 ## 0.1.0
 
 - First version. Model routing, slot leases, the dashboard, the fleet

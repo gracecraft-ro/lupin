@@ -26,7 +26,7 @@ that you post with `Loop:`.
      --status "in progress: watchdog script written, docs pending" \
      --branch BRANCH \
      --summary "Watchdog script written and verified. Docs still to do." \
-     --highlights "Added hosts/jesus/scripts/watchdog.sh" \
+     --highlights "Added scripts/watchdog.sh" \
      --evidence "systemd-analyze verify watchdog.service: no errors" \
      --decisions "Poll every 60s. A 30s poll doubled journalctl load." \
      --next "Owner: document the timer in docs/delegation-loops.md"

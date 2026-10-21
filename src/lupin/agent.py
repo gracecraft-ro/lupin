@@ -232,7 +232,7 @@ def _handle_loop_run(params: dict, cmd_id: str) -> list[str]:
     argv.extend(_validate_omp_options(params, platform))
     note = _validate_note(params.get("note"))
     if note is not None:
-        argv.extend(["--note", note])
+        argv.append(f"--note={note}")
     resume = params.get("resume", False)
     if not isinstance(resume, bool):
         raise RejectedCommand("resume must be a boolean")
@@ -250,7 +250,7 @@ def _handle_loop_run_all(params: dict, cmd_id: str) -> list[str]:
     argv.extend(_validate_omp_options(params, platform))
     note = _validate_note(params.get("note"))
     if note is not None:
-        argv.extend(["--note", note])
+        argv.append(f"--note={note}")
     return argv
 
 

@@ -23,8 +23,8 @@ import pytest
 import redis as redis_lib
 
 from lupin import (
-    cli, claims, commands, ledger, machines, quest, quota_cache, roadmap, serve, slots,
-    slots_redis, usage_cache,
+    agent, cli, claims, commands, ledger, machines, quest, quota_cache, roadmap, serve,
+    slots, slots_redis, usage_cache,
 )
 
 
@@ -211,6 +211,57 @@ class QuotaRenderingTests(unittest.TestCase):
         self.assertIn("3d 12h", rendered)
         self.assertIn("42% used", rendered)
 
+    def test_unclassified_window_keeps_its_pace_marker(self):
+        # Issue #80: the legend and the footer promise the marker, so a row
+        # whose window the page cannot name keeps one.
+        row = {
+            "provider": "openai",
+            "duration": serve.QuotaDuration.OTHER,
+            "label": "New window",
+            "used_pct": 42,
+            "resets_at": 302_400_000,
+        }
+        rendered = serve.render_quota_row(row, now_ms=0)
+
+        self.assertIn("quota-meter-elapsed", rendered)
+        self.assertIn("quota-meter-elapsed-unknown", rendered)
+        self.assertIn("pace not shown: unknown window length", rendered)
+        self.assertIn("Status unavailable", rendered)
+
+        # The same row with a known window length gets a real marker and a
+        # real pace status, even though the window name is unknown.
+        row["duration_ms"] = 604_800_000
+        rendered = serve.render_quota_row(row, now_ms=0)
+
+        self.assertEqual(serve.quota_elapsed_pct(row, now_ms=0), 50)
+        self.assertIn("left:50.0%", rendered)
+        self.assertIn("On pace", rendered)
+        self.assertNotIn("unknown window length", rendered)
+
+    def test_totals_table_shows_no_exception_name_and_no_file_path(self):
+        # Issue #51: a cached row can still hold the old text and the old
+        # path. The page shows a plain state either way.
+        snapshots = {
+            "jesus": {
+                "rows": [{
+                    "provider": "claude",
+                    "error": "unavailable (FileNotFoundError)",
+                    "source": "/var/lib/delegation-loop/stats-cache.json",
+                }],
+                "fetched_at": "2026-01-01T00:00:00+00:00",
+                "fetched_by": "jesus",
+            }
+        }
+        with (
+            mock.patch.object(quota_cache, "read_snapshot", return_value={}),
+            mock.patch.object(usage_cache, "read_snapshot", return_value=snapshots),
+        ):
+            page = serve.render_usage().decode()
+
+        self.assertIn("<td>claude</td><td colspan=3>Not available</td>", page)
+        self.assertNotIn("FileNotFoundError", page)
+        self.assertNotIn("/var/lib/delegation-loop", page)
+
     def test_quota_section_groups_by_provider_and_precedes_totals(self):
         # Real-shaped row, as `quota.quota_usage()` would produce it --
         # confirmed against that module's own tests.
@@ -295,7 +346,8 @@ class QuotaRenderingTests(unittest.TestCase):
         ):
             page = serve.render_usage().decode()
         self.assertIn("<h3>omp</h3>", page)
-        self.assertIn("<p class=dim>unavailable (RuntimeError)</p>", page)
+        self.assertIn("<p class=dim>Not available</p>", page)
+        self.assertNotIn("RuntimeError", page)
 
         claude_snapshot = {
             "claude": {
@@ -367,7 +419,7 @@ class QuotaRenderingTests(unittest.TestCase):
         self.assertIn("<td>claude</td><td>130</td><td>-</td><td>not tracked</td>", page)
         self.assertIn("<td>openai-codex</td><td>21</td><td>15</td><td>$0.75</td>", page)
         self.assertIn(
-            "<td>opencode-go</td><td colspan=3>unavailable (FileNotFoundError)</td>",
+            "<td>opencode-go</td><td colspan=3>Not available</td>",
             page,
         )
         self.assertIn("Usage snapshots:", page)
@@ -814,6 +866,11 @@ class ModelSnapshotTests(unittest.TestCase):
         self.assertEqual(serve.match_live_model("opencode-go/glm-5.3", models)["id"], "glm-5.3")
         self.assertEqual(serve.match_live_model("openai/gpt-6-luna", models), None)
         self.assertIsNone(serve.match_live_model("opencode-go/", models))
+        # "openai-codex/" is the real prefix for the Codex subscription.
+        codex = [{"id": "gpt-6.1-sol", "display_name": None}]
+        self.assertEqual(
+            serve.match_live_model("openai-codex/gpt-6.1-sol", codex)["id"], "gpt-6.1-sol"
+        )
 
     def test_match_live_model_no_match_is_none(self):
         self.assertIsNone(serve.match_live_model("fable", [{"id": "claude-opus-4-5"}]))
@@ -2623,6 +2680,26 @@ class LoopsRouteUnitTests(unittest.TestCase):
         self.assertNotIn("action=/loops/close", body)
         self.assertNotIn("action=/loops/state", body)
 
+    def test_sent_message_shows_up_as_a_pill(self):
+        data = {
+            "entries": [_loop_entry("a", "stopped", "pihome")],
+            "local_host": "pihome",
+            "machines": [{"name": "pihome", "state": "online", "slots": {}}],
+            "fleet_error": None,
+        }
+
+        body = serve.render_loops(
+            data,
+            group="repo",
+            selected_repo="a",
+            selected_tail=None,
+            lines=60,
+            sent="Started loop a on jesus",
+        ).decode()
+
+        self.assertIn("Started loop a on jesus", body)
+        self.assertIn("pill on", body)
+
 
     def test_close_route_rejects_bad_repo_name(self):
         handler = _loops_handler()
@@ -2748,7 +2825,37 @@ class LoopsRouteUnitTests(unittest.TestCase):
         ):
             handler.do_POST()
         fake_run.assert_called_once_with(["lupin", "run", "a"], timeout=20.0)
-        handler.redirect.assert_called_once_with("/loops?repo=a")
+        handler.redirect.assert_called_once_with(
+            "/loops?repo=a&sent=Started%20loop%20a%20on%20h"
+        )
+
+    def test_start_route_names_the_repo_and_the_machine(self):
+        handler = _loops_handler()
+        handler.cmd_signing_key = "secret"
+        _post_body(handler, "/loops/start", {"repo": "a", "machine": "jesus"})
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.loops.commands, "enqueue", return_value="cmd-1"),
+        ):
+            handler.do_POST()
+        target = handler.redirect.call_args.args[0]
+        assert target.startswith("/loops?repo=a&sent=")
+        # A queued start names the repo and the machine that will run it.
+        assert quote("Started loop a on jesus", safe="") in target
+
+    def test_start_route_reports_a_failed_start(self):
+        handler = _loops_handler()
+        _post_body(handler, "/loops/start", {"repo": "a", "machine": "h"})
+        with (
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve, "run", return_value=(1, "boom")),
+        ):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 502)
+        body = handler.reply.call_args.args[0].decode()
+        self.assertIn("run failed", body)
+        self.assertIn("machine h", body)
+        handler.redirect.assert_not_called()
 
     def test_coordinator_cannot_start_a_local_loop(self):
         handler = _loops_handler()
@@ -3155,6 +3262,58 @@ class ScheduleRunRouteUnitTests(unittest.TestCase):
             handler.do_POST()
         self.assertTrue(fake_machines.call_args.kwargs.get("strict"))
 
+    def test_note_reaches_the_local_loop(self):
+        handler = _schedule_handler()
+        _post_body(
+            handler, "/schedule/run",
+            {"repo": "a-repo", "place": "h", "note": "- focus on tests"},
+        )
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", return_value=[]),
+            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
+        ):
+            handler.do_POST()
+        fake_run.assert_called_once_with(
+            ["lupin", "run", "a-repo", "--note=- focus on tests"], timeout=20.0
+        )
+
+    def test_no_note_leaves_the_loop_arguments_alone(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "a-repo", "place": "h"})
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", return_value=[]),
+            mock.patch.object(serve, "run", return_value=(0, "")) as fake_run,
+        ):
+            handler.do_POST()
+        fake_run.assert_called_once_with(["lupin", "run", "a-repo"], timeout=20.0)
+
+    def test_nul_note_is_rejected_before_dispatch_or_enqueue(self):
+        handler = _schedule_handler()
+        _post_body(
+            handler, "/schedule/run",
+            {"repo": "a-repo", "place": "h", "note": "before\x00after"},
+        )
+        handler.reply = mock.Mock()
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
+            mock.patch.object(serve.machines, "hostname") as hostname,
+            mock.patch.object(serve.machines, "machines") as machines,
+            mock.patch.object(serve.loops, "dispatch_loop_action") as dispatch,
+            mock.patch.object(serve, "run") as run_local,
+            mock.patch.object(serve.commands, "enqueue") as enqueue,
+        ):
+            handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+        hostname.assert_not_called()
+        machines.assert_not_called()
+        dispatch.assert_not_called()
+        run_local.assert_not_called()
+        enqueue.assert_not_called()
+
 
 
 class TestSchedulePageIntegration:
@@ -3200,6 +3359,30 @@ class TestSchedulePageIntegration:
         assert stored["issuer"] == "pihome"
         assert commands.verify(stored, "secret") is True
         handler.send_response.assert_called_once_with(303)
+
+    def test_run_now_passes_the_note_to_a_remote_loop(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        _write_machine_record(redis_port, "jesus", state="online")
+        handler = _post_handler(
+            "/schedule/run", b"repo=widgets&place=jesus&note=-+focus+on+tests", kw
+        )
+        handler.cmd_signing_key = "secret"
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            handler.do_POST()
+
+        raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+        queued = raw.zrange("lupin:v1:cmdq:jesus", 0, -1)
+        assert len(queued) == 1
+        stored = json.loads(raw.get(f"lupin:v1:cmd:{queued[0]}"))
+        assert stored["action"] == "loop.run"
+        assert stored["params"] == {"repo": "widgets", "note": "- focus on tests"}
+        # The agent on the worker keeps the note in one argv element.
+        assert agent.ACTIONS["loop.run"](stored["params"], "cmd-1") == [
+            "lupin", "run", "widgets", "--note=- focus on tests",
+        ]
 
     def test_run_now_rejects_a_draining_named_machine(self, redis_port, flush_redis):
         kw = _kw(redis_port)
@@ -3284,6 +3467,16 @@ def _make_repo(tmp_path, name, *, doc=True):
     return repo_dir
 
 
+def _schedule_pairs(path) -> dict:
+    """The repo to platform pairs of a schedule file."""
+    pairs = {}
+    for line in path.read_text().splitlines():
+        fields = line.split()
+        if fields:
+            pairs[fields[0]] = fields[1] if len(fields) > 1 else "claude"
+    return pairs
+
+
 class RepoHelperTests(unittest.TestCase):
     def test_repo_slot_name_is_prefixed_so_it_cannot_collide_with_bmo(self):
         self.assertEqual(serve._repo_slot_name("widgets"), "repo:widgets")
@@ -3299,11 +3492,11 @@ class RepoHelperTests(unittest.TestCase):
                 mock.patch.object(serve, "STATE_DIR", state_dir),
                 mock.patch.object(serve, "REPOS_FILE", os.path.join(state_dir, "repos")),
             ):
-                serve.write_enabled_repos(["b-repo", "a-repo"])
+                serve.write_enabled_repos({"b-repo": "claude", "a-repo": "omp"})
                 self.assertEqual(serve.enabled_repos(), ["b-repo", "a-repo"])
 
     def test_enabled_repos_recognizes_a_bare_name_line(self):
-        """The dashboard's own `/repos/add` writes one name per line."""
+        """A schedule file may hold a repo name without a platform."""
         with tempfile.TemporaryDirectory() as tmp:
             repos_file = os.path.join(tmp, "repos")
             with open(repos_file, "w", encoding="utf-8") as fh:
@@ -3725,22 +3918,24 @@ class TestReposPageRoutes:
     def test_add_route_accepts_a_repo_without_a_delegation_doc(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
         _make_repo(tmp_path, "widgets", doc=False)
-        monkeypatch.setattr(serve, "enabled_repos", lambda: ["other"])
+        monkeypatch.setattr(serve, "_repo_platforms", lambda: {"other": "omp"})
         written = {}
-        monkeypatch.setattr(serve, "write_enabled_repos", lambda names: written.setdefault("names", names))
+        monkeypatch.setattr(
+            serve, "write_enabled_repos", lambda values: written.setdefault("values", values)
+        )
         handler = _repos_handler()
         _post_body(handler, "/repos/add", {"repo": "widgets"})
         handler.do_POST()
-        assert written["names"] == ["other", "widgets"]
+        assert written["values"] == {"other": "omp", "widgets": "claude"}
         handler.redirect.assert_called_once()
         assert "added" in handler.redirect.call_args.args[0]
 
     def test_add_route_is_a_no_op_when_already_enabled(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
         _make_repo(tmp_path, "widgets")
-        monkeypatch.setattr(serve, "enabled_repos", lambda: ["widgets"])
+        monkeypatch.setattr(serve, "_repo_platforms", lambda: {"widgets": "omp"})
 
-        def _fail(names):
+        def _fail(values):
             raise AssertionError("should not write -- already enabled")
 
         monkeypatch.setattr(serve, "write_enabled_repos", _fail)
@@ -3748,6 +3943,32 @@ class TestReposPageRoutes:
         _post_body(handler, "/repos/add", {"repo": "widgets"})
         handler.do_POST()
         handler.redirect.assert_called_once()
+
+    def test_add_route_keeps_a_comment_line_in_the_schedule_file(self, tmp_path, monkeypatch):
+        """A comment line stays one line. An add must not write it again."""
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        _make_repo(tmp_path, "gadgets")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        repos_file = state_dir / "repos"
+        repos_file.write_text("# notes for the loop\nlupin omp\n", encoding="utf-8")
+        monkeypatch.setattr(serve, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(serve, "REPOS_FILE", str(repos_file))
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/add", {"repo": "widgets"})
+        handler.do_POST()
+        assert repos_file.read_text(encoding="utf-8") == (
+            "# notes for the loop\nlupin omp\nwidgets claude\n"
+        )
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/add", {"repo": "gadgets"})
+        handler.do_POST()
+        assert repos_file.read_text(encoding="utf-8") == (
+            "# notes for the loop\nlupin omp\nwidgets claude\ngadgets claude\n"
+        )
 
     def test_generate_docs_route_rejects_a_repo_that_already_has_one(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
@@ -3767,16 +3988,18 @@ class TestReposPageRoutes:
     def test_generate_docs_route_writes_a_doc_and_adds_to_the_schedule(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
         _make_repo(tmp_path, "widgets", doc=False)
-        monkeypatch.setattr(serve, "enabled_repos", lambda: [])
+        monkeypatch.setattr(serve, "_repo_platforms", lambda: {})
         written = {}
-        monkeypatch.setattr(serve, "write_enabled_repos", lambda names: written.setdefault("names", names))
+        monkeypatch.setattr(
+            serve, "write_enabled_repos", lambda values: written.setdefault("values", values)
+        )
         handler = _repos_handler()
         _post_body(handler, "/repos/generate-docs", {"repo": "widgets"})
         handler.do_POST()
         doc_path = tmp_path / "widgets" / "docs" / "delegation-loop.md"
         assert doc_path.is_file()
         assert "widgets" in doc_path.read_text()
-        assert written["names"] == ["widgets"]
+        assert written["values"] == {"widgets": "claude"}
 
     def test_remove_route_rejects_a_repo_not_on_the_schedule(self, monkeypatch):
         monkeypatch.setattr(serve, "enabled_repos", lambda: ["other"])
@@ -3827,6 +4050,87 @@ class TestReposPageRoutes:
         doc_path = tmp_path / "widgets" / "docs" / "delegation-loop.md"
         assert doc_path.read_text() == "new content"
         handler.redirect.assert_called_once_with("/repos?doc=widgets&sent=saved")
+
+    def test_repos_handlers_keep_the_platform_of_every_repo(self, tmp_path, monkeypatch):
+        """Adding or removing a repo must not drop the platform column of
+        the schedule file (issue #65)."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        repos_file = state_dir / "repos"
+        repos_file.write_text("lupin omp\nroundsmith claude\n")
+        code_dir = tmp_path / "code"
+        (code_dir / "localno").mkdir(parents=True)
+        (code_dir / "fresh").mkdir()
+        monkeypatch.setattr(serve, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(serve, "REPOS_FILE", str(repos_file))
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        monkeypatch.setattr(serve.loop_runtime, "REPOS_FILE", repos_file)
+        monkeypatch.setattr(serve.loop_runtime, "ORCHESTRATORS_FILE", state_dir / "orchestrators.json")
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/add", {"repo": "localno"})
+        handler.do_POST()
+        assert repos_file.read_text() == "lupin omp\nroundsmith claude\nlocalno claude\n"
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/generate-docs", {"repo": "fresh"})
+        handler.do_POST()
+        assert _schedule_pairs(repos_file) == {
+            "lupin": "omp",
+            "roundsmith": "claude",
+            "localno": "claude",
+            "fresh": "claude",
+        }
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/remove", {"repo": "localno", "confirm": "localno"})
+        handler.do_POST()
+        assert _schedule_pairs(repos_file) == {
+            "lupin": "omp",
+            "roundsmith": "claude",
+            "fresh": "claude",
+        }
+
+    def test_doc_save_keeps_the_line_endings_of_the_file(self, tmp_path, monkeypatch):
+        """A save must not change the line endings of the doc (issue #66).
+        A browser sends the text of a textarea with CRLF endings."""
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        doc_path = tmp_path / "widgets" / "docs" / "delegation-loop.md"
+        doc_path.write_bytes(b"# doc\n\nline one\nline two\n")
+        handler = _repos_handler()
+        _post_body(
+            handler,
+            "/repos/doc/save",
+            {"repo": "widgets", "text": "# doc\r\n\r\nline one\r\nline two\r\n"},
+        )
+        handler.do_POST()
+        assert doc_path.read_bytes() == b"# doc\n\nline one\nline two\n"
+
+        doc_path.write_bytes(b"# doc\r\n\r\nline one\r\n")
+        handler = _repos_handler()
+        _post_body(
+            handler,
+            "/repos/doc/save",
+            {"repo": "widgets", "text": "# doc\r\n\r\nline one\r\n"},
+        )
+        handler.do_POST()
+        assert doc_path.read_bytes() == b"# doc\r\n\r\nline one\r\n"
+
+    def test_doc_editor_warns_before_unsaved_text_is_lost(self):
+        """The doc editor must warn before the typed text goes away
+        (issue #70). The browser's own leave-page prompt covers a reload
+        or a link click, and the auto-refresh waits for the editor."""
+        html = serve.render_repos(
+            {"repos": [], "machines": [], "fleet_error": None, "local_host": "h"},
+            doc_repo="widgets",
+            doc_text="# doc\n",
+            doc_edit=True,
+        ).decode("utf-8")
+        assert "beforeunload" in html
+        assert "lupinUnsavedChanges" in html
+        assert 'addEventListener("submit"' in html
+        assert "!window.lupinUnsavedChanges()" in serve.JS
 
     def test_slot_max_route_rejects_a_missing_repository(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
@@ -3975,6 +4279,14 @@ DEBRIEF_TEXT = (
 )
 
 
+DEBRIEF_WINDOW_TEXT = (
+    "# Debrief: acme/widgets\n"
+    "## Window\n"
+    "- From: 2026-10-02T09:00:00Z (2026-10-02 02:00 PDT)\n"
+    "- To: 2026-10-02T17:00:00Z (2026-10-02 10:00 PDT)\n"
+)
+
+
 def _write_debrief_file(root, repo, name, text):
     folder = root / "debriefs" / repo
     folder.mkdir(parents=True, exist_ok=True)
@@ -4030,6 +4342,27 @@ def test_debrief_page_renders_markdown_escapes_text_and_maps_images(tmp_path, mo
     assert "<h1>Debrief: acme/widgets</h1>" in body
     assert "<li>PR #11: Shipped feature &lt;b&gt;x&lt;/b&gt;</li>" in body
     assert f"<img src='/image?id={DEBRIEF_ATTACHMENT}'" in body
+
+
+def test_debrief_page_shows_the_window_in_the_readers_own_time_zone(tmp_path, monkeypatch):
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    _write_debrief_file(tmp_path, "widgets", "20261002-090000.md", DEBRIEF_WINDOW_TEXT)
+
+    handler = _get_handler("/debrief?repo=widgets&file=20261002-090000.md", {})
+    handler.do_GET()
+
+    body = handler.reply.call_args.args[0].decode()
+    # The UTC instant stays in the file. The page hands it to the browser.
+    assert "data-lupin-utc='2026-10-02T09:00:00Z'" in body
+    assert "data-lupin-utc='2026-10-02T17:00:00Z'" in body
+    # The page says the time is UTC until the browser gives a time zone.
+    assert "2026-10-02 09:00 UTC" in body
+    assert "2026-10-02 17:00 UTC" in body
+    # The Los Angeles time of the file does not reach the page.
+    assert "02:00 PDT" not in body
+    assert "10:00 PDT" not in body
+    # The browser does the conversion.
+    assert "resolvedOptions().timeZone" in body
 
 
 @pytest.mark.parametrize("query", [

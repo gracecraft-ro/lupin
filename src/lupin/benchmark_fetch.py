@@ -6,9 +6,13 @@ leaderboard. Instead, run an agent once a day. It searches the web, the
 same way a person would, and reports a score. This module runs that agent
 and caches what it finds.
 
-The lookup worker is a **free** model, `omp -p` on opencode-go's
-zero-price tier, not a paid `claude -p sonnet` call. It gets one tool
-only: web search. No bash, no file edits.
+The lookup worker is picked at run time, not named in this code: free
+models come and go, so a name written here would go stale. The worker
+comes from the newest model snapshot -- the opencode-go models whose
+input and output price are both zero -- and the list is a short one, a
+few fallbacks rather than a single name. The call is `omp -p` on one of
+those models, never a paid `claude -p sonnet` call. The agent gets web
+search and a page read. No bash, no file edits.
 
 One agent call per model list is not enough. Measured 2026-10-08: a single
 call asked to score 54 model IDs scored 24 and returned "not found" for
@@ -50,7 +54,7 @@ empty slot and fetches instead.
 The exact command this module runs per shard, confirmed by hand first
 (see `_build_argv`'s docstring for each flag):
 
-    omp -p --model opencode-go/beam-free --thinking xhigh \\
+    omp -p --model <worker-picked-from-the-snapshot> --thinking xhigh \\
       --tools web_search,read --no-session --auto-approve \\
       --max-time 420 '<prompt>'
 
@@ -94,17 +98,20 @@ CACHE_FRESH_SECONDS = 20 * 60 * 60
 # short Redis outage does not erase the last real score on file.
 REDIS_KEY_TTL = 7 * 24 * 60 * 60
 
-# The lookup worker. `omp -p` on opencode-go's zero-price tier, with the
-# thinking level at its maximum (`xhigh` for this model) -- this lookup is web research, where the
-# cheap answer is the one that says "not found". The 2026-10-20 model
-# snapshot lists `beam-free` at $0.00 input and output; `step-5-preview-free`
-# is gone, and `step-5-preview` now costs $1.00/$2.70 per Mtok. A hand test
-# on 2026-10-20 read the Artificial Analysis page for glm-5.3: `beam-free`
-# returned score 45 in 4.0 s, and `minimax-m3.1-flash-free` returned the same
-# score in 5.8 s.
+# The lookup worker is chosen at run time, never named here: free models
+# are replaced often, so a name in the code goes stale and the fetch
+# breaks. The worker comes from the newest model snapshot -- the
+# opencode-go models whose input and output price are both zero -- and
+# the list is short on purpose: a few fallbacks, not a whole fleet. The
+# thinking level is high, because this lookup is web research, where the
+# cheap answer is the one that says "not found".
 OMP_BINARY = "omp"
-OMP_MODEL = "opencode-go/beam-free"
 OMP_THINKING = "xhigh"
+
+# How many snapshot models to try as lookup workers. Short on purpose:
+# every candidate is one more subprocess call, and the first one that
+# answers is the one that counts.
+WORKER_CANDIDATE_LIMIT = 4
 
 # One tool for the page fetch, plus web search as the fallback. `read`
 # fetches a URL as text: no search-provider quota, ~2s per page. The free
@@ -249,6 +256,109 @@ def _zero_price_model_ids(model_ids: list[str]) -> list[str]:
     return zero_price
 
 
+def _opencode_go_rows(snapshot: dict) -> list[dict]:
+    """The opencode-go model rows in one snapshot, live ones first.
+
+    A subscription that failed its fetch keeps its last known list, so a
+    stale row is still a better guess than no worker at all. Live rows
+    win when there are any.
+    """
+    subscriptions = snapshot.get("subscriptions")
+    if not isinstance(subscriptions, dict):
+        return []
+    entry = subscriptions.get("opencode-go")
+    if not isinstance(entry, dict):
+        return []
+    models = [
+        model
+        for model in (entry.get("models") or [])
+        if isinstance(model, dict) and model.get("id")
+    ]
+    live = [model for model in models if entry.get("live")]
+    return live or models
+
+
+def _price_pair(model: dict) -> tuple[float, float] | None:
+    """One model's input and output price, or `None` when it has none."""
+    price = model.get("price")
+    if not isinstance(price, dict):
+        return None
+    input_price = price.get("input")
+    output_price = price.get("output")
+    for number in (input_price, output_price):
+        if not isinstance(number, (int, float)) or isinstance(number, bool):
+            return None
+    return float(input_price), float(output_price)
+
+
+def _worker_name(model_id: str) -> str:
+    """The `omp` model name for a snapshot model id."""
+    return model_id if "/" in model_id else f"opencode-go/{model_id}"
+
+
+def _zero_price_worker_ids(snapshot: dict) -> list[str]:
+    """The zero-price opencode-go models, sorted by id.
+
+    Sorting by id keeps the order the same on every run, so the same
+    model is tried first today and tomorrow.
+    """
+    free = []
+    for model in _opencode_go_rows(snapshot):
+        prices = _price_pair(model)
+        if prices is not None and prices == (0.0, 0.0):
+            free.append(_worker_name(model["id"]))
+    return sorted(set(free))
+
+
+def _cheapest_worker_id(snapshot: dict) -> str | None:
+    """The cheapest priced opencode-go model, or `None` when none has a price.
+
+    Ties break by id, so the answer does not change between runs.
+    """
+    priced = []
+    for model in _opencode_go_rows(snapshot):
+        prices = _price_pair(model)
+        if prices is None:
+            continue
+        priced.append((prices[0] + prices[1], model["id"]))
+    if not priced:
+        return None
+    priced.sort()
+    return _worker_name(priced[0][1])
+
+
+def _resolve_workers(connection: dict | None = None) -> tuple[list[str], str | None]:
+    """The lookup workers to try, and a line to print about the choice.
+
+    The workers come from the newest model snapshot: the opencode-go
+    models whose input and output price are both zero, sorted by id and
+    cut to `WORKER_CANDIDATE_LIMIT`. When the snapshot has no zero-price
+    model, the cheapest priced one is used instead and the line says so.
+    When there is no snapshot at all, the list is empty and the line says
+    how to fix it. No model name is written in this code: every name here
+    comes from the snapshot at run time.
+    """
+    snapshot = model_fetch.latest_snapshot(**(connection or {}))
+    if not isinstance(snapshot, dict):
+        return [], (
+            "benchmark lookup: no model snapshot found; "
+            "run `lupin fetch-models` to refresh it"
+        )
+    free = _zero_price_worker_ids(snapshot)
+    if free:
+        return free[:WORKER_CANDIDATE_LIMIT], None
+    cheapest = _cheapest_worker_id(snapshot)
+    if cheapest:
+        return [cheapest], (
+            "benchmark lookup: no zero-price model in the snapshot; "
+            "using the cheapest priced model instead"
+        )
+    return [], (
+        "benchmark lookup: the model snapshot lists no opencode-go model; "
+        "run `lupin fetch-models` to refresh it"
+    )
+
+
 def _build_prompt(
     model_ids: list[str], zero_price_model_ids: list[str] | None = None
 ) -> str:
@@ -262,13 +372,13 @@ def _build_prompt(
     )
 
 
-def _build_argv(prompt: str) -> list[str]:
+def _build_argv(prompt: str, model: str) -> list[str]:
     """Build the `omp` command. Each flag was tested by hand first:
 
     - `-p` runs one prompt to completion and exits -- the unattended
       shape, same as the `claude -p` call this replaces.
-    - `--model opencode-go/beam-free` is the zero-price subscription model
-      (see `OMP_MODEL`'s comment).
+    - `--model` is the lookup worker, taken from the model snapshot at
+      run time (see `_resolve_workers`). No model name is written here.
     - `--thinking xhigh` spends the most reasoning this model offers.
       A web lookup that gives up early is the failure mode here, not cost.
     - `--tools web_search,read` exposes two built-in tools. `read` fetches
@@ -286,7 +396,7 @@ def _build_argv(prompt: str) -> list[str]:
     """
     return [
         OMP_BINARY, "-p",
-        "--model", OMP_MODEL,
+        "--model", model,
         "--thinking", OMP_THINKING,
         "--tools", OMP_TOOLS,
         "--no-session",
@@ -359,44 +469,81 @@ def _valid_scores(raw) -> list[dict] | None:
     return scores
 
 
-def _run_shard(shard: list[str], zero_price_model_ids: list[str] | None = None) -> tuple[list[dict], str | None]:
+def _run_shard(
+    shard: list[str],
+    zero_price_model_ids: list[str] | None = None,
+    candidates: list[str] | None = None,
+) -> tuple[list[dict], str | None]:
     """One agent call for one shard. Returns `(scores, error)`.
+
+    The worker is the first candidate that answers. When a candidate
+    fails, times out, or hands back nothing usable, the next one is
+    tried, so a model that was replaced overnight does not sink the
+    whole fetch.
 
     Never raises: a missing `omp` binary, a timeout, a non-zero exit, or
     unusable output come back as the error string instead, so one shard's
     failure cannot sink the whole fetch.
     """
-    argv = _build_argv(_build_prompt(shard, zero_price_model_ids))
-    try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=SHARD_TIMEOUT, cwd="/tmp"
-        )
-    except FileNotFoundError:
-        return [], f"{OMP_BINARY} CLI not found"
-    except subprocess.TimeoutExpired:
-        return [], f"{OMP_BINARY} timed out after {SHARD_TIMEOUT}s"
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()[:300]
-        return [], f"{OMP_BINARY} exited {proc.returncode}: {detail}"
-    raw = _parse_scores(proc.stdout)
-    scores = _valid_scores(raw) if raw is not None else None
-    if scores is None:
-        return [], f"{OMP_BINARY} output did not contain a JSON scores object"
-    return scores, None
+    prompt = _build_prompt(shard, zero_price_model_ids)
+    errors: list[str] = []
+    for candidate in candidates or []:
+        argv = _build_argv(prompt, candidate)
+        try:
+            proc = subprocess.run(
+                argv, capture_output=True, text=True, timeout=SHARD_TIMEOUT, cwd="/tmp"
+            )
+        except FileNotFoundError:
+            # The binary itself is missing: the next candidate would fail
+            # the same way.
+            return [], f"{OMP_BINARY} CLI not found"
+        except subprocess.TimeoutExpired:
+            errors.append(f"{candidate} timed out after {SHARD_TIMEOUT}s")
+            continue
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()[:300]
+            errors.append(f"{candidate} exited {proc.returncode}: {detail}")
+            continue
+        raw = _parse_scores(proc.stdout)
+        scores = _valid_scores(raw) if raw is not None else None
+        if scores is None:
+            errors.append(f"{candidate} output did not contain a JSON scores object")
+            continue
+        if not scores:
+            errors.append(f"{candidate} returned no scores")
+            continue
+        return scores, None
+    return [], "; ".join(errors)[:500] or "no lookup worker answered"
 
 
-def fetch_benchmark_scores(model_ids: list[str], *, previous: list[dict] | None = None) -> dict:
+def fetch_benchmark_scores(
+    model_ids: list[str],
+    *,
+    previous: list[dict] | None = None,
+    connection: dict | None = None,
+) -> dict:
     """Fetch scores for `model_ids` by fanning out agent shards, then
     merge the results over `previous` (the cached scores, if any).
 
+    The lookup worker is chosen at run time from the newest model
+    snapshot (see `_resolve_workers`), never named here.
+
     Returns the shape this module caches: `{fetched_at, live, source,
     scores, [stale_reason]}`, where every score entry carries its own
-    `fetched_at`. `live` is False only when no shard returned anything
-    usable -- in that case the cached entries are still returned, so a
-    bad day dims the data instead of wiping it.
+    `fetched_at`. `source` says how the lookup ran, without naming the
+    worker: the worker is picked at run time, so its name would go
+    stale. `live` is False only when no shard returned anything usable
+    -- in that case the cached entries are still returned, so a bad day
+    dims the data instead of wiping it.
     """
     if not model_ids:
         return _unavailable("no model ids to score (neither model_fetch's snapshot nor model-tiers.json had any)")
+
+    candidates, note = _resolve_workers(connection)
+    if note:
+        print(note)
+    if not candidates:
+        return _unavailable(note or "no lookup worker available")
 
     shard_list = _shards(model_ids)
     new_scores: list[dict] = []
@@ -404,7 +551,7 @@ def fetch_benchmark_scores(model_ids: list[str], *, previous: list[dict] | None 
     zero_price = _zero_price_model_ids(model_ids)
     workers = min(MAX_PARALLEL_SHARDS, len(shard_list))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_run_shard, shard, zero_price): shard for shard in shard_list}
+        futures = {pool.submit(_run_shard, shard, zero_price, candidates): shard for shard in shard_list}
         for future in as_completed(futures):
             shard = futures[future]
             scores, error = future.result()
@@ -420,7 +567,11 @@ def fetch_benchmark_scores(model_ids: list[str], *, previous: list[dict] | None 
     snapshot = {
         "fetched_at": _newest_entry_time(merged),
         "live": True,
-        "source": f"{OMP_BINARY} -p {OMP_MODEL} thinking={OMP_THINKING}, web search + page reads",
+        # The worker is not named here: it was picked at run time from
+        # the model snapshot, and a free model name goes stale.
+        "source": (
+            f"{OMP_BINARY} -p thinking={OMP_THINKING}, web search + page reads"
+        ),
         "scores": merged,
     }
     if failures:
@@ -641,7 +792,7 @@ def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connec
         return _unavailable(f"redis unreachable: {exc}")
 
     try:
-        fresh = fetch_benchmark_scores(needed, previous=cached_scores)
+        fresh = fetch_benchmark_scores(needed, previous=cached_scores, connection=connection)
         try:
             client.set(REDIS_KEY, json.dumps(fresh), ex=REDIS_KEY_TTL)
         except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
