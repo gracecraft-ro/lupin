@@ -75,7 +75,16 @@ def package_version() -> str:
     try:
         return _pkg_version("lupin")
     except PackageNotFoundError:
-        return "0.0.0+dev"
+        # A source checkout has the file. The flake reads the same field.
+        from pathlib import Path
+
+        import tomllib
+
+        path = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        try:
+            return tomllib.loads(path.read_text(encoding="utf-8"))["project"]["version"]
+        except (OSError, KeyError, tomllib.TOMLDecodeError):
+            return "0.0.0+dev"
 
 
 def _now_iso() -> str:

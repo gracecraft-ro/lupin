@@ -76,6 +76,12 @@ def provider_for_model(model: str) -> str:
     subscription's glm-5.3. A bare name (sonnet/opus/fable) is a Claude
     subscription alias.
 
+    `openai-codex/` is the real prefix for the OpenAI (Codex) subscription,
+    so `openai-codex/gpt-6.1-sol` runs on the OpenAI account. `openai/` is
+    the accepted alias for the same account (issue #241). Both map to the
+    quota provider "openai", which is the name `quota.py` tracks that
+    account under.
+
     "bmo:"/"local:" models run on local/shared-GPU inference, not a cloud
     account with a quota reading -- `pace.py` never has rows for them, so
     they are never blocked. Falls back to the model name itself for
@@ -87,7 +93,7 @@ def provider_for_model(model: str) -> str:
         return "local"
     if model.startswith("opencode-go/"):
         return "opencode-go"
-    if model.startswith("openai/"):
+    if model.startswith(("openai-codex/", "openai/")):
         return "openai"
     return _PROVIDER_BY_MODEL.get(model, model)
 
@@ -102,7 +108,7 @@ def _load_tiers(source: str | None = None) -> dict:
 def _resolve_tier(tiers: dict, tier: str) -> str:
     """Return `tier` if this category has it, else the next higher one.
 
-    Some rows (frontend-ui, prose) skip tier0 on purpose -- see the "note"
+    Some rows (frontend-ui) skip tier0 on purpose -- see the "note"
     field in model-tiers.json. Escalating up is the safe direction; there is
     no silent downgrade to a cheaper model the matrix didn't ask for.
     """

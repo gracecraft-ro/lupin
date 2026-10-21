@@ -30,11 +30,13 @@ lupin fetch-models [--snapshot-file FILE] [--no-write] [--json]
 lupin fetch-benchmarks [--force] [--json]
 lupin quota [--json]
 lupin review-route (--category C --size S | --issue-json FILE) [--mode M]
-lupin review-route --prefetch N[,N...] [--repo OWNER/REPO]
+1: lupin review-route --prefetch N[,N...] [--repo OWNER/REPO] [--json]
+lupin pr-status [--repo OWNER/REPO] [--json] [--full]
 lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
 lupin hold (--lease ID | <slot> --holder H --wait S) [--ttl SECONDS] -- <command>
 lupin release --lease ID
 lupin status [--json]
+lupin dispatch OWNER/REPO#N [--holder HOLDER] [--json] [--no-start]
 lupin ledger append OWNER/REPO --event EVENT [--issue N] [--status S] \
   [--branch B] [--summary TEXT] [--highlights TEXT] [--evidence TEXT] \
   [--decisions TEXT] [--next TEXT] [--child N] [--json]
@@ -80,10 +82,22 @@ ledger annotations and a warning. It ignores `.loop/loop-state.json`.
 
 `review-route --prefetch` fetches issue/PR text up front -- body, comments,
 and (for a PR) reviews and a diff stat (changed files, additions/deletions,
-no diff text) -- one JSON blob keyed by number, always printed as JSON (no
-plain form; the output is nested data, not a one-line result). A number
-that is neither an issue nor a PR gets `{"error": ...}` in its own slot
-instead of failing the whole batch.
+no diff text). It prints markdown by default, one `brief_markdown` section
+per item separated by a blank line. Add `--json` for the keyed object,
+trimmed to the fields a worker reads: comments keep
+`author.login`/`createdAt`/`body`, reviews keep
+`author.login`/`state`/`submittedAt`/`body`, and the item keeps `kind`,
+`body`, and `diff_stat`. A number that is neither an issue nor a PR gets
+`{"error": ...}` in its own slot instead of failing the whole batch.
+
+`dispatch OWNER/REPO#N` claims the item, writes a markdown brief with its
+body and every comment (plus reviews and changed files for a PR) under the
+loop state directory's `notes/`, and starts the loop with that brief. Add
+`--no-start` to only write the brief; the claim stays with the holder.
+`--json` prints the brief's path and the claim. A brief over 8,000
+characters is passed to the loop as a short note naming its path, because
+the loop's note field has a cap. The brief is never committed to the
+repository.
 
 `acquire` prints a lease ID on success. Exit code 2 means the slot is full.
 The caller must skip and try again later. Exit code 3 means the `redis`
@@ -149,7 +163,7 @@ choose among orchestrators, add a profile when you enable the repo. Repeat
 ```
 lupin enable my-repo --platform omp \
   --orchestrator openai/gpt-5 \
-  --orchestrator opencode-go/step-5-preview-free:xhigh \
+  --orchestrator opencode-go/beam-free:xhigh \
   --orchestrator claude
 ```
 
@@ -168,7 +182,7 @@ orchestrator for that run and skip profile routing. For OMP, use
 `--model MODEL`. `openai` and `openai/MODEL` remain accepted aliases for
 `openai-codex` and `openai-codex/MODEL`. For example, use
 `--model openai-codex/gpt-5.6-luna` or
-`--model opencode-go/step-5-preview-free:xhigh`. Set auto-compaction for the
+`--model opencode-go/beam-free:xhigh`. Set auto-compaction for the
 selected model in OMP, near 200k tokens. Lupin passes the model to OMP; it
 does not set or check OMP's compaction settings. These options work with
 `run` and `once`; future one-off runs keep them. `run --all` applies them to
@@ -336,14 +350,17 @@ loop stops) are records.
 The Debriefs page (`/debrief`) shows the debriefs of all workers, so
 PiHome shows them too. Redis holds text only. A screenshot file stays on its
 worker. A GitHub attachment image is shown through the dashboard.
-If Claude cannot run, Lupin uses `openai-codex/gpt-5.6-luna`. Quota and
-rate-limit errors do not use a try; other failed model calls count (3 tries
-at most).
-If both models are blocked, the debrief shows with no digest and Lupin tries
+The digest uses these models in this order: bmo (`bmo:qwen3.8-flash-next`,
+tier0 in `model-tiers.json`), then `opencode-go/deepseek-v4.1-flash`, then
+Claude (`sonnet`). The worker reserves the fleet `bmo` slot and waits up to
+300 s, because bmo can sleep. A failed or out-of-quota model moves to the next
+one. Quota and rate-limit errors do not use a try; other failed model calls
+count (3 tries at most).
+If every model is blocked, the debrief shows with no digest and Lupin tries
 again later.
 
 `fetch-benchmarks` gets public benchmark scores. It does not run models.
-The lookup worker is a free opencode-go model (`step-5-preview-free`) run
+The lookup worker is a free opencode-go model (`beam-free`) run
 through `omp -p` with maximum thinking. It reads each model's own
 Artificial Analysis page directly -- the page states the Intelligence
 Index score in plain text, and one page read costs no search quota --
@@ -516,6 +533,9 @@ per-machine limit or add controls that the current code cannot support.
 - `src/lupin/_lease_runtime.py` — the `hold` subprocess/lease-renewal code
   shared by both slot backends above.
 - `src/lupin/review_dispatch.py` — picks which lock a routed model needs.
+- `src/lupin/pr_status.py` — `pr-status`: one read-only view of every open
+  pull request. It makes one `gh pr list` call. It shows merge, checks,
+  review, approval, claim, comments, description and reviewers.
 - `src/lupin/free_gate.py` — routes, then reserves the fleet `bmo` Redis
   slot for a `bmo:` pick before calling it final (issue #37).
 - `src/lupin/serve.py`, `src/lupin/roadmap.py` — the dashboard. Moved from
@@ -533,6 +553,8 @@ per-machine limit or add controls that the current code cannot support.
   file for routing, the Models page, and benchmark fallback.
 - `src/lupin/claims.py` — `claim`/`renew-claim`/`release-claim`: one GitHub
   issue claimed by one host at a time.
+- `src/lupin/dispatch.py` — `dispatch`: claims one issue or PR, writes its
+  markdown brief outside the repo, and starts its loop.
 - `src/lupin/digest.py` — writes a digest for each debrief and shares both
   through Redis.
 - `src/lupin/ledger.py` — appends and reads shared repository events in Redis.
@@ -562,8 +584,8 @@ per-machine limit or add controls that the current code cannot support.
 Full gate (the repo's gate, used by the merge rules):
 
 ```
-nix flake check                                    # build + test, all systems
-nix shell nixpkgs#python3Packages.pytest -c pytest -v
+nix flake check                                    # build + test, current system
+nix develop -c python3 -m pytest -v
 ```
 
 `nix develop <dir> -c <command>` runs `<command>` in the current directory. It
