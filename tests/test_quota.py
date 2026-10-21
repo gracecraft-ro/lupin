@@ -74,7 +74,7 @@ class ClaudeUsageTests(UsageReaderFixtures):
             "output_tokens": None,
             "cost": None,
             "period": "last 7 days",
-            "source": self.claude_path,
+            "source": quota.CLAUDE_STATS_SOURCE,
             "last_update": today.isoformat(),
         }])
 
@@ -82,14 +82,17 @@ class ClaudeUsageTests(UsageReaderFixtures):
         with mock.patch.object(quota, "CLAUDE_STATS_FILE", self.claude_path + ".missing"):
             rows = quota.claude_usage()
         self.assertEqual(rows[0]["provider"], "claude")
-        self.assertIn("unavailable (FileNotFoundError)", rows[0]["error"])
+        self.assertEqual(rows[0]["error"], quota.NOT_AVAILABLE)
+        self.assertNotIn("FileNotFoundError", rows[0]["error"])
+        self.assertNotIn("/", rows[0]["source"])
 
     def test_bad_json_is_unavailable(self):
         with open(self.claude_path, "w", encoding="utf-8") as stats_file:
             stats_file.write("{")
         with mock.patch.object(quota, "CLAUDE_STATS_FILE", self.claude_path):
             rows = quota.claude_usage()
-        self.assertIn("unavailable (JSONDecodeError)", rows[0]["error"])
+        self.assertEqual(rows[0]["error"], quota.NOT_AVAILABLE)
+        self.assertNotIn("JSONDecodeError", rows[0]["error"])
 
 
 class OmpUsageTests(UsageReaderFixtures):
@@ -125,14 +128,16 @@ class OmpUsageTests(UsageReaderFixtures):
     def test_missing_file_is_unavailable(self):
         with mock.patch.object(quota, "OMP_STATS_FILE", self.omp_path + ".missing"):
             rows = quota.omp_usage()
-        self.assertIn("unavailable (OperationalError)", rows[0]["error"])
+        self.assertEqual(rows[0]["error"], quota.NOT_AVAILABLE)
+        self.assertNotIn("OperationalError", rows[0]["error"])
 
     def test_empty_db_is_unavailable(self):
         with closing(sqlite3.connect(self.omp_path)):
             pass
         with mock.patch.object(quota, "OMP_STATS_FILE", self.omp_path):
             rows = quota.omp_usage()
-        self.assertIn("unavailable (OperationalError)", rows[0]["error"])
+        self.assertEqual(rows[0]["error"], quota.NOT_AVAILABLE)
+        self.assertNotIn("OperationalError", rows[0]["error"])
 
 
 class QuotaUsageTests(unittest.TestCase):
@@ -351,12 +356,14 @@ class QuotaUsageTests(unittest.TestCase):
         with mock.patch.object(quota, "run", return_value=(1, "boom")):
             rows = quota.quota_usage()
         omp_row = next(row for row in rows if row["provider"] == "omp")
-        self.assertIn("unavailable (RuntimeError)", omp_row["error"])
+        self.assertEqual(omp_row["error"], quota.NOT_AVAILABLE)
+        self.assertNotIn("RuntimeError", omp_row["error"])
 
         with mock.patch.object(quota, "run", return_value=(0, "not json")):
             rows = quota.quota_usage()
         omp_row = next(row for row in rows if row["provider"] == "omp")
-        self.assertIn("unavailable (JSONDecodeError)", omp_row["error"])
+        self.assertEqual(omp_row["error"], quota.NOT_AVAILABLE)
+        self.assertNotIn("JSONDecodeError", omp_row["error"])
 
     def test_claude_fallback_always_present(self):
         rows = quota.quota_usage()
@@ -535,7 +542,7 @@ class OpencodeGoKeyTests(unittest.TestCase):
                 self.fetch.side_effect = _http_error(code, body)
                 rows = quota.opencode_go_quota()
                 self.assertEqual(
-                    rows, [{"provider": "opencode-go", "note": "quota unavailable (HTTPError)"}]
+                    rows, [{"provider": "opencode-go", "note": quota.QUOTA_NOT_AVAILABLE}]
                 )
                 self.assertNotIn(SECRET_KEY, repr(rows))
 
@@ -544,7 +551,7 @@ class OpencodeGoKeyTests(unittest.TestCase):
         self.fetch.side_effect = quota.urllib.error.URLError("no route")
         self.assertEqual(
             quota.opencode_go_quota(),
-            [{"provider": "opencode-go", "note": "quota unavailable (URLError)"}],
+            [{"provider": "opencode-go", "note": quota.QUOTA_NOT_AVAILABLE}],
         )
 
 

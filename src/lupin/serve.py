@@ -38,6 +38,7 @@ from . import model_tiers as tiers_config
 from . import usage_cache
 from .slots import CoordinatorUnreachable
 from .quota import (
+    NOT_AVAILABLE,
     QuotaDuration,
     epoch_ms_to_local,
     quota_source_label,
@@ -1049,6 +1050,8 @@ font-size:.85rem;margin:1.25rem 0}
 .quota-legend-item{display:flex;align-items:center;gap:.5rem}
 .quota-legend-used{width:28px;height:8px;border-radius:4px;background:var(--accent)}
 .quota-legend-time{width:2px;height:14px;background:var(--fg)}
+.quota-legend-unknown{width:2px;height:14px;background:none;
+border-left:2px dashed var(--fg)}
 .quota-legend-ahead{width:28px;height:8px;border-radius:4px;background:var(--warn)}
 .quota-groups{display:grid;gap:.8rem}
 .quota-group{padding:1.2rem 1.4rem .4rem}
@@ -1071,6 +1074,8 @@ background:var(--accent)}
 .quota-meter-used.ahead{background:var(--warn)}
 .quota-meter-elapsed{position:absolute;top:-4px;bottom:-4px;width:2px;
 border-radius:1px;background:var(--fg)}
+.quota-meter-elapsed-unknown{left:0;width:0;background:none;
+border-left:2px dashed var(--fg);opacity:.6}
 .quota-reset{text-align:right}
 .quota-reset-left{font:500 1rem ui-monospace,monospace}
 .quota-reset-at{font:400 .75rem ui-monospace,monospace;color:var(--dim);margin-top:.2rem}
@@ -1482,18 +1487,37 @@ def time_until_reset(reset_at_ms, now_ms=None) -> str:
     return " ".join(parts)
 
 
-def time_remaining_pct(row: dict, now_ms=None) -> float | None:
+def quota_window_milliseconds(row: dict) -> int | None:
+    """The length of the row's window in ms, or None when it is unknown.
+
+    A row carries the named window (`duration`) and, when the source gave
+    one, the length of the window in ms (`duration_ms`). A window the page
+    cannot name can still have a known length, and the pace marker needs
+    it (issue #80).
+    """
     duration = row.get("duration", QuotaDuration.OTHER)
-    if not isinstance(duration, QuotaDuration):
+    if isinstance(duration, QuotaDuration):
+        milliseconds = duration.milliseconds
+    else:
         try:
-            duration = QuotaDuration(duration)
+            milliseconds = QuotaDuration(duration).milliseconds
         except (TypeError, ValueError):
-            return None
+            milliseconds = None
+    if milliseconds is not None:
+        return milliseconds
+    duration_ms = row.get("duration_ms")
+    if isinstance(duration_ms, (int, float)) and duration_ms > 0:
+        return int(duration_ms)
+    return None
+
+
+def time_remaining_pct(row: dict, now_ms=None) -> float | None:
+    milliseconds = quota_window_milliseconds(row)
     reset_at_ms = row.get("resets_at")
-    if duration.milliseconds is None or not isinstance(reset_at_ms, (int, float)):
+    if milliseconds is None or not isinstance(reset_at_ms, (int, float)):
         return None
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
-    return min(100, max(0, (reset_at_ms - now_ms) / duration.milliseconds * 100))
+    return min(100, max(0, (reset_at_ms - now_ms) / milliseconds * 100))
 
 
 def quota_duration_label(row: dict) -> str:
@@ -1523,6 +1547,20 @@ def quota_status(row: dict, now_ms=None) -> tuple[str, str]:
     if used < elapsed - 15:
         return "Under pace", "under"
     return "On pace", ""
+
+
+def quota_pace_note(row: dict) -> str:
+    """Why the pace marker cannot be placed, in plain words (issue #80).
+
+    Empty when the row shows a real pace marker.
+    """
+    if quota_progress_pct(row) is None:
+        return ""
+    if quota_window_milliseconds(row) is None:
+        return "pace not shown: unknown window length"
+    if not isinstance(row.get("resets_at"), (int, float)):
+        return "pace not shown: no reset time"
+    return ""
 
 
 def quota_row_name(row: dict) -> str:
@@ -1584,24 +1622,37 @@ def render_quota_row(row: dict, now_ms: int) -> str:
     available_text = "--" if used is None else f"{max(0, 100 - used):.0f}%"
     used_text = "--" if used is None else f"{used:.0f}%"
     used_width = "0%" if used is None else f"{used:.1f}%"
-    elapsed_marker = (
-        "" if elapsed is None
-        else f"<div class=quota-meter-elapsed style='left:{elapsed:.1f}%' "
-        "title='time elapsed in window'></div>"
-    )
+    pace_note = quota_pace_note(row)
+    if elapsed is not None:
+        elapsed_marker = (
+            f"<div class=quota-meter-elapsed style='left:{elapsed:.1f}%' "
+            "title='time elapsed in window'></div>"
+        )
+    elif used is not None:
+        # The row keeps its marker. A dashed marker says the elapsed time
+        # cannot be placed, because the window length is unknown
+        # (issue #80).
+        elapsed_marker = (
+            "<div class='quota-meter-elapsed quota-meter-elapsed-unknown' "
+            "title='time elapsed in window: window length unknown'></div>"
+        )
+    else:
+        elapsed_marker = ""
     account_html = f"<div class=dim>{esc(row['account'])}</div>" if row.get("account") else ""
+    note_html = f"<div class='dim'>{esc(pace_note)}</div>" if pace_note else ""
     aria_label = "quota usage unavailable"
     if used is not None and elapsed is not None:
         aria_label = f"{used:.0f}% used, {elapsed:.0f}% of window elapsed"
     elif used is not None:
-        aria_label = f"{used:.0f}% used"
+        aria_label = f"{used:.0f}% used, pace not shown" if pace_note else f"{used:.0f}% used"
     return (
         f"<div class=quota-row data-window-duration='{esc(duration_value)}' "
         f"data-resets-at-ms='{esc(reset_timestamp)}'>"
         "<div><div class=quota-window>"
         f"{esc(quota_duration_label(row))}</div>"
         f"{account_html}"
-        f"<div class='quota-status {status_class}'>{esc(status)}</div></div>"
+        f"<div class='quota-status {status_class}'>{esc(status)}</div>"
+        f"{note_html}</div>"
         "<div>"
         f"<div class=quota-values><span><strong>{available_text}</strong> available</span>"
         f"<span>{used_text} used</span></div>"
@@ -1613,6 +1664,75 @@ def render_quota_row(row: dict, now_ms: int) -> str:
         f"<div class=quota-reset-at>{esc(epoch_ms_to_local(reset_at_ms))}</div></div>"
         "</div>"
     )
+
+
+def render_quota_legend(rows: list[dict], now_ms: int) -> str:
+    """The legend. It only promises markers the rows show (issue #80).
+
+    A row whose window length is unknown keeps a dashed marker and says
+    so. The legend names that marker, so it never describes a solid
+    marker that no row has.
+    """
+    solid = any(quota_elapsed_pct(row, now_ms) is not None for row in rows)
+    dashed = any(
+        quota_progress_pct(row) is not None and quota_elapsed_pct(row, now_ms) is None
+        for row in rows
+    )
+    if solid:
+        time_item = (
+            "<span class=quota-legend-item><span class=quota-legend-time></span>"
+            "time elapsed in window</span>"
+        )
+    else:
+        time_item = ""
+    if dashed:
+        unknown_item = (
+            "<span class=quota-legend-item><span class=quota-legend-unknown></span>"
+            "window length unknown</span>"
+        )
+    else:
+        unknown_item = ""
+    return (
+        "<div class=quota-legend>"
+        "<span class=quota-legend-item><span class=quota-legend-used></span>used</span>"
+        f"{time_item}"
+        f"{unknown_item}"
+        "<span class=quota-legend-item><span class=quota-legend-ahead></span>"
+        "used faster than time</span></div>"
+    )
+
+
+# A file path in a cell of the Usage page (issue #51).
+_PATH_TOKEN_RE = re.compile(r"[^\s,;]+")
+
+# An exception name in a message of the Usage page (issue #51).
+_EXCEPTION_NAME_RE = re.compile(r"\(([A-Za-z_][A-Za-z0-9_]*)\)")
+
+
+def usage_source_text(source) -> str:
+    """The source cell of the totals table. Never a file path (issue #51).
+
+    The readers name their sources, so a new row has a plain name. A row
+    cached before that change can still hold a path, so the cell is
+    cleaned here too.
+    """
+
+    def clean(match):
+        token = match.group(0)
+        if "/" in token or token.endswith((".db", ".json", ".jsonl")):
+            return "local usage data"
+        return token
+
+    return _PATH_TOKEN_RE.sub(clean, str(source))
+
+
+def plain_message(message) -> str:
+    """A message of the Usage page without an exception name (issue #51).
+
+    A cached row can still hold the old text, which named the exception.
+    The name goes, the plain words stay.
+    """
+    return _EXCEPTION_NAME_RE.sub("", str(message)).strip()
 
 
 def render_usage(*, connection: dict | None = None) -> bytes:
@@ -1637,12 +1757,8 @@ def render_usage(*, connection: dict | None = None) -> bytes:
         "<div class=quota-heading><h2>Quota</h2>"
         f"<span class=dim>Data timestamp: {esc(fetched) if fetched else 'not available'}</span></div>",
         render_quota_summary(quota_rows, now_ms),
-        "<div class=quota-legend>"
-        "<span class=quota-legend-item><span class=quota-legend-used></span>used</span>"
-        "<span class=quota-legend-item><span class=quota-legend-time></span>"
-        "time elapsed in window</span>"
-        "<span class=quota-legend-item><span class=quota-legend-ahead></span>"
-        "used faster than time</span></div><div class=quota-groups>",
+        render_quota_legend(quota_rows, now_ms),
+        "<div class=quota-groups>",
     ]
     if not quota_rows:
         body.append(
@@ -1665,17 +1781,23 @@ def render_usage(*, connection: dict | None = None) -> bytes:
         )
         for row in rows:
             if "error" in row or "note" in row:
-                message = row.get("error", row.get("note"))
+                # A failed source shows a plain state. The detail stays in
+                # the log (issue #51).
+                if "error" in row:
+                    message = NOT_AVAILABLE
+                else:
+                    message = plain_message(row.get("note", ""))
                 body.append(f"<p class=dim>{esc(message)}</p>")
             else:
                 body.append(render_quota_row(row, now_ms))
         body.append("</section>")
     body.append(
         "</div><p class=dim>Bars show quota used; the marker shows time elapsed "
-        "in the window. The reset time appears at the right. OpenCode Go uses "
-        "omp or Orca's usage API; Claude uses Anthropic's OAuth usage API. "
-        "OpenAI uses omp or Codex's latest local snapshot, which only updates "
-        "when Codex writes a session event.</p>"
+        "in the window. A dashed marker means the window length is unknown, so "
+        "the elapsed time cannot be placed. The reset time appears at the right. "
+        "OpenCode Go uses omp or Orca's usage API; Claude uses Anthropic's OAuth "
+        "usage API. OpenAI uses omp or Codex's latest local snapshot, which only "
+        "updates when Codex writes a session event.</p>"
     )
     body.append("<h2>7-day totals</h2>")
     if usage_snapshots:
@@ -1703,8 +1825,8 @@ def render_usage(*, connection: dict | None = None) -> bytes:
         if "error" in row:
             body.append(
                 f"<tr><td>{esc(row['provider'])}</td><td colspan=3>"
-                f"{esc(row['error'])}</td><td>last 7 days</td>"
-                f"<td>{esc(row['source'])}</td><td>-</td></tr>"
+                f"{esc(NOT_AVAILABLE)}</td><td>last 7 days</td>"
+                f"<td>{esc(usage_source_text(row['source']))}</td><td>-</td></tr>"
             )
             continue
         input_tokens = "-" if row["input_tokens"] is None else esc(row["input_tokens"])
@@ -1715,7 +1837,8 @@ def render_usage(*, connection: dict | None = None) -> bytes:
             f"<td>{input_tokens}</td>"
             f"<td>{output_tokens}</td>"
             f"<td>{cost}</td><td>{esc(row['period'])}</td>"
-            f"<td>{esc(row['source'])}</td><td>{esc(row['last_update'])}</td></tr>"
+            f"<td>{esc(usage_source_text(row['source']))}</td>"
+            f"<td>{esc(row['last_update'])}</td></tr>"
         )
     body.append("</table></div>")
     return page(
