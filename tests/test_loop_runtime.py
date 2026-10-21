@@ -1379,6 +1379,129 @@ def test_start_loop_gives_each_run_a_new_branch_in_its_own_worktree(
     assert no_upstream.returncode == 1  # The run branch does not track origin/main.
 
 
+def _codegraph_harness(
+    monkeypatch, tmp_path: Path, make_checkout, *, index=True, ignored=True, installed=True, script=None
+):
+    """Set up a checkout for the CodeGraph step. Return the checkout, the launches and a calls file.
+
+    `index` puts `.codegraph/codegraph.db` in the checkout. `ignored` commits a
+    `.codegraph/.gitignore` to origin, as the repos that use CodeGraph do.
+    `installed` puts a fake `codegraph` on the lookup path. The fake appends its
+    arguments to the calls file and makes the database in the path it is given.
+    """
+    checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
+    (checkout / ".codegraph").mkdir()
+    if ignored:
+        (checkout / ".codegraph" / ".gitignore").write_text("*\n!.gitignore\n", encoding="utf-8")
+        _git_out(checkout, "add", ".codegraph/.gitignore")
+        _git_out(
+            checkout, "-c", "user.name=test", "-c", "user.email=test@example.com",
+            "-c", "commit.gpgsign=false", "commit", "-q", "-m", "ignore the index",
+        )
+        _git_out(checkout, "push", "-q", "origin", "main")
+    if index:
+        (checkout / ".codegraph" / "codegraph.db").write_text("index\n", encoding="utf-8")
+    calls = tmp_path / "codegraph-calls"
+    fake = tmp_path / "bin" / "codegraph"
+    fake.parent.mkdir()
+    fake.write_text(
+        script
+        or f'#!/bin/sh\necho "$@" >> "{calls}"\nmkdir -p "$3/.codegraph" && : > "$3/.codegraph/codegraph.db"\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    real_which = shutil.which
+    monkeypatch.setattr(
+        loop_runtime.shutil, "which",
+        lambda name, *args, **kwargs: (str(fake) if installed else None)
+        if name == "codegraph" else real_which(name, *args, **kwargs),
+    )
+    return checkout, launches, calls
+
+
+def _codegraph_events() -> list[dict]:
+    run_id = loop_runtime._read_metadata("widgets")["run_id"]
+    events = loop_runtime.run_log.read_events(loop_runtime.STATE_DIR, "widgets", run_id)
+    return [event for event in events if event["event"] == "codegraph_index"]
+
+
+def test_start_loop_builds_a_codegraph_index_in_the_new_worktree(monkeypatch, tmp_path: Path, make_checkout):
+    checkout, launches, calls = _codegraph_harness(monkeypatch, tmp_path, make_checkout)
+
+    started, message = loop_runtime.start_loop("widgets", platform="claude")
+
+    assert started, message
+    worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
+    assert calls.read_text(encoding="utf-8").split() == ["init", "-y", str(worktree)]
+    assert (worktree / ".codegraph" / "codegraph.db").is_file()
+    assert _git_out(worktree, "status", "--porcelain") == ""  # The index is ignored.
+    [event] = _codegraph_events()
+    assert event["status"] == "indexed"
+
+
+@pytest.mark.parametrize(
+    "options, expected",
+    [
+        ({"index": False}, None),
+        ({"installed": False}, ("skipped", "codegraph is not on PATH")),
+        ({"ignored": False}, ("skipped", "git does not ignore .codegraph/codegraph.db")),
+    ],
+)
+def test_start_loop_skips_the_codegraph_index_when_it_cannot_be_built(
+    monkeypatch, tmp_path: Path, make_checkout, options, expected
+):
+    checkout, launches, calls = _codegraph_harness(monkeypatch, tmp_path, make_checkout, **options)
+
+    started, message = loop_runtime.start_loop("widgets", platform="claude")
+
+    assert started, message
+    assert len(launches) == 1
+    assert not calls.exists()
+    events = _codegraph_events()
+    if expected is None:
+        assert events == []
+    else:
+        [event] = events
+        assert (event["status"], event["reason"]) == expected
+
+
+@pytest.mark.parametrize(
+    "script, reason",
+    [
+        ('#!/bin/sh\necho "starting" >&2\necho "out of memory" >&2\nexit 1\n', "out of memory"),
+        ("#!/bin/sh\nexit 3\n", "exit code 3"),
+        ("#!/bin/sh\nexec sleep 5\n", "TimeoutExpired"),
+    ],
+)
+def test_start_loop_still_starts_when_the_codegraph_index_fails(
+    monkeypatch, tmp_path: Path, make_checkout, script, reason
+):
+    monkeypatch.setattr(loop_runtime, "CODEGRAPH_TIMEOUT", 0.3)
+    checkout, launches, calls = _codegraph_harness(
+        monkeypatch, tmp_path, make_checkout, script=script
+    )
+
+    started, message = loop_runtime.start_loop("widgets", platform="claude")
+
+    assert started, message
+    assert len(launches) == 1
+    [event] = _codegraph_events()
+    assert event["status"] == "failed"
+    assert reason in event["reason"]
+
+
+def test_resume_does_not_build_the_codegraph_index_again(monkeypatch, tmp_path: Path, make_checkout):
+    checkout, launches, calls = _codegraph_harness(monkeypatch, tmp_path, make_checkout)
+    loop_runtime.start_loop("widgets", platform="claude")
+    _set_state("widgets", "stopped")
+
+    started, message = loop_runtime.start_loop("widgets", platform="claude", resume=True)
+
+    assert started, message
+    assert len(calls.read_text(encoding="utf-8").splitlines()) == 1  # Only the first run.
+    assert _codegraph_events() == []
+
+
 def test_agent_workspace_directory_is_the_run_worktree_not_the_checkout(
     monkeypatch, tmp_path: Path, make_checkout
 ):

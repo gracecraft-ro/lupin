@@ -460,8 +460,8 @@ and `--tail N` to choose the number of events. Use `--json` to print one JSON
 object per line.
 Events record route choices and quota headroom. They also record slot waits,
 acquisitions and releases, Herdr server changes, state changes, agent exits,
-handoff results, errors, and stop results. `lupin logs` prints events in time
-order.
+handoff results, CodeGraph index results, errors, and stop results.
+`lupin logs` prints events in time order.
 
 Lupin keeps at most 20 logs per repo and removes logs after 30 days. A log
 write failure does not stop the loop. Stop reports use the same run ID in
@@ -492,6 +492,16 @@ remote has it. Otherwise it starts at the remote default branch: the target of
 If the fetch fails, `run` refuses to start. The agent works in this worktree.
 The main checkout in `LUPIN_LOOP_CODE_DIR` is never the agent's working
 directory.
+
+If the main checkout has a CodeGraph index (`.codegraph/codegraph.db`), `run`
+builds an index in the new worktree with `codegraph init -y`. Git does not copy
+the index, because the repo ignores it. `run` skips this step when `codegraph`
+is not on `PATH`. It also skips the step when git does not ignore
+`.codegraph/codegraph.db`, because the index would make the worktree dirty. A
+failed index does not stop the run. `run` writes a `codegraph_index` event with
+the status (`indexed`, `skipped`, or `failed`) and the reason. A repo with no
+index in the main checkout gets no event. A resumed run keeps its worktree and
+its index.
 
 `run` removes the previous run's worktree and branch before it adds a new one.
 If git keeps that worktree, `run` refuses to start and names its path. With

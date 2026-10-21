@@ -48,6 +48,7 @@ DEFAULT_PROMPT = (
 )
 HERDR_TIMEOUT = 20.0
 GIT_TIMEOUT = 60.0
+CODEGRAPH_TIMEOUT = 120.0
 # Files in the git directory that show an unfinished git operation.
 UNFINISHED_GIT_STATES = (
     ("MERGE_HEAD", "merge"),
@@ -843,6 +844,44 @@ def _create_worktree(repo: str, checkout: Path) -> tuple[Path, str]:
     return path, branch
 
 
+def _index_worktree(checkout: Path, worktree: Path) -> dict[str, str] | None:
+    """Build a CodeGraph index in a new worktree. Return the log fields, or None.
+
+    The repo ignores the index, so git does not copy it from the checkout. Do
+    nothing when the checkout has no index. Skip when `codegraph` is not on PATH.
+    Skip when git does not ignore the index: it would make the worktree dirty,
+    and `lupin stop` keeps a dirty worktree. A failure never stops the run.
+    """
+    if not (checkout / ".codegraph" / "codegraph.db").is_file():
+        return None
+    codegraph = shutil.which("codegraph")
+    if not codegraph:
+        return {"status": "skipped", "reason": "codegraph is not on PATH"}
+    try:
+        ignored = subprocess.run(
+            ["git", "-C", str(worktree), "check-ignore", "-q", ".codegraph/codegraph.db"],
+            capture_output=True,
+            timeout=GIT_TIMEOUT,
+            check=False,
+        )
+        if ignored.returncode:
+            return {"status": "skipped", "reason": "git does not ignore .codegraph/codegraph.db"}
+        proc = subprocess.run(
+            [codegraph, "init", "-y", str(worktree)],
+            capture_output=True,
+            text=True,
+            timeout=CODEGRAPH_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+    if proc.returncode:
+        lines = (proc.stderr or proc.stdout).strip().splitlines()
+        reason = lines[-1][:200] if lines else f"exit code {proc.returncode}"
+        return {"status": "failed", "reason": reason}
+    return {"status": "indexed"}
+
+
 def _resumed_worktree(repo: str, metadata: dict | None) -> tuple[Path, str]:
     """Return the worktree and branch that the last run recorded. Never create one."""
     info = metadata or {}
@@ -1060,6 +1099,10 @@ def start_loop(
                 decision=routing_decision, platform=selected, provider=provider, model=model,
                 quota_headroom=quota_headroom,
             )
+            if not resume:
+                indexed = _index_worktree(checkout, worktree)
+                if indexed:
+                    _log_event(repo, value, "codegraph_index", **indexed)
             run_log.prune_runs(STATE_DIR, repo)
             _write_metadata(repo, value)
             if previous_state != "starting":
