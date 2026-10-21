@@ -583,6 +583,8 @@ class PackagedTiersTests(unittest.TestCase):
                     # so route() never returns it. Probe only the first.
                     providers = set()
                     for index, entry in enumerate(entries):
+                        if category == "prose" and tier_name == "tier0" and index > 0:
+                            continue
                         provider = route.provider_for_model(entry["model"])
                         if provider in providers:
                             continue
@@ -603,6 +605,22 @@ class PackagedTiersTests(unittest.TestCase):
                         seen.add(result["downgraded_from"]["effort"])
 
                 self.assertEqual(probes - seen, set())
+
+    def test_every_packaged_tier_model_maps_to_a_known_provider(self):
+        packaged = json.loads(
+            resources.files("lupin").joinpath("model-tiers.json").read_text(encoding="utf-8")
+        )
+        known_providers = {"bmo", "local", "opencode-go", "openai", "claude"}
+        for category, row in packaged.items():
+            if category.startswith("_"):
+                continue
+            for tier_name, entries in row["tiers"].items():
+                for entry in entries:
+                    with self.subTest(category=category, tier=tier_name, model=entry["model"]):
+                        self.assertIn(
+                            route.provider_for_model(entry["model"]),
+                            known_providers,
+                        )
 
     def test_packaged_tiers_never_list_fable(self):
         # Fable needs the user's approval (delegation-loop SKILL.md). No

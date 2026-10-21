@@ -15,6 +15,7 @@ All notable changes to Lupin. The version has one source:
 
 - "Run now" passes dash-leading notes as one argument, and rejects notes
   with a NUL byte before dispatch.
+- Packaged tiers use known aliases; OpenAI picks stay above tier0.
 
 ## 0.1.0
 
