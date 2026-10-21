@@ -253,7 +253,10 @@ def test_stop_closes_only_loop_workspace_and_stops_empty_session(
     monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: dict(metadata))
     monkeypatch.setattr(loop_runtime, "_start_server_for_read", lambda repo, data: data["session"])
     monkeypatch.setattr(loop_runtime, "_find_workspace", lambda session, data: {"id": "workspace-1"})
-    monkeypatch.setattr(loop_runtime, "_save_report", lambda repo, session, workspace: tmp_path / "report.log")
+    monkeypatch.setattr(
+        loop_runtime, "_save_report",
+        lambda repo, session, workspace, run_id=None: tmp_path / "report.log",
+    )
     monkeypatch.setattr(loop_runtime, "_workspace_id", lambda workspace: workspace["id"])
     monkeypatch.setattr(loop_runtime, "_herdr_json", lambda session, *args: actions.append((session, args)) or {})
     monkeypatch.setattr(loop_runtime, "_workspaces", lambda session: other_workspaces)
@@ -872,6 +875,7 @@ def test_send_loop_refuses_a_loop_that_is_not_running(monkeypatch):
 def _stop_harness(monkeypatch, tmp_path: Path, *, agent: dict | None, prompt_error: str | None = None):
     """Patch stop_loop's Herdr and systemd calls; return the ordered action list."""
     metadata = {
+        "run_id": "20260101-000001-000001-00000000000000000000000000000000",
         "repo": "widgets",
         "platform": "claude",
         "session": "lupin-widgets-abc123",
@@ -884,7 +888,12 @@ def _stop_harness(monkeypatch, tmp_path: Path, *, agent: dict | None, prompt_err
     monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: dict(metadata))
     monkeypatch.setattr(loop_runtime, "_start_server_for_read", lambda repo, data: data["session"])
     monkeypatch.setattr(loop_runtime, "_find_workspace", lambda session, data: {"id": "workspace-1"})
-    monkeypatch.setattr(loop_runtime, "_save_report", lambda repo, session, workspace: tmp_path / "report.log")
+
+    def save_report(repo, session, workspace, run_id=None):
+        actions.append(("save_report", run_id))
+        return tmp_path / "report.log"
+
+    monkeypatch.setattr(loop_runtime, "_save_report", save_report)
     monkeypatch.setattr(loop_runtime, "_workspace_id", lambda workspace: workspace["id"])
     monkeypatch.setattr(loop_runtime, "_agent_for_workspace", lambda session, workspace_id: agent)
     monkeypatch.setattr(loop_runtime, "_herdr_json", lambda session, *args: actions.append(args) or {})
@@ -916,12 +925,34 @@ def test_stop_asks_the_agent_for_a_handoff_before_closing(monkeypatch, tmp_path:
 
 
 def test_stop_force_skips_the_handoff(monkeypatch, tmp_path: Path):
+    run_id = "20260101-000001-000001-00000000000000000000000000000000"
     actions = _stop_harness(monkeypatch, tmp_path, agent={"name": "lupin-loop"})
 
     loop_runtime.stop_loop("widgets", force=True)
 
     assert not any(a[:2] == ("agent", "prompt") for a in actions)
     assert ("workspace", "close", "workspace-1") in actions
+    assert ("save_report", run_id) in actions
+    events = loop_runtime.run_log.read_events(
+        tmp_path, "widgets", run_id
+    )
+    assert events[-1]["event"] == "loop_stopped"
+    assert events[-1]["path"] == "force"
+    assert events[-1]["forced"] is True
+    assert events[-1]["exit_code"] == 0
+    assert events[-1]["handoff_outcome"] == "skipped"
+
+
+def test_save_report_filename_contains_run_id(monkeypatch, tmp_path: Path):
+    run_id = "20260101-000001-000001-00000000000000000000000000000000"
+    monkeypatch.setattr(loop_runtime, "REPORTS_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "_pane_id", lambda workspace: "pane-1")
+    monkeypatch.setattr(loop_runtime, "_herdr", lambda *args, **kwargs: "pane output")
+
+    report = loop_runtime._save_report("widgets", "session", {}, run_id)
+
+    assert report.name == f"widgets-{run_id}.log"
+    assert report.read_text(encoding="utf-8") == "pane output\n"
 
 
 def test_stop_still_closes_when_the_handoff_wait_times_out(monkeypatch, tmp_path: Path):
@@ -1336,6 +1367,8 @@ def test_start_loop_gives_each_run_a_new_branch_in_its_own_worktree(
     assert checkout not in worktree.parents
     assert str(worktree) in message
     assert branch.startswith("lupin-loop/")
+    assert re.fullmatch(r"lupin-loop/\d{8}-\d{6}-\d{6}", branch)
+    assert worktree.name == branch.rsplit("/", 1)[1]
     assert _git_out(worktree, "rev-parse", "HEAD") == _git_out(checkout, "rev-parse", "origin/main")
     assert _git_out(checkout, "branch", "--show-current") == "main"
     assert str(worktree.resolve()) in _git_out(checkout, "worktree", "list", "--porcelain")
@@ -1374,6 +1407,35 @@ def test_agent_workspace_directory_is_the_run_worktree_not_the_checkout(
     create = next(call for call in herdr_calls if call[:2] == ("workspace", "create"))
     assert create[create.index("--cwd") + 1] == worktree
     assert str(checkout) not in create
+
+
+def test_monitor_logs_herdr_server_loss_with_reason(monkeypatch, tmp_path: Path):
+    run_id = "20260101-000001-000001-00000000000000000000000000000000"
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "herdr-loops")
+    loop_runtime._write_metadata("widgets", {
+        "run_id": run_id, "repo": "widgets", "platform": "omp",
+        "session": loop_runtime.SESSION_NAME, "state": "running",
+    })
+    server_states = iter((True, False))
+    monkeypatch.setattr(loop_runtime, "_server_running", lambda session: next(server_states))
+    monkeypatch.setattr(loop_runtime, "_ensure_server", lambda *args: None)
+    monkeypatch.setattr(loop_runtime, "_find_workspace", lambda session, metadata: {"id": "w1"})
+    monkeypatch.setattr(loop_runtime, "_agent_state", lambda session, workspace: "working")
+    monkeypatch.setattr(loop_runtime, "_agent_for_workspace", lambda session, workspace_id: {"name": "lupin-loop"})
+    monkeypatch.setattr(loop_runtime, "_agent_command", lambda *args, **kwargs: ["agent"])
+    monkeypatch.setattr(loop_runtime.slots, "hold", lambda *args, **kwargs: 1)
+
+    with pytest.raises(loop_runtime.LoopError, match="stopped with status 1"):
+        loop_runtime._monitor_loop(
+            "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False
+        )
+
+    assert loop_runtime._read_metadata("widgets")["state"] == "needs_attention"
+    events = loop_runtime.run_log.read_events(tmp_path, "widgets", run_id)
+    server_loss = next(event for event in events if event["event"] == "herdr_server_stopped")
+    assert server_loss["reason"] == "Herdr server stopped while the agent was running"
+    assert server_loss["agent_exit_code"] == 1
 
 
 @pytest.mark.parametrize("saved", [{}, {"worktree": "gone"}])
@@ -2166,7 +2228,10 @@ def test_a_numbered_loop_uses_the_orchestrator_profile_of_its_repo(monkeypatch, 
 
     def select(candidates, snapshot):
         seen.append(candidates)
-        return {"platform": "omp", "provider": None, "model": "opencode-go/glm-5.3"}
+        return {
+            "platform": "omp", "provider": None, "model": "opencode-go/glm-5.3",
+            "quota_headroom": 0.75,
+        }
 
     monkeypatch.setattr(loop_runtime, "select_orchestrator", select)
     monkeypatch.setattr(
@@ -2179,6 +2244,10 @@ def test_a_numbered_loop_uses_the_orchestrator_profile_of_its_repo(monkeypatch, 
     assert started
     assert seen == [["omp-candidate"]]
     assert loop_runtime._read_metadata("widgets~2")["platform"] == "omp"
+    metadata = loop_runtime._read_metadata("widgets~2")
+    events = loop_runtime.run_log.read_events(state_dir, "widgets~2", metadata["run_id"])
+    routing = next(event for event in events if event["event"] == "routing_decision")
+    assert routing["quota_headroom"] == 0.75
 
 
 def test_a_numbered_loop_cannot_come_in_through_the_default_repos_or_the_repos_file(monkeypatch, tmp_path: Path):
@@ -2246,7 +2315,10 @@ def test_select_orchestrator_uses_the_account_with_quota_left():
     choice = loop_runtime.select_orchestrator(["claude", "openai/gpt-5"], snapshot, now=now)
 
     # The free account is used up. Headroom is the paid account's 90%, not 0%.
-    assert choice == {"platform": "omp", "provider": "openai-codex", "model": "openai-codex/gpt-5"}
+    assert choice == {
+        "platform": "omp", "provider": "openai-codex", "model": "openai-codex/gpt-5",
+        "quota_headroom": 90,
+    }
 
 
 def test_select_orchestrator_blocks_claude_when_weekly_usage_exceeds_90_percent():

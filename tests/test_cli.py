@@ -91,6 +91,32 @@ def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     assert metadata["state"] == "starting"
     assert metadata["platform"] == "claude"
     assert Path(metadata["prompt_file"]).is_file()
+    assert loop_runtime.run_log.valid_run_id(metadata["run_id"])
+    events = loop_runtime.run_log.read_events(state_dir, "widgets", metadata["run_id"])
+    assert [event["event"] for event in events[:2]] == ["run_start", "routing_decision"]
+    assert events[1]["quota_headroom"] is None
+
+
+def test_logs_cli_reads_latest_and_selected_run_as_jsonl(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    earlier = loop_runtime.run_log.new_run_id()
+    latest = loop_runtime.run_log.new_run_id()
+    loop_runtime.run_log.append_event(tmp_path, "widgets", earlier, "run_start")
+    loop_runtime.run_log.append_event(tmp_path, "widgets", latest, "run_start")
+    loop_runtime.run_log.append_event(tmp_path, "widgets", latest, "agent_exit", exit_code=0)
+    monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: {"run_id": latest})
+
+    assert cli.main(["logs", "widgets", "--tail", "1", "--json"]) == 0
+    latest_rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [(row["run_id"], row["event"]) for row in latest_rows] == [(latest, "agent_exit")]
+    assert cli.main(["logs", "widgets"]) == 0
+    latest_lines = capsys.readouterr().out.splitlines()
+    assert len(latest_lines) == 2
+    assert latest_lines[-1].endswith(f"run={latest} exit_code=0")
+
+    assert cli.main(["logs", "widgets", "--run", earlier, "--json"]) == 0
+    earlier_rows = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [(row["run_id"], row["event"]) for row in earlier_rows] == [(earlier, "run_start")]
 
 
 @pytest.mark.parametrize("argv", [["run", "--all", "--json"], ["once", "now", "--json"]])

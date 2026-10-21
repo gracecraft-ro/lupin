@@ -17,7 +17,7 @@
    `heartbeat`, `drain`, `undrain`, `machines`, `place`, `quest`, `reconcile`,
    `roadmap`, `ledger`, `fleet-run`.
    Loop lifecycle: `run`, `once`, `enable`, `disable`, `loops`, `stop`, `peek`,
-   `attach`, `schedule`, `pause`, `resume`, `supervise`.
+   `logs`, `attach`, `schedule`, `pause`, `resume`, `supervise`.
 
 One program, `lupin`, with subcommands. Run `lupin --help` for the full list.
 
@@ -52,6 +52,7 @@ lupin disable <repo>
 lupin loops [repo] [--machine M] [--json]
 lupin stop <repo> [--machine M] [--force] [--wait S] [--json]
 lupin peek <repo> [LINES] [--machine M] [--json]
+lupin logs <repo> [--run ID] [--tail N] [--json]
 lupin attach <repo> [--machine M] [--print]
 lupin schedule [--machine M] [--json]
 lupin schedule cal <expr> [--machine M] [--json]
@@ -358,7 +359,7 @@ dispatch host shows them too. Redis holds text only. A screenshot file stays on 
 worker. A GitHub attachment image is shown through the dashboard.
 The digest uses these models in this order: bmo (`bmo:qwen3.8-flash-next`,
 tier0 in `model-tiers.json`), then `opencode-go/deepseek-v4.1-flash`, then
-Claude (`sonnet`). The worker reserves the fleet `bmo` slot and waits up to
+Claude (`haiku`). The worker reserves the fleet `bmo` slot and waits up to
 300 s, because bmo can sleep. A failed or out-of-quota model moves to the next
 one. Quota and rate-limit errors do not use a try; other failed model calls
 count (3 tries at most).
@@ -452,10 +453,25 @@ several machines must see. Its schema is in `docs/redis-schema.md`.
 Loop state is stored under `$LUPIN_LOOP_STATE_DIR` or
 `/var/lib/delegation-loop`. Lupin stores enabled repos in `repos`, per-repo
 orchestrator profiles in `orchestrators.json`, loop metadata in
-`herdr-loops/`, run prompts in `notes/`, stop reports in `reports/`, run
-worktrees in `worktrees/`, and one-off schedules in `once/`. `locks/`
-serializes local start and stop actions. Herdr keeps its own session and
-workspace state.
+`herdr-loops/`, run prompts in `notes/`, stop reports in `reports/`, run logs
+in `logs/`, run worktrees in `worktrees/`, and one-off schedules in `once/`.
+`locks/` serializes local start and stop actions. Herdr keeps its own session
+and workspace state.
+
+Each run has a unique ID in `herdr-loops/<repo>.json`. Lupin writes events as
+one JSON object per line to `logs/<repo>/<run-id>.jsonl`. `lupin logs <repo>`
+shows the latest 50 events from the latest run. Use `--run ID` to select a run
+and `--tail N` to choose the number of events. Use `--json` to print one JSON
+object per line.
+Events record route choices and quota headroom. They also record slot waits,
+acquisitions and releases, Herdr server changes, state changes, agent exits,
+handoff results, errors, and stop results. `lupin logs` prints events in time
+order.
+
+Lupin keeps at most 20 logs per repo and removes logs after 30 days. A log
+write failure does not stop the loop. Stop reports use the same run ID in
+their file name.
+
 The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 The same file also holds each checkout's repo identity, so a restart does
 not pay for `gh` again. If `gh` is missing, Lupin gets the GitHub owner
@@ -577,6 +593,7 @@ per-machine limit or add controls that the current code cannot support.
   Attach uses Herdr directly over SSH.
 - `src/lupin/loop_runtime.py` — Herdr sessions, workspaces, state, reports,
   schedules, and systemd worker lifecycle.
+- `src/lupin/run_log.py` — writes and reads one event log per loop run.
 - `src/lupin/quest.py` — `quest start`/`stop`/`focus`/`release`: a set of
   issues worked together on one machine.
 - `src/lupin/place.py` — `place`: picks which fleet machine should run a
@@ -731,15 +748,22 @@ These rules keep a loop moving when no person is present.
    minutes after it starts, ask it for the result. If it has none, write that
    on the issue or the PR. Start it with `Loop:`. Then stop the worker. The
    `delegation-loop` skill shows how to ask a worker (`herdr agent prompt`).
-6. **Log environment problems in the ledger.** On some hosts, `lupin roadmap`
-   fails. The Redis user for that host has no permission to run `MULTI`.
-   `MULTI` is a Redis command that runs several commands as one unit. Also,
-   on some hosts, `gh` cannot see the environment repo. That repo tracks
-   environment problems. Write each problem to the ledger instead.
-   `OWNER/REPO` is that environment repo:
+6. **File environment problems in the issue tracker.** The tracker is
+   `gracecraft/ghostbook.nix`. The old name, `gracecraft/nix`, redirects
+   there. On ralpha, `GH_TOKEN` cannot read it. Use the saved `gracecraft-ro`
+   login for that command:
 
    ```sh
-   lupin ledger append OWNER/REPO --event env-friction --summary "<problem>"
+   TOKEN="$(env -u GH_TOKEN -u GITHUB_TOKEN gh auth token --user gracecraft-ro)"
+   env GH_TOKEN="$TOKEN" gh issue create --repo gracecraft/ghostbook.nix \
+     --label environment --title "<machine>: <problem>" --body-file -
+   ```
+
+   If `gh` cannot write, log the problem in the ledger:
+
+   ```sh
+   lupin ledger append gracecraft/ghostbook.nix --event env-friction \
+     --summary "<problem>"
    ```
 
 7. **Do not stop after a review.** A review with findings starts the next

@@ -691,7 +691,10 @@ def _stop_env(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: dict(metadata))
     monkeypatch.setattr(loop_runtime, "_start_server_for_read", lambda repo, data: data["session"])
     monkeypatch.setattr(loop_runtime, "_find_workspace", lambda session, data: {"id": "workspace-1"})
-    monkeypatch.setattr(loop_runtime, "_save_report", lambda repo, session, workspace: tmp_path / "report.log")
+    monkeypatch.setattr(
+        loop_runtime, "_save_report",
+        lambda repo, session, workspace, run_id=None: tmp_path / "report.log",
+    )
     monkeypatch.setattr(loop_runtime, "_workspace_id", lambda workspace: workspace["id"])
     monkeypatch.setattr(loop_runtime, "_agent_for_workspace", lambda session, workspace_id: None)
     monkeypatch.setattr(loop_runtime, "_herdr_json", lambda session, *args: actions.append(args) or {})
