@@ -86,7 +86,8 @@ draft, do the first step that applies:
 2. The PR is approved at its current head SHA and is behind `main`:
    dispatch a worker to sync it. A sync changes the head SHA, so get a new
    approval. If the sync stops on conflicts, the worker did not fail. Dispatch
-   a fix worker to resolve them. Do not repeat that sync.
+   a fix worker to resolve them. It follows the conflict steps in "Review and
+   merge each pull request". Do not repeat that sync.
 3. The PR has findings or a failed repo gate at its current head SHA. The
    repo gate is the set of checks that `AGENTS.md` defines. If a loop verdict
    with findings is at the head and nothing runs, start a fix worker, as "Fix
@@ -96,8 +97,10 @@ draft, do the first step that applies:
    and starts the fix worker. See "Run the fix cycle" in the `code-review`
    skill.
    - A fix worker cannot start, or `lupin route` fails or gives
-     `wait_seconds`: post a `Loop:` PR comment with the reason and the head
-     SHA, unless the reviewer posted it. Take the next item. Retry next cycle.
+     `wait_seconds`: post the `Loop:` comment that step 3 of "Fix worker
+     models" names, unless the reviewer posted it. Do not call the PR blocked
+     in this comment. Post it once for each head SHA. Take the next item.
+     Retry next cycle.
    - The reviewer reports that the fix worker's LEVEL is above its own: do not
      start a fix worker. Dispatch a reviewer from
      `lupin review-route --category CATEGORY --size size-l --mode separate`.
@@ -178,10 +181,11 @@ A PR is blocked on an owner decision when one of these is true:
 - A worker for it stops to ask the owner.
 - Its merge fails.
 
-Post the reason and the head SHA as a `Loop:` comment on each blocked PR,
-unless the reviewer posted it. Then take the next item. In each cycle, read the
-new comments on each blocked PR. Retry the PR when its head SHA changes or the
-owner answers in a comment. List the blocked PRs in the handoff.
+On each blocked PR, post the `Loop:` comment that step 3 of "Fix worker
+models" names, unless the reviewer posted it. Then take the next item. In each
+cycle, read the new comments on each blocked PR. Retry the PR when its head
+SHA changes or the owner answers in a comment. List the blocked PRs in the
+handoff.
 
 In each cycle, dispatch merges, syncs, and reviews first. Then use the free
 worker slots for new issues. A PR in a fix cycle does not stop work on a new
@@ -201,10 +205,12 @@ issue. Work that is already running continues.
 3. Stall rule ("raise the fix worker one model tier"). At LEVEL `size-m`: when
    the same finding or failing check is in 3 verdicts in a row, change LEVEL
    to `size-l`. At LEVEL `size-l`: when the same finding or failing check is
-   in 3 verdicts in a row, the PR is blocked on an owner decision. Count only
-   verdicts after the first `Round` line that says `size-l`, or all verdicts
-   if the PR started at `size-l`. Do not start a fix worker on a blocked PR.
-   Post the reason and the head SHA as a `Loop:` PR comment.
+   in 3 verdicts in a row, the PR is blocked on an owner decision. Two
+   `Round` reviews with the same round number at the same head SHA count as
+   one verdict. They are the same round, posted twice. Count only verdicts
+   after the first `Round` line that says `size-l`, or all verdicts if the PR
+   started at `size-l`. Do not start a fix worker on a blocked PR. Post the
+   reason and the head SHA as a `Loop:` PR comment.
 4. If there is no push 30 minutes after the fix worker starts, ask it for the
    result (Herdr: `herdr agent prompt NAME "report the result" --wait
    --timeout 120000`, with the agent name or its pane ID). If it has none,
@@ -596,6 +602,25 @@ the result, and pushes. If the merge has no conflicts, push it. Use
 to the merge rules. A sync is not a merge of the pull request. Otherwise stop.
 Do not rebase. Any other exit code from the first check means the check failed.
 Report it and stop. Do not merge.
+
+The fix worker that resolves a conflict follows these steps:
+
+1. Run `git merge origin/main` and fix each conflict in the file.
+2. Run `git add FILE` for each file you changed.
+3. If you edit a file after `git add`, run `git add FILE` again before the
+   commit. A commit holds the text that was staged. The gate reads the
+   working tree, not the commit, so a missing stage looks like a pass.
+4. Run `git diff --stat`. It must print nothing. If it prints a file, your last
+   edit is not staged. Run `git add FILE` for that file and run the check
+   again.
+5. Run `git diff --stat HEAD`. It must list only the files you changed. This
+   is the working tree against the last commit. It shows what the commit will
+   hold.
+6. Run `git commit`.
+7. Run `git diff --stat HEAD` again. It must print nothing. If it prints a
+   file, the commit does not have your last edit. Run `git add FILE`, commit
+   again, and run the check again.
+8. Run `git push <remote> HEAD:<branch>`.
 
 An approval binds to the head SHA. If the sync changed the head, get a new
 approval at the new head before you merge. The reviewer may limit that review

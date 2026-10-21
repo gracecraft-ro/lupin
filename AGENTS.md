@@ -624,6 +624,11 @@ The loop policy is in `docs/delegation-loop.md`.
    into the default branch, `main`. If the push fails, report the branch name
    and commit range. Do not merge that branch. If the PR opens, report its
    number to the orchestrator. The orchestrator dispatches `/code-review`.
+   Stage every file you change before you commit it. If you edit a file after
+   `git add`, run `git add FILE` again. A commit holds the text that was
+   staged. After the commit, run `git diff --stat HEAD`. It must print
+   nothing. The gate reads the working tree, not the commit, so a missing
+   stage looks like a pass.
 2. Do not merge your own work. A reviewer who is not the author runs
    `/code-review`. The orchestrator (the agent that dispatches and merges
    work) merges into `main` only when all four are true:
@@ -712,7 +717,7 @@ These rules keep a loop moving when no person is present.
    Give each new file a new name.
 5. **Ask a worker with no result for it.** If a worker has no result 30
    minutes after it starts, ask it for the result. If it has none, write that
-   on the issue. Start it with `Loop:`. Then stop the worker. The
+   on the issue or the PR. Start it with `Loop:`. Then stop the worker. The
    `delegation-loop` skill shows how to ask a worker (`herdr agent prompt`).
 6. **Log environment problems in the ledger.** On some hosts, `lupin roadmap`
    fails. The Redis user for that host has no permission to run `MULTI`.
