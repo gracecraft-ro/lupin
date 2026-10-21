@@ -700,10 +700,12 @@ not run a server for a feature branch.
    `systemd-run` command starts a command as a background service. The server
    must keep running after an agent session ends.
 6. The repo's `AGENTS.md` has a "Preview server" section. It names the start
-   command, the port, and the machine. It gives the tunnel command,
+   command and the port. The machine is in the owner's own machine notes. It
+   gives the tunnel command,
    `ssh -N -L PORT:127.0.0.1:PORT MACHINE`, and the local URL,
    `http://localhost:PORT`. The port must be free on that machine. Check with
-   `ss -ltn`. The `ss` command lists listening ports. If the repo has no
+   `ss -ltn`. The `ss` command lists listening ports. The scratch Redis port
+   needs the same check. If the repo has no
    runnable app, that section says `Preview server: none` and gives the reason.
 7. A PR does not need a tunnel command. The PR body says whether the change is
    visible only after the merge.
@@ -760,10 +762,10 @@ lupin ledger append OWNER/REPO --event pressure-test --status running \
 
 Check that the browser starts before you dispatch. Playwright cannot launch on
 some hosts. If it does not start, try to file or update an environment issue
-in the environment repo with label `environment`. On ralpha, `gh` cannot see
-that repo (`AGENTS.md` rule 6). If `gh` cannot write, run this command. Say in
-the `blocked` event summary or the handoff that the loop did not file the
-issue. `ENV_OWNER/REPO` is the environment repo that rule 6 of the repo's
+in the environment repo with label `environment`. On some hosts, `gh` cannot
+see that repo (`AGENTS.md` rule 6). If `gh` cannot write, run this command.
+Say in the `blocked` event summary or the handoff that the loop did not file
+the issue. `ENV_OWNER/REPO` is the environment repo that rule 6 of the repo's
 `AGENTS.md` names. The summary text names the repo that you test:
 
 ```sh

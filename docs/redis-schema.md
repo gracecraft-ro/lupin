@@ -149,7 +149,7 @@ stale focus doesn't need to time out.
 
 ```json
 {
-  "machine": "jesus",
+  "machine": "host-a",
   "pinned": false,
   "since": "2026-10-05T12:00:00Z",
   "release_when": "quest done"
@@ -167,10 +167,10 @@ and `lupin quest status`. No TTL — `quest stop` deletes the key.
 ```json
 {
   "issues": [11, 12, 13],
-  "targets": ["gracecraft/lupin#11", "gracecraft/lupin#12", "gracecraft/lupin#13"],
+  "targets": ["owner/repo#11", "owner/repo#12", "owner/repo#13"],
   "order": [11, 12, 13],
   "waits_on": [{"number": 12, "blocker": 11}],
-  "machine": "jesus",
+  "machine": "host-a",
   "state": "running"
 }
 ```
@@ -336,7 +336,7 @@ readings from different machines.
   "claude": {
     "rows": [{"provider": "claude", "duration": "PT5H", "used_pct": 42, "resets_at": 1_790_547_474_348}],
     "fetched_at": "2026-10-07T12:00:00+00:00",
-    "fetched_by": "jesus"
+    "fetched_by": "host-a"
   },
   "openai": {
     "rows": [{"provider": "openai", "duration": "PT5H", "used_pct": 10, "resets_at": 1_790_550_000_000}],
@@ -428,9 +428,9 @@ count. After 3 failed calls the agent stops. A quota or rate-limit error does
 not add to the count. The debrief text is stored in all cases.
 
 The Debriefs page (`/debrief`) reads all keys with `SCAN` and `GET`. A machine
-without a loop, such as PiHome, shows the debriefs of every worker. Each key
-expires after 30 days. The file on the worker stays. The agent skips a debrief
-older than 29 days, so an expired key does not start a new model call.
+without a loop, such as the dispatch host, shows the debriefs of every worker.
+Each key expires after 30 days. The file on the worker stays. The agent skips
+a debrief older than 29 days, so an expired key does not start a new model call.
 The page waits 1 second at most for Redis and shows local debriefs if Redis fails. The keys need no new ACL
 command.
 
@@ -471,8 +471,9 @@ the machine name, and the TTL is 30 days. The same machine can retry after a fai
 ### `debrief-image:<attachment-id>` and `debrief-image-miss:<machine>:<attachment-id>`
 
 A digest can show pictures from the debrief (GitHub attachments). A private repo's
-pictures need the worker's `gh` login, and PiHome has none for that repo. So the agent
-copies each picture of a digest to Redis: `{"type": "image/png", "data": "<base64>"}`.
+pictures need the worker's `gh` login, and the dispatch host has none for that
+repo. So the agent copies each picture of a digest to Redis:
+`{"type": "image/png", "data": "<base64>"}`.
 `GET /image?id=<attachment-id>` reads this key first and asks GitHub only if there is no copy.
 
 - A copy lives 7 days. The agent copies pictures only for a debrief younger than 7 days.
@@ -691,11 +692,11 @@ allowance.
 {
   "v": 1,
   "id": "a1b2c3d4e5f6...",
-  "target": "jesus",
+  "target": "host-a",
   "action": "loop.stop",
   "params": {"repo": "lupin"},
   "actor": "grace",
-  "issuer": "pihome",
+  "issuer": "host-b",
   "issued_at": 1759708800.123,
   "expires_at": 1759708920.123,
   "sig": "..."
@@ -724,7 +725,7 @@ claim belongs to this attempt when `claim` matches its token and `state` is
 `running`. Otherwise, another poller holds the claim, or a result exists.
 
 ```json
-{"id": "a1b2c3d4e5f6...", "state": "ok", "host": "jesus", "action": "loop.stop", "exit_code": 0, "output": "...", "truncated": false}
+{"id": "a1b2c3d4e5f6...", "state": "ok", "host": "host-a", "action": "loop.stop", "exit_code": 0, "output": "...", "truncated": false}
 ```
 
 A `running` entry that is still queued when `lupin agent` restarts is marked
@@ -789,8 +790,8 @@ long after it's stopped being runnable.
 
 ## ACL command list
 
-Each host gets its own Redis user (`lupin-jesus`, `lupin-ralpha`,
-`lupin-mac`), limited to keys under `~lupin:*` and these commands:
+Each host gets its own Redis user, named `lupin-<host>` for that host, limited
+to keys under `~lupin:*` and these commands:
 
 ```
 PING GET SET DEL TTL PTTL MULTI EXEC ZADD ZREM ZSCORE ZCARD ZRANGE
