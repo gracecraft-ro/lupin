@@ -33,6 +33,7 @@ STATE_DIR = Path(os.environ.get("LUPIN_LOOP_STATE_DIR", "/var/lib/delegation-loo
 # The longest note a start request accepts. `lupin dispatch` uses this to
 # decide when a brief is too long to pass as the note itself.
 MAX_NOTE_CHARS = 8000
+PROMPT_DOC_INLINE_LIMIT = 8000
 CODE_DIR = Path(os.environ.get("LUPIN_LOOP_CODE_DIR", "/code"))
 REPOS_FILE = STATE_DIR / "repos"
 ORCHESTRATORS_FILE = STATE_DIR / "orchestrators.json"
@@ -657,7 +658,7 @@ def _session_running(session: str) -> bool:
     return bool(info and info.get("running"))
 
 
-def _write_prompt(repo: str, note: str | None, resume: bool) -> str:
+def _write_prompt(repo: str, note: str | None, resume: bool, worktree: Path) -> str:
     base_path = os.environ.get("LUPIN_LOOP_PROMPT_FILE")
     base = Path(base_path).read_text(encoding="utf-8") if base_path else DEFAULT_PROMPT
     if resume:
@@ -665,6 +666,19 @@ def _write_prompt(repo: str, note: str | None, resume: bool) -> str:
             "You were cut off, not finished. Check for work in progress and continue it.\n\n"
             + base
         )
+    source_doc = (CODE_DIR / base_repo(repo) / "docs" / "delegation-loop.md").absolute()
+    worktree_doc = worktree / "docs" / "delegation-loop.md"
+    if source_doc.is_file():
+        current_doc = source_doc.read_text(encoding="utf-8")
+        if not worktree_doc.is_file() or (
+            worktree_doc.read_text(encoding="utf-8") != current_doc
+        ):
+            base += (
+                f"\n\nThe current checkout has a saved docs/delegation-loop.md at {source_doc} "
+                "It is missing from or different in this run's worktree. Use it instead."
+            )
+            if len(current_doc) <= PROMPT_DOC_INLINE_LIMIT:
+                base += f"\n\nCurrent docs/delegation-loop.md:\n\n{current_doc}"
     handoff = STATE_DIR / "handoffs" / f"{validate_repo(repo)}.json"
     if handoff.is_file():
         base = (
@@ -994,7 +1008,7 @@ def start_loop(
             "branch": branch,
         }
         try:
-            prompt_file = _write_prompt(repo, note, resume)
+            prompt_file = _write_prompt(repo, note, resume, worktree)
             value["prompt_file"] = prompt_file
             _write_metadata(repo, value)
             worker = _lupin_command(

@@ -13,6 +13,8 @@ All notable changes to Lupin. The version has one source:
 
 ### Fixed
 
+- New loop prompts include saved repo instructions when the worktree copy
+  is missing or different.
 - "Run now" passes dash-leading notes as one argument, and rejects notes
   with a NUL byte before dispatch.
 
