@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import os
@@ -26,18 +27,98 @@ IMAGE = re.compile(r"!\[([^\]]*)\]\((https://[^)\s]+)\)")
 ATTACHMENT_ID = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 ATTACHMENT_PATH = "/user-attachments/assets/"
 
-LEDGER_STATUS_NOTE = (
-    "In-flight status comes from the last ledger action. It does not confirm that a process is running. "
-    "Parallel status is an estimate. Check the live issue and worktree before dispatch."
+# The note under the board and under the per-repository graph. Plain words,
+# one line per stage, and no sentence said twice.
+STAGE_NOTE = (
+    "In progress: the loop sent this issue to a machine. The page only knows the last recorded "
+    "action, so it cannot tell you if the process is still running. "
+    "Ready: the loop can take this issue next. "
+    "Later: the issue waits for its turn. "
+    "Blocked: the issue needs a person, a decision, or another issue first. "
+    "The loop takes two issues at a time, when they touch different files. "
+    "Priorities run from P0, the most urgent, to P4, the least. "
+    "Sizes run from size-xs to size-xl. size-? means the issue has no size label."
 )
-QUEUE_STAGE_NOTE = (
-    "Marked in flight means the ledger records a dispatch action. Eligible issues are not dispatched, "
-    "held, or waiting on an open dependency. Next batch starts with the first eligible issue and can "
-    "add one more only when both have known, non-overlapping files and do not touch bottleneck files. "
-    "Next up holds other eligible P0/P1 issues. Blocked or held means a decision, unresolved dependency, "
-    "or holding label prevents work, or the issue has an open dependency. All remaining issues are in "
-    "Later queue."
-)
+
+# One stage vocabulary for the whole Roadmap page family: the board lanes,
+# the list column, the detail panel and the queue graph all use these
+# words. The queue model keeps finer stages (which issue goes out first);
+# STAGE_SOURCES maps them onto the four words people read.
+STAGE_IN_PROGRESS = "In progress"
+STAGE_READY = "Ready"
+STAGE_LATER = "Later"
+STAGE_BLOCKED = "Blocked"
+# The stage words, in the order the tabs and the lanes use them.
+STAGE_ORDER = [STAGE_IN_PROGRESS, STAGE_READY, STAGE_LATER, STAGE_BLOCKED]
+# Which queue stage names sit behind each page word.
+STAGE_SOURCES = {
+    STAGE_IN_PROGRESS: ("Marked in flight",),
+    STAGE_READY: ("Next batch", "Next up"),
+    STAGE_LATER: ("Later queue",),
+    STAGE_BLOCKED: ("Blocked or held",),
+}
+STAGE_LABELS = {
+    source: word for word, sources in STAGE_SOURCES.items() for source in sources
+}
+
+# What a size token and a priority letter mean, in plain words.
+SIZE_MEANINGS = {
+    "size-xs": "a tiny change",
+    "size-s": "a small change",
+    "size-m": "a medium change",
+    "size-l": "a large change",
+    "size-xl": "a very large change",
+    "size-?": "no size label on this issue",
+}
+PRIORITY_MEANINGS = {
+    "P0": "the most urgent",
+    "P1": "urgent",
+    "P2": "normal",
+    "P3": "low",
+    "P4": "the least urgent",
+}
+
+
+def stage_label(name: str) -> str:
+    """The page word for a queue stage name."""
+    return STAGE_LABELS.get(name, name)
+
+
+def stage_sources(word: str) -> tuple[str, ...]:
+    """The queue stage names behind a page stage word."""
+    return STAGE_SOURCES.get(word, (word,))
+
+
+def _size_meaning(size: str) -> str:
+    """What a size token means, in plain words."""
+    return SIZE_MEANINGS.get(size, "no size label on this issue")
+
+
+def _priority_meaning(priority: str) -> str:
+    """What a priority letter means, in plain words."""
+    return PRIORITY_MEANINGS.get(priority, "a normal priority")
+
+
+def _count_phrase(count: int, word: str) -> str:
+    """'1 issue' or '2 issues'."""
+    return f"{count} {word}" if count == 1 else f"{count} {word}s"
+
+
+def _empty_state(repos: list[str], has_issues: bool) -> str:
+    """The message when the board or the list shows no rows.
+
+    Repositories that are configured stay visible. The page never says
+    that no repositories exist while repositories are selected.
+    """
+    if not repos:
+        return "<p class='dim'>No repositories are configured for the roadmap.</p>"
+    names = ", ".join(repos)
+    if has_issues:
+        return (
+            "<p class='dim'>No issues match these filters. "
+            f"The selected repositories still have open issues: {names}.</p>"
+        )
+    return f"<p class='dim'>The selected repositories have no open issues: {names}.</p>"
 
 
 def github_attachment_id(url: str) -> str | None:
@@ -393,12 +474,17 @@ def _label_names(issue: dict) -> list[str]:
     )
 
 
+# Every priority the code can label an issue with. The list filter offers
+# the same values, so the filter and the rows cannot drift apart.
+PRIORITIES = ["P0", "P1", "P2", "P3", "P4"]
+
+
 def _priority(labels: list[str]) -> str:
     for label in labels:
-        match = re.fullmatch(r"(?:(?:prio|priority)/)?(P[0-3])", label, re.IGNORECASE)
+        match = re.fullmatch(r"(?:(?:prio|priority)/)?(P[0-4])", label, re.IGNORECASE)
         if match:
             return match.group(1).upper()
-    return "P4"
+    return PRIORITIES[-1]
 
 
 def _size(labels: list[str]) -> str:
@@ -1213,6 +1299,47 @@ def _escape_attr(value: str) -> str:
     return html.escape(str(value), quote=True)
 
 
+
+def _warning_key(scope: str, message: str) -> str:
+    return hashlib.sha256(f"{scope}\0{message}".encode("utf-8")).hexdigest()
+
+
+def warning_card(message: str) -> str:
+    """A warning card the reader can dismiss."""
+    text = html.escape(message)
+    return (
+        f"<div class='card warning' data-warning='{_escape_attr(message)}'>"
+        f"<span class='warning-text'>{text}</span>"
+        "<button type='button' class='warning-dismiss'>Dismiss</button></div>"
+    )
+
+
+def _warning_dismiss_script() -> str:
+    """Hide warnings that the reader dismissed before."""
+    return """
+(function(){
+  const storageKey='lupin-roadmap-dismissed-warning:';
+  function hideDismissed(root){
+    (root.matches&&root.matches('[data-warning]')?[root]:[])
+      .concat(Array.from(root.querySelectorAll('[data-warning]')))
+      .forEach(function(element){
+        try{if(localStorage.getItem(storageKey+element.dataset.warning)!==null)element.hidden=true;}catch(_){}
+      });
+  }
+  window.lupinHideDismissedRoadmapWarnings=hideDismissed;
+  hideDismissed(document);
+  document.addEventListener('click',function(event){
+    const button=event.target.closest('.warning-dismiss');
+    if(!button)return;
+    const element=button.closest('[data-warning]');
+    if(!element)return;
+    try{localStorage.setItem(storageKey+element.dataset.warning,'1');}catch(_){}
+    element.hidden=true;
+  });
+})();
+"""
+
+
 def _render_body(body: str) -> str:
     body = str(body or "")
     if not body:
@@ -1375,18 +1502,28 @@ def _render_queue_graph_svg(repo: str, model: dict) -> str:
     issue_map = {node["number"]: node for node in model["nodes"]}
     positions = {}
     lanes = []
-    lane_x = [18, 318, 618, 918, 1218]
     card_w = 264
     row_gap = 82
     top = 64
-    for lane_index, stage in enumerate(model["stages"]):
-        lane_nodes = [issue_map[number] for number in stage["numbers"] if number in issue_map]
-        lanes.append(lane_nodes)
+    for word in STAGE_ORDER:
+        numbers = [
+            number
+            for stage in model["stages"]
+            if stage["name"] in stage_sources(word)
+            for number in stage["numbers"]
+        ]
+        lanes.append((word, [issue_map[number] for number in numbers if number in issue_map]))
+    lane_x = [18 + index * 320 for index in range(len(lanes))]
+    width = lane_x[-1] + card_w + 18
+    for lane_index, (_word, lane_nodes) in enumerate(lanes):
         for row, node in enumerate(lane_nodes):
             positions[node["number"]] = (lane_x[lane_index], top + row * row_gap)
-    height = max(460, max((top + len(lane) * row_gap + 25 for lane in lanes), default=460))
+    height = max(
+        460,
+        max((top + len(lane) * row_gap + 25 for _word, lane in lanes), default=460),
+    )
     svg = [
-        f"<svg class='queue-graph' role='img' aria-label='Open issue roadmap for {html.escape(repo or '')}' viewBox='0 0 1510 {height}' width='1510' height='{height}'>"
+        f"<svg class='queue-graph' role='img' aria-label='Open issue roadmap for {html.escape(repo or '')}' viewBox='0 0 {width} {height}' width='{width}' height='{height}'>"
     ]
     for edge in model["edges"]:
         start = positions.get(edge["from"])
@@ -1403,11 +1540,11 @@ def _render_queue_graph_svg(repo: str, model: dict) -> str:
     svg.append(
         "<defs><marker id='arrow' viewBox='0 0 10 10' refX='8' refY='5' markerWidth='6' markerHeight='6' orient='auto'><path d='M0 0L10 5L0 10z' fill='currentColor'/></marker></defs>"
     )
-    for lane_index, lane in enumerate(lanes):
+    for lane_index, (word, lane) in enumerate(lanes):
         x = lane_x[lane_index]
         svg.append(f"<rect class='lane' x='{x - 6}' y='10' width='276' height='{height - 20}' rx='7'/>")
-        svg.append(_svg_text(x, 34, f"{model['stages'][lane_index]['name']} · {len(lane)}", 15, 700))
-    for lane in lanes:
+        svg.append(_svg_text(x, 34, f"{word} · {len(lane)}", 15, 700))
+    for _word, lane in lanes:
         for node in lane:
             x, y = positions[node["number"]]
             href = node["url"] if node["url"].startswith("https://github.com/") else "#"
@@ -1589,6 +1726,10 @@ BOARD_CSS = """
 .roadmap-repo,.roadmap-status-tabs a,.roadmap-chip,.roadmap-view a{display:inline-flex;gap:.45rem;white-space:nowrap;padding:.45rem .8rem;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--ink2);text-decoration:none;font-size:13px}
 .roadmap-repo.active,.roadmap-status-tabs a.active,.roadmap-chip.active,.roadmap-view a.active{background:var(--ink);border-color:var(--ink);color:var(--surface)}
 .roadmap-status-tabs{padding:0;border:0}.roadmap-status-tabs span{font:12px var(--mono);opacity:.8}
+.roadmap-stage-tabs{display:flex;gap:.5rem;align-items:center;overflow-x:auto;padding:.65rem 0;border-bottom:1px solid var(--line)}
+.roadmap-stage-tabs a{display:inline-flex;gap:.45rem;white-space:nowrap;padding:.45rem .8rem;border:1px solid var(--line);border-radius:999px;background:var(--surface);color:var(--ink2);text-decoration:none;font-size:13px}
+.roadmap-stage-tabs a.active{background:var(--ink);border-color:var(--ink);color:var(--surface)}
+.roadmap-stage-tabs span{font:12px var(--mono);opacity:.8}
 .roadmap-filter-row strong{color:var(--ink3);font:12px var(--mono);text-transform:uppercase;letter-spacing:.05em}
 .roadmap-board-toolbar{display:flex;align-items:center;justify-content:space-between;gap:1rem;padding:.75rem 0;border-bottom:1px solid var(--line)}
 .roadmap-view{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;flex:none}
@@ -1624,6 +1765,7 @@ BOARD_CSS = """
 .repo-warnings{grid-column:1/-1;padding:.7rem 1rem;border:1px solid var(--warnline);background:var(--warnbg);color:var(--warnink);border-radius:12px;font-size:12px}
 .repo-warnings summary{cursor:pointer;font:600 12px var(--mono)}
 .repo-warnings ul{margin:.5rem 0 0;padding-left:1.1rem;display:grid;gap:.25rem}
+.warning-dismiss{font:inherit;font-size:12px;margin-left:.6rem;padding:.2rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}
 @media(max-width:900px){.updated-label{display:none}}
 @media(max-width:1000px){.roadmap-layout{grid-template-columns:1fr}.roadmap-detail{border-left:0;border-top:1px solid var(--line)}}
 @media(max-width:760px){.roadmap-board{grid-template-columns:1fr}.roadmap-card-grid,.roadmap-human .roadmap-card-grid{grid-template-columns:1fr}.roadmap-facts{display:none}}
@@ -1643,9 +1785,15 @@ def _repo_warnings(models: dict, repos: list[str]) -> str:
         messages = (models.get(repo) or {}).get("warnings") or []
         if not messages:
             continue
-        items = "".join(f"<li>{html.escape(message)}</li>" for message in messages)
+        items = "".join(
+            f"<li data-warning='{_warning_key(repo, message)}'>"
+            f"{html.escape(message)} "
+            "<button type='button' class='warning-dismiss'>Dismiss</button></li>"
+            for message in messages
+        )
         parts.append(
-            f"<details class='repo-warnings'><summary>{html.escape(repo)}: "
+            f"<details class='repo-warnings'>"
+            f"<summary>{html.escape(repo)}: "
             f"{len(messages)} warning{'s' if len(messages) != 1 else ''}</summary>"
             f"<ul>{items}</ul></details>"
         )
@@ -1664,7 +1812,7 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
     selected_number = query.get("issue", "").strip()
     selected_repo = query.get("issue_repo", repo_filter).strip()
     active_repos = [repo for repo in repos if not repo_filter or repo == repo_filter]
-    stage_names = ["Marked in flight", "Next batch", "Next up", "Later queue", "Blocked or held"]
+    stage_names = [source for sources in STAGE_SOURCES.values() for source in sources]
     stage_items = {name: [] for name in stage_names}
     blocked_by_person = []
     issue_count = active_count = batch_count = 0
@@ -1705,12 +1853,7 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
             blocked_by_person.append((repo, node, cap, parents.get(number)))
 
     def matches(repo, node, cap, stage):
-        stage_matches = (
-            not stage_filter
-            or stage_filter == stage
-            or (stage_filter == "Ready" and stage in {"Next batch", "Next up"})
-            or (stage_filter == "Blocked" and stage == "Blocked or held")
-        )
+        stage_matches = not stage_filter or stage in stage_sources(stage_filter)
         return (
             (not tag_filter or tag_filter in node.get("labels", []))
             and (not cap_filter or cap_filter == cap)
@@ -1731,7 +1874,11 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
         )
         blocked = (
             f"<p class='roadmap-blocker'>Needs a person: {html.escape(str(node.get('decision') or node.get('unresolvedDependency') or 'owner input'))}</p>"
-            if stage == "Blocked or held" else ""
+            if stage == STAGE_BLOCKED else ""
+        )
+        meta_title = (
+            f"{node['priority']} is {_priority_meaning(node['priority'])}; "
+            f"{node['size']} means {_size_meaning(node['size'])}"
         )
         quest_pick = (
             f"<label class='quest-pick'><input type='checkbox' form='quest-start' name='issue' value='{node['number']}'> quest</label>"
@@ -1740,7 +1887,7 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
         return (
             f"<article class='roadmap-card'><div class='roadmap-card-meta'>"
             f"<a href='{_escape_attr(gh_url)}' target='_blank' rel='noopener'>{html.escape(repo)} · #{node['number']} ↗</a>"
-            f"<span>{html.escape(node['priority'])} · {html.escape(node['size'])}</span>{quest_pick}</div>"
+            f"<span title='{_escape_attr(meta_title)}'>{html.escape(node['priority'])} · {html.escape(node['size'])}</span>{quest_pick}</div>"
             f"<h3><a href='{_escape_attr(detail)}'>{html.escape(node['title'])}</a></h3>"
             f"{epic}<div class='roadmap-tags'>{labels}</div>"
             f"<span class='roadmap-cap'>{html.escape(cap)}</span>{blocked}</article>"
@@ -1751,7 +1898,13 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
     )
 
     def board_link(**overrides):
-        params = {"view": "board", "repo": repo_filter, "tag": tag_filter, "cap": cap_filter}
+        params = {
+            "view": "board",
+            "repo": repo_filter,
+            "tag": tag_filter,
+            "cap": cap_filter,
+            "stage": stage_filter,
+        }
         params.update(overrides)
         return "/roadmap?" + "&".join(
             f"{quote(key, safe='')}={quote(str(value), safe='')}"
@@ -1762,9 +1915,27 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
     status_html = (
         f"<nav class='roadmap-status-tabs' aria-label='Issue status'>"
         f"<a class='{'active' if not stage_filter else ''}' href='{_escape_attr(board_link(stage=''))}'>Open <span>{issue_count}</span></a>"
-        f"<a class='{'active' if stage_filter == 'Marked in flight' else ''}' href='{_escape_attr(board_link(stage='Marked in flight'))}'>In progress <span>{active_count}</span></a>"
+        f"<a class='{'active' if stage_filter == STAGE_IN_PROGRESS else ''}' href='{_escape_attr(board_link(stage=STAGE_IN_PROGRESS))}'>In progress <span>{active_count}</span></a>"
         f"<a href='/roadmap?state=closed{('&amp;repo=' + quote(repo_filter, safe='')) if repo_filter else ''}'>Completed <span>{completed_count}</span></a>"
         "</nav>"
+    )
+    stage_counts = {
+        word: sum(
+            len(stage_items.get(source, []))
+            for source in stage_sources(word)
+        )
+        for word in STAGE_ORDER
+    }
+    stage_counts[STAGE_BLOCKED] += len(blocked_by_person)
+    stage_tabs = (
+        "<nav class='roadmap-stage-tabs' aria-label='Issue stages'>"
+        f"<a class='{'active' if not stage_filter else ''}' href='{_escape_attr(board_link(stage=''))}'>All stages</a>"
+        + "".join(
+            f"<a class='{'active' if stage_filter == word else ''}' href='{_escape_attr(board_link(stage=word))}'>"
+            f"{html.escape(word)} <span>{stage_counts[word]}</span></a>"
+            for word in STAGE_ORDER
+        )
+        + "</nav>"
     )
     view_html = (
         f"<nav class='roadmap-view' aria-label='Roadmap view'><a class='active' href='{_escape_attr(board_link(stage=''))}'>Board</a>"
@@ -1788,24 +1959,26 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
         for cap in ["", *LIST_CAPABILITIES]
     )
     board_lanes = []
-    visible_human = [item for item in blocked_by_person if matches(item[0], item[1], item[2], "Blocked or held")]
-    if visible_human and (not stage_filter or stage_filter in {"Blocked", "Blocked or held"}):
+    visible_human = [
+        item
+        for item in blocked_by_person
+        if matches(item[0], item[1], item[2], "Blocked or held")
+    ]
+    if visible_human and (not stage_filter or stage_filter == STAGE_BLOCKED):
         board_lanes.append(
             "<section class='roadmap-human'><header><h2>Blocked issues · need a person</h2>"
             f"<span>{len(visible_human)}</span></header><div class='roadmap-card-grid'>"
-            + "".join(item_card(item, "Blocked or held") for item in visible_human)
+            + "".join(item_card(item, STAGE_BLOCKED) for item in visible_human)
             + "</div></section>"
         )
     lane_groups = [
-        ("Marked in flight", ["Marked in flight"]),
-        ("Ready", ["Next batch", "Next up"]),
-        ("Later", ["Later queue"]),
-        ("Blocked or held", ["Blocked or held"]),
+        (STAGE_IN_PROGRESS, ("Marked in flight",)),
+        (STAGE_READY, ("Next batch", "Next up")),
+        (STAGE_LATER, ("Later queue",)),
+        (STAGE_BLOCKED, ("Blocked or held",)),
     ]
     for title, source_stages in lane_groups:
-        if stage_filter and stage_filter not in source_stages and not (
-            stage_filter == "Ready" and title == "Ready"
-        ):
+        if stage_filter and stage_filter != title:
             continue
         items = [
             item
@@ -1831,6 +2004,16 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
             for stage in model.get("stages", [])
             for number in stage["numbers"]
         }
+
+        def page_stage(number: int) -> str:
+            """The stage word of an issue, the same one the board shows."""
+            name = stage_by_number.get(number)
+            if name:
+                return stage_label(name)
+            if number in model.get("ownerBlocked", []):
+                return STAGE_BLOCKED
+            return STAGE_LATER
+
         relation_rows = []
         for edge in model.get("edges", []):
             if chosen["number"] not in {edge["from"], edge["to"]}:
@@ -1852,14 +2035,14 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
             relation_rows.append(
                 f"<li><span>{html.escape(relation)}</span><a href='{_escape_attr(href)}'>"
                 f"#{other_number} {html.escape(other['title'])}</a>"
-                f"<span>{html.escape(stage_by_number.get(other_number, 'open'))}</span></li>"
+                f"<span>{html.escape(page_stage(other_number))}</span></li>"
             )
         relations = (
             f"<section class='roadmap-relations'><h3>Relations</h3><ul>{''.join(relation_rows)}</ul></section>"
             if relation_rows else ""
         )
         details = render_issue_details(chosen).replace("<details class='issue-details'", "<details open class='issue-details'", 1)
-        stage = stage_by_number.get(chosen["number"], "Blocked or held" if chosen["number"] in model.get("ownerBlocked", []) else "open")
+        stage = page_stage(chosen["number"])
         issue_panel = (
             f"<aside class='roadmap-detail'><div class='roadmap-detail-top'>{html.escape(selected_repo)} #{chosen['number']}"
             f"<a href='{_escape_attr(chosen.get('url') or '#')}' target='_blank' rel='noopener'>Open on GitHub ↗</a></div>"
@@ -1869,16 +2052,17 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
     else:
         issue_panel = "<aside class='roadmap-detail roadmap-detail-empty'><p>Select an issue to see its details.</p></aside>"
     quest_panel = _render_quest_section(repo_filter, quest_state) if repo_filter else ""
-    repo_param = f"&amp;repo={quote(repo_filter, safe='')}" if repo_filter else ""
+    empty_html = _empty_state(active_repos, issue_count > 0)
     body = (
         "<header class='roadmap-title'><h1>Roadmap</h1><span class='sp'></span>"
         f"<span class='roadmap-facts'>{issue_count} open issues · {active_count} in progress</span></header>"
         f"<nav class='roadmap-repos' aria-label='Repositories'>{repo_html}</nav>"
         f"<div class='roadmap-board-toolbar'>{status_html}{view_html}</div>"
+        f"{stage_tabs}"
         f"<nav class='roadmap-filter-row' aria-label='Tags'><strong>Tags</strong>{tag_html}</nav>"
         f"<nav class='roadmap-filter-row' aria-label='Capabilities'><strong>Capability</strong>{cap_html}</nav>"
-        f"<div class='roadmap-layout'><main class='roadmap-board'>{_repo_warnings(models, active_repos)}{''.join(board_lanes) or '<p class=dim>No issues match these filters.</p>'}{quest_panel}</main>{issue_panel}</div>"
-        f"<p class='dim roadmap-note'>{QUEUE_STAGE_NOTE} {LEDGER_STATUS_NOTE} Issue links open GitHub.</p>"
+        f"<div class='roadmap-layout'><main class='roadmap-board'>{_repo_warnings(models, active_repos)}{''.join(board_lanes) or empty_html}{quest_panel}</main>{issue_panel}</div>"
+        f"<p class='dim roadmap-note'>{STAGE_NOTE} Issue links open GitHub.</p>"
     )
     return body, BOARD_CSS
 
@@ -1886,7 +2070,7 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
 def render_combined_page(repos: list[str], models: dict, page_fn, query=None, quest_state=None) -> bytes:
     """Render the cross-repository Roadmap board as a full page."""
     body, css = board_fragment(repos, models, query, quest_state)
-    return page_fn("Roadmap", body, css, "")
+    return page_fn("Roadmap", body, css, _warning_dismiss_script())
 
 
 def skipped_warning(skipped: list[str]) -> str:
@@ -1907,7 +2091,7 @@ def _render_quest_section(repo: str | None, quest_state: dict | None) -> str:
     start_form = (
         f"<form id=quest-start class='row' action='/quest/start' method='post'>{repo_input}"
         "<button type='submit'>Start quest</button>"
-        "<span class='dim'>Tick issues below, then start.</span></form>"
+        "<span class='dim'>Tick the issues you want, then start.</span></form>"
     )
     if not quest_state:
         return f"<div class='card'><h2>Quest</h2>{start_form}</div>"
@@ -1928,8 +2112,12 @@ def _render_quest_section(repo: str | None, quest_state: dict | None) -> str:
         "<button type='submit'>Stop quest</button></form>"
     )
     warning = skipped_warning(quest_state.get("skipped", []))
+    warning_text = f"{warning}. Progress may be wrong."
     warning_html = (
-        f"<p class='dim'>{_escape_attr(warning)}. Progress may be wrong.</p>" if warning else ""
+        f"<p class='dim' data-warning='{_escape_attr(warning_text)}'>{_escape_attr(warning_text)}"
+        "<button type='button' class='warning-dismiss'>Dismiss</button></p>"
+        if warning
+        else ""
     )
     return f"<div class='card'><h2>Quest</h2>{progress}{warning_html}{stop_form}{start_form}</div>"
 
@@ -1964,12 +2152,11 @@ def render_page(
     issue_map = {node["number"]: node for node in model["nodes"]}
     svg = _render_queue_graph_svg(repo, model)
 
-    warnings = "".join(
-        f"<div class='card warning'>{html.escape(message)}</div>"
-        for message in model["warnings"]
-    )
+    warnings = "".join(warning_card(message) for message in model["warnings"])
     if not model["acyclic"]:
-        warnings += "<div class='card warning'>The dependency graph has a cycle. Check the issue links before dispatch.</div>"
+        warnings += warning_card(
+            "The dependency graph has a cycle. Check the issue links before dispatch."
+        )
     handoff = model.get("handoffStatus")
     handoff_fact = (
         f"<span class='pill'>Latest handoff: {html.escape(handoff)}</span>"
@@ -2003,7 +2190,7 @@ def render_page(
                 f"#{number} {html.escape(node['title'])}</li>"
             )
     queue_html = (
-        f"<h2>Next batch · computed order</h2><ol data-next-batch='{_escape_attr(repo or '')}'>"
+        f"<h2>{STAGE_READY} · computed order</h2><ol data-next-batch='{_escape_attr(repo or '')}'>"
         + "".join(next_batch)
         + "</ol>"
     )
@@ -2018,7 +2205,7 @@ def render_page(
             f"#{number} {html.escape(node['title'])}</a></li>"
         )
     owner_blocked_html = (
-        "<h2>Owner blocked</h2>"
+        f"<h2>{STAGE_BLOCKED}</h2>"
         "<p class='dim'>Needs the owner's decision. Nothing else to do until then.</p>"
         f"<ul class='owner-blocked-list'>{''.join(owner_blocked_items)}</ul>"
     ) if owner_blocked_items else ""
@@ -2035,18 +2222,17 @@ def render_page(
         f"<p class='dim'>GitHub data refreshes hourly; this page reloads about every five "
         f"minutes and reads ledger events from Redis.</p>"
         f"<div class='queue-facts'><span class='pill'>{len(model['nodes'])} open issues</span>"
-        f"<span class='pill'>{model['activeCount']} marked in flight</span>"
-        f"<span class='pill'>{len(model['batch'])} next batch</span>{handoff_fact}</div>"
+        f"<span class='pill'>{model['activeCount']} {STAGE_IN_PROGRESS.lower()}</span>"
+        f"<span class='pill'>{len(model['batch'])} {STAGE_READY.lower()}</span>{handoff_fact}</div>"
         f"{_render_quest_section(repo, quest_state)}"
         f"{warnings}<h2>Issue roadmap</h2>"
         "<p class='dim'>Line key: solid lines show dependencies; dashed lines show parent or split links. Cards link to GitHub.</p>"
         f"<div class='queue-scroll'>{svg}</div>"
-        f"<p class='dim'>{QUEUE_STAGE_NOTE}</p>"
+        f"<p class='dim'>{STAGE_NOTE}</p>"
         f"{owner_blocked_html}"
         "<h2>Issue details and recent activity</h2>"
         f"<div class='queue-comment-list' data-browse-group>{''.join(issue_details)}"
         "<button class='browse-more' type='button' hidden></button></div>"
-        f"<p class='dim'>{LEDGER_STATUS_NOTE}</p>"
     )
     css += _QUEUE_GRAPH_CSS
     css += """
@@ -2056,12 +2242,14 @@ def render_page(
 .browse-search input{flex:1;min-width:12rem}
 .browse-more{font:inherit;margin:.3rem 0;padding:.3rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}
 .warning{border-color:var(--warn);color:var(--warn)}
+.warning-text{vertical-align:middle}
+.warning-dismiss{font:inherit;font-size:12px;margin-left:.6rem;padding:.2rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}
 .queue-comment-list{display:grid;gap:.35rem}
 .issue-body img.image-attachment{display:block;max-width:100%;max-height:640px;height:auto;object-fit:contain;margin:.6rem 0;border-radius:6px}
 .quest-pick{display:inline-flex;align-items:center;gap:.25rem;font-size:.8rem;color:var(--ink2);margin-right:.4rem}
 """
     css += DIGEST_CSS
-    return page_fn(title, body, css, _browse_script())
+    return page_fn(title, body, css, _browse_script() + _warning_dismiss_script())
 
 def render_completed_page(repo: str | None, repos: list[str], issues_by_repo: dict, page_fn) -> bytes:
     selected_repos = [repo] if repo else repos
@@ -2087,10 +2275,7 @@ def render_completed_page(repo: str | None, repos: list[str], issues_by_repo: di
         if repo
         else "Completed issues across repositories"
     )
-    warning_cards = "".join(
-        f"<div class='card warning'>{html.escape(warning)}</div>"
-        for warning in warnings
-    )
+    warning_cards = "".join(warning_card(warning) for warning in warnings)
     body = (
         f"<header><h1>{heading}</h1><span class='sp'></span>"
         "<a href='/roadmap'>all repositories</a></header>"
@@ -2099,15 +2284,15 @@ def render_completed_page(repo: str | None, repos: list[str], issues_by_repo: di
         "<input id='roadmap-search' type='search' placeholder='Titles, labels, descriptions'></div>"
         f"{warning_cards}{''.join(groups) or '<p class=dim>No completed issues.</p>'}"
     )
-    css = ".browse-search{display:flex;gap:.6rem;align-items:center;margin:1rem 0}.browse-search input{flex:1;min-width:12rem;font:inherit;padding:.35rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}.queue-comment-list{display:grid;gap:.35rem}.browse-more{font:inherit;margin:.3rem 0;padding:.3rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}"
-    return page_fn(heading, body, css, _browse_script())
+    css = ".browse-search{display:flex;gap:.6rem;align-items:center;margin:1rem 0}.browse-search input{flex:1;min-width:12rem;font:inherit;padding:.35rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}.queue-comment-list{display:grid;gap:.35rem}.browse-more{font:inherit;margin:.3rem 0;padding:.3rem .55rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}.warning-text{vertical-align:middle}.warning-dismiss{font:inherit;font-size:12px;margin-left:.6rem;padding:.2rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}"
+    return page_fn(heading, body, css, _browse_script() + _warning_dismiss_script())
 
 
 # Larger backlogs open in List. The Board stays readable with a few dozen issues.
 BOARD_MAX_ISSUES = 36
 LIST_PAGE_SIZE = 50
 EPIC_PAGE_SIZE = 10
-LIST_PRIORITIES = ["P0", "P1", "P2", "P3"]
+LIST_PRIORITIES = PRIORITIES
 # Keys of model-tiers.json (route.py's lookup table). The mockup calls this
 # axis "capability"; classify.classify() already sorts an issue into one of
 # these, so the List view's capability filter reuses that, not a new label.
@@ -2162,13 +2347,9 @@ def _list_rows(
             epic_node = by_number.get(epic_number) if epic_number else None
             stage = stage_of.get(node["number"], "")
             if node["number"] in owner_blocked or stage == "Blocked or held":
-                stage = "Blocked"
-            elif stage in {"Next batch", "Next up"}:
-                stage = "Ready"
-            elif stage == "Marked in flight":
-                stage = "In progress"
-            elif stage == "Later queue":
-                stage = "Later"
+                stage = STAGE_BLOCKED
+            else:
+                stage = stage_label(stage) if stage else STAGE_LATER
             rows.append(
                 {
                     "repo": repo,
@@ -2233,6 +2414,7 @@ LIST_CSS = """
 .repo-warnings{margin:.75rem 0;padding:.7rem 1rem;border:1px solid var(--warnline);background:var(--warnbg);color:var(--warnink);border-radius:12px;font-size:12px}
 .repo-warnings summary{cursor:pointer;font:600 12px var(--mono)}
 .repo-warnings ul{margin:.5rem 0 0;padding-left:1.1rem;display:grid;gap:.25rem}
+.warning-dismiss{font:inherit;font-size:12px;margin-left:.6rem;padding:.2rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}
 @media(max-width:760px){.list-stage-row{align-items:flex-start;flex-direction:column}.queue-filter{align-items:stretch}.queue-filter input,.queue-filter select{max-width:100%}}
 """
 
@@ -2258,13 +2440,19 @@ def list_fragment(repos: list[str], models: dict, query: dict, quest_state=None)
     )
     stage_counts = {
         stage: sum(row["stage"] == stage for row in rows)
-        for stage in ("In progress", "Blocked", "Ready", "Later")
+        for stage in STAGE_ORDER
     }
     blocked_owner_count = sum(row["ownerBlocked"] for row in rows)
     if stage_filter:
         rows = [row for row in rows if row["stage"] == stage_filter]
     if owner_filter:
         rows = [row for row in rows if row["ownerBlocked"]]
+
+    selected_repos = [repo for repo in repos if not repo_filter or repo == repo_filter]
+    open_count = sum(
+        len((models.get(repo) or {}).get("nodes", [])) for repo in selected_repos
+    )
+    empty_html = _empty_state(selected_repos, open_count > 0)
 
     base_filters = {
         "view": "list",
@@ -2326,11 +2514,15 @@ def list_fragment(repos: list[str], models: dict, query: dict, quest_state=None)
         f"<a class='{'active' if not stage_filter else ''}' href='{_escape_attr(list_link(stage='', owner=''))}'>All <b>{sum(stage_counts.values())}</b></a>"
         + "".join(
             f"<a class='{'active' if stage_filter == stage else ''}' href='{_escape_attr(list_link(stage=stage, owner=''))}'>{stage} <b>{stage_counts[stage]}</b></a>"
-            for stage in ("In progress", "Blocked", "Ready", "Later")
+            for stage in STAGE_ORDER
         )
         + "</nav>"
-        f"<a class='list-owner-blocked' href='{_escape_attr(list_link(stage='Blocked', owner='1'))}'>"
-        f"{blocked_owner_count} blocked need a person</a>"
+        + (
+            f"<a class='list-owner-blocked' href='{_escape_attr(list_link(stage=STAGE_BLOCKED, owner='1'))}'>"
+            f"{blocked_owner_count} blocked need a person</a>"
+            if blocked_owner_count
+            else ""
+        )
     )
 
     head = (
@@ -2382,7 +2574,7 @@ def list_fragment(repos: list[str], models: dict, query: dict, quest_state=None)
             header = (
                 f"<a class='list-group-header' href='{_escape_attr(toggle_href)}'>"
                 f"{'▾' if is_open else '▸'} {html.escape(title)} "
-                f"<span class='dim'>({len(group_rows)} issues)</span></a>"
+                f"<span class='dim'>({_count_phrase(len(group_rows), 'issue')})</span></a>"
             )
             if not is_open:
                 return f"<div class='list-group'>{header}</div>"
@@ -2409,12 +2601,13 @@ def list_fragment(repos: list[str], models: dict, query: dict, quest_state=None)
         if ungrouped:
             sections.append(group_section("none", "No epic", ungrouped))
         table_html = head + (
-            "".join(sections) if sections else "<p class='dim'>No issues match these filters.</p>"
+            "".join(sections) if sections else empty_html
         )
         epic_count = len(epics) + (1 if ungrouped else 0)
         footer = (
-            f"<div class='list-pager'>{len(rows)} issues in {epic_count} epics. "
-            f"Open an epic to see its issues, {EPIC_PAGE_SIZE} at a time.</div>"
+            f"<div class='list-pager'>{_count_phrase(len(rows), 'issue')} in "
+            f"{_count_phrase(epic_count, 'epic')}. "
+            f"Open an epic to see its issues. The list shows {EPIC_PAGE_SIZE} at a time.</div>"
         )
     else:
         total = len(rows)
@@ -2445,11 +2638,11 @@ def list_fragment(repos: list[str], models: dict, query: dict, quest_state=None)
         table_html = head + (
             "".join(row_html(row) for row in page_rows)
             if page_rows
-            else "<p class='dim'>No issues match these filters.</p>"
+            else empty_html
         )
         footer = (
             "<div class='list-pager'>"
-            f"<span>Showing <b>{range_text}</b> of {total}</span>"
+            f"<span>Showing <b>{range_text}</b> of {total} issues</span>"
             f"<span class='sp'></span>{prev_link}{next_link}</div>"
         )
 
@@ -2475,7 +2668,7 @@ def list_fragment(repos: list[str], models: dict, query: dict, quest_state=None)
 def render_list_page(repos: list[str], models: dict, page_fn, query: dict, quest_state=None) -> bytes:
     """Render the Roadmap List view as a full page."""
     body, css = list_fragment(repos, models, query, quest_state)
-    return page_fn("Work across repositories · list", body, css, "")
+    return page_fn("Work across repositories · list", body, css, _warning_dismiss_script())
 
 
 def repository_names(rows: list[dict]) -> list[str]:

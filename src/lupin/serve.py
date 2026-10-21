@@ -412,6 +412,7 @@ def _roadmap_loader_script() -> str:
     var holder=document.createElement('template');
     holder.innerHTML=html;
     box.replaceWith(holder.content);
+    if(window.lupinHideDismissedRoadmapWarnings)window.lupinHideDismissedRoadmapWarnings(document);
   }).catch(function(){location.href=box.dataset.full;});
 })();
 """
@@ -3381,7 +3382,7 @@ class Handler(BaseHTTPRequestHandler):
                     "Roadmap",
                     shell,
                     roadmap.BOARD_CSS + roadmap.LIST_CSS,
-                    _roadmap_loader_script(),
+                    roadmap._warning_dismiss_script() + _roadmap_loader_script(),
                 )
             )
         elif url.path == "/roadmap/board":

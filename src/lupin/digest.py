@@ -330,7 +330,8 @@ def _run_digest(model: str, effort: str, prompt: str) -> str:
     try:
         with tempfile.TemporaryDirectory() as cwd:
             proc = subprocess.run(
-                argv, capture_output=True, text=True, timeout=timeout, cwd=cwd
+                argv, capture_output=True, text=True, timeout=timeout, cwd=cwd,
+                stdin=subprocess.DEVNULL,
             )
     except FileNotFoundError:
         raise DigestError(f"{argv[0]} not found") from None
