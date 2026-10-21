@@ -15,7 +15,7 @@ import tempfile
 import time
 import unittest
 from contextlib import closing, redirect_stderr, redirect_stdout
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
 from lupin import pace, quota
@@ -368,6 +368,57 @@ class QuotaUsageTests(unittest.TestCase):
     def test_claude_fallback_always_present(self):
         rows = quota.quota_usage()
         self.assertTrue(any(row["provider"] == "claude" for row in rows))
+
+    def test_reset_credits_ride_on_their_login_rows(self):
+        # Shape from `omp usage --json` on 2026-10-21: the plus login has two
+        # available reset credits. The free login has none.
+        def limit(used_fraction):
+            return {
+                "id": "primary",
+                "label": "5 hours",
+                "window": {"id": "5h", "label": "5 hours", "durationMs": 18_000_000, "resetsAt": 1_790_547_474_348},
+                "amount": {"usedFraction": used_fraction},
+            }
+
+        report = {
+            "generatedAt": 1_790_529_505_926,
+            "reports": [
+                {
+                    "provider": "openai-codex",
+                    "metadata": {"planType": "plus"},
+                    "limits": [limit(0.0)],
+                    "resetCredits": {
+                        "availableCount": 2,
+                        "credits": [
+                            {"grantedAt": "2026-09-29T18:36:49.931644Z", "expiresAt": "2026-10-29T18:36:49.931644Z", "status": "available"},
+                            {"grantedAt": "2026-10-07T22:59:56.486921Z", "expiresAt": "2026-11-06T22:59:56.486921Z", "status": "available"},
+                        ],
+                    },
+                },
+                {
+                    "provider": "openai-codex",
+                    "metadata": {"planType": "free"},
+                    "limits": [limit(1.0)],
+                    "resetCredits": {"availableCount": 0},
+                },
+            ],
+        }
+        with mock.patch.object(quota, "run", return_value=(0, json.dumps(report))):
+            rows = quota.quota_usage()
+
+        plus = next(row for row in rows if row.get("provider") == "openai" and row["account"].startswith("plus"))
+        free = next(row for row in rows if row.get("provider") == "openai" and row["account"].startswith("free"))
+        self.assertEqual(
+            plus["reset_credits"],
+            {
+                "available": 2,
+                "expires_at": [
+                    int(datetime(2026, 10, 29, 18, 36, 49, 931644, tzinfo=timezone.utc).timestamp() * 1000),
+                    int(datetime(2026, 11, 6, 22, 59, 56, 486921, tzinfo=timezone.utc).timestamp() * 1000),
+                ],
+            },
+        )
+        self.assertEqual(free["reset_credits"], {"available": 0, "expires_at": []})
 
 
 class OpencodeGoQuotaTests(UsageReaderFixtures):
