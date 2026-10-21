@@ -866,6 +866,11 @@ class ModelSnapshotTests(unittest.TestCase):
         self.assertEqual(serve.match_live_model("opencode-go/glm-5.3", models)["id"], "glm-5.3")
         self.assertEqual(serve.match_live_model("openai/gpt-6-luna", models), None)
         self.assertIsNone(serve.match_live_model("opencode-go/", models))
+        # "openai-codex/" is the real prefix for the Codex subscription.
+        codex = [{"id": "gpt-6.1-sol", "display_name": None}]
+        self.assertEqual(
+            serve.match_live_model("openai-codex/gpt-6.1-sol", codex)["id"], "gpt-6.1-sol"
+        )
 
     def test_match_live_model_no_match_is_none(self):
         self.assertIsNone(serve.match_live_model("fable", [{"id": "claude-opus-4-5"}]))
