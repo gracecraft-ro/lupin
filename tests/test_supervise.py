@@ -71,7 +71,8 @@ def test_idle_loop_with_work_is_nudged_and_one_event_is_written(tmp_path):
     assert fakes.nudges == [("widgets", supervise.NUDGE_TEXT)]
     assert supervise.NUDGE_TEXT.startswith("Supervisor:")
     assert "until nothing is left" in supervise.NUDGE_TEXT
-    assert "no research or docs item is left" in supervise.NUDGE_TEXT
+    assert "no research, docs, or marketing item is left" in supervise.NUDGE_TEXT
+    assert "delegate a research worker" in supervise.NUDGE_TEXT
     assert "Loop:" in supervise.NUDGE_TEXT
     assert report["loops"][0]["verdict"] == "idle"
     assert report["loops"][0]["nudge"] == "sent"
@@ -524,10 +525,18 @@ def test_refused_login_during_the_ledger_write_is_an_auth_error(monkeypatch):
 NUDGE_TEXT = (
     "Supervisor: Work the queue until nothing is left. Nothing is left when no "
     "open issue that you may take is unclaimed, every pull request that you own "
-    "is ready for production, no pull request waits for a review, and no research "
-    "or docs item is left. Write each question for the owner as an issue comment "
-    "that starts with 'Loop:'. Then take the next item. Do not ask if you must "
-    "continue."
+    "is ready for production, no pull request waits for a review, and no research, "
+    "docs, or marketing item is left. If you think you are blocked, first delegate "
+    "a research worker to find the best way forward. Act on its recommended option. "
+    "Wait for the owner only for a decision that needs the owner: credentials, money, "
+    "hardware, a product choice, or an action that the repo rules reserve for a person. "
+    "Write each such question as an issue comment that starts with 'Loop:', and name "
+    "the options. For any other block, retry a transient error 3 times, 5 minutes "
+    "apart, then use the fallback that the repo docs name, then take the next item. "
+    "Keep working while you wait. Delegate tickets and fixes; do not write them "
+    "yourself. Do not ask if you must continue. "
+    "When you are blocked, reply in the pane with one line: the block, the research "
+    "result, and the next action."
 )
 _FORBIDDEN = ("merge", "push", "--force", "commit", "--author", "reset", "rebase")
 # Each command, and the one function that may run it.
