@@ -172,16 +172,16 @@
         {
           "model": "opencode-go/deepseek-v4.1-flash",
           "effort": "high"
-        },
-        {
-          "model": "openai-codex/gpt-6-sol",
-          "effort": "high"
         }
       ],
       "tier1": [
         {
           "model": "haiku",
           "effort": "xhigh"
+        },
+        {
+          "model": "openai-codex/gpt-6-sol",
+          "effort": "high"
         }
       ],
       "tier2": [
