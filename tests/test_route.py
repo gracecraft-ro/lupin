@@ -3,10 +3,70 @@ import itertools
 import json
 import time
 import unittest
+from datetime import datetime, timezone
 from importlib import resources
+from unittest import mock
 
 from lupin import route
 from lupin.quota import QuotaDuration
+
+
+def _price_snapshot(tiers: dict | None = None) -> dict:
+    if tiers is None:
+        tiers = json.loads(
+            resources.files("lupin").joinpath("model-tiers.json").read_text(encoding="utf-8")
+        )
+    subscriptions = {"claude": [], "opencode-go": [], "codex": []}
+    seen = {name: set() for name in subscriptions}
+    for category, row in tiers.items():
+        if category.startswith("_"):
+            continue
+        for entries in row["tiers"].values():
+            for entry in entries:
+                model = entry["model"]
+                if model.startswith("opencode-go/"):
+                    subscription, model_id = "opencode-go", model.split("/", 1)[1]
+                elif model.startswith(("openai-codex/", "openai/")):
+                    subscription, model_id = "codex", model.split("/", 1)[1]
+                elif model.startswith(("bmo:", "local:")):
+                    continue
+                else:
+                    subscription, model_id = "claude", f"claude-{model}"
+                model_id = model_id.split(":", 1)[0]
+                if model_id not in seen[subscription]:
+                    seen[subscription].add(model_id)
+                    subscriptions[subscription].append(
+                        {"id": model_id, "price": {"input": 1, "output": 1}}
+                    )
+    return {
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "subscriptions": {
+            name: {"live": True, "models": models}
+            for name, models in subscriptions.items()
+        },
+    }
+
+
+def _route_with_snapshot(category, size, snapshot, *, tiers=None, **kwargs):
+    snapshot = copy.deepcopy(snapshot)
+    if isinstance(snapshot, dict):
+        snapshot.setdefault("fetched_at", datetime.now(timezone.utc).isoformat())
+        subscriptions = snapshot.get("subscriptions")
+        if isinstance(subscriptions, dict):
+            for group in subscriptions.values():
+                if isinstance(group, dict):
+                    group.setdefault("live", True)
+    with mock.patch.object(
+        route.model_fetch, "latest_snapshot", return_value=snapshot
+    ):
+        return route.route(category, size, tiers=tiers, **kwargs)
+
+
+def _route_with_prices(category, size, *, tiers=None, **kwargs):
+    return _route_with_snapshot(
+        category, size, _price_snapshot(tiers), tiers=tiers, **kwargs
+    )
+
 
 HOUR_MS = 60 * 60 * 1000
 MIN_MS = 60 * 1000
@@ -260,7 +320,7 @@ class RoutePacingTests(unittest.TestCase):
         # this exercises the "other entry in the same tier" branch either
         # way).
         rows = [self._row("claude", 100, 10 * HOUR_MS)]
-        result = route.route("prose", "size-l", tiers=_PROSE_OTHER_ACCOUNT, quota_rows=rows)
+        result = _route_with_prices("prose", "size-l", tiers=_PROSE_OTHER_ACCOUNT, quota_rows=rows)
 
         self.assertEqual(result["model"], "opencode-go/glm-5.3")
         self.assertEqual(result["downgraded_from"], {"model": "opus", "effort": "high"})
@@ -280,7 +340,7 @@ class RoutePacingTests(unittest.TestCase):
             }
         }
         rows = [self._row("openai", 100, 10 * HOUR_MS)]
-        result = route.route("coding", "size-l", tiers=tiers, quota_rows=rows)
+        result = _route_with_prices("coding", "size-l", tiers=tiers, quota_rows=rows)
 
         self.assertEqual(result["model"], "opus")
         self.assertEqual(
@@ -306,7 +366,7 @@ class RoutePacingTests(unittest.TestCase):
             self._row("openai", 100, 10 * HOUR_MS),
             self._row("claude", 100, 10 * HOUR_MS),
         ]
-        result = route.route("coding", "size-l", tiers=tiers, quota_rows=rows)
+        result = _route_with_prices("coding", "size-l", tiers=tiers, quota_rows=rows)
 
         self.assertEqual(result["model"], "openai-codex/gpt-6.1-sol")
         self.assertNotIn("downgraded_from", result)
@@ -328,7 +388,7 @@ class RoutePacingTests(unittest.TestCase):
                 }
             }
         }
-        result = route.route("prose", "size-l", tiers=tiers, quota_rows=rows)
+        result = _route_with_prices("prose", "size-l", tiers=tiers, quota_rows=rows)
 
         self.assertEqual(result["model"], "opus")
         self.assertNotIn("downgraded_from", result)
@@ -341,7 +401,7 @@ class RoutePacingTests(unittest.TestCase):
         # still claude, still blocked. The new fallback must recognize that
         # and keep searching instead of silently returning a blocked model.
         rows = [self._row("claude", 100, 10 * HOUR_MS)]
-        result = route.route("coding", "size-m", tiers=_TIERS, quota_rows=rows)
+        result = _route_with_prices("coding", "size-m", tiers=_TIERS, quota_rows=rows)
 
         # coding has no other provider at any tier in this fixture -- every
         # candidate is claude, so route() must report a wait, not a model
@@ -355,12 +415,121 @@ class RoutePacingTests(unittest.TestCase):
             self._row("claude", 100, 5 * HOUR_MS),
             self._row("opencode-go", 100, 20 * MIN_MS),
         ]
-        result = route.route("prose", "size-l", tiers=_PROSE_OTHER_ACCOUNT, quota_rows=rows)
+        result = _route_with_prices("prose", "size-l", tiers=_PROSE_OTHER_ACCOUNT, quota_rows=rows)
 
         # opus (claude) is blocked, falls to opencode-go/glm-5.3 -- also
         # blocked, resetting sooner than claude. The wait must reflect that
         # sooner reset, not claude's (seen first).
         self.assertAlmostEqual(result["wait_seconds"], 20 * 60, delta=2)
+
+    def test_same_tier_fallback_must_not_cost_more(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [
+                        {"model": "opencode-go/glm-5.3", "effort": "high"},
+                        {"model": "sonnet", "effort": "high"},
+                    ]
+                }
+            }
+        }
+        snapshot = {
+            "subscriptions": {
+                "opencode-go": {
+                    "models": [
+                        {"id": "glm-5.3", "price": {"input": 0.5, "output": 2}}
+                    ]
+                },
+                "claude": {
+                    "models": [
+                        {
+                            "id": "claude-sonnet-5-5",
+                            "price": {"input": 3, "output": 15},
+                        }
+                    ]
+                },
+            }
+        }
+        rows = [self._row("opencode-go", 100, HOUR_MS)]
+
+        result = _route_with_snapshot(
+            "coding", "size-m", snapshot, tiers=tiers, quota_rows=rows
+        )
+
+        self.assertEqual(result["model"], "opencode-go/glm-5.3")
+        self.assertIsNotNone(result["wait_seconds"])
+
+    def test_cheaper_same_tier_fallback_remains_available(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [
+                        {"model": "sonnet", "effort": "high"},
+                        {"model": "opencode-go/glm-5.3", "effort": "high"},
+                    ]
+                }
+            }
+        }
+        snapshot = {
+            "subscriptions": {
+                "opencode-go": {
+                    "models": [
+                        {"id": "glm-5.3", "price": {"input": 0.5, "output": 2}}
+                    ]
+                },
+                "claude": {
+                    "models": [
+                        {
+                            "id": "claude-sonnet-5-5",
+                            "price": {"input": 3, "output": 15},
+                        }
+                    ]
+                },
+            }
+        }
+        rows = [self._row("claude", 100, HOUR_MS)]
+
+        result = _route_with_snapshot(
+            "coding", "size-m", snapshot, tiers=tiers, quota_rows=rows
+        )
+
+        self.assertEqual(result["model"], "opencode-go/glm-5.3")
+
+    def test_missing_stale_unverified_or_invalid_prices_cause_a_deferral(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [
+                        {"model": "opencode-go/glm-5.3", "effort": "high"},
+                        {"model": "sonnet", "effort": "high"},
+                    ]
+                }
+            }
+        }
+        stale = _price_snapshot(tiers)
+        stale["fetched_at"] = "2000-01-01T00:00:00+00:00"
+        unverified = _price_snapshot(tiers)
+        unverified["subscriptions"]["opencode-go"]["live"] = False
+        invalid = _price_snapshot(tiers)
+        invalid["subscriptions"]["claude"]["models"][0]["price"]["input"] = float(
+            "nan"
+        )
+        snapshots = {
+            "missing": {},
+            "stale": stale,
+            "unverified": unverified,
+            "invalid": invalid,
+        }
+        rows = [self._row("opencode-go", 100, HOUR_MS)]
+
+        for state, snapshot in snapshots.items():
+            with self.subTest(state=state):
+                result = _route_with_snapshot(
+                    "coding", "size-m", snapshot, tiers=tiers, quota_rows=rows
+                )
+
+                self.assertEqual(result["model"], "opencode-go/glm-5.3")
+                self.assertIsNotNone(result["wait_seconds"])
 
     def test_claude_weekly_over_90_uses_open_lower_tier_model(self):
         tiers = {
@@ -376,7 +545,7 @@ class RoutePacingTests(unittest.TestCase):
             self._row("openai", 10, 6 * 24 * HOUR_MS, QuotaDuration.WEEKLY),
         ]
 
-        result = route.route("coding", "size-l", tiers=tiers, quota_rows=rows)
+        result = _route_with_prices("coding", "size-l", tiers=tiers, quota_rows=rows)
 
         self.assertEqual(result["model"], "openai-codex/gpt-6-luna")
         self.assertEqual(
@@ -397,7 +566,7 @@ class RoutePacingTests(unittest.TestCase):
             self._row("opencode-go", 10, 6 * 24 * HOUR_MS, QuotaDuration.WEEKLY),
         ]
 
-        result = route.route("coding", "size-m", tiers=tiers, quota_rows=rows)
+        result = _route_with_prices("coding", "size-m", tiers=tiers, quota_rows=rows)
 
         self.assertEqual(result["model"], "sonnet")
         self.assertIsNotNone(result["wait_seconds"])
@@ -407,7 +576,7 @@ class RoutePacingTests(unittest.TestCase):
         # coding's tier0 is bmo/local, tier1 sonnet (claude), both blocked.
         # Decision 3 forbids landing on tier0 to avoid the wait.
         rows = [self._row("claude", 100, 3 * HOUR_MS)]
-        result = route.route("coding", "size-m", tiers=_TIERS, quota_rows=rows)
+        result = _route_with_prices("coding", "size-m", tiers=_TIERS, quota_rows=rows)
 
         self.assertNotIn("bmo:", result["model"])
         self.assertNotIn("local:", result["model"])
@@ -415,7 +584,7 @@ class RoutePacingTests(unittest.TestCase):
 
     def test_lean_in_bumps_one_tier_on_a_surplus(self):
         rows = [self._row("claude", 10, 1 * HOUR_MS)]  # <50% used, <24h left
-        result = route.route("coding", "size-m", tiers=_TIERS, quota_rows=rows)
+        result = _route_with_prices("coding", "size-m", tiers=_TIERS, quota_rows=rows)
 
         self.assertEqual(result, {"model": "opus", "effort": "high"})
 
@@ -435,7 +604,7 @@ class RoutePacingTests(unittest.TestCase):
             }
         }
         rows = [self._row("opencode-go", 10, 20 * 60 * 1000)]
-        result = route.route("coding", "size-m", tiers=tiers, quota_rows=rows)
+        result = _route_with_prices("coding", "size-m", tiers=tiers, quota_rows=rows)
 
         self.assertEqual(result, {"model": "opencode-go/qwen3.8-max", "effort": "high"})
 
@@ -452,13 +621,13 @@ class RoutePacingTests(unittest.TestCase):
             }
         }
         rows = [self._row("opencode-go", 10, 20 * 60 * 1000)]
-        result = route.route("coding", "size-xs", tiers=tiers, quota_rows=rows)
+        result = _route_with_prices("coding", "size-xs", tiers=tiers, quota_rows=rows)
 
         self.assertEqual(result, {"model": "opencode-go/glm-5.3", "effort": "low"})
 
     def test_lean_in_never_goes_past_the_top_tier(self):
         rows = [self._row("claude", 10, 1 * HOUR_MS)]
-        result = route.route("coding", "size-l", tiers=_TIERS, quota_rows=rows)
+        result = _route_with_prices("coding", "size-l", tiers=_TIERS, quota_rows=rows)
 
         self.assertEqual(result, {"model": "opus", "effort": "high"})
 
@@ -502,7 +671,7 @@ class RoutePacingTests(unittest.TestCase):
         for name, (row, tier1, tier2, expected) in cases.items():
             with self.subTest(case=name):
                 tiers = {"coding": {"tiers": {"tier1": tier1, "tier2": tier2}}}
-                result = route.route("coding", "size-m", tiers=tiers, quota_rows=[row])
+                result = _route_with_prices("coding", "size-m", tiers=tiers, quota_rows=[row])
 
                 self.assertEqual({key: result.get(key) for key in expected}, expected)
                 if "reason" in expected:
@@ -556,13 +725,13 @@ class RouteMultiAccountTests(unittest.TestCase):
 
     def test_a_used_up_login_does_not_move_the_pick_off_its_provider(self):
         rows = [self._free_used_up(), self._row("plus", 60, 4 * HOUR_MS)]
-        result = route.route("coding", "size-m", tiers=_OPENAI_THEN_CLAUDE, quota_rows=rows)
+        result = _route_with_prices("coding", "size-m", tiers=_OPENAI_THEN_CLAUDE, quota_rows=rows)
 
         self.assertEqual(result, {"model": "openai/gpt-5", "effort": "high"})
 
     def test_every_login_blocked_defers_instead_of_upgrading(self):
         rows = [self._free_used_up(), self._row("plus", 100, 4 * HOUR_MS)]
-        result = route.route("coding", "size-m", tiers=_OPENAI_THEN_CLAUDE, quota_rows=rows)
+        result = _route_with_prices("coding", "size-m", tiers=_OPENAI_THEN_CLAUDE, quota_rows=rows)
 
         self.assertEqual(result["model"], "openai/gpt-5")
         self.assertEqual(result["reason"], "all allowed models are blocked by quota")
@@ -574,7 +743,7 @@ class RouteMultiAccountTests(unittest.TestCase):
             self._row("plus", 100, 4 * HOUR_MS),
             self._row(None, 100, 10 * HOUR_MS, provider="claude"),
         ]
-        result = route.route("coding", "size-m", tiers=_OPENAI_THEN_CLAUDE, quota_rows=rows)
+        result = _route_with_prices("coding", "size-m", tiers=_OPENAI_THEN_CLAUDE, quota_rows=rows)
 
         self.assertEqual(result["model"], "openai/gpt-5")
         self.assertAlmostEqual(result["wait_seconds"], 4 * 60 * 60, delta=2)
@@ -640,7 +809,7 @@ class PackagedTiersTests(unittest.TestCase):
                 seen = set()
                 seen_models = set()
                 for size, bmo, states in grid:
-                    result = route.route(
+                    result = _route_with_prices(
                         category,
                         size,
                         bmo_available=bmo,

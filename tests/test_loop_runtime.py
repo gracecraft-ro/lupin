@@ -2340,6 +2340,7 @@ def test_select_orchestrator_blocks_claude_when_weekly_usage_exceeds_90_percent(
         "platform": "omp",
         "provider": "openai-codex",
         "model": "openai-codex/gpt-6-luna",
+        "quota_headroom": 9,
     }
 
 
