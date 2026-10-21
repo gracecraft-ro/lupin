@@ -484,7 +484,7 @@ def _work_left(connection: dict, full_name: str, base: str) -> tuple[int | None,
         try:
             return claims.claims_for(targets, strict=True, **connection)
         except redis.exceptions.NoPermissionError as exc:
-            # On some machines the Redis user cannot run MULTI. Then each issue counts as not claimed.
+            # A denied claim read leaves every issue counted as not claimed.
             notes.append("claims: unreadable")
             raise CoordinatorUnreachable(str(exc)) from exc
         except CoordinatorAuthFailed:

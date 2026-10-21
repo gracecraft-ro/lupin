@@ -560,6 +560,16 @@ def _peek_args(parser: argparse.ArgumentParser) -> None:
     _fleet_connection_args(parser)
 
 
+def _logs_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("repo", help="repository whose run log to show")
+    parser.add_argument("--run", dest="run_id", help="run ID (default: latest run)")
+    parser.add_argument(
+        "--tail", type=int, default=50,
+        help="number of events to show (default: 50)",
+    )
+    parser.add_argument("--json", action="store_true", help="print one JSON object per line")
+
+
 def _attach_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("repo", help="repository whose loop to attach to")
     parser.add_argument("--machine", default=None, help="skip resolving which machine runs repo's loop")
@@ -734,6 +744,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub._choices_actions = [action for action in sub._choices_actions if action.dest != "loop"]
     _stop_args(sub.add_parser("stop", help="stop a repo's loop, on whichever machine runs it"))
     _peek_args(sub.add_parser("peek", help="show recent pane output for a repo's loop"))
+    _logs_args(sub.add_parser("logs", help="show events from a loop run"))
     _attach_args(sub.add_parser("attach", help="attach a terminal to a repo's loop session"))
     _schedule_args(sub.add_parser("schedule", help="show or set a machine's loop-run cadence"))
     _pause_resume_args(sub.add_parser("pause", help="pause a machine's scheduled loop runs"))
@@ -2074,6 +2085,30 @@ def _cmd_peek(args: argparse.Namespace) -> int:
     return code
 
 
+def _cmd_logs(args: argparse.Namespace) -> int:
+    try:
+        events = loop_runtime.read_run_logs(args.repo, args.run_id, tail=args.tail)
+    except loop_runtime.LoopError as exc:
+        print(f"lupin logs: {exc}", file=sys.stderr)
+        return 1
+    for event in events:
+        if args.json:
+            print(json.dumps(event, sort_keys=True))
+            continue
+        standard = {"event", "run_id", "timestamp"}
+        fields = " ".join(
+            f"{key}={json.dumps(value, sort_keys=True)}"
+            for key, value in sorted(event.items())
+            if key not in standard
+        )
+        line = (
+            f"{event.get('timestamp', '?')} {event.get('event', '?')} "
+            f"run={event.get('run_id', '?')}"
+        )
+        print(f"{line} {fields}".rstrip())
+    return 0
+
+
 def _cmd_attach(args: argparse.Namespace) -> int:
     local_host = machines.hostname()
     if args.machine:
@@ -2345,6 +2380,8 @@ def _main(argv: list[str] | None = None) -> int:
         return _cmd_stop(args)
     if args.cmd == "peek":
         return _cmd_peek(args)
+    if args.cmd == "logs":
+        return _cmd_logs(args)
     if args.cmd == "attach":
         return _cmd_attach(args)
     if args.cmd == "schedule":

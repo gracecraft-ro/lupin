@@ -576,7 +576,7 @@ class PackagedTiersTests(unittest.TestCase):
                 continue
             with self.subTest(category=category):
                 probed = copy.deepcopy(row)
-                probes = set()
+                probes = {}
                 for tier_name, entries in probed["tiers"].items():
                     # A later entry on a provider that an earlier entry in
                     # the same tier already uses shares its blocked state,
@@ -588,8 +588,9 @@ class PackagedTiersTests(unittest.TestCase):
                             continue
                         providers.add(provider)
                         entry["effort"] = f"__probe_{tier_name}_{index}__"
-                        probes.add(entry["effort"])
+                        probes[entry["effort"]] = entry["model"]
                 seen = set()
+                seen_models = set()
                 for size, bmo, states in grid:
                     result = route.route(
                         category,
@@ -599,10 +600,23 @@ class PackagedTiersTests(unittest.TestCase):
                         quota_rows=_grid_rows(states),
                     )
                     seen.add(result.get("effort"))
+                    seen_models.add(result.get("model"))
                     if "downgraded_from" in result:
                         seen.add(result["downgraded_from"]["effort"])
+                        seen_models.add(result["downgraded_from"]["model"])
 
-                self.assertEqual(probes - seen, set())
+                if category == "prose":
+                    # digest.py reads the prose tier0 order itself, so an entry
+                    # there can be live even when route() never picks it.
+                    from lupin import digest
+
+                    seen_models.update(model for model, _effort in digest._error_chain())
+
+                missing = {
+                    tag for tag, model in probes.items()
+                    if tag not in seen and model not in seen_models
+                }
+                self.assertEqual(missing, set())
 
     def test_packaged_tiers_never_list_fable(self):
         # Fable needs the user's approval (delegation-loop SKILL.md). No

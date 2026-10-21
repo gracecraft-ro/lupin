@@ -253,7 +253,10 @@ def test_stop_closes_only_loop_workspace_and_stops_empty_session(
     monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: dict(metadata))
     monkeypatch.setattr(loop_runtime, "_start_server_for_read", lambda repo, data: data["session"])
     monkeypatch.setattr(loop_runtime, "_find_workspace", lambda session, data: {"id": "workspace-1"})
-    monkeypatch.setattr(loop_runtime, "_save_report", lambda repo, session, workspace: tmp_path / "report.log")
+    monkeypatch.setattr(
+        loop_runtime, "_save_report",
+        lambda repo, session, workspace, run_id=None: tmp_path / "report.log",
+    )
     monkeypatch.setattr(loop_runtime, "_workspace_id", lambda workspace: workspace["id"])
     monkeypatch.setattr(loop_runtime, "_herdr_json", lambda session, *args: actions.append((session, args)) or {})
     monkeypatch.setattr(loop_runtime, "_workspaces", lambda session: other_workspaces)
@@ -872,6 +875,7 @@ def test_send_loop_refuses_a_loop_that_is_not_running(monkeypatch):
 def _stop_harness(monkeypatch, tmp_path: Path, *, agent: dict | None, prompt_error: str | None = None):
     """Patch stop_loop's Herdr and systemd calls; return the ordered action list."""
     metadata = {
+        "run_id": "20260101-000001-000001-00000000000000000000000000000000",
         "repo": "widgets",
         "platform": "claude",
         "session": "lupin-widgets-abc123",
@@ -884,7 +888,12 @@ def _stop_harness(monkeypatch, tmp_path: Path, *, agent: dict | None, prompt_err
     monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: dict(metadata))
     monkeypatch.setattr(loop_runtime, "_start_server_for_read", lambda repo, data: data["session"])
     monkeypatch.setattr(loop_runtime, "_find_workspace", lambda session, data: {"id": "workspace-1"})
-    monkeypatch.setattr(loop_runtime, "_save_report", lambda repo, session, workspace: tmp_path / "report.log")
+
+    def save_report(repo, session, workspace, run_id=None):
+        actions.append(("save_report", run_id))
+        return tmp_path / "report.log"
+
+    monkeypatch.setattr(loop_runtime, "_save_report", save_report)
     monkeypatch.setattr(loop_runtime, "_workspace_id", lambda workspace: workspace["id"])
     monkeypatch.setattr(loop_runtime, "_agent_for_workspace", lambda session, workspace_id: agent)
     monkeypatch.setattr(loop_runtime, "_herdr_json", lambda session, *args: actions.append(args) or {})
@@ -916,12 +925,34 @@ def test_stop_asks_the_agent_for_a_handoff_before_closing(monkeypatch, tmp_path:
 
 
 def test_stop_force_skips_the_handoff(monkeypatch, tmp_path: Path):
+    run_id = "20260101-000001-000001-00000000000000000000000000000000"
     actions = _stop_harness(monkeypatch, tmp_path, agent={"name": "lupin-loop"})
 
     loop_runtime.stop_loop("widgets", force=True)
 
     assert not any(a[:2] == ("agent", "prompt") for a in actions)
     assert ("workspace", "close", "workspace-1") in actions
+    assert ("save_report", run_id) in actions
+    events = loop_runtime.run_log.read_events(
+        tmp_path, "widgets", run_id
+    )
+    assert events[-1]["event"] == "loop_stopped"
+    assert events[-1]["path"] == "force"
+    assert events[-1]["forced"] is True
+    assert events[-1]["exit_code"] == 0
+    assert events[-1]["handoff_outcome"] == "skipped"
+
+
+def test_save_report_filename_contains_run_id(monkeypatch, tmp_path: Path):
+    run_id = "20260101-000001-000001-00000000000000000000000000000000"
+    monkeypatch.setattr(loop_runtime, "REPORTS_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "_pane_id", lambda workspace: "pane-1")
+    monkeypatch.setattr(loop_runtime, "_herdr", lambda *args, **kwargs: "pane output")
+
+    report = loop_runtime._save_report("widgets", "session", {}, run_id)
+
+    assert report.name == f"widgets-{run_id}.log"
+    assert report.read_text(encoding="utf-8") == "pane output\n"
 
 
 def test_stop_still_closes_when_the_handoff_wait_times_out(monkeypatch, tmp_path: Path):
@@ -1093,6 +1124,62 @@ def test_start_loop_works_while_the_shared_session_runs_other_loops(monkeypatch,
 
     assert started, message
     assert loop_runtime._read_metadata("widgets")["session"] == loop_runtime.SESSION_NAME
+
+
+def test_start_loop_uses_saved_checkout_doc_when_worktree_copy_is_stale(
+    monkeypatch, tmp_path: Path, make_checkout
+):
+    checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
+    doc = checkout / "docs" / "delegation-loop.md"
+    doc.parent.mkdir()
+    doc.write_text("old upstream instructions\n", encoding="utf-8")
+    _git_as(checkout, "add", "docs/delegation-loop.md")
+    _git_as(checkout, "commit", "-m", "add loop instructions")
+    _git_as(checkout, "push", "origin", "main")
+    _git_as(checkout, "fetch", "origin")
+    doc.write_text("new dashboard instructions\n", encoding="utf-8")
+
+    started, message = loop_runtime.start_loop(
+        "widgets",
+        platform="omp",
+        provider="openai-codex",
+        model="openai-codex/gpt-6-luna",
+    )
+
+    assert started, message
+    metadata = loop_runtime._read_metadata("widgets")
+    worktree_doc = Path(metadata["worktree"]) / "docs" / "delegation-loop.md"
+    assert worktree_doc.read_text(encoding="utf-8") == "old upstream instructions\n"
+    prompt = Path(metadata["prompt_file"]).read_text(encoding="utf-8")
+    assert str(doc) in prompt
+    assert "new dashboard instructions" in prompt
+    assert "old upstream instructions" not in prompt
+
+
+def test_start_loop_keeps_a_long_saved_doc_as_a_path(monkeypatch, tmp_path: Path, make_checkout):
+    checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
+    doc = checkout / "docs" / "delegation-loop.md"
+    doc.parent.mkdir()
+    long_doc = "new dashboard instructions\n" + (
+        "z" * loop_runtime.PROMPT_DOC_INLINE_LIMIT
+    )
+    doc.write_text(long_doc, encoding="utf-8")
+
+    started, message = loop_runtime.start_loop(
+        "widgets",
+        platform="omp",
+        provider="openai-codex",
+        model="openai-codex/gpt-6-luna",
+    )
+
+    assert started, message
+    metadata = loop_runtime._read_metadata("widgets")
+    worktree_doc = Path(metadata["worktree"]) / "docs" / "delegation-loop.md"
+    assert not worktree_doc.exists()
+    prompt = Path(metadata["prompt_file"]).read_text(encoding="utf-8")
+    assert str(doc) in prompt
+    assert long_doc not in prompt
+    assert "new dashboard instructions" not in prompt
 
 
 def test_start_loop_selects_profile_candidate_and_persists_it_for_recovery(
@@ -1280,6 +1367,8 @@ def test_start_loop_gives_each_run_a_new_branch_in_its_own_worktree(
     assert checkout not in worktree.parents
     assert str(worktree) in message
     assert branch.startswith("lupin-loop/")
+    assert re.fullmatch(r"lupin-loop/\d{8}-\d{6}-\d{6}", branch)
+    assert worktree.name == branch.rsplit("/", 1)[1]
     assert _git_out(worktree, "rev-parse", "HEAD") == _git_out(checkout, "rev-parse", "origin/main")
     assert _git_out(checkout, "branch", "--show-current") == "main"
     assert str(worktree.resolve()) in _git_out(checkout, "worktree", "list", "--porcelain")
@@ -1318,6 +1407,35 @@ def test_agent_workspace_directory_is_the_run_worktree_not_the_checkout(
     create = next(call for call in herdr_calls if call[:2] == ("workspace", "create"))
     assert create[create.index("--cwd") + 1] == worktree
     assert str(checkout) not in create
+
+
+def test_monitor_logs_herdr_server_loss_with_reason(monkeypatch, tmp_path: Path):
+    run_id = "20260101-000001-000001-00000000000000000000000000000000"
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "herdr-loops")
+    loop_runtime._write_metadata("widgets", {
+        "run_id": run_id, "repo": "widgets", "platform": "omp",
+        "session": loop_runtime.SESSION_NAME, "state": "running",
+    })
+    server_states = iter((True, False))
+    monkeypatch.setattr(loop_runtime, "_server_running", lambda session: next(server_states))
+    monkeypatch.setattr(loop_runtime, "_ensure_server", lambda *args: None)
+    monkeypatch.setattr(loop_runtime, "_find_workspace", lambda session, metadata: {"id": "w1"})
+    monkeypatch.setattr(loop_runtime, "_agent_state", lambda session, workspace: "working")
+    monkeypatch.setattr(loop_runtime, "_agent_for_workspace", lambda session, workspace_id: {"name": "lupin-loop"})
+    monkeypatch.setattr(loop_runtime, "_agent_command", lambda *args, **kwargs: ["agent"])
+    monkeypatch.setattr(loop_runtime.slots, "hold", lambda *args, **kwargs: 1)
+
+    with pytest.raises(loop_runtime.LoopError, match="stopped with status 1"):
+        loop_runtime._monitor_loop(
+            "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False
+        )
+
+    assert loop_runtime._read_metadata("widgets")["state"] == "needs_attention"
+    events = loop_runtime.run_log.read_events(tmp_path, "widgets", run_id)
+    server_loss = next(event for event in events if event["event"] == "herdr_server_stopped")
+    assert server_loss["reason"] == "Herdr server stopped while the agent was running"
+    assert server_loss["agent_exit_code"] == 1
 
 
 @pytest.mark.parametrize("saved", [{}, {"worktree": "gone"}])
@@ -1515,15 +1633,20 @@ def test_stop_keeps_an_ignored_ledger_file_outside_the_worktree(
 
 def test_next_prompt_names_the_kept_ledger_file_only_when_it_exists(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", tmp_path / "code")
     monkeypatch.delenv("LUPIN_LOOP_PROMPT_FILE", raising=False)
     kept = tmp_path / "handoffs" / "widgets.json"
 
-    before = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
+    before = Path(
+        loop_runtime._write_prompt("widgets", None, False, tmp_path / "worktree")
+    ).read_text(encoding="utf-8")
     assert str(kept) not in before
 
     kept.parent.mkdir()
     kept.write_text("{}\n", encoding="utf-8")
-    after = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
+    after = Path(
+        loop_runtime._write_prompt("widgets", None, False, tmp_path / "worktree")
+    ).read_text(encoding="utf-8")
     assert str(kept) in after
 
 
@@ -1545,15 +1668,20 @@ def test_stop_keeps_an_ignored_handoff_file_outside_the_worktree(
 
 def test_next_prompt_names_the_kept_handoff_file_only_when_it_exists(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", tmp_path / "code")
     monkeypatch.delenv("LUPIN_LOOP_PROMPT_FILE", raising=False)
     kept = tmp_path / "handoffs" / "widgets.HANDOFF.md"
 
-    before = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
+    before = Path(
+        loop_runtime._write_prompt("widgets", None, False, tmp_path / "worktree")
+    ).read_text(encoding="utf-8")
     assert str(kept) not in before
 
     kept.parent.mkdir()
     kept.write_text("# Handoff\n", encoding="utf-8")
-    after = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
+    after = Path(
+        loop_runtime._write_prompt("widgets", None, False, tmp_path / "worktree")
+    ).read_text(encoding="utf-8")
     assert str(kept) in after
 
 
@@ -2022,10 +2150,15 @@ def test_credentials_come_from_the_repo_of_the_loop(monkeypatch, tmp_path: Path)
 
 def test_a_numbered_loop_is_told_to_claim_its_issues(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", tmp_path / "code")
     monkeypatch.delenv("LUPIN_LOOP_PROMPT_FILE", raising=False)
 
-    first = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
-    second = Path(loop_runtime._write_prompt("widgets~2", None, False)).read_text(encoding="utf-8")
+    first = Path(
+        loop_runtime._write_prompt("widgets", None, False, tmp_path / "worktree")
+    ).read_text(encoding="utf-8")
+    second = Path(
+        loop_runtime._write_prompt("widgets~2", None, False, tmp_path / "worktree")
+    ).read_text(encoding="utf-8")
 
     assert "You are the loop" not in first
     assert "You are the loop widgets~2. Other loops work on widgets on this machine" in second
@@ -2095,7 +2228,10 @@ def test_a_numbered_loop_uses_the_orchestrator_profile_of_its_repo(monkeypatch, 
 
     def select(candidates, snapshot):
         seen.append(candidates)
-        return {"platform": "omp", "provider": None, "model": "opencode-go/glm-5.3"}
+        return {
+            "platform": "omp", "provider": None, "model": "opencode-go/glm-5.3",
+            "quota_headroom": 0.75,
+        }
 
     monkeypatch.setattr(loop_runtime, "select_orchestrator", select)
     monkeypatch.setattr(
@@ -2108,6 +2244,10 @@ def test_a_numbered_loop_uses_the_orchestrator_profile_of_its_repo(monkeypatch, 
     assert started
     assert seen == [["omp-candidate"]]
     assert loop_runtime._read_metadata("widgets~2")["platform"] == "omp"
+    metadata = loop_runtime._read_metadata("widgets~2")
+    events = loop_runtime.run_log.read_events(state_dir, "widgets~2", metadata["run_id"])
+    routing = next(event for event in events if event["event"] == "routing_decision")
+    assert routing["quota_headroom"] == 0.75
 
 
 def test_a_numbered_loop_cannot_come_in_through_the_default_repos_or_the_repos_file(monkeypatch, tmp_path: Path):
@@ -2175,7 +2315,10 @@ def test_select_orchestrator_uses_the_account_with_quota_left():
     choice = loop_runtime.select_orchestrator(["claude", "openai/gpt-5"], snapshot, now=now)
 
     # The free account is used up. Headroom is the paid account's 90%, not 0%.
-    assert choice == {"platform": "omp", "provider": "openai-codex", "model": "openai-codex/gpt-5"}
+    assert choice == {
+        "platform": "omp", "provider": "openai-codex", "model": "openai-codex/gpt-5",
+        "quota_headroom": 90,
+    }
 
 
 def test_select_orchestrator_skips_a_provider_when_every_account_is_blocked():
