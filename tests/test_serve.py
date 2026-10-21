@@ -3289,6 +3289,16 @@ def _make_repo(tmp_path, name, *, doc=True):
     return repo_dir
 
 
+def _schedule_pairs(path) -> dict:
+    """The repo to platform pairs of a schedule file."""
+    pairs = {}
+    for line in path.read_text().splitlines():
+        fields = line.split()
+        if fields:
+            pairs[fields[0]] = fields[1] if len(fields) > 1 else "claude"
+    return pairs
+
+
 class RepoHelperTests(unittest.TestCase):
     def test_repo_slot_name_is_prefixed_so_it_cannot_collide_with_bmo(self):
         self.assertEqual(serve._repo_slot_name("widgets"), "repo:widgets")
@@ -3304,11 +3314,11 @@ class RepoHelperTests(unittest.TestCase):
                 mock.patch.object(serve, "STATE_DIR", state_dir),
                 mock.patch.object(serve, "REPOS_FILE", os.path.join(state_dir, "repos")),
             ):
-                serve.write_enabled_repos(["b-repo", "a-repo"])
+                serve.write_enabled_repos({"b-repo": "claude", "a-repo": "omp"})
                 self.assertEqual(serve.enabled_repos(), ["b-repo", "a-repo"])
 
     def test_enabled_repos_recognizes_a_bare_name_line(self):
-        """The dashboard's own `/repos/add` writes one name per line."""
+        """A schedule file may hold a repo name without a platform."""
         with tempfile.TemporaryDirectory() as tmp:
             repos_file = os.path.join(tmp, "repos")
             with open(repos_file, "w", encoding="utf-8") as fh:
@@ -3730,22 +3740,24 @@ class TestReposPageRoutes:
     def test_add_route_accepts_a_repo_without_a_delegation_doc(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
         _make_repo(tmp_path, "widgets", doc=False)
-        monkeypatch.setattr(serve, "enabled_repos", lambda: ["other"])
+        monkeypatch.setattr(serve, "_repo_platforms", lambda: {"other": "omp"})
         written = {}
-        monkeypatch.setattr(serve, "write_enabled_repos", lambda names: written.setdefault("names", names))
+        monkeypatch.setattr(
+            serve, "write_enabled_repos", lambda values: written.setdefault("values", values)
+        )
         handler = _repos_handler()
         _post_body(handler, "/repos/add", {"repo": "widgets"})
         handler.do_POST()
-        assert written["names"] == ["other", "widgets"]
+        assert written["values"] == {"other": "omp", "widgets": "claude"}
         handler.redirect.assert_called_once()
         assert "added" in handler.redirect.call_args.args[0]
 
     def test_add_route_is_a_no_op_when_already_enabled(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
         _make_repo(tmp_path, "widgets")
-        monkeypatch.setattr(serve, "enabled_repos", lambda: ["widgets"])
+        monkeypatch.setattr(serve, "_repo_platforms", lambda: {"widgets": "omp"})
 
-        def _fail(names):
+        def _fail(values):
             raise AssertionError("should not write -- already enabled")
 
         monkeypatch.setattr(serve, "write_enabled_repos", _fail)
@@ -3753,6 +3765,32 @@ class TestReposPageRoutes:
         _post_body(handler, "/repos/add", {"repo": "widgets"})
         handler.do_POST()
         handler.redirect.assert_called_once()
+
+    def test_add_route_keeps_a_comment_line_in_the_schedule_file(self, tmp_path, monkeypatch):
+        """A comment line stays one line. An add must not write it again."""
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        _make_repo(tmp_path, "gadgets")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        repos_file = state_dir / "repos"
+        repos_file.write_text("# notes for the loop\nlupin omp\n", encoding="utf-8")
+        monkeypatch.setattr(serve, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(serve, "REPOS_FILE", str(repos_file))
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/add", {"repo": "widgets"})
+        handler.do_POST()
+        assert repos_file.read_text(encoding="utf-8") == (
+            "# notes for the loop\nlupin omp\nwidgets claude\n"
+        )
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/add", {"repo": "gadgets"})
+        handler.do_POST()
+        assert repos_file.read_text(encoding="utf-8") == (
+            "# notes for the loop\nlupin omp\nwidgets claude\ngadgets claude\n"
+        )
 
     def test_generate_docs_route_rejects_a_repo_that_already_has_one(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
@@ -3772,16 +3810,18 @@ class TestReposPageRoutes:
     def test_generate_docs_route_writes_a_doc_and_adds_to_the_schedule(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
         _make_repo(tmp_path, "widgets", doc=False)
-        monkeypatch.setattr(serve, "enabled_repos", lambda: [])
+        monkeypatch.setattr(serve, "_repo_platforms", lambda: {})
         written = {}
-        monkeypatch.setattr(serve, "write_enabled_repos", lambda names: written.setdefault("names", names))
+        monkeypatch.setattr(
+            serve, "write_enabled_repos", lambda values: written.setdefault("values", values)
+        )
         handler = _repos_handler()
         _post_body(handler, "/repos/generate-docs", {"repo": "widgets"})
         handler.do_POST()
         doc_path = tmp_path / "widgets" / "docs" / "delegation-loop.md"
         assert doc_path.is_file()
         assert "widgets" in doc_path.read_text()
-        assert written["names"] == ["widgets"]
+        assert written["values"] == {"widgets": "claude"}
 
     def test_remove_route_rejects_a_repo_not_on_the_schedule(self, monkeypatch):
         monkeypatch.setattr(serve, "enabled_repos", lambda: ["other"])
@@ -3832,6 +3872,87 @@ class TestReposPageRoutes:
         doc_path = tmp_path / "widgets" / "docs" / "delegation-loop.md"
         assert doc_path.read_text() == "new content"
         handler.redirect.assert_called_once_with("/repos?doc=widgets&sent=saved")
+
+    def test_repos_handlers_keep_the_platform_of_every_repo(self, tmp_path, monkeypatch):
+        """Adding or removing a repo must not drop the platform column of
+        the schedule file (issue #65)."""
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        repos_file = state_dir / "repos"
+        repos_file.write_text("lupin omp\nroundsmith claude\n")
+        code_dir = tmp_path / "code"
+        (code_dir / "localno").mkdir(parents=True)
+        (code_dir / "fresh").mkdir()
+        monkeypatch.setattr(serve, "STATE_DIR", str(state_dir))
+        monkeypatch.setattr(serve, "REPOS_FILE", str(repos_file))
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        monkeypatch.setattr(serve.loop_runtime, "REPOS_FILE", repos_file)
+        monkeypatch.setattr(serve.loop_runtime, "ORCHESTRATORS_FILE", state_dir / "orchestrators.json")
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/add", {"repo": "localno"})
+        handler.do_POST()
+        assert repos_file.read_text() == "lupin omp\nroundsmith claude\nlocalno claude\n"
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/generate-docs", {"repo": "fresh"})
+        handler.do_POST()
+        assert _schedule_pairs(repos_file) == {
+            "lupin": "omp",
+            "roundsmith": "claude",
+            "localno": "claude",
+            "fresh": "claude",
+        }
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/remove", {"repo": "localno", "confirm": "localno"})
+        handler.do_POST()
+        assert _schedule_pairs(repos_file) == {
+            "lupin": "omp",
+            "roundsmith": "claude",
+            "fresh": "claude",
+        }
+
+    def test_doc_save_keeps_the_line_endings_of_the_file(self, tmp_path, monkeypatch):
+        """A save must not change the line endings of the doc (issue #66).
+        A browser sends the text of a textarea with CRLF endings."""
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        doc_path = tmp_path / "widgets" / "docs" / "delegation-loop.md"
+        doc_path.write_bytes(b"# doc\n\nline one\nline two\n")
+        handler = _repos_handler()
+        _post_body(
+            handler,
+            "/repos/doc/save",
+            {"repo": "widgets", "text": "# doc\r\n\r\nline one\r\nline two\r\n"},
+        )
+        handler.do_POST()
+        assert doc_path.read_bytes() == b"# doc\n\nline one\nline two\n"
+
+        doc_path.write_bytes(b"# doc\r\n\r\nline one\r\n")
+        handler = _repos_handler()
+        _post_body(
+            handler,
+            "/repos/doc/save",
+            {"repo": "widgets", "text": "# doc\r\n\r\nline one\r\n"},
+        )
+        handler.do_POST()
+        assert doc_path.read_bytes() == b"# doc\r\n\r\nline one\r\n"
+
+    def test_doc_editor_warns_before_unsaved_text_is_lost(self):
+        """The doc editor must warn before the typed text goes away
+        (issue #70). The browser's own leave-page prompt covers a reload
+        or a link click, and the auto-refresh waits for the editor."""
+        html = serve.render_repos(
+            {"repos": [], "machines": [], "fleet_error": None, "local_host": "h"},
+            doc_repo="widgets",
+            doc_text="# doc\n",
+            doc_edit=True,
+        ).decode("utf-8")
+        assert "beforeunload" in html
+        assert "lupinUnsavedChanges" in html
+        assert 'addEventListener("submit"' in html
+        assert "!window.lupinUnsavedChanges()" in serve.JS
 
     def test_slot_max_route_rejects_a_missing_repository(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
