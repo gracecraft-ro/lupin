@@ -38,6 +38,7 @@ from . import model_tiers as tiers_config
 from . import usage_cache
 from .slots import CoordinatorUnreachable
 from .quota import (
+    NOT_AVAILABLE,
     QuotaDuration,
     epoch_ms_to_local,
     quota_source_label,
@@ -165,14 +166,43 @@ def enabled_repos() -> list[str]:
     return list(_repo_platforms().keys())
 
 
-def write_enabled_repos(names: list[str]) -> None:
-    """Write enabled repo names in the legacy one-name-per-line format.
+def _schedule_file_lines() -> list[str]:
+    """The lines of the schedule file, without their line endings."""
+    try:
+        with open(REPOS_FILE, encoding="utf-8") as fh:
+            return fh.read().splitlines()
+    except OSError:
+        return []
 
-    The loop runtime also writes `REPOS_FILE` with repo platforms.
+
+def write_enabled_repos(values: dict[str, str]) -> None:
+    """Write the schedule file, one `repo platform` line per repo.
+
+    The platform column matters. The loop runtime reads `REPOS_FILE` as
+    `repo platform` pairs, and a repo without a platform runs on
+    `claude`. So every repo keeps the platform it has (issue #65).
+
+    The file is read back first. The repos that are already in it keep
+    their place, and lines that are not repo entries, such as comments,
+    stay as they are.
     """
     os.makedirs(STATE_DIR, exist_ok=True)
+    lines: list[str] = []
+    written: set[str] = set()
+    for line in _schedule_file_lines():
+        fields = line.split()
+        if not fields or fields[0].startswith("#"):
+            lines.append(line)
+            continue
+        repo = fields[0]
+        if repo in values and repo not in written:
+            lines.append(f"{repo} {values[repo]}")
+            written.add(repo)
+    for repo, platform in values.items():
+        if repo not in written:
+            lines.append(f"{repo} {platform}")
     with open(REPOS_FILE, "w", encoding="utf-8") as fh:
-        fh.writelines(f"{name}\n" for name in names)
+        fh.writelines(f"{line}\n" for line in lines)
 
 
 # A per-repo loop concurrency cap uses the existing Redis slot schema.
@@ -200,6 +230,30 @@ def _delegation_doc_template(repo: str) -> str:
         "TODO: anything a loop must know before it starts -- how to test,\n"
         "what not to touch, where to push its work.\n"
     )
+
+
+def _doc_line_ending(data: bytes) -> str:
+    """The line ending a doc file uses, taken from its first line.
+
+    A doc keeps the line endings it has. A save must not turn every line
+    of the file into a change (issue #66).
+    """
+    index = data.find(b"\n")
+    if index > 0 and data[index - 1 : index] == b"\r":
+        return "\r\n"
+    return "\n"
+
+
+def _with_line_ending(text: str, ending: str) -> str:
+    """Text with every line ending set to `ending`.
+
+    A browser sends the text of a textarea with CRLF line endings, so the
+    endings of the file decide what is written (issue #66).
+    """
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    if ending == "\n":
+        return normalized
+    return normalized.replace("\n", ending)
 
 
 def code_repos() -> list[dict]:
@@ -358,6 +412,7 @@ def _roadmap_loader_script() -> str:
     var holder=document.createElement('template');
     holder.innerHTML=html;
     box.replaceWith(holder.content);
+    if(window.lupinHideDismissedRoadmapWarnings)window.lupinHideDismissedRoadmapWarnings(document);
   }).catch(function(){location.href=box.dataset.full;});
 })();
 """
@@ -394,13 +449,18 @@ def loop_tail(repo: str, machine: str, lines: int, connection: dict, signing_key
 def _repo_platforms() -> dict[str, str]:
     """Repo to platform, read from `REPOS_FILE`.
     Lines use `repo` or `repo platform`.
+
+    A line that starts with `#` is a comment. Lupin ignores it, so it
+    must not turn up as a repo (issue #65).
     """
     result: dict[str, str] = {}
     try:
         with open(REPOS_FILE, encoding="utf-8") as fh:
             for line in fh:
                 parts = line.split()
-                if parts and "~" not in parts[0]:
+                if not parts or parts[0].startswith("#"):
+                    continue
+                if "~" not in parts[0]:
                     result[parts[0]] = parts[1] if len(parts) > 1 else "claude"
     except OSError:
         pass
@@ -991,6 +1051,8 @@ font-size:.85rem;margin:1.25rem 0}
 .quota-legend-item{display:flex;align-items:center;gap:.5rem}
 .quota-legend-used{width:28px;height:8px;border-radius:4px;background:var(--accent)}
 .quota-legend-time{width:2px;height:14px;background:var(--fg)}
+.quota-legend-unknown{width:2px;height:14px;background:none;
+border-left:2px dashed var(--fg)}
 .quota-legend-ahead{width:28px;height:8px;border-radius:4px;background:var(--warn)}
 .quota-groups{display:grid;gap:.8rem}
 .quota-group{padding:1.2rem 1.4rem .4rem}
@@ -1013,6 +1075,8 @@ background:var(--accent)}
 .quota-meter-used.ahead{background:var(--warn)}
 .quota-meter-elapsed{position:absolute;top:-4px;bottom:-4px;width:2px;
 border-radius:1px;background:var(--fg)}
+.quota-meter-elapsed-unknown{left:0;width:0;background:none;
+border-left:2px dashed var(--fg);opacity:.6}
 .quota-reset{text-align:right}
 .quota-reset-left{font:500 1rem ui-monospace,monospace}
 .quota-reset-at{font:400 .75rem ui-monospace,monospace;color:var(--dim);margin-top:.2rem}
@@ -1060,11 +1124,15 @@ function tick(){var now=Date.now()/1000;
    var d=parseFloat(e.dataset.until)-now;
    e.textContent=d>0?("in "+fmt(d)):("overdue by "+fmt(-d));});}
 setInterval(tick,1000);tick();
+// A page with an open editor sets this to true while it holds text that
+// is not saved. The auto-refresh then waits instead of reloading the page
+// (issue #70).
+window.lupinUnsavedChanges=window.lupinUnsavedChanges||function(){return false;};
 var box=document.getElementById("auto");
 if(box){box.checked=localStorage.getItem("lupin-auto")==="1";
  box.addEventListener("change",function(){
    localStorage.setItem("lupin-auto",box.checked?"1":"0");});
- setInterval(function(){if(box.checked)location.reload();},10000);}
+ setInterval(function(){if(box.checked&&!window.lupinUnsavedChanges())location.reload();},10000);}
 document.querySelectorAll("[data-once-repo]").forEach(function(row){
  var when=row.querySelector("input"),command=row.querySelector("code"),
      status=row.querySelector("[data-copy-status]");
@@ -1093,6 +1161,27 @@ var t=localStorage.getItem("lupin-theme");
 if(!t){t=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";}
 document.documentElement.setAttribute("data-theme",t);
 }catch(e){}})();</script>"""
+
+# The doc editor on the Repos page. The browser's own leave-page prompt
+# covers a reload or a link click. The auto-refresh box reloads the page
+# every 10 seconds, so the editor also tells the page that it holds text
+# the person has not saved (issue #70). A save is not a loss, so the form
+# marks the text as saved when it goes.
+DOC_EDITOR_JS = """
+(function(){
+var area=document.querySelector("textarea[name=text]");
+if(!area)return;
+var saved=area.value;
+function dirty(){return area.value!==saved;}
+window.lupinUnsavedChanges=dirty;
+window.addEventListener("beforeunload",function(event){
+ if(!dirty())return;
+ event.preventDefault();
+ event.returnValue="You have unsaved changes";
+ return "";});
+if(area.form){area.form.addEventListener("submit",function(){saved=area.value;});}
+})();
+"""
 
 # (nav key, path, label, icon path data) -- icon paths are the same ones the
 # design mockup uses for these pages, so the sidebar and page headers agree.
@@ -1399,18 +1488,37 @@ def time_until_reset(reset_at_ms, now_ms=None) -> str:
     return " ".join(parts)
 
 
-def time_remaining_pct(row: dict, now_ms=None) -> float | None:
+def quota_window_milliseconds(row: dict) -> int | None:
+    """The length of the row's window in ms, or None when it is unknown.
+
+    A row carries the named window (`duration`) and, when the source gave
+    one, the length of the window in ms (`duration_ms`). A window the page
+    cannot name can still have a known length, and the pace marker needs
+    it (issue #80).
+    """
     duration = row.get("duration", QuotaDuration.OTHER)
-    if not isinstance(duration, QuotaDuration):
+    if isinstance(duration, QuotaDuration):
+        milliseconds = duration.milliseconds
+    else:
         try:
-            duration = QuotaDuration(duration)
+            milliseconds = QuotaDuration(duration).milliseconds
         except (TypeError, ValueError):
-            return None
+            milliseconds = None
+    if milliseconds is not None:
+        return milliseconds
+    duration_ms = row.get("duration_ms")
+    if isinstance(duration_ms, (int, float)) and duration_ms > 0:
+        return int(duration_ms)
+    return None
+
+
+def time_remaining_pct(row: dict, now_ms=None) -> float | None:
+    milliseconds = quota_window_milliseconds(row)
     reset_at_ms = row.get("resets_at")
-    if duration.milliseconds is None or not isinstance(reset_at_ms, (int, float)):
+    if milliseconds is None or not isinstance(reset_at_ms, (int, float)):
         return None
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
-    return min(100, max(0, (reset_at_ms - now_ms) / duration.milliseconds * 100))
+    return min(100, max(0, (reset_at_ms - now_ms) / milliseconds * 100))
 
 
 def quota_duration_label(row: dict) -> str:
@@ -1440,6 +1548,20 @@ def quota_status(row: dict, now_ms=None) -> tuple[str, str]:
     if used < elapsed - 15:
         return "Under pace", "under"
     return "On pace", ""
+
+
+def quota_pace_note(row: dict) -> str:
+    """Why the pace marker cannot be placed, in plain words (issue #80).
+
+    Empty when the row shows a real pace marker.
+    """
+    if quota_progress_pct(row) is None:
+        return ""
+    if quota_window_milliseconds(row) is None:
+        return "pace not shown: unknown window length"
+    if not isinstance(row.get("resets_at"), (int, float)):
+        return "pace not shown: no reset time"
+    return ""
 
 
 def quota_row_name(row: dict) -> str:
@@ -1501,24 +1623,37 @@ def render_quota_row(row: dict, now_ms: int) -> str:
     available_text = "--" if used is None else f"{max(0, 100 - used):.0f}%"
     used_text = "--" if used is None else f"{used:.0f}%"
     used_width = "0%" if used is None else f"{used:.1f}%"
-    elapsed_marker = (
-        "" if elapsed is None
-        else f"<div class=quota-meter-elapsed style='left:{elapsed:.1f}%' "
-        "title='time elapsed in window'></div>"
-    )
+    pace_note = quota_pace_note(row)
+    if elapsed is not None:
+        elapsed_marker = (
+            f"<div class=quota-meter-elapsed style='left:{elapsed:.1f}%' "
+            "title='time elapsed in window'></div>"
+        )
+    elif used is not None:
+        # The row keeps its marker. A dashed marker says the elapsed time
+        # cannot be placed, because the window length is unknown
+        # (issue #80).
+        elapsed_marker = (
+            "<div class='quota-meter-elapsed quota-meter-elapsed-unknown' "
+            "title='time elapsed in window: window length unknown'></div>"
+        )
+    else:
+        elapsed_marker = ""
     account_html = f"<div class=dim>{esc(row['account'])}</div>" if row.get("account") else ""
+    note_html = f"<div class='dim'>{esc(pace_note)}</div>" if pace_note else ""
     aria_label = "quota usage unavailable"
     if used is not None and elapsed is not None:
         aria_label = f"{used:.0f}% used, {elapsed:.0f}% of window elapsed"
     elif used is not None:
-        aria_label = f"{used:.0f}% used"
+        aria_label = f"{used:.0f}% used, pace not shown" if pace_note else f"{used:.0f}% used"
     return (
         f"<div class=quota-row data-window-duration='{esc(duration_value)}' "
         f"data-resets-at-ms='{esc(reset_timestamp)}'>"
         "<div><div class=quota-window>"
         f"{esc(quota_duration_label(row))}</div>"
         f"{account_html}"
-        f"<div class='quota-status {status_class}'>{esc(status)}</div></div>"
+        f"<div class='quota-status {status_class}'>{esc(status)}</div>"
+        f"{note_html}</div>"
         "<div>"
         f"<div class=quota-values><span><strong>{available_text}</strong> available</span>"
         f"<span>{used_text} used</span></div>"
@@ -1530,6 +1665,75 @@ def render_quota_row(row: dict, now_ms: int) -> str:
         f"<div class=quota-reset-at>{esc(epoch_ms_to_local(reset_at_ms))}</div></div>"
         "</div>"
     )
+
+
+def render_quota_legend(rows: list[dict], now_ms: int) -> str:
+    """The legend. It only promises markers the rows show (issue #80).
+
+    A row whose window length is unknown keeps a dashed marker and says
+    so. The legend names that marker, so it never describes a solid
+    marker that no row has.
+    """
+    solid = any(quota_elapsed_pct(row, now_ms) is not None for row in rows)
+    dashed = any(
+        quota_progress_pct(row) is not None and quota_elapsed_pct(row, now_ms) is None
+        for row in rows
+    )
+    if solid:
+        time_item = (
+            "<span class=quota-legend-item><span class=quota-legend-time></span>"
+            "time elapsed in window</span>"
+        )
+    else:
+        time_item = ""
+    if dashed:
+        unknown_item = (
+            "<span class=quota-legend-item><span class=quota-legend-unknown></span>"
+            "window length unknown</span>"
+        )
+    else:
+        unknown_item = ""
+    return (
+        "<div class=quota-legend>"
+        "<span class=quota-legend-item><span class=quota-legend-used></span>used</span>"
+        f"{time_item}"
+        f"{unknown_item}"
+        "<span class=quota-legend-item><span class=quota-legend-ahead></span>"
+        "used faster than time</span></div>"
+    )
+
+
+# A file path in a cell of the Usage page (issue #51).
+_PATH_TOKEN_RE = re.compile(r"[^\s,;]+")
+
+# An exception name in a message of the Usage page (issue #51).
+_EXCEPTION_NAME_RE = re.compile(r"\(([A-Za-z_][A-Za-z0-9_]*)\)")
+
+
+def usage_source_text(source) -> str:
+    """The source cell of the totals table. Never a file path (issue #51).
+
+    The readers name their sources, so a new row has a plain name. A row
+    cached before that change can still hold a path, so the cell is
+    cleaned here too.
+    """
+
+    def clean(match):
+        token = match.group(0)
+        if "/" in token or token.endswith((".db", ".json", ".jsonl")):
+            return "local usage data"
+        return token
+
+    return _PATH_TOKEN_RE.sub(clean, str(source))
+
+
+def plain_message(message) -> str:
+    """A message of the Usage page without an exception name (issue #51).
+
+    A cached row can still hold the old text, which named the exception.
+    The name goes, the plain words stay.
+    """
+    return _EXCEPTION_NAME_RE.sub("", str(message)).strip()
 
 
 def render_usage(*, connection: dict | None = None) -> bytes:
@@ -1554,12 +1758,8 @@ def render_usage(*, connection: dict | None = None) -> bytes:
         "<div class=quota-heading><h2>Quota</h2>"
         f"<span class=dim>Data timestamp: {esc(fetched) if fetched else 'not available'}</span></div>",
         render_quota_summary(quota_rows, now_ms),
-        "<div class=quota-legend>"
-        "<span class=quota-legend-item><span class=quota-legend-used></span>used</span>"
-        "<span class=quota-legend-item><span class=quota-legend-time></span>"
-        "time elapsed in window</span>"
-        "<span class=quota-legend-item><span class=quota-legend-ahead></span>"
-        "used faster than time</span></div><div class=quota-groups>",
+        render_quota_legend(quota_rows, now_ms),
+        "<div class=quota-groups>",
     ]
     if not quota_rows:
         body.append(
@@ -1582,17 +1782,23 @@ def render_usage(*, connection: dict | None = None) -> bytes:
         )
         for row in rows:
             if "error" in row or "note" in row:
-                message = row.get("error", row.get("note"))
+                # A failed source shows a plain state. The detail stays in
+                # the log (issue #51).
+                if "error" in row:
+                    message = NOT_AVAILABLE
+                else:
+                    message = plain_message(row.get("note", ""))
                 body.append(f"<p class=dim>{esc(message)}</p>")
             else:
                 body.append(render_quota_row(row, now_ms))
         body.append("</section>")
     body.append(
         "</div><p class=dim>Bars show quota used; the marker shows time elapsed "
-        "in the window. The reset time appears at the right. OpenCode Go uses "
-        "omp or Orca's usage API; Claude uses Anthropic's OAuth usage API. "
-        "OpenAI uses omp or Codex's latest local snapshot, which only updates "
-        "when Codex writes a session event.</p>"
+        "in the window. A dashed marker means the window length is unknown, so "
+        "the elapsed time cannot be placed. The reset time appears at the right. "
+        "OpenCode Go uses omp or Orca's usage API; Claude uses Anthropic's OAuth "
+        "usage API. OpenAI uses omp or Codex's latest local snapshot, which only "
+        "updates when Codex writes a session event.</p>"
     )
     body.append("<h2>7-day totals</h2>")
     if usage_snapshots:
@@ -1620,8 +1826,8 @@ def render_usage(*, connection: dict | None = None) -> bytes:
         if "error" in row:
             body.append(
                 f"<tr><td>{esc(row['provider'])}</td><td colspan=3>"
-                f"{esc(row['error'])}</td><td>last 7 days</td>"
-                f"<td>{esc(row['source'])}</td><td>-</td></tr>"
+                f"{esc(NOT_AVAILABLE)}</td><td>last 7 days</td>"
+                f"<td>{esc(usage_source_text(row['source']))}</td><td>-</td></tr>"
             )
             continue
         input_tokens = "-" if row["input_tokens"] is None else esc(row["input_tokens"])
@@ -1632,7 +1838,8 @@ def render_usage(*, connection: dict | None = None) -> bytes:
             f"<td>{input_tokens}</td>"
             f"<td>{output_tokens}</td>"
             f"<td>{cost}</td><td>{esc(row['period'])}</td>"
-            f"<td>{esc(row['source'])}</td><td>{esc(row['last_update'])}</td></tr>"
+            f"<td>{esc(usage_source_text(row['source']))}</td>"
+            f"<td>{esc(row['last_update'])}</td></tr>"
         )
     body.append("</table></div>")
     return page(
@@ -1666,7 +1873,7 @@ def model_tiers() -> list[dict]:
     return rows
 
 
-_ALIAS_PREFIX = re.compile(r"^(?:bmo|local):|^(?:opencode-go|openai)/")
+_ALIAS_PREFIX = re.compile(r"^(?:bmo|local):|^(?:opencode-go|openai-codex|openai)/")
 
 
 def load_model_snapshot(connection: dict | None = None) -> dict | None:
@@ -1715,10 +1922,10 @@ def match_live_model(alias: str, models: list[dict]) -> dict | None:
       two are never found -- `model_fetch` only covers the claude,
       opencode-go, and codex subscriptions, not bmo's or a local model
       server's own catalog. Those aliases always report "no live data".
-    - An "opencode-go/" or "openai/" prefix is stripped too, because the
-      snapshot's own `subscription` field already says which service a
-      model id belongs to -- the tier file repeats it in the alias, and
-      the badge would otherwise never match.
+    - An "opencode-go/", "openai-codex/" or "openai/" prefix is stripped
+      too, because the snapshot's own `subscription` field already says
+      which service a model id belongs to -- the tier file repeats it in
+      the alias, and the badge would otherwise never match.
     - What remains is looked up as a case-insensitive substring of a
       snapshot model's id or display name, first match wins. Good enough
       to flag "known reachable today" without pretending to be a precise
@@ -2484,7 +2691,7 @@ def render_repos(
             "(loop status and concurrency caps below are limited to this machine).</p>"
         )
 
-    return page("Repos", "".join(body), active="repos")
+    return page("Repos", "".join(body), active="repos", extra_js=DOC_EDITOR_JS)
 
 
 TIMER_WINDOW_S = 4 * 3600  # the mockup's 4-hour timeline strip
@@ -2614,7 +2821,7 @@ def render_schedule(data: dict, *, sent: str | None = None) -> bytes:
     body.append(
         '<div class=card><div class=row style="margin-bottom:.4rem">'
         "<b>Run now</b><span class=dim>Starts loops on free machines. "
-        "The note is kept with the request but is not passed into the loop.</span></div>"
+        "The note is passed to each loop as extra instructions.</span></div>"
         f"{error_note}"
         "<form method=post action=/schedule/run class=row>"
         f"<select name=repo><option value=all>all enabled repos</option>{repo_options}</select>"
@@ -2642,7 +2849,13 @@ def _loops_url(repo: str, group: str, lines: int) -> str:
 
 
 def render_loops(
-    data: dict, *, group: str, selected_repo: str, selected_tail: str | None, lines: int
+    data: dict,
+    *,
+    group: str,
+    selected_repo: str,
+    selected_tail: str | None,
+    lines: int,
+    sent: str | None = None,
 ) -> bytes:
     """The Loops page (issue #21): a sidebar grouped by repo or by machine,
     and a tail pane for whichever loop is selected.
@@ -2651,6 +2864,9 @@ def render_loops(
     separately by the caller (same split `gather()`/`render_dashboard()`
     already use: this function renders a already-read state, it doesn't go
     read anything itself).
+
+    `sent` is the message a POST handler left for the user. It shows up
+    as a pill, like on the other pages.
     """
     entries = data["entries"]
     local_host = data["local_host"]
@@ -2794,9 +3010,13 @@ def render_loops(
     error_note = (
         f"<p class=dim>Fleet registry unreachable: {esc(fleet_error)}</p>" if fleet_error else ""
     )
+    sent_note = (
+        f"<div class=card><span class='pill on'>{esc(sent)}</span></div>" if sent else ""
+    )
     body = (
         f'<header><h1>{icon("M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3")}Loops</h1></header>'
         f"{error_note}"
+        f"{sent_note}"
         "<div class=loops-shell>"
         f"<div class='card loops-side'>{''.join(side)}</div>"
         f"<div class=loops-main>{''.join(main)}</div>"
@@ -2887,6 +3107,50 @@ def render_debrief_index(items: list[dict]) -> bytes:
         debrief.CSS,
         active="debriefs",
     )
+
+
+DEBRIEF_TZ_JS = """
+// Show the debrief window in the reader's own time zone.
+function lupinLocalTime(when,zone){
+ var parts=new Intl.DateTimeFormat("en-CA",{timeZone:zone,year:"numeric",month:"2-digit",
+  day:"2-digit",hour:"2-digit",minute:"2-digit",hour12:false,timeZoneName:"short"}).formatToParts(when);
+ var part={};
+ parts.forEach(function(p){part[p.type]=p.value;});
+ return part.year+"-"+part.month+"-"+part.day+" "+part.hour+":"+part.minute+" "+part.timeZoneName;}
+document.querySelectorAll("[data-lupin-utc]").forEach(function(el){
+ var iso=el.getAttribute("data-lupin-utc");
+ var when=new Date(iso);
+ if(!when||isNaN(when.getTime()))return;
+ var zone=null;
+ try{zone=Intl.DateTimeFormat().resolvedOptions().timeZone;}catch(e){zone=null;}
+ if(!zone)return;
+ var local=null;
+ try{local=lupinLocalTime(when,zone);}catch(e){local=null;}
+ if(!local)return;
+ el.textContent=local+" ("+el.getAttribute("data-lupin-utc-label")+")";});
+"""
+
+_WINDOW_TIME_HTML = re.compile(
+    r"<li>(From|To): (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)(?: \([^<]*\))?</li>"
+)
+
+
+def render_window_times(html: str) -> str:
+    """Mark the window times so the page can show them in the reader's time zone.
+
+    The file keeps the UTC instant. The page shows the reader's local time and
+    keeps the UTC time next to it. Without a time zone from the browser the
+    page shows the UTC time and says so.
+    """
+    def replace(match: re.Match) -> str:
+        key, iso = match.group(1), match.group(2)
+        label = f"{iso[:10]} {iso[11:16]} UTC"
+        return (
+            f"<li>{key}: <span data-lupin-utc='{iso}' data-lupin-utc-label='{label}'>"
+            f"{label}</span></li>"
+        )
+
+    return _WINDOW_TIME_HTML.sub(replace, html)
 
 
 def _debrief_stamp(name: str) -> str:
@@ -3118,7 +3382,7 @@ class Handler(BaseHTTPRequestHandler):
                     "Roadmap",
                     shell,
                     roadmap.BOARD_CSS + roadmap.LIST_CSS,
-                    _roadmap_loader_script(),
+                    roadmap._warning_dismiss_script() + _roadmap_loader_script(),
                 )
             )
         elif url.path == "/roadmap/board":
@@ -3246,8 +3510,9 @@ class Handler(BaseHTTPRequestHandler):
                 "<header><h1>Debrief</h1><span class=sp></span>"
                 "<a href='/debrief'>all debriefs</a></header>"
                 f"<div class=card>{remote_note}{summary}"
-                f"<div class=debrief>{debrief.render_html(markdown, repo)}</div></div>",
+                f"<div class=debrief>{render_window_times(debrief.render_html(markdown, repo))}</div></div>",
                 debrief.CSS,
+                extra_js=DEBRIEF_TZ_JS,
                 active="debriefs",
             )
         )
@@ -3395,9 +3660,10 @@ class Handler(BaseHTTPRequestHandler):
         if not self._repo_exists(repo):
             self.reply(render_error("unknown repository"), 400)
             return
-        enabled = enabled_repos()
+        enabled = _repo_platforms()
         if repo not in enabled:
-            write_enabled_repos(sorted(set(enabled) | {repo}))
+            enabled[repo] = "claude"
+            write_enabled_repos(enabled)
         self.redirect(f"/repos?sent={quote(f'{repo} added to the schedule', safe='')}")
 
     def do_repos_generate_docs(self, form: dict) -> None:
@@ -3416,7 +3682,9 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             self.reply(render_error(f"could not write doc: {exc}"), 500)
             return
-        write_enabled_repos(sorted(set(enabled_repos()) | {repo}))
+        enabled = _repo_platforms()
+        enabled.setdefault(repo, "claude")
+        write_enabled_repos(enabled)
         self.redirect(f"/repos?sent={quote(f'generated docs and added {repo}', safe='')}")
 
     def do_repos_remove(self, form: dict) -> None:
@@ -3445,9 +3713,12 @@ class Handler(BaseHTTPRequestHandler):
         if len(text) > 200_000:
             self.reply(render_error("doc is too long"), 400)
             return
+        doc_path = os.path.join(CODE_DIR, repo, LOOP_DOC)
         try:
-            with open(os.path.join(CODE_DIR, repo, LOOP_DOC), "w", encoding="utf-8") as fh:
-                fh.write(text)
+            with open(doc_path, "rb") as fh:
+                ending = _doc_line_ending(fh.read())
+            with open(doc_path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(_with_line_ending(text, ending))
         except OSError as exc:
             self.reply(render_error(f"could not save doc: {exc}"), 500)
             return
@@ -3566,7 +3837,16 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_loop_fullscreen(selected, tail, lines, group))
             return
 
-        self.reply(render_loops(data, group=group, selected_repo=selected_repo, selected_tail=tail, lines=lines))
+        self.reply(
+            render_loops(
+                data,
+                group=group,
+                selected_repo=selected_repo,
+                selected_tail=tail,
+                lines=lines,
+                sent=query.get("sent"),
+            )
+        )
 
     def _loop_targets(self, machine: str, scope: str, repo: str) -> list[str]:
         """Return active Herdr loops on a machine for an all-stop request."""
@@ -3679,9 +3959,15 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("cannot reach the redis coordinator"), 502)
             return
         if result["mode"] == "local" and result["returncode"] != 0:
-            self.reply(render_error(f"run failed: {result['output'].strip()}"), 502)
+            self.reply(
+                render_error(f"run failed: {result['output'].strip()} (machine {machine})"), 502
+            )
             return
-        self.redirect(f"/loops?repo={quote(loop_runtime.loop_repo(repo), safe='')}")
+        name = loop_runtime.loop_repo(repo)
+        # The same wording the "Run now" card uses: the repo and the
+        # machine that owns the run.
+        sent = f"Started loop {name} on {machine}"
+        self.redirect(f"/loops?repo={quote(name, safe='')}&sent={quote(sent, safe='')}")
 
     def do_schedule_timer(self, form: dict) -> None:
         """Start or stop `delegation-loop.timer` -- always on this machine.
@@ -3743,6 +4029,10 @@ class Handler(BaseHTTPRequestHandler):
         if len(note) > 500:
             self.reply(render_error("note is too long"), 400)
             return
+        if "\x00" in note:
+            self.reply(render_error("note has a NUL byte"), 400)
+            return
+
 
         local_host = machines.hostname()
         try:
@@ -3778,6 +4068,12 @@ class Handler(BaseHTTPRequestHandler):
         for repo, machine in zip(targets_repos, assigned):
             local_argv = ["lupin", "run", repo]
             queue_params = {"repo": repo}
+            if note:
+                # The note rides along as extra instructions for the run.
+                # "--note=..." keeps a note that starts with "-" out of
+                # argparse's way: it would read "-x" as an option.
+                local_argv.append(f"--note={note}")
+                queue_params["note"] = note
             try:
                 result = loops.dispatch_loop_action(
                     machine=machine, local_host=local_host,

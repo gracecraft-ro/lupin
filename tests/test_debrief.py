@@ -139,6 +139,23 @@ def _section(markdown: str, heading: str) -> str:
     return after.split("\n## ", 1)[0]
 
 
+def test_window_shows_utc_and_los_angeles_time():
+    window = _section(_markdown(), "Window")
+
+    assert "- From: 2026-10-02T09:00:00Z (2026-10-02 02:00 PDT)" in window
+    assert "- To: 2026-10-02T17:00:00Z (2026-10-02 10:00 PDT)" in window
+
+
+def test_window_shows_pst_in_january():
+    start = datetime(2026, 1, 15, 0, 0, tzinfo=timezone.utc)
+    with mock.patch.object(debrief, "_gh", FakeGh(dict(RESPONSES))):
+        text = debrief.build_markdown(
+            FULL, start, start + timedelta(hours=6), events=[], claimed=set(), period="6h"
+        )
+
+    assert "(2026-01-14 16:00 PST)" in text
+
+
 def test_shipped_lists_only_items_in_the_window():
     fake = FakeGh(dict(RESPONSES))
     with mock.patch.object(debrief, "_gh", fake):
@@ -674,7 +691,10 @@ def _stop_env(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: dict(metadata))
     monkeypatch.setattr(loop_runtime, "_start_server_for_read", lambda repo, data: data["session"])
     monkeypatch.setattr(loop_runtime, "_find_workspace", lambda session, data: {"id": "workspace-1"})
-    monkeypatch.setattr(loop_runtime, "_save_report", lambda repo, session, workspace: tmp_path / "report.log")
+    monkeypatch.setattr(
+        loop_runtime, "_save_report",
+        lambda repo, session, workspace, run_id=None: tmp_path / "report.log",
+    )
     monkeypatch.setattr(loop_runtime, "_workspace_id", lambda workspace: workspace["id"])
     monkeypatch.setattr(loop_runtime, "_agent_for_workspace", lambda session, workspace_id: None)
     monkeypatch.setattr(loop_runtime, "_herdr_json", lambda session, *args: actions.append(args) or {})
