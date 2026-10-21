@@ -26,8 +26,8 @@ class _FakePipeline:
         self._queued.append(("GET", key))
         return self
 
-    def pttl(self, key):
-        self._queued.append(("PTTL", key))
+    def ttl(self, key):
+        self._queued.append(("TTL", key))
         return self
 
     def execute(self, **kwargs):
@@ -36,7 +36,7 @@ class _FakePipeline:
         results = []
         for name, key in self._queued:
             self._client.commands.append(name)
-            results.append(self._client.values[key] if name == "GET" else 90_000)
+            results.append(self._client.values[key] if name == "GET" else 90)
         if self._transaction:
             self._client.commands.append("EXEC")
         return results
@@ -79,7 +79,7 @@ def test_claims_for_reads_the_ttl_in_one_round_trip_when_asked(monkeypatch):
 
     result = claims.claims_for(["gracecraft/lupin"], with_ttl=True)
 
-    assert fake.commands == ["SCAN", "GET", "PTTL"]
+    assert fake.commands == ["SCAN", "GET", "TTL"]
     assert result["gracecraft/lupin#6"]["ttl"] == 90.0
 
 
@@ -87,6 +87,25 @@ def test_claims_for_works_when_the_acl_denies_multi(auth_redis_port, no_multi_kw
     admin = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, "redis_password": "test-pass"}
     claims.claim("gracecraft/lupin#6", "holder-a", **admin)
     connection = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, **no_multi_kw}
+
+    result = claims.claims_for(["gracecraft/lupin"], with_ttl=True, **connection)
+
+    assert result["gracecraft/lupin#6"]["session"] == "holder-a"
+    assert result["gracecraft/lupin#6"]["ttl"] > 0
+
+
+def test_claims_for_works_when_the_acl_denies_pttl(auth_redis_port, no_pttl_kw):
+    admin = {
+        "redis_host": "127.0.0.1",
+        "redis_port": auth_redis_port,
+        "redis_password": "test-pass",
+    }
+    claims.claim("gracecraft/lupin#6", "holder-a", **admin)
+    connection = {
+        "redis_host": "127.0.0.1",
+        "redis_port": auth_redis_port,
+        **no_pttl_kw,
+    }
 
     result = claims.claims_for(["gracecraft/lupin"], with_ttl=True, **connection)
 
