@@ -35,7 +35,8 @@ For each loop on this machine:
 
 A `stopped` verdict does not block a nudge. An idle loop with an inactive unit, or one that asks to continue, is `stopped` and still gets the nudge.
 
-A `blocked` or `needs_attention` pane gets no text. Its verdict is `stopped` with the reason "waiting for the owner".
+A `blocked` or `needs_attention` pane gets no text. Its verdict is `stopped`
+with the reason "blocked, research needed".
 
 ## Decide: owner decision or not
 
@@ -61,7 +62,11 @@ If you are not sure, the orchestrator researches first. Its research result show
 
 2. If the pane shows `Awaiting owner input`, read the question. Apply "Decide".
 3. Owner decision: record `owner-decision`. Put one short question, with its options, in the handoff.
-4. Not an owner decision: Herdr rejects a prompt to a blocked pane with `agent_blocked`, so nothing is sent. Record the question, PANE_ID, and time. Retry on the next pass. Issue #271 covers this gap.
+4. Not an owner decision: Herdr rejects a prompt to a blocked pane with
+   `agent_blocked`, so nothing is sent. The report says `blocked, research needed`.
+   Follow `NUDGE_TEXT`: research first, retry once, and use the repo fallback.
+   If no competent model is affordable, record the task as deferred with the
+   reason. Then take the next item.
 
 ## Sending the rule by hand
 

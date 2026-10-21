@@ -73,6 +73,9 @@ def test_idle_loop_with_work_is_nudged_and_one_event_is_written(tmp_path):
     assert "until nothing is left" in supervise.NUDGE_TEXT
     assert "no research, docs, or marketing item is left" in supervise.NUDGE_TEXT
     assert "delegate a research worker" in supervise.NUDGE_TEXT
+    assert "retry once" in supervise.NUDGE_TEXT
+    assert "fallback" in supervise.NUDGE_TEXT
+    assert "deferred with the reason" in supervise.NUDGE_TEXT
     assert "Loop:" in supervise.NUDGE_TEXT
     assert report["loops"][0]["verdict"] == "idle"
     assert report["loops"][0]["nudge"] == "sent"
@@ -232,15 +235,20 @@ def test_lupin_needs_attention_wins_over_a_working_pane(monkeypatch):
 
 
 @pytest.mark.parametrize("state", ["blocked", "needs_attention"])
-def test_loop_waiting_for_the_owner_is_flagged_and_never_nudged(tmp_path, state):
+def test_blocked_loop_is_flagged_and_never_nudged(tmp_path, state):
     fakes = Fakes(tmp_path, [_loop(state=state)])
 
     report = supervise.run_pass(**fakes.kwargs())
 
     row = report["loops"][0]
-    assert (row["verdict"], row["nudge"], row["reason"]) == ("stopped", "none", "waiting for the owner")
+    assert (
+        row["verdict"],
+        row["nudge"],
+        row["reason"],
+    ) == ("stopped", "none", "blocked, research needed")
     assert fakes.nudges == []
     assert fakes.ledger[0][1]["status"] == "flagged"
+    assert "reason=blocked, research needed" in fakes.ledger[0][1]["highlights"][0]
 
 
 # (2) Busywork is flagged, and no nudge is sent.
@@ -531,8 +539,9 @@ NUDGE_TEXT = (
     "Wait for the owner only for a decision that needs the owner: credentials, money, "
     "hardware, a product choice, or an action that the repo rules reserve for a person. "
     "Write each such question as an issue comment that starts with 'Loop:', and name "
-    "the options. For any other block, retry a transient error 3 times, 5 minutes "
-    "apart, then use the fallback that the repo docs name, then take the next item. "
+    "the options. For any other block, retry once, then use the fallback that "
+    "the repo docs name. If no competent model is affordable, record the task "
+    "as deferred with the reason. Then take the next item. "
     "Keep working while you wait. Delegate tickets and fixes; do not write them "
     "yourself. Do not ask if you must continue. "
     "When you are blocked, reply in the pane with one line: the block, the research "

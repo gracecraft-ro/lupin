@@ -39,8 +39,9 @@ NUDGE_TEXT = (
     "Wait for the owner only for a decision that needs the owner: credentials, money, "
     "hardware, a product choice, or an action that the repo rules reserve for a person. "
     "Write each such question as an issue comment that starts with 'Loop:', and name "
-    "the options. For any other block, retry a transient error 3 times, 5 minutes "
-    "apart, then use the fallback that the repo docs name, then take the next item. "
+    "the options. For any other block, retry once, then use the fallback that "
+    "the repo docs name. If no competent model is affordable, record the task "
+    "as deferred with the reason. Then take the next item. "
     "Keep working while you wait. Delegate tickets and fixes; do not write them "
     "yourself. Do not ask if you must continue. "
     "When you are blocked, reply in the pane with one line: the block, the research "
@@ -55,7 +56,7 @@ REPEAT_COUNT = 3
 NUDGE_INTERVAL_S = 3600
 # `--every` cannot be shorter than this.
 MIN_EVERY_S = 600
-# Herdr states where the agent waits for the owner. The supervisor never answers for the owner.
+# Herdr rejects prompts for these states; the report says research is needed.
 WAITING_STATES = {"blocked", "needs_attention"}
 _LIVE = {"running", "starting", "needs_attention"}
 STATE_FILE = Path(
@@ -254,7 +255,7 @@ def run_pass(
             "unit": loop.get("unit", "unknown"), "verdict": result, "nudge": nudge,
         }
         if result == "stopped" and state in WAITING_STATES:
-            row["reason"] = "waiting for the owner"
+            row["reason"] = "blocked, research needed"
         rows.append(row)
 
     if not dry_run:

@@ -34,6 +34,17 @@ The `delegation-loop` skill gives the full steps. The short list:
 `lupin roadmap --repo` reads the checkout in `LUPIN_LOOP_CODE_DIR` (default
 `/code`). Give the folder name of the checkout.
 
+## Blocked work
+
+1. If a task looks blocked, first delegate a research worker to find the best
+   way forward. Act on its result.
+2. Wait for the owner only for a decision that belongs to them, such as
+   credentials, money, hardware, or a product choice, or for an action the repo
+   rules reserve for a person.
+3. For any other block, retry once, then use the fallback named in the repo
+   docs. If no competent model is affordable, record the task as deferred with
+   the reason. Then take the next item.
+
 ## Rule 1: push the branch, open the PR upstream
 
 The PR goes to upstream `OWNER/REPO`, against `main`. A worker pushes its
