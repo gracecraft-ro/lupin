@@ -532,9 +532,12 @@ def _reset_credits(report: dict) -> dict:
     credits = report.get("resetCredits")
     if not isinstance(credits, dict) or not isinstance(credits.get("availableCount"), int):
         return {}
+    credit_rows = credits.get("credits")
+    if not isinstance(credit_rows, list):
+        credit_rows = []
     expires = [
         quota_reset_timestamp(credit.get("expiresAt"))
-        for credit in credits.get("credits") or []
+        for credit in credit_rows
         if isinstance(credit, dict) and credit.get("status") == "available"
     ]
     return {"reset_credits": {

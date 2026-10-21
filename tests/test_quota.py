@@ -301,6 +301,23 @@ class QuotaUsageTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertNotIn("account", rows[0])
 
+    def test_non_list_reset_credits_keeps_available_count(self):
+        report = {
+            "provider": "openai-codex",
+            "resetCredits": {"availableCount": 42, "credits": 42},
+            "limits": [{
+                "label": "5 hours",
+                "window": {"durationMs": 18_000_000, "resetsAt": 1_790_547_474_348},
+                "amount": {"usedFraction": 0.4},
+            }],
+        }
+
+        rows = self._omp_rows(report)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["reset_credits"], {"available": 42, "expires_at": []})
+
+
     def test_two_logins_on_one_plan_get_different_labels(self):
         reports = (
             self._codex_report("plus", "id-one", [("5 hours", 18_000_000, 0.1)]),
