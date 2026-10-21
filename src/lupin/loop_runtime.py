@@ -20,7 +20,7 @@ from typing import Any
 
 import redis
 
-from . import claims, slots, slots_redis
+from . import claims, run_log, slots, slots_redis
 
 # A loop id is a repo name. `repo~2` is a second loop on the same repo on this
 # machine, `repo~3` a third, and so on. There is no `repo~1`: that is `repo`.
@@ -123,12 +123,12 @@ def _write_orchestrator_profiles(profiles: dict[str, list[str]]) -> None:
 
 def select_orchestrator(
     candidates: list[str], snapshot: dict, *, now: float | None = None
-) -> dict[str, str | None]:
+) -> dict[str, str | float | None]:
     from . import pace, quota_cache
 
     now = time.time() if now is None else now
     now_ms = now * 1000
-    choices: list[tuple[float, int, dict[str, str | None]]] = []
+    choices: list[tuple[float, int, dict[str, str | float | None]]] = []
     for index, raw in enumerate(candidates):
         selector = validate_orchestrator(raw)
         if selector == "claude":
@@ -154,6 +154,7 @@ def select_orchestrator(
             "platform": platform,
             "provider": ("openai-codex" if provider == "openai" else provider) if platform == "omp" else None,
             "model": model,
+            "quota_headroom": headroom,
         }))
     if not choices:
         raise LoopError("no configured orchestrator has fresh, usable quota")
@@ -434,6 +435,31 @@ def _write_metadata(repo: str, value: dict) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def _log_event(repo: str, metadata: dict | None, event: str, **fields: object) -> None:
+    run_id = metadata.get("run_id") if isinstance(metadata, dict) else None
+    if isinstance(run_id, str):
+        run_log.append_event(STATE_DIR, repo, run_id, event, **fields)
+
+
+def _log_current_event(repo: str, event: str, **fields: object) -> None:
+    try:
+        metadata = _read_metadata(repo)
+    except Exception:
+        return
+    _log_event(repo, metadata, event, **fields)
+
+
+def _set_loop_state(repo: str, metadata: dict, state: str, **fields: object) -> None:
+    previous = metadata.get("state")
+    metadata["state"] = state
+    _write_metadata(repo, metadata)
+    if previous != state:
+        _log_event(
+            repo, metadata, "state_transition",
+            from_state=previous, to_state=state, **fields,
+        )
 
 
 def _default_repos() -> list[tuple[str, str]]:
@@ -795,9 +821,9 @@ def _create_worktree(repo: str, checkout: Path) -> tuple[Path, str]:
     """
     _git(checkout, "fetch", "origin")
     base = _default_base(checkout)
-    run_id = f"{_stamp()}-{time.time_ns() % 1000000:06d}"
-    branch = f"lupin-loop/{run_id}"
-    path = STATE_DIR / "worktrees" / repo / run_id
+    worktree_id = f"{_stamp()}-{time.time_ns() % 1000000:06d}"
+    branch = f"lupin-loop/{worktree_id}"
+    path = STATE_DIR / "worktrees" / repo / worktree_id
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
     _git(checkout, "worktree", "add", "--no-track", "-b", branch, str(path), base)
     return path, branch
@@ -897,6 +923,7 @@ def _finish_failed_start(repo: str, value: dict, resume: bool) -> str:
     Otherwise remove the worktree and its branch. When git keeps the worktree,
     the note names its path. Metadata is written even if removal raises.
     """
+    previous_state = value.get("state")
     value["state"] = "failed"
     removed_note = ""
     try:
@@ -907,6 +934,11 @@ def _finish_failed_start(repo: str, value: dict, resume: bool) -> str:
                 removed_note = f"; {exc}"
     finally:
         _write_metadata(repo, value)
+        if previous_state != "failed":
+            _log_event(
+                repo, value, "state_transition",
+                from_state=previous_state, to_state="failed",
+            )
         if value["prompt_file"]:
             Path(value["prompt_file"]).unlink(missing_ok=True)
     return removed_note
@@ -960,17 +992,25 @@ def start_loop(
         legacy = _session_info(legacy_session_name(repo))
         if legacy and legacy.get("running"):
             return False, f"skip {repo}: an old Herdr session is still running; use lupin stop first"
+        routing_decision = "configured_platform"
+        quota_headroom = None
         if platform is None and provider is None and model is None:
             candidates = orchestrator_profiles().get(source)
             if candidates:
                 from . import quota_cache
 
                 choice = select_orchestrator(candidates, quota_cache.read_snapshot(**_redis_kwargs()))
+                routing_decision = "profile"
+                quota_headroom = choice.get("quota_headroom")
                 selected = choice["platform"]
                 provider = choice["provider"]
                 model = choice["model"]
+        else:
+            routing_decision = "explicit"
         provider, model = validate_omp_options(selected, provider, model)
         _refuse_unfinished_git_work(checkout)
+        run_id = run_log.new_run_id()
+        previous_state = metadata.get("state") if metadata else None
         if resume:
             worktree, branch = _resumed_worktree(repo, metadata)
             previous_note = ""
@@ -978,6 +1018,7 @@ def start_loop(
             previous_note = _clear_previous_worktree(repo, metadata)
             worktree, branch = _create_worktree(repo, checkout)
         value = {
+            "run_id": run_id,
             "version": 1,
             "repo": repo,
             "platform": selected,
@@ -996,7 +1037,22 @@ def start_loop(
         try:
             prompt_file = _write_prompt(repo, note, resume)
             value["prompt_file"] = prompt_file
+            _log_event(
+                repo, value, "run_start",
+                platform=selected, provider=provider, model=model, resume=bool(resume),
+            )
+            _log_event(
+                repo, value, "routing_decision",
+                decision=routing_decision, platform=selected, provider=provider, model=model,
+                quota_headroom=quota_headroom,
+            )
+            run_log.prune_runs(STATE_DIR, repo)
             _write_metadata(repo, value)
+            if previous_state != "starting":
+                _log_event(
+                    repo, value, "state_transition",
+                    from_state=previous_state, to_state="starting",
+                )
             worker = _lupin_command(
                 "worker", "--repo", repo, "--platform", selected, "--session", session,
                 "--prompt-file", prompt_file,
@@ -1013,11 +1069,19 @@ def start_loop(
                 claude_limits=selected == "claude",
             )
         except BaseException as exc:
+            _log_event(
+                repo, value, "error",
+                error_type=type(exc).__name__, message=str(exc),
+            )
             removed_note = _finish_failed_start(repo, value, resume)
             if not isinstance(exc, Exception):
                 raise
             return False, (str(exc) or f"could not start loop service for {repo}") + removed_note
         if rc:
+            _log_event(
+                repo, value, "error",
+                error_type="WorkerStartError", message=output or f"could not start loop service for {repo}",
+            )
             removed_note = _finish_failed_start(repo, value, resume)
             return False, (output or f"could not start loop service for {repo}") + removed_note
         return True, (
@@ -1166,9 +1230,8 @@ def _record_workspace(repo: str, metadata: dict, workspace: dict) -> dict:
     value = dict(metadata)
     value["workspace_id"] = _workspace_id(workspace)
     value["pane_id"] = _pane_id(workspace)
-    value["state"] = "running"
     value.setdefault("started_at", _now())
-    _write_metadata(repo, value)
+    _set_loop_state(repo, value, "running")
     return value
 
 
@@ -1246,10 +1309,11 @@ def _agent_command(
 ) -> list[str]:
     args = [
         "launch-agent" if launch else "wait-agent",
-        "--repo", repo, "--session", session, "--workspace", workspace_id,
+        "--repo", repo, "--platform", platform, "--session", session,
+        "--workspace", workspace_id,
     ]
     if launch:
-        args.extend(["--platform", platform, "--prompt-file", prompt_file])
+        args.extend(["--prompt-file", prompt_file])
         if provider:
             args.extend(["--provider", provider])
         if model:
@@ -1269,7 +1333,7 @@ def _run_worktree(repo: str, metadata: dict) -> Path:
     return Path(value)
 
 
-def _renew_claims(holder: str, stop: threading.Event) -> None:
+def _renew_claims(repo: str, holder: str, stop: threading.Event) -> None:
     """Renew the claims of `holder` each CLAIM_RENEW_INTERVAL until `stop` is set.
 
     An error does not stop the loop. The monitor log gets one line for each
@@ -1290,6 +1354,7 @@ def _renew_claims(holder: str, stop: threading.Event) -> None:
             reported = None
             continue
         if line != reported:
+            _log_current_event(repo, "claim_renew_error", message=line)
             print(f"lupin: {line}", file=sys.stderr, flush=True)
             reported = line
 
@@ -1297,12 +1362,17 @@ def _renew_claims(holder: str, stop: threading.Event) -> None:
 def _monitor_loop(
     repo: str, platform: str, session: str, prompt_file: str, resume: bool
 ) -> int:
+    server_was_running = _server_running(session)
+    if not server_was_running:
+        _log_current_event(repo, "herdr_server_start_requested", session=session)
     _ensure_server(repo, session, platform)
+    _log_current_event(
+        repo, "herdr_server_ready", session=session, started=not server_was_running,
+    )
     metadata = _metadata_for_session(repo, session)
     workspace = _find_workspace(session, metadata)
     if workspace is None and metadata.get("state") in {"running", "needs_attention"}:
-        metadata["state"] = "needs_attention"
-        _write_metadata(repo, metadata)
+        _set_loop_state(repo, metadata, "needs_attention", reason="workspace_missing")
         raise LoopError(f"saved Herdr workspace for {repo} is missing; review it before starting again")
     launch = workspace is None
     holder = claim_holder(repo, metadata)
@@ -1314,8 +1384,7 @@ def _monitor_loop(
         if not workspace_id:
             raise HerdrError("saved Herdr workspace has no ID")
         if _agent_state(session, workspace) != "done" and _agent_for_workspace(session, workspace_id) is None:
-            metadata["state"] = "needs_attention"
-            _write_metadata(repo, metadata)
+            _set_loop_state(repo, metadata, "needs_attention", reason="agent_missing")
             raise LoopError(f"saved Herdr workspace for {repo} has no reported agent; stop it before starting again")
     workspace_id = _workspace_id(workspace)
     if not workspace_id:
@@ -1333,19 +1402,34 @@ def _monitor_loop(
     # stops (issue #156). `hold` returns when the agent is `done`, but the
     # agent is still alive then and waits for input.
     stop_renewing = threading.Event()
-    renewer = threading.Thread(target=_renew_claims, args=(holder, stop_renewing), daemon=True)
+    renewer = threading.Thread(
+        target=_renew_claims, args=(repo, holder, stop_renewing), daemon=True
+    )
     if holder:
         renewer.start()
     try:
         try:
+            _log_event(
+                repo, metadata, "slot_wait", slot=platform, scope="agent",
+                wait_seconds=wait_s,
+            )
             rc = slots.hold(
                 command, slot=platform, holder=unit_name(repo), wait=wait_s,
                 ttl=LEASE_TTL, max_holders=max_holders,
             )
+            metadata["agent_exit_code"] = rc
+            _write_metadata(repo, metadata)
+            _log_event(
+                repo, metadata, "slot_released", slot=platform, scope="agent",
+                exit_code=rc,
+            )
         except slots.SlotFull:
+            _log_event(
+                repo, metadata, "slot_wait_failed", slot=platform, scope="agent",
+                reason="full",
+            )
             if launch:
                 _herdr_json(session, "workspace", "close", workspace_id)
-                metadata["state"] = "failed"
                 metadata["workspace_id"] = None
                 metadata["pane_id"] = None
                 removed_note = ""
@@ -1353,22 +1437,40 @@ def _monitor_loop(
                     _, removed_note = _remove_worktree(repo, metadata)
                 except LoopError as exc:
                     removed_note = f"; {exc}"
-                _write_metadata(repo, metadata)
+                _set_loop_state(repo, metadata, "failed", reason="slot_full")
                 raise LoopError(f"{platform} slot is full{removed_note}")
             raise LoopError(f"{platform} slot is full")
         if rc:
-            metadata["state"] = "needs_attention"
-            _write_metadata(repo, metadata)
+            if not _server_running(session):
+                reason = "Herdr server stopped while the agent was running"
+                _log_event(
+                    repo, metadata, "herdr_server_stopped",
+                    reason=reason, agent_exit_code=rc,
+                )
+                _set_loop_state(
+                    repo, metadata, "needs_attention",
+                    reason=reason, exit_code=rc,
+                )
+            else:
+                _log_event(repo, metadata, "agent_exit", exit_code=rc)
+                _set_loop_state(
+                    repo, metadata, "needs_attention", reason="agent_exit", exit_code=rc,
+                )
             raise LoopError(f"Herdr agent for {repo} stopped with status {rc}")
         while True:
             if not _server_running(session):
-                metadata["state"] = "needs_attention"
-                _write_metadata(repo, metadata)
+                _log_event(
+                    repo, metadata, "herdr_server_stopped",
+                    reason="Herdr server is not running",
+                )
+                _set_loop_state(
+                    repo, metadata, "needs_attention",
+                    reason="Herdr server is not running",
+                )
                 return 1
             if _workspace_by_id(session, workspace_id) is None:
-                metadata["state"] = "stopped"
                 metadata["stopped_at"] = _now()
-                _write_metadata(repo, metadata)
+                _set_loop_state(repo, metadata, "stopped", reason="workspace_closed")
                 return 0
             time.sleep(2)
     finally:
@@ -1395,38 +1497,52 @@ def worker(
     metadata.update({"repo": repo, "platform": platform, "session": session})
     metadata["prompt_file"] = prompt_file
     if not recovering:
-        metadata["state"] = "starting"
-    _write_metadata(repo, metadata)
+        _set_loop_state(repo, metadata, "starting")
+    else:
+        _write_metadata(repo, metadata)
     command = _lupin_command(
         "monitor", "--repo", repo, "--platform", platform, "--session", session,
         "--prompt-file", prompt_file,
     )
     if resume:
         command.append("--resume")
+    _log_event(
+        repo, metadata, "slot_wait", slot=f"loop-{base_repo(repo)}",
+        scope="loop", wait_seconds=0,
+    )
     try:
         rc = slots_redis.hold(
             command, slot=f"loop-{base_repo(repo)}", holder=unit_name(repo), wait=0.0,
             ttl=LEASE_TTL, max_holders=1, **kwargs,
         )
     except slots.SlotFull:
-        metadata["state"] = "needs_attention"
-        _write_metadata(repo, metadata)
+        _log_event(
+            repo, metadata, "slot_wait_failed", slot=f"loop-{base_repo(repo)}",
+            scope="loop", reason="full",
+        )
+        _set_loop_state(repo, metadata, "needs_attention", reason="loop_slot_full")
         raise LoopError(
             f"fleet loop slot loop-{base_repo(repo)} is full for {repo}; "
             "raise its stored max to run more loops on this repo"
         )
+    _log_event(
+        repo, metadata, "slot_released", slot=f"loop-{base_repo(repo)}",
+        scope="loop", exit_code=rc,
+    )
     if rc:
-        # The monitor records a workspace as soon as it has one. `starting` here
-        # means it died first. No later step ends that state, and `run` refuses
-        # a repo that stays in it.
         latest = _read_metadata(repo)
         if latest and latest.get("state") == "starting":
-            latest["state"] = "failed"
-            _write_metadata(repo, latest)
+            _set_loop_state(
+                repo, latest, "failed", reason="monitor_exit", exit_code=rc,
+            )
+    _log_current_event(repo, "worker_exit", exit_code=rc)
     return rc
 
 
 def monitor(repo: str, platform: str, session: str, prompt_file: str, resume: bool) -> int:
+    _log_current_event(
+        repo, "slot_acquired", slot=f"loop-{base_repo(repo)}", scope="loop",
+    )
     try:
         return _monitor_loop(repo, platform, session, prompt_file, resume)
     except LoopError:
@@ -1453,23 +1569,40 @@ def launch_agent(
     repo: str, session: str, workspace_id: str, platform: str, prompt_file: str, resume: bool,
     provider: str | None = None, model: str | None = None,
 ) -> int:
+    _log_current_event(repo, "slot_acquired", slot=platform, scope="agent")
     workspace = _workspace_by_id(session, workspace_id)
     if workspace is None:
+        _log_current_event(
+            repo, "agent_exit", exit_code=0, reason="workspace_missing",
+        )
         return 0
     provider, model = validate_omp_options(platform, provider, model)
-    return _launch_agent(session, platform, workspace, prompt_file, resume, _agent_name_for(repo, session), provider, model)
+    rc = _launch_agent(
+        session, platform, workspace, prompt_file, resume,
+        _agent_name_for(repo, session), provider, model,
+    )
+    _log_current_event(repo, "agent_exit", exit_code=rc)
+    return rc
 
-def wait_agent(session: str, workspace_id: str) -> int:
-    return _wait_existing_agent(session, workspace_id)
+def wait_agent(repo: str, session: str, workspace_id: str, platform: str) -> int:
+    _log_current_event(repo, "slot_acquired", slot=platform, scope="agent")
+    rc = _wait_existing_agent(session, workspace_id)
+    _log_current_event(repo, "agent_exit", exit_code=rc)
+    return rc
 
 
-def _save_report(repo: str, session: str, workspace: dict) -> Path:
+def _save_report(
+    repo: str, session: str, workspace: dict, run_id: str | None = None
+) -> Path:
     pane = _pane_id(workspace)
     if not pane:
         raise HerdrError("Herdr workspace has no pane ID")
     output = _herdr(session, "pane", "read", pane, "--source", "recent", "--lines", "100000", "--format", "text", timeout=PANE_READ_TIMEOUT)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True, mode=0o750)
-    path = REPORTS_DIR / f"{validate_repo(repo)}-{_stamp()}-{time.time_ns() % 1000000:06d}.log"
+    if run_log.valid_run_id(run_id):
+        path = REPORTS_DIR / f"{validate_repo(repo)}-{run_id}.log"
+    else:
+        path = REPORTS_DIR / f"{validate_repo(repo)}-{_stamp()}-{time.time_ns() % 1000000:06d}.log"
     temporary = path.with_suffix(path.suffix + ".part")
     temporary.write_text(output + "\n", encoding="utf-8")
     os.chmod(temporary, 0o640)
@@ -1481,22 +1614,22 @@ def _start_server_for_read(repo: str, metadata: dict) -> str:
     session = metadata.get("session") or session_name(repo)
     if not isinstance(session, str):
         raise LoopError("loop state has an invalid Herdr session")
+    was_running = _server_running(session)
+    if not was_running:
+        _log_event(repo, metadata, "herdr_server_start_requested", session=session)
     _ensure_server(repo, session, metadata.get("platform", "claude"))
+    _log_event(repo, metadata, "herdr_server_ready", session=session, started=not was_running)
     return session
 
 
-def _request_handoff(repo: str, session: str, workspace: dict, grace: float) -> str:
-    """Ask the loop's agent to run /handoff and wait until it settles.
-
-    Returns a note for the stop message, or "" when nothing needs saying.
-    A wait that ends without a settled agent is not an error: the text sent
-    to the agent says the stop happens anyway. Any other failure raises, so
-    nothing is closed. `--force` skips this step.
-    """
+def _request_handoff(
+    repo: str, session: str, workspace: dict, grace: float
+) -> tuple[str, str]:
+    """Ask the loop's agent to run /handoff. Return a stop note and outcome."""
     workspace_id = _workspace_id(workspace)
     agent = _agent_for_workspace(session, workspace_id) if workspace_id else None
     if agent is None:
-        return ""
+        return "", "no_agent"
     try:
         _herdr(
             session, "agent", "prompt", agent.get("name") or AGENT_NAME, HANDOFF_TEXT,
@@ -1505,12 +1638,12 @@ def _request_handoff(repo: str, session: str, workspace: dict, grace: float) -> 
         )
     except HerdrError as exc:
         if "timeout" in str(exc).lower():
-            return f"; the agent did not finish its handoff in {int(grace)}s"
+            return f"; the agent did not finish its handoff in {int(grace)}s", "timeout"
         raise LoopError(
             f"could not ask the agent for {repo} to hand off: {exc}. "
             "Nothing was stopped. Add --force to stop it anyway."
         ) from exc
-    return ""
+    return "", "completed"
 
 
 def stop_loop(repo: str, *, force: bool = False, grace: float = HANDOFF_GRACE_S) -> str:
@@ -1521,34 +1654,71 @@ def stop_loop(repo: str, *, force: bool = False, grace: float = HANDOFF_GRACE_S)
         metadata = _read_metadata(repo)
         if not metadata:
             raise LoopError(f"no Lupin loop state for {repo}")
+        _log_event(repo, metadata, "stop_requested", forced=force)
         session = _start_server_for_read(repo, metadata)
         workspace = _find_workspace(session, metadata)
         report = None
         handoff_note = ""
+        handoff_outcome = "no_workspace"
         if workspace is not None:
-            if not force:
-                handoff_note = _request_handoff(repo, session, workspace, grace)
-            report = _save_report(repo, session, workspace)
+            if force:
+                handoff_outcome = "skipped"
+            else:
+                try:
+                    handoff_note, handoff_outcome = _request_handoff(
+                        repo, session, workspace, grace
+                    )
+                except LoopError as exc:
+                    _log_event(
+                        repo, metadata, "handoff_wait", outcome="error",
+                        error_type=type(exc).__name__, message=str(exc),
+                    )
+                    raise
+            _log_event(
+                repo, metadata, "handoff_wait", outcome=handoff_outcome,
+                grace_seconds=grace,
+            )
+            report = _save_report(repo, session, workspace, metadata.get("run_id"))
+            _log_event(repo, metadata, "pane_report_saved", path=str(report))
             workspace_id = _workspace_id(workspace)
             if not workspace_id:
                 raise HerdrError("Herdr workspace has no ID")
             _herdr_json(session, "workspace", "close", workspace_id)
+        else:
+            _log_event(
+                repo, metadata, "handoff_wait", outcome=handoff_outcome,
+                grace_seconds=grace,
+            )
         _, state = _run(["systemctl", "is-active", f"{unit_name(repo)}.service"], timeout=SYSTEMCTL_CHECK_TIMEOUT)
+        stop_exit_code = 0
         if state in {"active", "activating", "deactivating"}:
             rc, output = _run(
                 _sudo_argv("systemctl", "stop", f"{unit_name(repo)}.service"),
                 timeout=SYSTEMCTL_STOP_TIMEOUT,
             )
             if rc:
+                _log_event(
+                    repo, metadata, "worker_stop", outcome="failed",
+                    exit_code=rc, message=output,
+                )
                 raise LoopError(output or f"could not stop Lupin worker for {repo}")
+            stop_exit_code = rc
+            _log_event(repo, metadata, "worker_stop", outcome="stopped", exit_code=rc)
         if session != SESSION_NAME and not _workspaces(session):
+            _log_event(repo, metadata, "herdr_server_stop_requested", session=session)
             _herdr_json(None, "session", "stop", session, "--json")
+            _log_event(repo, metadata, "herdr_server_stopped", session=session)
         _, worktree_note = _remove_worktree(repo, metadata)
-        metadata["state"] = "stopped"
         metadata["stopped_at"] = _now()
         metadata["workspace_id"] = None
         metadata["pane_id"] = None
-        _write_metadata(repo, metadata)
+        _set_loop_state(repo, metadata, "stopped", forced=force)
+        _log_event(
+            repo, metadata, "loop_stopped", path="force" if force else "graceful",
+            forced=force, exit_code=stop_exit_code,
+            agent_exit_code=metadata.get("agent_exit_code"),
+            handoff_outcome=handoff_outcome,
+        )
         message = (
             f"stopped {repo}"
             + (f"; report saved to {report}" if report else "")
@@ -1724,9 +1894,7 @@ def loop_state(repo: str) -> dict:
         saved_state = metadata.get("state")
         if saved_state in {"running", "needs_attention"}:
             state = "needs_attention"
-            if saved_state != state:
-                metadata["state"] = state
-                _write_metadata(repo, metadata)
+            _set_loop_state(repo, metadata, state, reason="workspace_missing")
         else:
             state = saved_state if saved_state == "starting" else "unknown"
         return {
@@ -1752,6 +1920,21 @@ def loop_state(repo: str) -> dict:
         "since": metadata.get("started_at"),
         "agent": agent.get("name", AGENT_NAME) if agent else AGENT_NAME,
     }
+
+
+def read_run_logs(repo: str, run_id: str | None = None, *, tail: int = 50) -> list[dict]:
+    repo = validate_repo(repo)
+    if run_id is None:
+        metadata = _read_metadata(repo)
+        run_id = metadata.get("run_id") if metadata else None
+        if not run_log.valid_run_id(run_id):
+            run_id = run_log.latest_run_id(STATE_DIR, repo)
+    if not run_id:
+        raise LoopError(f"no run logs for {repo}")
+    try:
+        return run_log.read_events(STATE_DIR, repo, run_id, tail=tail)
+    except run_log.RunLogError as exc:
+        raise LoopError(str(exc)) from exc
 
 
 def _agent_repo(agent: dict) -> str | None:
@@ -2123,6 +2306,23 @@ def _print_json(value: Any) -> None:
     print(json.dumps(value, sort_keys=True))
 
 
+def _log_action_error(args: Any, exc: Exception) -> None:
+    repo = None
+    if getattr(args, "action", None) in {"worker", "monitor", "launch-agent", "wait-agent"}:
+        repo = getattr(args, "repo", None)
+    elif (
+        getattr(args, "action", None) == "local-action"
+        and getattr(args, "local_action", None) == "stop"
+        and getattr(args, "action_args", None)
+    ):
+        repo = args.action_args[0]
+    if isinstance(repo, str):
+        cause = exc.__cause__ if isinstance(exc.__cause__, Exception) else exc
+        _log_current_event(
+            repo, "error", error_type=type(cause).__name__, message=str(cause),
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
 
@@ -2154,6 +2354,7 @@ def main(argv: list[str] | None = None) -> int:
     launch_parser.add_argument("--resume", action="store_true")
     wait_parser = sub.add_parser("wait-agent", help=argparse.SUPPRESS)
     wait_parser.add_argument("--repo", required=True)
+    wait_parser.add_argument("--platform", required=True)
     wait_parser.add_argument("--session", required=True)
     wait_parser.add_argument("--workspace", required=True)
     once_parser = sub.add_parser("once-fire", help=argparse.SUPPRESS)
@@ -2184,7 +2385,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.model,
             )
         if args.action == "wait-agent":
-            return wait_agent(args.session, args.workspace)
+            return wait_agent(args.repo, args.session, args.workspace, args.platform)
         if args.action == "once-fire":
             for item in once_fire(args.id):
                 print(item)
@@ -2210,10 +2411,15 @@ def main(argv: list[str] | None = None) -> int:
                 print(schedule_local([args.local_action]))
             return 0
     except (LoopError, slots.SlotFull, slots.CoordinatorUnreachable, slots_redis.CoordinatorUnreachable) as exc:
+        _log_action_error(args, exc)
         print(f"lupin loop: {exc}", file=sys.stderr)
         return 2
     except (IndexError, ValueError) as exc:
+        _log_action_error(args, exc)
         print(f"lupin loop: invalid arguments: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:
+        _log_action_error(args, exc)
+        raise
     print(f"lupin loop: no handler for action {args.action}", file=sys.stderr)
     return 1

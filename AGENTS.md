@@ -17,7 +17,7 @@
    `heartbeat`, `drain`, `undrain`, `machines`, `place`, `quest`, `reconcile`,
    `roadmap`, `ledger`, `fleet-run`.
    Loop lifecycle: `run`, `once`, `enable`, `disable`, `loops`, `stop`, `peek`,
-   `attach`, `schedule`, `pause`, `resume`, `supervise`.
+   `logs`, `attach`, `schedule`, `pause`, `resume`, `supervise`.
 
 One program, `lupin`, with subcommands. Run `lupin --help` for the full list.
 
@@ -52,6 +52,7 @@ lupin disable <repo>
 lupin loops [repo] [--machine M] [--json]
 lupin stop <repo> [--machine M] [--force] [--wait S] [--json]
 lupin peek <repo> [LINES] [--machine M] [--json]
+lupin logs <repo> [--run ID] [--tail N] [--json]
 lupin attach <repo> [--machine M] [--print]
 lupin schedule [--machine M] [--json]
 lupin schedule cal <expr> [--machine M] [--json]
@@ -447,10 +448,25 @@ several machines must see. Its schema is in `docs/redis-schema.md`.
 Loop state is stored under `$LUPIN_LOOP_STATE_DIR` or
 `/var/lib/delegation-loop`. Lupin stores enabled repos in `repos`, per-repo
 orchestrator profiles in `orchestrators.json`, loop metadata in
-`herdr-loops/`, run prompts in `notes/`, stop reports in `reports/`, run
-worktrees in `worktrees/`, and one-off schedules in `once/`. `locks/`
-serializes local start and stop actions. Herdr keeps its own session and
-workspace state.
+`herdr-loops/`, run prompts in `notes/`, stop reports in `reports/`, run logs
+in `logs/`, run worktrees in `worktrees/`, and one-off schedules in `once/`.
+`locks/` serializes local start and stop actions. Herdr keeps its own session
+and workspace state.
+
+Each run has a unique ID in `herdr-loops/<repo>.json`. Lupin writes events as
+one JSON object per line to `logs/<repo>/<run-id>.jsonl`. `lupin logs <repo>`
+shows the latest 50 events from the latest run. Use `--run ID` to select a run
+and `--tail N` to choose the number of events. Use `--json` to print one JSON
+object per line.
+Events record route choices and quota headroom. They also record slot waits,
+acquisitions and releases, Herdr server changes, state changes, agent exits,
+handoff results, errors, and stop results. `lupin logs` prints events in time
+order.
+
+Lupin keeps at most 20 logs per repo and removes logs after 30 days. A log
+write failure does not stop the loop. Stop reports use the same run ID in
+their file name.
+
 The dashboard caches GitHub data in `~/.local/state/lupin/cache.json`.
 The same file also holds each checkout's repo identity, so a restart does
 not pay for `gh` again. If `gh` is missing, Lupin gets the GitHub owner
@@ -572,6 +588,7 @@ per-machine limit or add controls that the current code cannot support.
   Attach uses Herdr directly over SSH.
 - `src/lupin/loop_runtime.py` — Herdr sessions, workspaces, state, reports,
   schedules, and systemd worker lifecycle.
+- `src/lupin/run_log.py` — writes and reads one event log per loop run.
 - `src/lupin/quest.py` — `quest start`/`stop`/`focus`/`release`: a set of
   issues worked together on one machine.
 - `src/lupin/place.py` — `place`: picks which fleet machine should run a
