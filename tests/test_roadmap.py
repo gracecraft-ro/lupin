@@ -511,15 +511,50 @@ class RoadmapTests(unittest.TestCase):
         self.assertIn("Recent GitHub comments are unavailable: denied", page)
         # Every warning card has a way to dismiss it.
         self.assertEqual(page.count("class='warning-dismiss'"), 2)
-        # Each card carries its own warning text, so one dismissal does not
+        # Each card keeps its message as its key, so one dismissal does not
         # hide another warning.
         self.assertIn("data-warning='GitHub issue data is unavailable: denied'", page)
-        self.assertIn("data-warning='Recent GitHub comments are unavailable: denied'", page)
+        self.assertIn(
+            "data-warning='Recent GitHub comments are unavailable: denied'",
+            page,
+        )
         # The browser keeps the dismissed text, so the warning stays gone
         # after a reload. The dismissal never lives in the URL (issue #87).
         self.assertIn("lupin-roadmap-dismissed-warning:", page)
         self.assertIn("localStorage", page)
         self.assertNotIn("dismiss=", page)
+
+    def test_repo_fetch_warnings_are_dismissible_on_board_and_list(self):
+        warnings = ["GitHub issue data is unavailable: denied", "Comments unavailable"]
+        models = {
+            repo: roadmap.build_model([], {}, [], warnings=warnings, repo=repo)
+            for repo in ("repo-a", "repo-b")
+        }
+        render = lambda title, body, css, js: body + js
+
+        board = roadmap.render_combined_page(["repo-a", "repo-b"], models, render)
+        list_page = roadmap.render_list_page(
+            ["repo-a", "repo-b"], models, render, {}
+        )
+
+        for page in (board, list_page):
+            self.assertIn("GitHub issue data is unavailable: denied", page)
+            self.assertIn("Comments unavailable", page)
+            self.assertEqual(page.count("class='warning-dismiss'"), 4)
+            self.assertIn("lupin-roadmap-dismissed-warning:", page)
+            self.assertIn("localStorage", page)
+            self.assertIn(
+                f"data-warning='{roadmap._warning_key('repo-a', warnings[0])}'",
+                page,
+            )
+            self.assertIn(
+                f"data-warning='{roadmap._warning_key('repo-b', warnings[0])}'",
+                page,
+            )
+            self.assertNotEqual(
+                roadmap._warning_key("repo-a", warnings[0]),
+                roadmap._warning_key("repo-a", warnings[1]),
+            )
 
     def test_completed_page_warning_cards_can_be_dismissed(self):
         closed_issue = {

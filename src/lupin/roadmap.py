@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import os
@@ -1298,16 +1299,13 @@ def _escape_attr(value: str) -> str:
     return html.escape(str(value), quote=True)
 
 
-WARNING_DISMISS_KEY = "lupin-roadmap-dismissed-warning:"
+
+def _warning_key(scope: str, message: str) -> str:
+    return hashlib.sha256(f"{scope}\0{message}".encode("utf-8")).hexdigest()
 
 
 def warning_card(message: str) -> str:
-    """A warning card the reader can dismiss.
-
-    The warning text stays in the page source. The button hides the card on
-    screen and the browser remembers the text, so the same warning stays
-    gone after a reload. A different warning still shows.
-    """
+    """A warning card the reader can dismiss."""
     text = html.escape(message)
     return (
         f"<div class='card warning' data-warning='{_escape_attr(message)}'>"
@@ -1317,28 +1315,26 @@ def warning_card(message: str) -> str:
 
 
 def _warning_dismiss_script() -> str:
-    """Hide warnings the reader already dismissed. The browser keeps the
-    dismissed text, so a reload does not bring the warning back."""
+    """Hide warnings that the reader dismissed before."""
     return """
 (function(){
   const storageKey='lupin-roadmap-dismissed-warning:';
-  function dismissed(text){
-    try{return localStorage.getItem(storageKey+text)!==null;}catch(_){return false;}
+  function hideDismissed(root){
+    (root.matches&&root.matches('[data-warning]')?[root]:[])
+      .concat(Array.from(root.querySelectorAll('[data-warning]')))
+      .forEach(function(element){
+        try{if(localStorage.getItem(storageKey+element.dataset.warning)!==null)element.hidden=true;}catch(_){}
+      });
   }
-  function hide(element){
-    element.style.display='none';
-  }
-  document.querySelectorAll('[data-warning]').forEach(function(element){
-    if(dismissed(element.getAttribute('data-warning')))hide(element);
-  });
+  window.lupinHideDismissedRoadmapWarnings=hideDismissed;
+  hideDismissed(document);
   document.addEventListener('click',function(event){
     const button=event.target.closest('.warning-dismiss');
     if(!button)return;
     const element=button.closest('[data-warning]');
     if(!element)return;
-    const text=element.getAttribute('data-warning');
-    try{localStorage.setItem(storageKey+text,'1');}catch(_){}
-    hide(element);
+    try{localStorage.setItem(storageKey+element.dataset.warning,'1');}catch(_){}
+    element.hidden=true;
   });
 })();
 """
@@ -1769,6 +1765,7 @@ BOARD_CSS = """
 .repo-warnings{grid-column:1/-1;padding:.7rem 1rem;border:1px solid var(--warnline);background:var(--warnbg);color:var(--warnink);border-radius:12px;font-size:12px}
 .repo-warnings summary{cursor:pointer;font:600 12px var(--mono)}
 .repo-warnings ul{margin:.5rem 0 0;padding-left:1.1rem;display:grid;gap:.25rem}
+.warning-dismiss{font:inherit;font-size:12px;margin-left:.6rem;padding:.2rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}
 @media(max-width:900px){.updated-label{display:none}}
 @media(max-width:1000px){.roadmap-layout{grid-template-columns:1fr}.roadmap-detail{border-left:0;border-top:1px solid var(--line)}}
 @media(max-width:760px){.roadmap-board{grid-template-columns:1fr}.roadmap-card-grid,.roadmap-human .roadmap-card-grid{grid-template-columns:1fr}.roadmap-facts{display:none}}
@@ -1788,9 +1785,15 @@ def _repo_warnings(models: dict, repos: list[str]) -> str:
         messages = (models.get(repo) or {}).get("warnings") or []
         if not messages:
             continue
-        items = "".join(f"<li>{html.escape(message)}</li>" for message in messages)
+        items = "".join(
+            f"<li data-warning='{_warning_key(repo, message)}'>"
+            f"{html.escape(message)} "
+            "<button type='button' class='warning-dismiss'>Dismiss</button></li>"
+            for message in messages
+        )
         parts.append(
-            f"<details class='repo-warnings'><summary>{html.escape(repo)}: "
+            f"<details class='repo-warnings'>"
+            f"<summary>{html.escape(repo)}: "
             f"{len(messages)} warning{'s' if len(messages) != 1 else ''}</summary>"
             f"<ul>{items}</ul></details>"
         )
@@ -2067,7 +2070,7 @@ def board_fragment(repos: list[str], models: dict, query=None, quest_state=None)
 def render_combined_page(repos: list[str], models: dict, page_fn, query=None, quest_state=None) -> bytes:
     """Render the cross-repository Roadmap board as a full page."""
     body, css = board_fragment(repos, models, query, quest_state)
-    return page_fn("Roadmap", body, css, "")
+    return page_fn("Roadmap", body, css, _warning_dismiss_script())
 
 
 def skipped_warning(skipped: list[str]) -> str:
@@ -2411,6 +2414,7 @@ LIST_CSS = """
 .repo-warnings{margin:.75rem 0;padding:.7rem 1rem;border:1px solid var(--warnline);background:var(--warnbg);color:var(--warnink);border-radius:12px;font-size:12px}
 .repo-warnings summary{cursor:pointer;font:600 12px var(--mono)}
 .repo-warnings ul{margin:.5rem 0 0;padding-left:1.1rem;display:grid;gap:.25rem}
+.warning-dismiss{font:inherit;font-size:12px;margin-left:.6rem;padding:.2rem .5rem;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg);cursor:pointer}
 @media(max-width:760px){.list-stage-row{align-items:flex-start;flex-direction:column}.queue-filter{align-items:stretch}.queue-filter input,.queue-filter select{max-width:100%}}
 """
 
@@ -2664,7 +2668,7 @@ def list_fragment(repos: list[str], models: dict, query: dict, quest_state=None)
 def render_list_page(repos: list[str], models: dict, page_fn, query: dict, quest_state=None) -> bytes:
     """Render the Roadmap List view as a full page."""
     body, css = list_fragment(repos, models, query, quest_state)
-    return page_fn("Work across repositories · list", body, css, "")
+    return page_fn("Work across repositories · list", body, css, _warning_dismiss_script())
 
 
 def repository_names(rows: list[dict]) -> list[str]:
