@@ -81,7 +81,7 @@ def test_loop_run_returns_after_starting_lupin_worker(redis_port, flush_redis, m
         (
             "loop.run",
             {"repo": "lupin", "platform": "omp", "note": "review\nhandoff", "resume": True},
-            ["lupin", "run", "lupin", "--platform", "omp", "--note", "review\nhandoff", "--resume"],
+            ["lupin", "run", "lupin", "--platform", "omp", "--note=review\nhandoff", "--resume"],
         ),
         (
             "loop.run",
@@ -99,20 +99,32 @@ def test_loop_run_returns_after_starting_lupin_worker(redis_port, flush_redis, m
         (
             "loop.run-all",
             {"note": "review"},
-            ["lupin", "run", "--all", "--note", "review"],
+            ["lupin", "run", "--all", "--note=review"],
         ),
         (
             "loop.run-all",
             {
                 "platform": "omp",
                 "provider": "opencode-go",
-                "model": "opencode-go/step-5-preview-free:xhigh",
+                "model": "opencode-go/deepseek-v4.1-flash:xhigh",
             },
             [
                 "lupin", "run", "--all", "--platform", "omp", "--provider", "opencode-go",
-                "--model", "opencode-go/step-5-preview-free:xhigh",
+                "--model", "opencode-go/deepseek-v4.1-flash:xhigh",
             ],
         ),
+
+        (
+            "loop.run",
+            {"repo": "lupin", "note": "- focus on tests"},
+            ["lupin", "run", "lupin", "--note=- focus on tests"],
+        ),
+        (
+            "loop.run-all",
+            {"note": "- focus on tests"},
+            ["lupin", "run", "--all", "--note=- focus on tests"],
+        ),
+
         (
             "repo.enable",
             {"repo": "lupin"},

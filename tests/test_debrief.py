@@ -139,6 +139,23 @@ def _section(markdown: str, heading: str) -> str:
     return after.split("\n## ", 1)[0]
 
 
+def test_window_shows_utc_and_los_angeles_time():
+    window = _section(_markdown(), "Window")
+
+    assert "- From: 2026-10-02T09:00:00Z (2026-10-02 02:00 PDT)" in window
+    assert "- To: 2026-10-02T17:00:00Z (2026-10-02 10:00 PDT)" in window
+
+
+def test_window_shows_pst_in_january():
+    start = datetime(2026, 1, 15, 0, 0, tzinfo=timezone.utc)
+    with mock.patch.object(debrief, "_gh", FakeGh(dict(RESPONSES))):
+        text = debrief.build_markdown(
+            FULL, start, start + timedelta(hours=6), events=[], claimed=set(), period="6h"
+        )
+
+    assert "(2026-01-14 16:00 PST)" in text
+
+
 def test_shipped_lists_only_items_in_the_window():
     fake = FakeGh(dict(RESPONSES))
     with mock.patch.object(debrief, "_gh", fake):

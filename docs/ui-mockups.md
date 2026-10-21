@@ -41,3 +41,7 @@
 ## [1k · Machines](ui.dc.html#1k)
 
 ![Machines mockup](ui-mockups/machines.png)
+
+The capacity in the mockup is fleet-wide. Each slot has one shared limit for
+the whole fleet, the same as the live page. No machine card carries its own
+slot limit.

@@ -30,10 +30,12 @@ four jobs:
 
 ## Install
 
-Run Lupin one time, without installing it:
+Run Lupin one time, without installing it.
+
+Replace `OWNER/REPO` with the actual owner and repository name for the Lupin flake before you run this command.
 
 ```sh
-nix run github:gracecraft-software/lupin -- --help
+nix run github:OWNER/REPO -- --help
 ```
 
 Build it from a checkout:

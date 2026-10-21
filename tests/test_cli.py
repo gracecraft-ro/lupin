@@ -130,7 +130,7 @@ def test_fleet_run_uses_only_per_machine_signing_keys(monkeypatch, tmp_path, cap
     monkeypatch.setattr(
         loop_runtime,
         "orchestrator_profiles",
-        lambda: {"widgets": ["opencode-go/step-5-preview-free:xhigh"]},
+        lambda: {"widgets": ["opencode-go/deepseek-v4.1-flash:xhigh"]},
     )
     monkeypatch.setattr(machines, "hostname", lambda: "pihome")
     monkeypatch.setattr(machines, "machines", lambda connection, **kwargs: [{"name": "jesus"}, {"name": "ralpha"}])
@@ -347,14 +347,14 @@ def test_loops_unreadable_repos_file_exits_one_without_traceback(monkeypatch, tm
         (
             [
                 "run", "widgets", "--machine", "remote", "--platform", "omp",
-                "--provider", "opencode-go", "--model", "opencode-go/step-5-preview-free:xhigh",
+                "--provider", "opencode-go", "--model", "opencode-go/deepseek-v4.1-flash:xhigh",
             ],
             "loop.run",
             {
                 "repo": "widgets",
                 "platform": "omp",
                 "provider": "opencode-go",
-                "model": "opencode-go/step-5-preview-free:xhigh",
+                "model": "opencode-go/deepseek-v4.1-flash:xhigh",
                 "note": None,
                 "resume": False,
             },

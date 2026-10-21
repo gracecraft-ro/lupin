@@ -86,7 +86,8 @@ draft, do the first step that applies:
 2. The PR is approved at its current head SHA and is behind `main`:
    dispatch a worker to sync it. A sync changes the head SHA, so get a new
    approval. If the sync stops on conflicts, the worker did not fail. Dispatch
-   a fix worker to resolve them. Do not repeat that sync.
+   a fix worker to resolve them. It follows the conflict steps in "Review and
+   merge each pull request". Do not repeat that sync.
 3. The PR has findings or a failed repo gate at its current head SHA. The
    repo gate is the set of checks that `AGENTS.md` defines. If a loop verdict
    with findings is at the head and nothing runs, start a fix worker, as "Fix
@@ -96,8 +97,10 @@ draft, do the first step that applies:
    and starts the fix worker. See "Run the fix cycle" in the `code-review`
    skill.
    - A fix worker cannot start, or `lupin route` fails or gives
-     `wait_seconds`: post a `Loop:` PR comment with the reason and the head
-     SHA, unless the reviewer posted it. Take the next item. Retry next cycle.
+     `wait_seconds`: post the `Loop:` comment that step 3 of "Fix worker
+     models" names, unless the reviewer posted it. Do not call the PR blocked
+     in this comment. Post it once for each head SHA. Take the next item.
+     Retry next cycle.
    - The reviewer reports that the fix worker's LEVEL is above its own: do not
      start a fix worker. Dispatch a reviewer from
      `lupin review-route --category CATEGORY --size size-l --mode separate`.
@@ -178,10 +181,11 @@ A PR is blocked on an owner decision when one of these is true:
 - A worker for it stops to ask the owner.
 - Its merge fails.
 
-Post the reason and the head SHA as a `Loop:` comment on each blocked PR,
-unless the reviewer posted it. Then take the next item. In each cycle, read the
-new comments on each blocked PR. Retry the PR when its head SHA changes or the
-owner answers in a comment. List the blocked PRs in the handoff.
+On each blocked PR, post the `Loop:` comment that step 3 of "Fix worker
+models" names, unless the reviewer posted it. Then take the next item. In each
+cycle, read the new comments on each blocked PR. Retry the PR when its head
+SHA changes or the owner answers in a comment. List the blocked PRs in the
+handoff.
 
 In each cycle, dispatch merges, syncs, and reviews first. Then use the free
 worker slots for new issues. A PR in a fix cycle does not stop work on a new
@@ -201,10 +205,12 @@ issue. Work that is already running continues.
 3. Stall rule ("raise the fix worker one model tier"). At LEVEL `size-m`: when
    the same finding or failing check is in 3 verdicts in a row, change LEVEL
    to `size-l`. At LEVEL `size-l`: when the same finding or failing check is
-   in 3 verdicts in a row, the PR is blocked on an owner decision. Count only
-   verdicts after the first `Round` line that says `size-l`, or all verdicts
-   if the PR started at `size-l`. Do not start a fix worker on a blocked PR.
-   Post the reason and the head SHA as a `Loop:` PR comment.
+   in 3 verdicts in a row, the PR is blocked on an owner decision. Two
+   `Round` reviews with the same round number at the same head SHA count as
+   one verdict. They are the same round, posted twice. Count only verdicts
+   after the first `Round` line that says `size-l`, or all verdicts if the PR
+   started at `size-l`. Do not start a fix worker on a blocked PR. Post the
+   reason and the head SHA as a `Loop:` PR comment.
 4. If there is no push 30 minutes after the fix worker starts, ask it for the
    result (Herdr: `herdr agent prompt NAME "report the result" --wait
    --timeout 120000`, with the agent name or its pane ID). If it has none,
@@ -597,6 +603,25 @@ to the merge rules. A sync is not a merge of the pull request. Otherwise stop.
 Do not rebase. Any other exit code from the first check means the check failed.
 Report it and stop. Do not merge.
 
+The fix worker that resolves a conflict follows these steps:
+
+1. Run `git merge origin/main` and fix each conflict in the file.
+2. Run `git add FILE` for each file you changed.
+3. If you edit a file after `git add`, run `git add FILE` again before the
+   commit. A commit holds the text that was staged. The gate reads the
+   working tree, not the commit, so a missing stage looks like a pass.
+4. Run `git diff --stat`. It must print nothing. If it prints a file, your last
+   edit is not staged. Run `git add FILE` for that file and run the check
+   again.
+5. Run `git diff --stat HEAD`. It must list only the files you changed. This
+   is the working tree against the last commit. It shows what the commit will
+   hold.
+6. Run `git commit`.
+7. Run `git diff --stat HEAD` again. It must print nothing. If it prints a
+   file, the commit does not have your last edit. Run `git add FILE`, commit
+   again, and run the check again.
+8. Run `git push <remote> HEAD:<branch>`.
+
 An approval binds to the head SHA. If the sync changed the head, get a new
 approval at the new head before you merge. The reviewer may limit that review
 to the files the sync changed. The gate (the set of checks that `AGENTS.md`
@@ -700,10 +725,12 @@ not run a server for a feature branch.
    `systemd-run` command starts a command as a background service. The server
    must keep running after an agent session ends.
 6. The repo's `AGENTS.md` has a "Preview server" section. It names the start
-   command, the port, and the machine. It gives the tunnel command,
+   command and the port. The machine is in the owner's own machine notes. It
+   gives the tunnel command,
    `ssh -N -L PORT:127.0.0.1:PORT MACHINE`, and the local URL,
    `http://localhost:PORT`. The port must be free on that machine. Check with
-   `ss -ltn`. The `ss` command lists listening ports. If the repo has no
+   `ss -ltn`. The `ss` command lists listening ports. The scratch Redis port
+   needs the same check. If the repo has no
    runnable app, that section says `Preview server: none` and gives the reason.
 7. A PR does not need a tunnel command. The PR body says whether the change is
    visible only after the merge.
@@ -719,6 +746,8 @@ repo names marks it.
 Start a run when one of these is true:
 
 - The repo has no `pressure-test` event. This is the first run, so it is due.
+- A QA register row has no `Last QA date`, or the date is 14 days old or older.
+  This trigger applies whether or not a UI pull request merged.
 - 5 or more UI pull requests merged since the last run.
 - The last run is more than 24 hours old, and a UI pull request merged since
   it.
@@ -729,9 +758,21 @@ signal is a release pull request that the repo's `AGENTS.md` release rules
 name, or an owner `Loop:` comment. If the repo has neither, the trigger does
 not apply.
 
-A `blocked` event counts as the last run for the due check. The repo is due
-again when one of the other triggers holds, or when a host can launch the
-browser again.
+Before the due check, read the repo's QA register issue. In Lupin, use issue
+#88. In another repo, find the existing register issue or create it once.
+Use its rows for the 14-day trigger and sample pool.
+
+Every run also samples long-tail rows. The pool has rows whose `Last QA date`
+is 30 days old or older, or whose `Changed since?` value is greater than zero.
+Do not sample rows already selected as due. Choose 3 rows at random without
+replacement, or choose the whole pool if it has fewer than 3 rows. Record the
+sample count and random seed in the `pressure-test` ledger event. If the pool
+is empty, record `sample_n=0; seed=none`.
+
+A `blocked` event records an attempt, not a test. It does not update the
+register or clear an overdue row. The 14-day trigger uses `Last QA date`, not
+the event time. Retry blocked work when a host can launch the browser; the row
+stays due.
 
 Read the ledger and find the newest `pressure-test` event:
 
@@ -755,15 +796,15 @@ Record the start:
 
 ```sh
 lupin ledger append OWNER/REPO --event pressure-test --status running \
-  --summary "director=SESSION; reason=first|5-prs|24h|release"
+  --summary "director=SESSION; reason=first|14d|5-prs|24h|release; sample_n=N; seed=SEED"
 ```
 
 Check that the browser starts before you dispatch. Playwright cannot launch on
 some hosts. If it does not start, try to file or update an environment issue
-in the environment repo with label `environment`. On ralpha, `gh` cannot see
-that repo (`AGENTS.md` rule 6). If `gh` cannot write, run this command. Say in
-the `blocked` event summary or the handoff that the loop did not file the
-issue. `ENV_OWNER/REPO` is the environment repo that rule 6 of the repo's
+in the environment repo with label `environment`. On some hosts, `gh` cannot
+see that repo (`AGENTS.md` rule 6). If `gh` cannot write, run this command.
+Say in the `blocked` event summary or the handoff that the loop did not file
+the issue. `ENV_OWNER/REPO` is the environment repo that rule 6 of the repo's
 `AGENTS.md` names. The summary text names the repo that you test:
 
 ```sh
@@ -776,20 +817,22 @@ browser, write the blocked event, report it, and take the next queue item:
 
 ```sh
 lupin ledger append OWNER/REPO --event pressure-test --status blocked \
-  --summary "browser did not start; see <issue or ledger entry>"
+  --summary "sample_n=N; seed=SEED; browser did not start; see <issue or ledger entry>"
 ```
 
 Dispatch `/ui-pressure-test` as the only director for that repo. The test
 agent stays read-only for source code, has its own browser data, and writes
-prioritized tickets. The test agent also writes a coverage report. The report
-has Result, Coverage, Tickets, Not tested, and Risks. Write the report to the
-QA task issue. If there is no QA task issue, put the coverage report in the
-handoff, and link the handoff entry with `--evidence`. After the agent posts
-the tickets, record the end:
+prioritized tickets. The test agent also writes a coverage report with Result,
+Coverage, Tickets, Visual review, Design-system check, Not tested, and Risks.
+Write it to the QA register issue. Update only rows the test ran, with the full
+commit SHA, device results, evidence link, and changed-since count. Leave other
+rows unchanged. If the browser blocked a test, leave that row's date and result
+unchanged; it stays due. After the agent posts the tickets, record the end:
 
 ```sh
 lupin ledger append OWNER/REPO --event pressure-test --status done \
-  --summary "tickets=N; untested=M" --evidence "<report link>"
+  --summary "tickets=N; untested=M; sample_n=N; seed=SEED" \
+  --evidence "<report link>"
 ```
 
 Then dispatch fix workers for the tickets. A pressure-test ticket has no pull

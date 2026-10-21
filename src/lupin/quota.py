@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import http.client
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -31,6 +32,8 @@ from contextlib import closing
 from datetime import date, datetime, timedelta
 from enum import Enum
 
+logger = logging.getLogger(__name__)
+
 CODEX_SESSIONS_DIR = os.path.expanduser("~/.codex/sessions")
 CLAUDE_STATS_FILE = os.path.expanduser("~/.claude/stats-cache.json")
 CLAUDE_CREDENTIALS_FILE = os.path.expanduser("~/.claude/.credentials.json")
@@ -41,6 +44,16 @@ OPENCODE_GO_AUTH_FILE = os.path.join(
     "auth.json",
 )
 OMP_STATS_FILE = os.path.expanduser("~/.omp/stats.db")
+
+# The names the Usage page shows for the local usage sources. The page
+# shows these names, never the file paths (issue #51).
+CLAUDE_STATS_SOURCE = "Claude local stats cache"
+OMP_STATS_SOURCE = "OMP local stats database"
+
+# The plain text the page shows when a source cannot be read (issue #51).
+# The exception name and the path stay in the log.
+NOT_AVAILABLE = "Not available"
+QUOTA_NOT_AVAILABLE = "Quota data not available"
 
 # opencode.ai sits behind Cloudflare, which blocks Python urllib's default
 # "Python-urllib/x.y" user agent with a 403 (confirmed, issue #34).
@@ -104,11 +117,29 @@ def run(argv: list[str], timeout: float = 10.0) -> tuple[int, str]:
     return proc.returncode, out
 
 
-def unavailable_usage(provider: str, source: str, error: Exception) -> list[dict]:
+def unavailable_usage(
+    provider: str,
+    source: str,
+    error: Exception,
+    label: str = "local usage data",
+) -> list[dict]:
+    """A plain unavailable row. The page never shows the error (issue #51).
+
+    `source` says where the data would come from. `label` is the name the
+    page shows for it, so it must be a name a person can read, never a
+    file path. The exception name and the path go to the log.
+    """
+    logger.warning(
+        "quota source %s unavailable (%s): %s: %s",
+        provider,
+        source,
+        type(error).__name__,
+        error,
+    )
     return [{
         "provider": provider,
-        "source": source,
-        "error": f"unavailable ({type(error).__name__})",
+        "source": label,
+        "error": NOT_AVAILABLE,
     }]
 
 
@@ -137,11 +168,11 @@ def claude_usage() -> list[dict]:
             "output_tokens": None,
             "cost": None,
             "period": "last 7 days",
-            "source": CLAUDE_STATS_FILE,
+            "source": CLAUDE_STATS_SOURCE,
             "last_update": last_update,
         }]
     except Exception as error:
-        return unavailable_usage("claude", CLAUDE_STATS_FILE, error)
+        return unavailable_usage("claude", CLAUDE_STATS_FILE, error, CLAUDE_STATS_SOURCE)
 
 
 def omp_usage() -> list[dict]:
@@ -171,7 +202,7 @@ def omp_usage() -> list[dict]:
                 "output_tokens": period_totals.get(provider, (0, 0, 0))[1],
                 "cost": period_totals.get(provider, (0, 0, 0))[2],
                 "period": "last 7 days",
-                "source": OMP_STATS_FILE,
+                "source": OMP_STATS_SOURCE,
                 "last_update": time.strftime(
                     "%Y-%m-%d %H:%M:%S", time.localtime(timestamp / 1000)
                 ),
@@ -179,7 +210,7 @@ def omp_usage() -> list[dict]:
             for provider, timestamp in sorted(latest.items())
         ]
     except Exception as error:
-        return unavailable_usage("stats.db", OMP_STATS_FILE, error)
+        return unavailable_usage("stats.db", OMP_STATS_FILE, error, OMP_STATS_SOURCE)
 
 
 def epoch_ms_to_local(value) -> str:
@@ -256,9 +287,21 @@ def quota_reset_timestamp(value) -> int | None:
     return None
 
 
-def quota_duration(limit: dict, window: dict) -> QuotaDuration:
+def window_milliseconds(window: dict) -> int | None:
+    """The length of a quota window in ms, when the source gives one.
+
+    A window the page cannot name can still have a known length. The
+    page needs the length to place the pace marker (issue #80).
+    """
     duration_ms = window.get("durationMs")
-    if isinstance(duration_ms, (int, float)):
+    if isinstance(duration_ms, (int, float)) and duration_ms > 0:
+        return int(duration_ms)
+    return None
+
+
+def quota_duration(limit: dict, window: dict) -> QuotaDuration:
+    duration_ms = window_milliseconds(window)
+    if duration_ms is not None:
         for duration in (
             QuotaDuration.FIVE_HOURS,
             QuotaDuration.WEEKLY,
@@ -319,7 +362,10 @@ def claude_oauth_quota() -> list[dict]:
         with urllib.request.urlopen(request, timeout=10) as response:
             data = json.load(response)
     except (OSError, KeyError, TypeError, ValueError, urllib.error.URLError) as error:
-        return [{"provider": "claude", "note": f"quota unavailable ({type(error).__name__})"}]
+        logger.warning(
+            "claude oauth quota unavailable: %s: %s", type(error).__name__, error
+        )
+        return [{"provider": "claude", "note": QUOTA_NOT_AVAILABLE}]
     if not isinstance(data, dict):
         return [{"provider": "claude", "note": "no quota data reported"}]
     rows = []
@@ -398,9 +444,15 @@ def opencode_go_quota() -> list[dict]:
             body = b""
         if error.code == 401 and b"api_key_expired" in body:
             return [{"provider": "opencode-go", "note": OPENCODE_GO_KEY_EXPIRED}]
-        return [{"provider": "opencode-go", "note": f"quota unavailable ({type(error).__name__})"}]
+        logger.warning(
+            "opencode-go quota unavailable: %s: %s", type(error).__name__, error
+        )
+        return [{"provider": "opencode-go", "note": QUOTA_NOT_AVAILABLE}]
     except (OSError, ValueError, urllib.error.URLError) as error:
-        return [{"provider": "opencode-go", "note": f"quota unavailable ({type(error).__name__})"}]
+        logger.warning(
+            "opencode-go quota unavailable: %s: %s", type(error).__name__, error
+        )
+        return [{"provider": "opencode-go", "note": QUOTA_NOT_AVAILABLE}]
 
     if not isinstance(data, dict) or not isinstance(data.get("usage"), dict):
         return [{"provider": "opencode-go", "note": "no quota data reported"}]
@@ -475,17 +527,19 @@ def quota_usage() -> list[dict]:
     rc, out = run(["omp", "usage", "--json"])
     if rc != 0:
         rows = unavailable_usage(
-            "omp", "omp usage --json", RuntimeError(f"exit code {rc}")
+            "omp", "omp usage --json", RuntimeError(f"exit code {rc}"), "omp usage"
         ) + codex_session_quota()
         return add_quota_fallbacks(rows)
     try:
         data = json.loads(out)
     except json.JSONDecodeError as error:
-        rows = unavailable_usage("omp", "omp usage --json", error) + codex_session_quota()
+        rows = unavailable_usage(
+            "omp", "omp usage --json", error, "omp usage"
+        ) + codex_session_quota()
         return add_quota_fallbacks(rows)
     if not isinstance(data, dict):
         rows = unavailable_usage(
-            "omp", "omp usage --json", ValueError("expected a JSON object")
+            "omp", "omp usage --json", ValueError("expected a JSON object"), "omp usage"
         ) + codex_session_quota()
         return add_quota_fallbacks(rows)
 
@@ -509,6 +563,7 @@ def quota_usage() -> list[dict]:
             rows.append({
                 "provider": provider,
                 "duration": quota_duration(limit, window),
+                "duration_ms": window_milliseconds(window),
                 "label": limit.get("label", limit.get("id", "-")),
                 "used_pct": None if used_fraction is None else used_fraction * 100,
                 "resets_at": quota_reset_timestamp(window.get("resetsAt")),
