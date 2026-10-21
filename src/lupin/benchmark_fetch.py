@@ -491,7 +491,8 @@ def _run_shard(
         argv = _build_argv(prompt, candidate)
         try:
             proc = subprocess.run(
-                argv, capture_output=True, text=True, timeout=SHARD_TIMEOUT, cwd="/tmp"
+                argv, capture_output=True, text=True, timeout=SHARD_TIMEOUT, cwd="/tmp",
+                stdin=subprocess.DEVNULL,
             )
         except FileNotFoundError:
             # The binary itself is missing: the next candidate would fail
