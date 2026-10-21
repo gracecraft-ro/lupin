@@ -1095,6 +1095,62 @@ def test_start_loop_works_while_the_shared_session_runs_other_loops(monkeypatch,
     assert loop_runtime._read_metadata("widgets")["session"] == loop_runtime.SESSION_NAME
 
 
+def test_start_loop_uses_saved_checkout_doc_when_worktree_copy_is_stale(
+    monkeypatch, tmp_path: Path, make_checkout
+):
+    checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
+    doc = checkout / "docs" / "delegation-loop.md"
+    doc.parent.mkdir()
+    doc.write_text("old upstream instructions\n", encoding="utf-8")
+    _git_as(checkout, "add", "docs/delegation-loop.md")
+    _git_as(checkout, "commit", "-m", "add loop instructions")
+    _git_as(checkout, "push", "origin", "main")
+    _git_as(checkout, "fetch", "origin")
+    doc.write_text("new dashboard instructions\n", encoding="utf-8")
+
+    started, message = loop_runtime.start_loop(
+        "widgets",
+        platform="omp",
+        provider="openai-codex",
+        model="openai-codex/gpt-6-luna",
+    )
+
+    assert started, message
+    metadata = loop_runtime._read_metadata("widgets")
+    worktree_doc = Path(metadata["worktree"]) / "docs" / "delegation-loop.md"
+    assert worktree_doc.read_text(encoding="utf-8") == "old upstream instructions\n"
+    prompt = Path(metadata["prompt_file"]).read_text(encoding="utf-8")
+    assert str(doc) in prompt
+    assert "new dashboard instructions" in prompt
+    assert "old upstream instructions" not in prompt
+
+
+def test_start_loop_keeps_a_long_saved_doc_as_a_path(monkeypatch, tmp_path: Path, make_checkout):
+    checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
+    doc = checkout / "docs" / "delegation-loop.md"
+    doc.parent.mkdir()
+    long_doc = "new dashboard instructions\n" + (
+        "z" * loop_runtime.PROMPT_DOC_INLINE_LIMIT
+    )
+    doc.write_text(long_doc, encoding="utf-8")
+
+    started, message = loop_runtime.start_loop(
+        "widgets",
+        platform="omp",
+        provider="openai-codex",
+        model="openai-codex/gpt-6-luna",
+    )
+
+    assert started, message
+    metadata = loop_runtime._read_metadata("widgets")
+    worktree_doc = Path(metadata["worktree"]) / "docs" / "delegation-loop.md"
+    assert not worktree_doc.exists()
+    prompt = Path(metadata["prompt_file"]).read_text(encoding="utf-8")
+    assert str(doc) in prompt
+    assert long_doc not in prompt
+    assert "new dashboard instructions" not in prompt
+
+
 def test_start_loop_selects_profile_candidate_and_persists_it_for_recovery(
     monkeypatch, tmp_path: Path, make_checkout
 ):
@@ -1515,15 +1571,20 @@ def test_stop_keeps_an_ignored_ledger_file_outside_the_worktree(
 
 def test_next_prompt_names_the_kept_ledger_file_only_when_it_exists(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", tmp_path / "code")
     monkeypatch.delenv("LUPIN_LOOP_PROMPT_FILE", raising=False)
     kept = tmp_path / "handoffs" / "widgets.json"
 
-    before = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
+    before = Path(
+        loop_runtime._write_prompt("widgets", None, False, tmp_path / "worktree")
+    ).read_text(encoding="utf-8")
     assert str(kept) not in before
 
     kept.parent.mkdir()
     kept.write_text("{}\n", encoding="utf-8")
-    after = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
+    after = Path(
+        loop_runtime._write_prompt("widgets", None, False, tmp_path / "worktree")
+    ).read_text(encoding="utf-8")
     assert str(kept) in after
 
 
@@ -1545,15 +1606,20 @@ def test_stop_keeps_an_ignored_handoff_file_outside_the_worktree(
 
 def test_next_prompt_names_the_kept_handoff_file_only_when_it_exists(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", tmp_path / "code")
     monkeypatch.delenv("LUPIN_LOOP_PROMPT_FILE", raising=False)
     kept = tmp_path / "handoffs" / "widgets.HANDOFF.md"
 
-    before = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
+    before = Path(
+        loop_runtime._write_prompt("widgets", None, False, tmp_path / "worktree")
+    ).read_text(encoding="utf-8")
     assert str(kept) not in before
 
     kept.parent.mkdir()
     kept.write_text("# Handoff\n", encoding="utf-8")
-    after = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
+    after = Path(
+        loop_runtime._write_prompt("widgets", None, False, tmp_path / "worktree")
+    ).read_text(encoding="utf-8")
     assert str(kept) in after
 
 
@@ -2022,10 +2088,15 @@ def test_credentials_come_from_the_repo_of_the_loop(monkeypatch, tmp_path: Path)
 
 def test_a_numbered_loop_is_told_to_claim_its_issues(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", tmp_path / "code")
     monkeypatch.delenv("LUPIN_LOOP_PROMPT_FILE", raising=False)
 
-    first = Path(loop_runtime._write_prompt("widgets", None, False)).read_text(encoding="utf-8")
-    second = Path(loop_runtime._write_prompt("widgets~2", None, False)).read_text(encoding="utf-8")
+    first = Path(
+        loop_runtime._write_prompt("widgets", None, False, tmp_path / "worktree")
+    ).read_text(encoding="utf-8")
+    second = Path(
+        loop_runtime._write_prompt("widgets~2", None, False, tmp_path / "worktree")
+    ).read_text(encoding="utf-8")
 
     assert "You are the loop" not in first
     assert "You are the loop widgets~2. Other loops work on widgets on this machine" in second
