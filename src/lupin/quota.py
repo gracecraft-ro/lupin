@@ -523,6 +523,29 @@ def _account_labels(reports: list[dict]) -> list[str | None]:
     return labels
 
 
+def _reset_credits(report: dict) -> dict:
+    """`reset_credits` for one login's rows. `{}` when omp reports none.
+
+    `available` is omp's count. `expires_at` lists the known expiry times
+    of the available credits, in epoch ms, sorted.
+    """
+    credits = report.get("resetCredits")
+    if not isinstance(credits, dict) or not isinstance(credits.get("availableCount"), int):
+        return {}
+    credit_rows = credits.get("credits")
+    if not isinstance(credit_rows, list):
+        credit_rows = []
+    expires = [
+        quota_reset_timestamp(credit.get("expiresAt"))
+        for credit in credit_rows
+        if isinstance(credit, dict) and credit.get("status") == "available"
+    ]
+    return {"reset_credits": {
+        "available": credits["availableCount"],
+        "expires_at": sorted(ms for ms in expires if ms is not None),
+    }}
+
+
 def quota_usage() -> list[dict]:
     rc, out = run(["omp", "usage", "--json"])
     if rc != 0:
@@ -551,6 +574,8 @@ def quota_usage() -> list[dict]:
         if provider == "ollama":
             continue
         who = {"account": account} if account else {}
+        # Reset credits belong to the login, so every row of it carries them.
+        who.update(_reset_credits(report))
         limits = report.get("limits") or []
         if not limits:
             for note in report.get("notes") or ["no quota data reported"]:
