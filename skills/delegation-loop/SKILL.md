@@ -92,7 +92,7 @@ after it. For each other PR, do the first step that applies:
      once for each head SHA. Take the next item. Retry next cycle.
    - The reviewer reports that the fix worker's LEVEL is above its own: do not
      start a fix worker. Dispatch a reviewer from `lupin review-route --category
-     CATEGORY --size size-l --mode separate`.
+CATEGORY --size size-l --mode separate`.
 4. The PR has no review at its current head SHA: dispatch a reviewer. Do not
    wait for the worker to request one.
 5. The PR waits for a gate that is still running: wait for the result.
@@ -163,7 +163,7 @@ cycle does not stop work on a new issue. Work that is already running continues.
 ### Fix worker models
 
 1. Make FILE with `gh issue view <number> --repo OWNER/REPO --json
-   title,body,labels > FILE` for the linked issue, or `gh pr view` with the same
+title,body,labels > FILE` for the linked issue, or `gh pr view` with the same
    flags if no issue is linked. Run `lupin classify --issue-json FILE`. If it
    fails, use category `coding` and LEVEL `size-m`.
 2. Take LEVEL from the latest `Round` review on the PR. If there is none, LEVEL
@@ -181,11 +181,11 @@ cycle does not stop work on a new issue. Work that is already running continues.
    blocked PR. Post the reason and the head SHA as a `Loop:` PR comment.
 4. If there is no push 30 minutes after the fix worker starts, ask it for the
    result (Herdr: `herdr agent prompt NAME "report the result" --wait --timeout
-   120000`, with the agent name or its pane ID). If it has none, stop it (Herdr:
+120000`, with the agent name or its pane ID). If it has none, stop it (Herdr:
    `herdr pane close <pane_id>`).
 5. If the fix worker ended with no push, whoever started it posts a `Round N.`
    verdict review at the same head SHA, with the same findings and the line `The
-   fix worker did not push.` Its first line is `Round N. LEVEL: <LEVEL>.`, as in
+fix worker did not push.` Its first line is `Round N. LEVEL: <LEVEL>.`, as in
    "Output format" in `code-review`. Check the stall rule (step 3) before you
    post. That is the next round.
 6. `size-l` usually gives Opus. That is allowed here. Never use Fable without
@@ -231,10 +231,9 @@ lupin place 123 --json
 The roadmap ranks issues. The DAG view shows dependencies. Prefetch gets the
 latest issue or PR text and comments as markdown (`--json` gives the keyed
 object). Placement recommends a model, effort, and machine. It does not claim
-work or start an agent. Load the `triage` skill to decide what is ready. Check
-likely files and live work before you run issues in parallel. Run issues
-together only when their work does not overlap. `lupin quota` shows the shared
-Redis snapshot, refreshed with local provider data when this machine has
+work or start an agent. Delegate a subagent to run the `triage` skill to help prioritize or groom the backlog as needed - lupin roadmap depends on issues being properly triaged.
+Check likely files, comments, and live work before you run issues in parallel.
+Run issues together only when their work does not overlap. `lupin quota` shows the shared Redis snapshot, refreshed with local provider data when this machine has
 credentials. `route()` reads quota from the local machine, so the two results
 may differ.
 
@@ -365,13 +364,13 @@ does not recognize the agent.
 
 Agent states:
 
-|State|Meaning|What to do|
-|---|---|---|
-|`idle`|Ready for input|Send the next prompt|
-|`done`|Ready for input|Send the next prompt. The CLI state decides this, not the badge in the app|
-|`working`|The agent is busy|Wait or read output|
-|`blocked`|The agent stopped on a question or an approval|Read the output, then ask the owner. Do not answer for the owner|
-|`unknown`|Herdr cannot tell what the agent does|Not proof that it finished. Check the pane yourself|
+| State     | Meaning                                        | What to do                                                                 |
+| --------- | ---------------------------------------------- | -------------------------------------------------------------------------- |
+| `idle`    | Ready for input                                | Send the next prompt                                                       |
+| `done`    | Ready for input                                | Send the next prompt. The CLI state decides this, not the badge in the app |
+| `working` | The agent is busy                              | Wait or read output                                                        |
+| `blocked` | The agent stopped on a question or an approval | Read the output, then ask the owner. Do not answer for the owner           |
+| `unknown` | Herdr cannot tell what the agent does          | Not proof that it finished. Check the pane yourself                        |
 
 A timeout does not prove the text arrived, and it does not prove the text did
 not arrive. A prompt that reports a stall can also be delivered. Read the agent
@@ -432,9 +431,11 @@ only that branch to the fork, with `git push -u fork <branch>`. The PR base is
 `main` on upstream:
 
 <!-- markdownlint-disable MD013 -->
+
 ```sh
 gh pr create --repo OWNER/REPO --base main --head FORK_OWNER:<branch> --title "<title>" --body "Closes #N"
 ```
+
 <!-- markdownlint-enable MD013 -->
 
 The PR body has one line for each issue. Use `Closes #N` when the PR finishes
@@ -466,8 +467,8 @@ in one dispatch, with a separate verdict for each. Review complex or high-risk
 changes alone. Keep visual or 3D reviews to one or two PRs per dispatch. The
 reviewer must be capable of doing the issue and must not be below the worker's
 model tier. On a PR the loop owns, the reviewer uses `--size LEVEL` with the fix
-worker's LEVEL or higher. Prefer a reviewer one tier higher when quota allows.
-Use Opus sparingly. If the fix changes anything a person can see, the brief must
+worker's LEVEL or higher. Prefer a reviewer one tier higher when quota allows, but
+use frontier models sparingly. If the fix changes anything a person can see, the brief must
 tell the fix worker to capture new screenshots, even when the finding is not
 labeled visual. The fix worker attaches them after it pushes (see "Attach
 screenshots to the PR" in the `ship` skill).
@@ -488,7 +489,7 @@ a conflict, works in its worktree and follows these steps. Do not rebase:
    commit. A commit holds the text that was staged. The gate reads the working
    tree, not the commit, so a missing stage looks like a pass.
 4. Run `git diff --stat`. It must print nothing. If it prints a file, run `git
-   add FILE` for that file and run the check again.
+add FILE` for that file and run the check again.
 5. Run `git diff --stat HEAD`. It must list only the files you changed.
 6. Run `git commit`.
 7. Run `git diff --stat HEAD` again. It must print nothing. If it prints a file,
@@ -538,6 +539,7 @@ server for a feature branch.
    ```
 
    Then it restarts the server.
+
 3. Bind the server to `127.0.0.1` or to the Tailscale IP address. Never bind to
    `0.0.0.0`.
 4. Set `LUPIN_LOOP_STATE_DIR` to a scratch path. Do not point the preview at the
@@ -647,7 +649,7 @@ Use `lupin machines`, `lupin peek`, and `lupin attach` to check live work. On a
 Herdr worker, `herdr --session lupin-loops agent list` shows each loop's state,
 workspace, and pane in one call. Read the final diff and run the repo's required
 gate and a smoke check. A worker's success report is not proof. Re-read issue
-and PR comments before closure.
+and PR comments before closure. Use `lupin quota` to pace your spending.
 
 After the merge and the preview restart, check that the preview port answers.
 Run `curl -fsS -o /dev/null http://127.0.0.1:PORT/` on the preview machine. Use

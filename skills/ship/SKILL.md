@@ -2,7 +2,7 @@
 name: ship
 description: >-
   Finish a delegated GitHub issue from its acceptance checks through verification
-  and a clear report. Use this skill when implementing or finishing an issue,
+  and a clear report. Use this Lupin skill when implementing or finishing an issue,
   preparing its pull request, or reporting completed work.
 compatibility: Requires the repository's tools and GitHub CLI. Lupin and Redis are used when fleet claims are configured.
 ---
@@ -22,8 +22,9 @@ every GitHub comment that you post with `Loop:`.
 
    Use `lupin place 123 --json` for a model, effort, and machine suggestion. It
    does not claim or start the task.
-2. Check `pwd`, the branch, and `git status`. Use the issue's worktree. Do not
-   edit a shared main checkout that another loop may use.
+
+2. Check `pwd`, the branch, and `git status`. Use the issue's worktree. Unless directed
+   by the owner, avoid editing a shared main checkout that another loop may use.
 3. Read the acceptance checks. If they are unclear, report the gap before
    coding. Do not replace the requested behavior with a smaller change.
 4. For a review fix, read the PR's latest comments and reviews. Use the same
@@ -86,6 +87,7 @@ the error. Then go to "Report and release" below.
    It must be `https://github.com/<owner>/<repo>.git`. If it is not, or there is
    no `fork` remote, stop and report. Never run `git remote add`. `FORK_OWNER`
    is `<owner>`. Workers never push to `origin` or `main`.
+
 2. Find the feature branch with `git branch --show-current`. If the output is
    empty (detached, no branch name) or `main`, stop and report. Otherwise, run
    `git push -u fork <branch>`. Never push any other ref.
@@ -107,6 +109,7 @@ the error. Then go to "Report and release" below.
 
    Use `Closes #<issue>` when the PR finishes the issue. Use `Refs #<issue>`
    only when work stays open.
+
 4. Request review with one comment on the PR:
 
    ```sh
@@ -118,6 +121,7 @@ the error. Then go to "Report and release" below.
    prints. `<sha>` is the output of `git rev-parse HEAD`. If the comment fails,
    report the error and the PR number. Then go to step 5. Do not merge. Do not
    wait for approval. The owner merges the PR.
+
 5. Attach the screenshots for every visual change. See "Attach screenshots to
    the PR" below. Then go to "Report and release" below.
 6. If every push route fails, or PR creation fails, report the branch name and
@@ -139,6 +143,7 @@ covers screenshots, follow it. Otherwise follow this section.
    upload. Write the comment in `evidence/<issue-number>/report.md`. Show before
    and after, or the new screen if there is no before. Say what to look at. Use
    the same path in the body and in `--attach`:
+
    ```md
    Loop: Screenshots for PR #123.
    Before: ![before](./evidence/123/before.png)
@@ -157,6 +162,7 @@ covers screenshots, follow it. Otherwise follow this section.
    Text after `#` is the image's alt text. A path that the body names is
    replaced with the uploaded image. An attached file that the body does not
    name goes at the end. One command takes up to 50 files.
+
 4. Run `gh pr view <PR_NUMBER> --repo <owner>/<repo> --comments`. Each image in
    your comment must now be a `https://github.com/user-attachments/...` link. A
    `./evidence/...` path means the upload did not happen: follow the next
@@ -179,7 +185,7 @@ with `gh --version`. Upgrade, or report that you cannot attach. Do not skip it
 silently. Attach only a screenshot you opened and checked.
 
 If you could not capture a screenshot, post a PR comment that says so and why.
-Say so in your report too. The orchestrator then treats the PR as blocked.
+Say so in your report too. The orchestrator must escalate.
 
 Do not attach a non-image file, such as a 3D model. Before `lupin stop`, copy it
 to a durable location outside the worktree. In the PR comment, give the machine

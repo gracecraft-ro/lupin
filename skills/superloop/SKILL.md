@@ -1,7 +1,7 @@
 ---
 name: superloop
 description: >-
-  Supervise Lupin loops on one machine, by hand or with lupin supervise. Use it when a loop is blocked, when the monitor shows an alert, or when you must decide if the owner is needed.
+  Supervise Lupin loops on one machine, by hand or with lupin supervise. Use it when asked to supervise loops.
 compatibility: >-
   Requires Lupin, Herdr, and the delegation-loop skill on the supervisor host. Redis is required for ledger records.
 ---
@@ -10,6 +10,7 @@ compatibility: >-
 
 `lupin supervise` runs fixed rules and uses no model. An agent with this skill
 handles steps that need judgment: a blocked loop, an alert, or an unclear reply.
+Dynamic pricing, nuanced situation, or loops that require extra handholding may also need this.
 Do not copy the rule text into other files. Copy the text inside the quotes of
 `NUDGE_TEXT` in `<checkout>/src/lupin/supervise.py`. Do not copy the Python.
 
@@ -27,17 +28,16 @@ no text. Its verdict is `stopped` with the reason "waiting for the owner".
 
 Ask: can only a person supply or decide this?
 
-| Owner decision: wait for the owner | Not an owner decision: research, then act |
-|---|---|
-| Credentials: a token, password, login, or key | A rate limit, timeout, or other transient error |
-| Money: a paid plan, purchase, or budget | A failed test, gate, push, or merge conflict |
-| Hardware: a machine or device | A missing label or tool that the repo docs give a fallback for |
-| A product or policy choice | A technical choice between options |
-| An action that the repo rules reserve for a person | A model or quota limit (see "Hourly pass") |
+| Owner decision: wait for the owner                 | Not an owner decision: research, then act                      |
+| -------------------------------------------------- | -------------------------------------------------------------- |
+| Credentials: a token, password, login, or key      | A rate limit, timeout, or other transient error                |
+| Money: a paid plan, purchase, or budget            | A failed test, gate, push, or merge conflict                   |
+| Hardware: a machine or device                      | A missing label or tool that the repo docs give a fallback for |
+| A product or policy choice                         | A technical choice between options                             |
+| An action that the repo rules reserve for a person | A model or quota limit (see "Hourly pass")                     |
 
-If you are not sure, the orchestrator (the main agent of a loop) researches
-first. A research worker answers one question. It reads and runs checks. It does
-not change code, issues, pull requests, or loops.
+If you are not sure, dispatch researchers first. A research worker answers one question.
+It gathers information and writes an informed report. It does not change code, issues, pull requests, or loops.
 
 ## Blocked loop
 
@@ -76,8 +76,8 @@ Use this only when `lupin supervise` did not nudge the loop.
 
 ## Hourly pass
 
-Each hourly block in the monitor log starts with `=== hourly check`. The owner
-gives the path of the monitor log.
+Each hourly block in the monitor log starts with `=== hourly check`.
+Check the burn rate.
 
 1. Read the last 40 lines:
 
@@ -85,27 +85,15 @@ gives the path of the monitor log.
    tail -n 40 <monitor-log>
    ```
 
-2. Check the time of the newest header, in Los Angeles time. If it is more than
-   70 minutes old, record `missed-pass`.
-3. For `roundsmith`, `lupin`, and `bodysmith`, the block must show `running`.
+2. For `roundsmith`, `lupin`, and `bodysmith`, the block must show `running`.
    Each `ALERT` line is a block. Apply "Decide".
-4. Each loop must show the GPT-6-Luna header. For an `ALERT`, read the pane with
-   `lupin peek REPO 25`.
-5. Check Claude's 7-day quota:
-
-   ```sh
-   lupin quota --json | jq '.claude.rows[] | select(.duration == "P7D") | .used_pct'
-   ```
-
-   If `used_pct` is more than 90, defer all work routed to Claude. Keep the
-   GPT-6-Luna work running. If you cannot read `used_pct`, record the block and
-   treat the quota as blocked.
-
-6. If you cannot finish a pass, record `missed-pass` with the reason.
+3. For an `ALERT`, read the pane with `lupin peek REPO 25`.
+4. Check the burn rate with `lupin quota`; if a loop is burning through usage faster than the daily budget, adjust accordingly. Evenly spread out usage and budget 10% of weekly headroom for the owner to use at their discretion, _unless_ the weekly limit is 3 hours from resetting. Always try to use `bmo` or other free models as needed to triage, etc.
+5. Occasionally inspect the workers to identify areas where ANY process could be streamlined or improved; proactively ticket anything you see that seems less than optimal. E.g. unpushed local changes, confusing or brittle instructions, wasteful spend, failure to trigger ui-pressure-tests, doc bloat, etc.
 
 Do not start a model run unless you can read
 `~/.local/state/lupin/model-snapshot.json`. If you cannot read it, record the
-block. Do not start a loop for the repos `field-trip` or `ghostbook.nix`.
+block.
 
 ## Record
 
@@ -130,8 +118,9 @@ lupin ledger read OWNER/REPO --limit 20
 
 ## Stop
 
-The watch ends when the owner tells you to stop, or when `lupin loops --json`
-shows no loop with `"state": "running"` for `roundsmith`, `lupin`, or
-`bodysmith`. Record the end with status `stopped`. Run the `handoff` skill.
-Include the last hourly pass time, each open block, and each waiting owner
-decision.
+There will always be work to do. The superloop ends when the owner tells you to stop.
+
+However, after 24 hours, if you haven't been stopped, you may pass your session's superloop torch to the next superloop.
+
+When you are wrapping up, record the end with status `stopped`. Run the `handoff` skill.
+Include the last hourly pass time, each open block, and the executive summary.
