@@ -9,7 +9,7 @@ Lupin runs coding-agent loops on a group of machines (a fleet). It has 4 jobs:
 4. **Fleet.** It shares issue claims, quests, machine records, quota, and events
    through Redis. It ranks open issues and starts loops on workers.
 
-> **Status:** Early software. Some defaults and data files are specific to the
+> **Status:** Early software. Many defaults and data files are specific to the
 > owner's fleet. Read [Known limits](#known-limits) before you install it.
 
 ## Requirements
