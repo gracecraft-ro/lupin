@@ -501,29 +501,14 @@ def test_release_keeps_a_lock_that_another_holder_has(redis_port, flush_redis):
     assert _raw_client(redis_port).get(_lock_key("issues:open")) == "other-caller"
 
 
-# The command list from docs/redis-schema.md, "ACL command list". It has no
-# MULTI and no WATCH.
-_FLEET_ACL_COMMANDS = (
-    "PING GET SET DEL EXPIRE PEXPIRE TTL ZADD ZREM ZSCORE ZCARD ZRANGE "
-    "ZREMRANGEBYSCORE XADD XRANGE XREVRANGE SCAN EVAL EVALSHA SCRIPT|LOAD SCRIPT|EXISTS"
-).split()
-
-
-def test_lock_works_with_the_fleet_acl(auth_redis_port, monkeypatch):
+def test_lock_works_with_the_fleet_acl(auth_redis_port, fleet_acl_kw, monkeypatch):
     """A user with only the fleet's commands takes the lock, fetches,
     publishes, and releases. No ACL error."""
     admin = redis_lib.Redis(
         host="127.0.0.1", port=auth_redis_port, password="test-pass", decode_responses=True
     )
-    admin.execute_command(
-        "ACL", "SETUSER", "fleet", "reset", "on", ">fleet-pw", "~lupin:*",
-        *(f"+{command.lower()}" for command in _FLEET_ACL_COMMANDS),
-    )
     monkeypatch.delenv("LUPIN_GH_CANONICAL_FETCHER")
-    connection = {
-        "redis_host": "127.0.0.1", "redis_port": auth_redis_port,
-        "redis_username": "fleet", "redis_password": "fleet-pw",
-    }
+    connection = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, **fleet_acl_kw}
     lock_key = _lock_key("issues:open", repo="acl/repo")
     seen = {}
 
@@ -542,7 +527,6 @@ def test_lock_works_with_the_fleet_acl(auth_redis_port, monkeypatch):
         assert admin.get(f"{gh_cache.PREFIX}gh-cache:acl/repo:issues:open") is not None
     finally:
         admin.delete(lock_key, f"{gh_cache.PREFIX}gh-cache:acl/repo:issues:open")
-        admin.execute_command("ACL", "DELUSER", "fleet")
 
 
 def test_unset_setting_never_fetches_when_redis_is_down(closed_port, monkeypatch):

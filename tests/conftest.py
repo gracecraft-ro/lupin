@@ -112,6 +112,26 @@ def no_multi_kw(auth_redis_port):
     admin.execute_command("ACL", "DELUSER", "no-multi")
 
 
+# The command list from docs/redis-schema.md, "ACL command list". It has no
+# PTTL, MULTI, or WATCH.
+FLEET_ACL_COMMANDS = (
+    "PING GET SET DEL EXPIRE PEXPIRE TTL ZADD ZREM ZSCORE ZCARD ZRANGE "
+    "ZREMRANGEBYSCORE XADD XRANGE XREVRANGE SCAN EVAL EVALSHA SCRIPT|LOAD SCRIPT|EXISTS"
+).split()
+
+
+@pytest.fixture
+def fleet_acl_kw(auth_redis_port):
+    """Connection kwargs for a user with only the fleet's commands, on `lupin:*` keys."""
+    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
+    admin.execute_command(
+        "ACL", "SETUSER", "fleet", "reset", "on", ">fleet-pw", "~lupin:*",
+        *(f"+{command.lower()}" for command in FLEET_ACL_COMMANDS),
+    )
+    yield {"redis_username": "fleet", "redis_password": "fleet-pw"}
+    admin.execute_command("ACL", "DELUSER", "fleet")
+
+
 @pytest.fixture
 def no_pttl_kw(auth_redis_port):
     """Connection kwargs for a user that can run everything except PTTL."""
