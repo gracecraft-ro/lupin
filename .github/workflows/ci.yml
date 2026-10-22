@@ -1,4 +1,4 @@
-# Runs `nix flake check` on each pull request to main or release/next.
+# Runs `nix flake check` on each pull request to main.
 # `nix flake check` checks the host system, so the job runs once per system.
 # The workflow checks all three systems the flake has outputs for.
 # The repository is public, so the x86_64-linux and aarch64-darwin legs use
@@ -20,7 +20,7 @@ name: CI
 # This is a note only; the trigger below and the behavior do not change.
 on:
   pull_request_target:
-    branches: [main, release/next]
+    branches: [main]
 
 permissions:
   contents: read

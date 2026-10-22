@@ -3,7 +3,7 @@ name: triage
 description: >-
   Prioritize GitHub issues and choose the next work to delegate. Use this
   skill when sorting a backlog, applying issue labels, checking dependencies,
-  or preparing an issue for Lupin routing.
+  or preparing an issue for Lupin routing. Please delegate this to an economical model.
 compatibility: Requires Lupin and GitHub CLI. Redis is required for fleet claims.
 ---
 
@@ -92,12 +92,35 @@ Write the `Duplicates` list in your reply to the orchestrator. Begin it with a
 line that reads `Duplicates:`. Then write one line per pair:
 `#N ~ #M — verdict: reason.` If no pair is similar, write `Duplicates: none.`
 
-Triage only reads issues and decides. Do not close an issue, change its labels,
-or post a comment during triage. Label and comment changes happen only in
-repository setup and in the claim step below.
+Close the duplicates.
+
+## Writes that triage may make
+
+Triage may make these writes on the issues it reads:
+
+- **Labels.** Apply the repository's priority label and size label to each open
+  issue that does not have them. Apply the type and blocker labels from the
+  repository's label map when they apply. Do this when you decide the issue's
+  priority and size. Do not remove a label that a person set.
+- **Native blocked-by links.** Add a link when you find that one issue must
+  finish before another. Add it in GitHub's issue dependency feature. Do this
+  when you check dependencies.
+- **Comments.** Post a comment only to record a decision that a later reader
+  needs, for example the reason for a blocker. Start it with `Loop:`.
+
+Please also group / structure issues into epics, mark issues as sub-issues, etc. 
+
+You may close an addressed issue during triage. You may revise an issue's title or body.
+Claim labels and claim comments belong to the claim step below.
+
+A dependency that is only text ("Depends on #N") does not appear in
+`lupin roadmap --dag`. That command reads native blocked-by links only. Treat a
+text dependency as a blocker when you decide what to dispatch. Then add the
+native link, so `--dag` and `--stage blocked` show it.
 
 ## Route and reserve the issue
 
+If you are prepared to route and reserve the issue: 
 From the issue's repository checkout, `lupin place 123 --json` classifies the
 issue, recommends a model and effort, and ranks available machines. It does
 not claim the issue or start an agent. `lupin quota` displays the shared Redis
@@ -132,7 +155,7 @@ start an agent or disable quota pacing. Do not claim those issues again.
 
 ## Handoff
 
-Give the worker a short brief:
+Finish with a a short brief:
 
 - Issue number, goal, and acceptance checks.
 - Current comments and open dependencies.
