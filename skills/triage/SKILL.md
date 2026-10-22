@@ -3,7 +3,7 @@ name: triage
 description: >-
   Prioritize GitHub issues and choose the next work to delegate. Use this
   skill when sorting a backlog, applying issue labels, checking dependencies,
-  or preparing an issue for Lupin routing.
+  or preparing an issue for Lupin routing. Please delegate this to an economical model.
 compatibility: Requires Lupin and GitHub CLI. Redis is required for fleet claims.
 ---
 
@@ -91,6 +91,8 @@ If either issue has the `claimed` label, use `overlap` or `not duplicate`. Use
 Write one line per pair under `Duplicates`:
 `#N ~ #M — verdict: reason.`
 
+Close the duplicates.
+
 ## Writes that triage may make
 
 Triage may make these writes on the issues it reads:
@@ -105,7 +107,9 @@ Triage may make these writes on the issues it reads:
 - **Comments.** Post a comment only to record a decision that a later reader
   needs, for example the reason for a blocker. Start it with `Loop:`.
 
-Do not close an issue during triage. Do not edit an issue's title or body.
+Please also group / structure issues into epics, mark issues as sub-issues, etc. 
+
+You may close an addressed issue during triage. You may revise an issue's title or body.
 Claim labels and claim comments belong to the claim step below.
 
 A dependency that is only text ("Depends on #N") does not appear in
@@ -115,6 +119,7 @@ native link, so `--dag` and `--stage blocked` show it.
 
 ## Route and reserve the issue
 
+If you are prepared to route and reserve the issue: 
 From the issue's repository checkout, `lupin place 123 --json` classifies the
 issue, recommends a model and effort, and ranks available machines. It does
 not claim the issue or start an agent. `lupin quota` displays the shared Redis
@@ -148,7 +153,7 @@ start an agent or disable quota pacing. Do not claim those issues again.
 
 ## Handoff
 
-Give the worker a short brief:
+Finish with a a short brief:
 
 - Issue number, goal, and acceptance checks.
 - Current comments and open dependencies.
