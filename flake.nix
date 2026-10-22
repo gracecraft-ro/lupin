@@ -83,6 +83,10 @@
               # tests/conftest.py starts `redis-server` from PATH.
               pkgs.redis
             ];
+            # uv puts .venv in the checkout by default. /code is shared with the Mac.
+            shellHook = ''
+              export UV_PROJECT_ENVIRONMENT="$HOME/.venvs/lupin"
+            '';
           };
         }
       );
