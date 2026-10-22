@@ -73,6 +73,27 @@ benchmark category covers both.
 - Use `completely-blocked-on-human` only for a real human-only blocker. Record
   the exact missing action. Work on other issues while it is blocked.
 
+## Check for duplicate issues
+
+Before you finish the `Duplicates` list, check each pair that looks similar.
+
+1. Read both issue bodies and comments.
+2. Check both issues' labels, including `claimed`.
+3. Check for open pull requests that reference either issue.
+4. Choose one verdict:
+   - `duplicate`: The issues ask for the same change. Name the issue to keep.
+   - `overlap`: The issues have different scopes. Name both and state the split.
+   - `not duplicate`: The issues ask for different changes. Give one reason.
+
+If either issue has the `claimed` label, use `overlap` or `not duplicate`. Use
+`duplicate` only if the owner confirms it.
+
+Write one line per pair under `Duplicates`:
+`#N ~ #M — verdict: reason.`
+
+Do not close an issue, change its labels, or post a comment on an issue during
+triage.
+
 ## Route and reserve the issue
 
 From the issue's repository checkout, `lupin place 123 --json` classifies the
