@@ -419,7 +419,7 @@ Each run has its own Git worktree in `worktrees/<repo>/` in the loop state
 directory. A worktree is a second working copy of the repo, with its own files
 and branch. This one is on a new branch, `lupin-loop/<time>`. `run` runs `git
 fetch origin` first. The branch starts at the remote default branch: the target
-of `origin/HEAD`, or else `origin/main` or `origin/master`. If the fetch fails,
+of `origin/HEAD`, or else `origin/main`. If the fetch fails,
 `run` refuses to start. The main checkout in `LUPIN_LOOP_CODE_DIR` is never the
 agent's working directory.
 

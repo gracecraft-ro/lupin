@@ -63,7 +63,7 @@ herdr worktree create --branch <branch> --base origin/main --cwd <checkout>
 If the checkout has neither an `origin` nor a `fork` remote, stop. Report the
 missing remote. Add `fork` only as step 3 says.
 
-`lupin run` starts from `origin/HEAD`, or else `origin/main` or `origin/master`.
+`lupin run` starts from `origin/HEAD`, or else `origin/main`.
 
 ## Pull request and review
 
