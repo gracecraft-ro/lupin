@@ -146,6 +146,11 @@ MODEL_TIER_ORDER = tiers_config.TIER_ORDER
 def _model_tiers_path() -> str:
     return tiers_config.path(MODEL_TIERS_PATH)
 
+def _model_tiers_source_label() -> str:
+    if tiers_config.SETTING in os.environ:
+        return os.path.basename(_model_tiers_path())
+    return "modules/ai/model-tiers.json"
+
 # --------------------------------------------------------------------------
 # running read-only probes
 # --------------------------------------------------------------------------
@@ -2160,7 +2165,7 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
     body.extend([
         "<h2>Routing by task category</h2>",
         "<p class=dim>Read from <code>"
-        f"{esc(_model_tiers_path())}</code>. Each tier is an ordered fallback "
+        f"{esc(_model_tiers_source_label())}</code>. Each tier is an ordered fallback "
         "chain: the first entry is tried first, then the next. A category "
         "with no entry for a tier escalates to the next tier up. The "
         "&middot; note after each pick is today's live match (issue #16's "
