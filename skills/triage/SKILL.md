@@ -17,15 +17,15 @@ issue comments before making a decision. An issue body can be out of date.
 From a configured repository checkout, run:
 
 ```sh
-lupin roadmap --repo REPO --stage all --json
+lupin roadmap --repo OWNER/REPO --stage all --json
 lupin roadmap --dag --json
 lupin review-route --prefetch 123 --repo OWNER/REPO
 ```
 
 `roadmap` ranks open work. `roadmap --dag` shows issue dependencies across
 enabled repositories. `review-route --prefetch` fetches issue or pull request
-text and comments; it does not choose a model. Omit `--repo` when Lupin's
-enabled-repository list is the intended scope.
+text and comments; it does not choose a model. For `roadmap`, add `--repo
+OWNER/REPO` to read one repository. Omit it to read every enabled repository.
 
 Use the repository's label map if it has one. Keep its priority, size, type,
 and blocker labels. Use a separate `claimed` label for active work. Add it
@@ -75,7 +75,7 @@ benchmark category covers both.
 
 ## Check for duplicate issues
 
-Before you finish the `Duplicates` list, check each pair that looks similar.
+Before you write the `Duplicates` list, check each pair of similar issues.
 
 1. Read both issue bodies and comments.
 2. Check both issues' labels, including `claimed`.
@@ -88,8 +88,9 @@ Before you finish the `Duplicates` list, check each pair that looks similar.
 If either issue has the `claimed` label, use `overlap` or `not duplicate`. Use
 `duplicate` only if the owner confirms it.
 
-Write one line per pair under `Duplicates`:
-`#N ~ #M — verdict: reason.`
+Write the `Duplicates` list in your reply to the orchestrator. Begin it with a
+line that reads `Duplicates:`. Then write one line per pair:
+`#N ~ #M — verdict: reason.` If no pair is similar, write `Duplicates: none.`
 
 Close the duplicates.
 
@@ -140,9 +141,10 @@ lupin release-claim OWNER/REPO#123 --holder SESSION
 ```
 
 A claim is stored in Redis. It does not add a GitHub label or comment, and it
-does not store the worktree path. After the claim succeeds, the claim owner
-adds the `claimed` label and comments with the machine, worktree, branch, and
-holder. When the claim ends, remove the label and comment with the result.
+does not store the worktree path. After the claim succeeds, the agent that made
+the claim adds the `claimed` label and a comment with the machine, worktree,
+branch, and holder. When the claim ends, remove the label and comment with the
+result.
 Start each comment with `Loop:`.
 Do not mark an issue as claimed if the Redis claim fails. Lupin has no local
 claim fallback.

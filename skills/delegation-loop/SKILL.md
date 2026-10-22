@@ -211,8 +211,9 @@ for root in "$HOME/.claude/skills" "$HOME/.pi/agent/skills" "$HOME/.omp/agent/sk
 done
 ```
 
-Start a new agent session and confirm it loads `/delegation-loop`, `/triage`,
-`/ship`, `/code-review`, `/handoff`, and `/ui-pressure-test`. Do not start a
+Start a new agent session and confirm it loads the `delegation-loop`, `triage`,
+`ship`, `code-review`, `handoff`, and `ui-pressure-test` skills. In Claude Code,
+run `/name` for each. In another agent, read each `SKILL.md`. Do not start a
 worker if a skill it needs is missing.
 
 ## Read the backlog
@@ -230,11 +231,12 @@ lupin place 123 --json
 The roadmap ranks issues. The DAG view shows dependencies. Prefetch gets the
 latest issue or PR text and comments as markdown (`--json` gives the keyed
 object). Placement recommends a model, effort, and machine. It does not claim
-work or start an agent. Use `/triage` to decide what is ready. Check likely
-files and live work before you run issues in parallel. Run issues together only
-when their work does not overlap. `lupin quota` shows the shared Redis snapshot,
-refreshed with local provider data when this machine has credentials. `route()`
-reads quota from the local machine, so the two results may differ.
+work or start an agent. Load the `triage` skill to decide what is ready. Check
+likely files and live work before you run issues in parallel. Run issues
+together only when their work does not overlap. `lupin quota` shows the shared
+Redis snapshot, refreshed with local provider data when this machine has
+credentials. `route()` reads quota from the local machine, so the two results
+may differ.
 
 ## Claim and label work
 

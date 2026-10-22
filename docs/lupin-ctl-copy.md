@@ -234,7 +234,7 @@ Claimed      a loop has assigned itself the issue
 lupin re-reads GitHub on every command and caches for 60s. `--refresh` forces a re-read.
 Missing or broken data is reported, not guessed:
 ```
-warning: #440 has no priority label. Sorted last.
+warning: api-gateway: 1 open issue has no priority label (sorted last)
 warning: #431 depends on #999, which does not exist. Treated as unblocked.
 ```
 

@@ -299,8 +299,8 @@ information order, control visibility, or workflow complexity is the problem.
 File the visual review and the design-system check as design requests. Each
 one gets its screenshot and the file the rule comes from.
 
-Use the repo's `/triage` skill and issue label map. Give every ticket a `P0` to
-`P3` priority, mapped to the repo's labels when needed:
+Use the `triage` skill and the repo's issue label map. Give every ticket a
+`P0` to `P3` priority, mapped to the repo's labels when needed:
 
 - `P0`: a core task is broken or very disruptive, or the app loses or exposes
   important user data. Escalate at once. Stop a test if continuing could cause
