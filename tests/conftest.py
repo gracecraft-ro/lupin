@@ -133,6 +133,15 @@ def fleet_acl_kw(auth_redis_port):
 
 
 @pytest.fixture
+def no_pttl_kw(auth_redis_port):
+    """Connection kwargs for a user that can run everything except PTTL."""
+    admin = redis_lib.Redis(host="127.0.0.1", port=auth_redis_port, password="test-pass")
+    admin.execute_command("ACL", "SETUSER", "no-pttl", "on", ">no-pttl-pw", "~*", "+@all", "-pttl")
+    yield {"redis_username": "no-pttl", "redis_password": "no-pttl-pw"}
+    admin.execute_command("ACL", "DELUSER", "no-pttl")
+
+
+@pytest.fixture
 def closed_port() -> int:
     """A TCP port nothing listens on -- exercises the unreachable-redis path."""
     return _free_port()

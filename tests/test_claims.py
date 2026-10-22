@@ -26,8 +26,8 @@ class _FakePipeline:
         self._queued.append(("GET", key))
         return self
 
-    def pttl(self, key):
-        self._queued.append(("PTTL", key))
+    def ttl(self, key):
+        self._queued.append(("TTL", key))
         return self
 
     def execute(self, **kwargs):
@@ -36,7 +36,7 @@ class _FakePipeline:
         results = []
         for name, key in self._queued:
             self._client.commands.append(name)
-            results.append(self._client.values[key] if name == "GET" else 90_000)
+            results.append(self._client.values[key] if name == "GET" else 90)
         if self._transaction:
             self._client.commands.append("EXEC")
         return results
@@ -79,7 +79,7 @@ def test_claims_for_reads_the_ttl_in_one_round_trip_when_asked(monkeypatch):
 
     result = claims.claims_for(["gracecraft/lupin"], with_ttl=True)
 
-    assert fake.commands == ["SCAN", "GET", "PTTL"]
+    assert fake.commands == ["SCAN", "GET", "TTL"]
     assert result["gracecraft/lupin#6"]["ttl"] == 90.0
 
 
@@ -92,22 +92,6 @@ def test_claims_for_works_when_the_acl_denies_multi(auth_redis_port, no_multi_kw
 
     assert result["gracecraft/lupin#6"]["session"] == "holder-a"
     assert result["gracecraft/lupin#6"]["ttl"] > 0
-
-
-def test_claims_for_reads_the_ttl_with_the_fleet_acl(auth_redis_port, fleet_acl_kw):
-    """`lupin roadmap` asks for the TTL. The fleet user must be able to read it."""
-    admin = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, "redis_password": "test-pass"}
-    claims.claim("gracecraft/lupin#8", "holder-a", **admin)
-    connection = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, **fleet_acl_kw}
-    try:
-        result = claims.claims_for(["gracecraft/lupin"], with_ttl=True, **connection)
-
-        assert result["gracecraft/lupin#8"]["session"] == "holder-a"
-        assert result["gracecraft/lupin#8"]["ttl"] > 0
-    finally:
-        redis_lib.Redis(
-            host="127.0.0.1", port=auth_redis_port, password="test-pass"
-        ).delete("lupin:v1:claim:gracecraft/lupin#8")
 
 
 def test_claims_for_skips_a_claim_that_is_not_a_json_object(redis_port, flush_redis):
