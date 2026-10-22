@@ -724,7 +724,8 @@ class ModelTierTests(unittest.TestCase):
         ):
             page = serve.render_model_tiers().decode()
 
-        self.assertIn(f"<code>{self.tiers_path}</code>", page)
+        self.assertIn("<code>model-tiers.json</code>", page)
+        self.assertNotIn(self.tiers_path, page)
         self.assertIn("opencode-go/custom", page)
 
     def test_model_tiers_route_and_dashboard_link(self):

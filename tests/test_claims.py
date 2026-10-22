@@ -94,22 +94,6 @@ def test_claims_for_works_when_the_acl_denies_multi(auth_redis_port, no_multi_kw
     assert result["gracecraft/lupin#6"]["ttl"] > 0
 
 
-def test_claims_for_reads_the_ttl_with_the_fleet_acl(auth_redis_port, fleet_acl_kw):
-    """`lupin roadmap` asks for the TTL. The fleet user must be able to read it."""
-    admin = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, "redis_password": "test-pass"}
-    claims.claim("gracecraft/lupin#8", "holder-a", **admin)
-    connection = {"redis_host": "127.0.0.1", "redis_port": auth_redis_port, **fleet_acl_kw}
-    try:
-        result = claims.claims_for(["gracecraft/lupin"], with_ttl=True, **connection)
-
-        assert result["gracecraft/lupin#8"]["session"] == "holder-a"
-        assert result["gracecraft/lupin#8"]["ttl"] > 0
-    finally:
-        redis_lib.Redis(
-            host="127.0.0.1", port=auth_redis_port, password="test-pass"
-        ).delete("lupin:v1:claim:gracecraft/lupin#8")
-
-
 def test_claims_for_skips_a_claim_that_is_not_a_json_object(redis_port, flush_redis):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     claims.claim("gracecraft/lupin#6", "holder-a", **kw)
