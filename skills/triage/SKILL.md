@@ -52,6 +52,39 @@ issue with CAD and UI terms routes as `cad-spatial`. Split visual and CAD work
 into evaluator lanes, or route each lane separately. Do not assume one
 benchmark category covers both.
 
+## Check for duplicates
+
+Before you finish the Duplicates list, check each possible pair. Read both
+issue bodies and their latest comments. Check the labels on both issues,
+including `claimed`, and check for open pull requests linked to either issue.
+Use the body and comments to compare the requested changes, not the titles.
+
+Give each pair one verdict and one reason:
+
+- `duplicate`: the issues ask for the same change. Name the issue to keep.
+- `overlap`: the issues ask for different work. Name both issues and say how
+  to split the work.
+- `not duplicate`: say in one line why the requests differ.
+
+Write one line per pair in the Duplicates list. If either issue has the
+`claimed` label, use `overlap` or `not duplicate` unless the owner confirms
+that the issues are duplicates. Do not close issues, change labels, or comment
+on either issue during this check. The owner decides whether to close an issue.
+
+Rerun on 2026-10-20 inputs:
+
+- bodysmith #660 and #531 — duplicate; keep #660. Both request moving CI to
+  the ralpha ARM64 runner because hosted billing blocks jobs. #660 adds
+  concurrency, architecture review, and fork-secrets safety; #531 gives
+  evidence and the same billing cause. #660 has no labels; #531 has no labels.
+  #660's linked PR #663 is merged; no open PR is linked to either issue.
+- lupin #246 and #88 — overlap; keep both. #246 changes the reusable UI test
+  skill and proposes a separate UX test skill; #88 records one completed
+  Lupin UI test and its findings. Split reusable test procedure from the test
+  record and its findings. #246 has `enhancement` and `claimed`; #88 has no
+  labels. No open PR is linked to either issue.
+
+
 ## Decide what is ready
 
 - Dispatch the PR work first in each cycle. Then use the free worker slots for

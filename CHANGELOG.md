@@ -6,7 +6,7 @@ All notable changes to Lupin. The version has one source:
 ## Unreleased
 
 ### Added
-
+- The triage skill checks issue bodies, comments, labels, and open pull requests before it records duplicate verdicts.
 - `lupin --version` prints the package version. The flake reads the same
   version from `pyproject.toml`.
 - `docs/release.md` gives the release steps.
