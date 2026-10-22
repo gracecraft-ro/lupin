@@ -274,7 +274,7 @@ def claims_for(
     Pass `client` to use a ready client, as the debrief path does. Without
     it, a client is made from the connection arguments.
 
-    With `with_ttl=True`, each value also has `"ttl"`: the seconds Redis
+    With `with_ttl=True`, each value also has `"ttl"`: the whole seconds Redis
     still holds the claim. It is `None` if the key has no expiry.
 
     `strict=True` raises `ValueError` for a claim that is not a JSON object.
@@ -308,15 +308,15 @@ def claims_for(
             return result
         # One batch for all keys. GET, not MGET: a key of the wrong type
         # raises an error, where MGET returns None. With `with_ttl`, each key
-        # also gets a PTTL. No MULTI: the fleet ACL does not allow it. A
-        # claim that expires between GET and PTTL only loses its TTL. Build
+        # also gets a TTL. No MULTI: the fleet ACL does not allow it. A
+        # claim that expires between GET and TTL only loses its TTL. Build
         # the batch inside the retry: execute() clears it.
         def read_claims():
             pipe = client.pipeline(transaction=False)
             for key in wanted:
                 pipe.get(key)
                 if with_ttl:
-                    pipe.pttl(key)
+                    pipe.ttl(key)
             return pipe.execute(raise_on_error=True)
 
         replies = _call_with_retry(read_claims)
@@ -337,8 +337,8 @@ def claims_for(
                         skipped.append(f"claim:{target}")
                     continue
             if with_ttl:
-                ttl_ms = replies[i * per_key + 1]
-                claim["ttl"] = ttl_ms / 1000 if ttl_ms >= 0 else None
+                ttl_s = replies[i * per_key + 1]
+                claim["ttl"] = ttl_s if ttl_s >= 0 else None
             result[target] = claim
         return result
     except redis.exceptions.AuthenticationError as exc:
