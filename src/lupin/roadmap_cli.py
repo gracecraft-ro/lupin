@@ -114,7 +114,7 @@ def build_roadmap(
     issues, and compute each issue's status.
 
     Returns {"repos": {repo: [node, ...]}, "cycles": [...], "warnings": [...],
-    "claims": [...]}.
+    "unprioritized": {repo: [number, ...]}, "claims": [...]}.
     Each node: number, title, priority, status (ready/blocked/claimed),
     claimedBy (session string or None), blockedBy (resolved open blockers).
     Each claim: target, host, holder, age_seconds, ttl_seconds. It lists
@@ -124,6 +124,7 @@ def build_roadmap(
     location itself when it is None (see `gh_cache._resolve`).
     """
     warnings: list[str] = []
+    unprioritized: dict[str, list[int]] = {}
     issues_by_repo: dict[str, dict[int, dict]] = {}
     open_numbers: dict[str, set[int]] = {}
     owners: dict[str, str | None] = {}
@@ -187,7 +188,7 @@ def build_roadmap(
             labels = roadmap._label_names(issue)
             priority = roadmap._priority(labels)
             if priority == "P4":
-                warnings.append(f"#{number} has no priority label. Sorted last.")
+                unprioritized.setdefault(repo, []).append(number)
             active_blockers = []
             for blocker_repo, blocker_number in _blocked_by_targets(dag["repos"], repo, number):
                 if blocker_repo not in open_numbers:
@@ -231,6 +232,7 @@ def build_roadmap(
         "repos": nodes_by_repo,
         "cycles": dag.get("cycles", []),
         "warnings": warnings,
+        "unprioritized": unprioritized,
         "claims": sorted(claim_rows, key=_claim_sort_key),
     }
 
@@ -351,7 +353,7 @@ def _cycles_json(cycles: list[list[dict]]) -> list[list[dict]]:
 
 def to_json(model: dict, limit: int, stage: str) -> dict:
     out = {
-        "warnings": model["warnings"],
+        "warnings": _json_warnings(model),
         "cycles": _cycles_json(model["cycles"]),
         "repos": {},
         "claims": model["claims"],
@@ -497,7 +499,7 @@ def render_dag(model: dict, multi_repo: bool) -> tuple[str, int]:
 
 def dag_to_json(model: dict, multi_repo: bool) -> dict:
     if model["cycles"]:
-        return {"cycles": _cycles_json(model["cycles"]), "warnings": model["warnings"]}
+        return {"cycles": _cycles_json(model["cycles"]), "warnings": _json_warnings(model)}
     lookup = _node_lookup(model)
     nodes_json = [
         {
@@ -515,7 +517,12 @@ def dag_to_json(model: dict, multi_repo: bool) -> dict:
         {"from": {"repo": s[0], "number": s[1]}, "to": {"repo": d[0], "number": d[1]}}
         for s, d in _edges_for_scope(model)
     ]
-    return {"nodes": nodes_json, "edges": edges_json, "cycles": [], "warnings": model["warnings"]}
+    return {
+        "nodes": nodes_json,
+        "edges": edges_json,
+        "cycles": [],
+        "warnings": _json_warnings(model),
+    }
 
 
 def _append_warnings(text: str, warnings: list[str]) -> str:
@@ -523,6 +530,26 @@ def _append_warnings(text: str, warnings: list[str]) -> str:
         return text
     lines = "\n".join(f"warning: {w}" for w in warnings)
     return f"{text}\n\n{lines}" if text else lines
+
+
+def _json_warnings(model: dict) -> list[str]:
+    """Every warning, with one line per issue that has no priority label."""
+    per_issue = [
+        f"#{number} has no priority label. Sorted last."
+        for numbers in model.get("unprioritized", {}).values()
+        for number in numbers
+    ]
+    return [*model["warnings"], *per_issue]
+
+
+def _text_warnings(model: dict) -> list[str]:
+    """Every warning, with one line per repo for issues with no priority label."""
+    lines = [*model["warnings"]]
+    for repo, numbers in model.get("unprioritized", {}).items():
+        count = len(numbers)
+        noun, verb = ("issue", "has") if count == 1 else ("issues", "have")
+        lines.append(f"{repo}: {count} open {noun} {verb} no priority label (sorted last)")
+    return lines
 
 
 def fleet_repos(
@@ -650,8 +677,9 @@ def run(
         text, exit_code = render_dag(model, multi_repo)
         if as_json:
             return json.dumps(dag_to_json(model, multi_repo)), exit_code
-        return _append_warnings(text, model["warnings"]), exit_code
+        return _append_warnings(text, _text_warnings(model)), exit_code
 
     if as_json:
         return json.dumps(to_json(model, limit, stage)), 0
-    return _append_warnings(render_list(model, limit, stage, explicit_repo), model["warnings"]), 0
+    text = render_list(model, limit, stage, explicit_repo)
+    return _append_warnings(text, _text_warnings(model)), 0
