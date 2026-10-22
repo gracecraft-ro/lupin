@@ -801,31 +801,21 @@ def _refuse_unfinished_git_work(checkout: Path) -> None:
 
 
 def _default_base(checkout: Path) -> str:
-    """Return the remote branch that a run starts from, for example `origin/main`.
-
-    Use `origin/release/next` when the remote has it.
-    """
-    try:
-        _git(checkout, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/release/next")
-        return "origin/release/next"
-    except LoopError:
-        pass
+    """Return the remote branch that a run starts from, for example `origin/main`."""
     try:
         base = _git(checkout, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").strip()
     except LoopError:
         base = ""
     if base:
         return base
-    for candidate in ("origin/main", "origin/master"):
-        try:
-            _git(checkout, "rev-parse", "--verify", "--quiet", f"refs/remotes/{candidate}")
-        except LoopError:
-            continue
-        return candidate
-    raise LoopError(
-        f"cannot find the default branch of {checkout}. "
-        "Run `git remote set-head origin --auto` in it."
-    )
+    try:
+        _git(checkout, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/main")
+    except LoopError:
+        raise LoopError(
+            f"cannot find the default branch of {checkout}. "
+            "Run `git remote set-head origin --auto` in it."
+        ) from None
+    return "origin/main"
 
 
 def _create_worktree(repo: str, checkout: Path) -> tuple[Path, str]:
