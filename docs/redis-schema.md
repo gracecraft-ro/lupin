@@ -801,9 +801,18 @@ Each host gets its own Redis user, named `lupin-<host>` for that host, limited
 to keys under `~lupin:*` and these commands:
 
 ```
-PING GET SET DEL TTL PTTL MULTI EXEC ZADD ZREM ZSCORE ZCARD ZRANGE
-ZREMRANGEBYSCORE XADD XRANGE XREVRANGE SCAN EVAL
+PING GET SET DEL EXPIRE PEXPIRE TTL ZADD ZREM ZSCORE ZCARD ZRANGE
+ZREMRANGEBYSCORE XADD XRANGE XREVRANGE SCAN EVAL EVALSHA SCRIPT|LOAD
+SCRIPT|EXISTS
 ```
+
+`PTTL`, `MULTI`, `EXEC`, and `WATCH` are not on the list. Use `TTL` to read
+the time left. Use `EVAL` for steps that must be atomic.
+
+If you add a command to the code, add it here and in the test list in
+`tests/conftest.py`. Then add it to `commands` in
+`hosts/pihome/modules/redis-lupin.nix` in the `waifu.nix` repo. If the Nix list
+lacks a command, that command fails on the real fleet.
 
 ## Fallback when Redis is unreachable
 
