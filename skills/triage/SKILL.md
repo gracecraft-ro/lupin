@@ -91,8 +91,27 @@ If either issue has the `claimed` label, use `overlap` or `not duplicate`. Use
 Write one line per pair under `Duplicates`:
 `#N ~ #M — verdict: reason.`
 
-Do not close an issue, change its labels, or post a comment on an issue during
-triage.
+## Writes that triage may make
+
+Triage may make these writes on the issues it reads:
+
+- **Labels.** Apply the repository's priority label and size label to each open
+  issue that does not have them. Apply the type and blocker labels from the
+  repository's label map when they apply. Do this when you decide the issue's
+  priority and size. Do not remove a label that a person set.
+- **Native blocked-by links.** Add a link when you find that one issue must
+  finish before another. Add it in GitHub's issue dependency feature. Do this
+  when you check dependencies.
+- **Comments.** Post a comment only to record a decision that a later reader
+  needs, for example the reason for a blocker. Start it with `Loop:`.
+
+Do not close an issue during triage. Do not edit an issue's title or body.
+Claim labels and claim comments belong to the claim step below.
+
+A dependency that is only text ("Depends on #N") does not appear in
+`lupin roadmap --dag`. That command reads native blocked-by links only. Treat a
+text dependency as a blocker when you decide what to dispatch. Then add the
+native link, so `--dag` and `--stage blocked` show it.
 
 ## Route and reserve the issue
 
