@@ -13,8 +13,7 @@ installed package metadata, or `pyproject.toml` in a source checkout.
 
 ## Before a release
 
-1. Merge every change into `main`. Use a release pull request when the
-   remote has a `release/next` branch.
+1. Merge every change into `main`.
 2. Run the gate on `main`:
 
    ```sh
