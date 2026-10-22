@@ -655,6 +655,10 @@ def test_launch_agent_uses_herdr_start_api(monkeypatch, tmp_path: Path):
         "300000",
         "--",
         "--dangerously-skip-permissions",
+        "--model",
+        "claude-sonnet-5-5",
+        "--effort",
+        "high",
         "--continue",
         "finish the handoff",
     ]
@@ -702,6 +706,27 @@ def test_launch_agent_starts_claude_with_skip_permissions(monkeypatch, tmp_path:
     assert argv[argv.index("--") + 1] == "--dangerously-skip-permissions"
     assert ("--continue" in argv) == resume
     assert argv[-1] == "finish the handoff"
+
+
+def test_launch_agent_pins_claude_model_and_effort(monkeypatch, tmp_path: Path):
+    prompt_file = tmp_path / "prompt"
+    prompt_file.write_text("finish the handoff\n", encoding="utf-8")
+    workspace = {"id": "w1", "root_pane": {"pane_id": "w1:p1", "workspace_id": "w1"}}
+    calls = []
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: calls.append(argv) or (0, ""))
+    monkeypatch.setattr(loop_runtime, "_wait_agent", lambda got_session, workspace_id: 0)
+
+    loop_runtime._launch_agent(
+        "lupin-widgets-abc123", "claude", workspace, str(prompt_file), resume=False
+    )
+
+    argv = calls[0]
+    flags = argv[argv.index("--") + 1 :]
+    assert flags[:5] == [
+        "--dangerously-skip-permissions",
+        "--model", "claude-sonnet-5-5",
+        "--effort", "high",
+    ]
 
 
 def test_launch_agent_omp_does_not_skip_permissions(monkeypatch, tmp_path: Path):

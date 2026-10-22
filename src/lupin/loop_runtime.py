@@ -27,6 +27,10 @@ from . import claims, run_log, slots, slots_redis
 REPO_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}(~([2-9]|[1-9][0-9]))?$")
 PLATFORMS = {"claude", "omp"}
 AGENT_NAME = "lupin-loop"
+# Claude loops run on this model at this effort. The flags pin the choice,
+# so a launch does not depend on the global Claude setting.
+CLAUDE_LOOP_MODEL = "claude-sonnet-5-5"
+CLAUDE_LOOP_EFFORT = "high"
 # One Herdr session per machine. Each loop is one workspace in it.
 SESSION_NAME = "lupin-loops"
 STATE_DIR = Path(os.environ.get("LUPIN_LOOP_STATE_DIR", "/var/lib/delegation-loop"))
@@ -1321,6 +1325,7 @@ def _launch_agent(
     # Herdr passes arguments after `--` to the agent. It rejects this flag before `--`.
     if platform == "claude":
         argv.append("--dangerously-skip-permissions")
+        argv.extend(["--model", CLAUDE_LOOP_MODEL, "--effort", CLAUDE_LOOP_EFFORT])
     if resume and platform == "claude":
         argv.append("--continue")
     if platform == "omp":
