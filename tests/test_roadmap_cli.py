@@ -172,9 +172,45 @@ class BuildRoadmapTests(unittest.TestCase):
         )
 
         self.assertEqual(code, 0)
-        self.assertIn("warning: #440 has no priority label. Sorted last.", text)
+        self.assertIn(
+            "warning: api-gateway: 1 open issue has no priority label (sorted last)", text
+        )
         # #418 (P1) must rank above #440 (no label, falls back to last).
         self.assertLess(text.index("#418"), text.index("#440"))
+
+    def test_no_priority_label_text_counts_per_repo_and_json_lists_each_issue(self):
+        open_issues = {
+            "api-gateway": [
+                _issue(440, "docs", labels=[]),
+                _issue(441, "typos", labels=[]),
+            ]
+        }
+        dag = {
+            "repos": {
+                "api-gateway": [
+                    {"number": 440, "blockedBy": [], "blocking": []},
+                    {"number": 441, "blockedBy": [], "blocking": []},
+                ]
+            },
+            "cycles": [],
+            "warnings": {},
+        }
+        self._patch(open_issues, dag)
+
+        text, _ = roadmap_cli.run(
+            "api-gateway", 10, "ready", False, False, False, claims_lookup=lambda repos: {}
+        )
+        json_text, _ = roadmap_cli.run(
+            "api-gateway", 10, "ready", False, True, False, claims_lookup=lambda repos: {}
+        )
+
+        self.assertIn(
+            "warning: api-gateway: 2 open issues have no priority label (sorted last)", text
+        )
+        self.assertNotIn("#440 has no priority label", text)
+        payload = json.loads(json_text)
+        self.assertIn("#440 has no priority label. Sorted last.", payload["warnings"])
+        self.assertIn("#441 has no priority label. Sorted last.", payload["warnings"])
 
     def test_broken_dependency_link_is_treated_as_unblocked_with_warning(self):
         open_issues = {"api-gateway": [_issue(431, "rate-limit headers", "P2")]}

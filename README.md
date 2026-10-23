@@ -1,94 +1,64 @@
 # lupin
 
-Lupin runs coding-agent loops on a group of machines (a fleet). It does
-four jobs:
+Lupin runs coding-agent loops on a group of machines (a fleet). It has 4 jobs:
 
-1. **Routing.** It selects a model and an effort level for a task based on available quota. (Supports Claude, OpenAI, and OpenCode Go subscription quota readouts)
+1. **Routing.** It picks a model and an effort level for a task. It uses Claude,
+   OpenAI, and OpenCode Go quota.
 2. **Slots.** It limits how many callers use a resource at the same time.
-3. **Dashboard.** It shows the loops in a web page, and lets you start and
-   stop them.
-4. **Fleet.** It shares issue claims, quests, machine records, quota, and
-   events between machines through Redis. It ranks open issues and starts
-   loops on workers.
+3. **Dashboard.** A web page shows the loops. You can start and stop them there.
+4. **Fleet.** It shares issue claims, quests, machine records, quota, and events
+   through Redis. It ranks open issues and starts loops on workers.
 
-> **Status:** Lupin is early software. One owner uses it on one fleet. Some
-> defaults and data files are specific to that fleet. Read
-> [Known limits](#known-limits) before you install it.
+> **Status:** Early software. Many defaults and data files are specific to the
+> owner's fleet. Read [Known limits](#known-limits) before you install it.
 
 ## Requirements
 
 | Item | Necessary for | Notes |
 | --- | --- | --- |
-| Nix with flakes | All | The supported way to build Lupin. |
-| Python 3.11 or later | All | Nix supplies it. |
+| Nix with flakes | All | The supported way to build Lupin. Nix supplies Python 3.11 or later. |
 | Redis | Fleet commands, `redis` slot backend, dashboard data | Not necessary for `route` or the `local` slot backend. |
-| `gh` (GitHub CLI) | Claims, roadmap, dashboard | The Nix package adds it to `PATH`. |
-| `git` | Loops, roadmap | The Nix package adds it to `PATH`. |
+| `gh` (GitHub CLI), `git` | `gh`: claims, roadmap, dashboard. `git`: loops, roadmap. | The Nix package adds both to `PATH`. |
 | systemd (Linux) | Loop workers, timers | Not available on macOS. |
 | Herdr | Loop workers | The Lupin package adds it to `PATH`. Set `LUPIN_HERDR_BIN` to use another binary. |
-| `omp` | OMP loops, `fetch-benchmarks`, some quota data | The default adds it to `PATH` from a pinned input. `without-omp` saves about 228 MiB; install `omp` separately for OMP tasks. |
+| `omp` | OMP loops, `fetch-benchmarks`, some quota data | The default adds it to `PATH` from a pinned input. `without-omp` saves about 228 MiB. Install `omp` separately for OMP tasks. |
 
 ## Install
 
-Run Lupin one time, without installing it.
+Run Lupin one time without installing it: `nix run github:OWNER/REPO -- --help`.
+Replace `OWNER/REPO` with the owner and repository name of the Lupin flake. To
+build it from a checkout, run `nix build .`, then `./result/bin/lupin --help`.
 
-Replace `OWNER/REPO` with the actual owner and repository name for the Lupin flake before you run this command.
-
-```sh
-nix run github:OWNER/REPO -- --help
-```
-
-Build it from a checkout:
-
-```sh
-nix build .
-./result/bin/lupin --help
-```
-
-To install it on a NixOS or nix-darwin machine, add this flake as an input
-and add `packages.<system>.default` to `environment.systemPackages`.
+To install it on a NixOS or nix-darwin machine, add this flake as an input. Add
+`packages.<system>.default` to `environment.systemPackages`.
 
 ## Quick start
 
-These commands do not need Redis.
-
-Select a model for a medium-size prose task:
+These commands need no Redis. Select a model for a medium-size prose task. Then
+get a slot lease, check the slot, and release the lease. `lupin hold` runs a
+command while you hold a lease. It releases the lease when the command stops.
 
 ```sh
-$ lupin route prose m
+$ lupin route prose size-m
 sonnet high
-```
-
-Get a slot lease, then look at the slot:
-
-```sh
 $ lupin acquire demo --holder me --max 1
 demo:7d023867bcbed45f
 $ lupin status
 demo: 1/1
 $ lupin release --lease demo:7d023867bcbed45f
-```
-
-Run a command while you hold a lease. Lupin releases the lease when the
-command stops:
-
-```sh
-lupin hold demo --holder me --wait 5 -- echo inside-lease
+$ lupin hold demo --holder me --wait 5 -- echo inside-lease
 ```
 
 The route categories are `coding`, `general`, `frontend-ui`, `translation`,
-`prose`, and `cad-spatial`. If `LUPIN_MODEL_TIERS` is not set, Lupin uses
-the bundled `src/lupin/model-tiers.json` file.
-
-Set `LUPIN_MODEL_TIERS` to a JSON file to use your own model tiers. The
-category selected by `route` must exist in the file. Each category has a
-`tiers` object with one or more of `tier0`, `tier1`, and `tier2`. Each tier
-is a list of ordered `{model, effort}` choices. The first choice is tried
-first. Effort must be `low`, `medium`, `high`, or `xhigh`. You can omit a tier.
-If a route needs it, Lupin uses the next higher tier. If no higher tier exists,
-the route reports an error. Optional fields are `source`, `last_verified`, and
-`note`. A top-level key that starts with `_` is ignored. The Models page shows
-the file path.
+`prose`, and `cad-spatial`. If `LUPIN_MODEL_TIERS` is not set, Lupin uses the
+bundled `src/lupin/model-tiers.json` file. To use your own model tiers, set it
+to a JSON file. The file must have the category that `route` selects. A category
+has a `tiers` object with one or more of `tier0`, `tier1`, and `tier2`. Each
+tier is a list of `{model, effort}` choices that Lupin tries in order. Effort
+must be `low`, `medium`, `high`, or `xhigh`. If a route needs an omitted tier,
+Lupin uses the next higher tier. If no higher tier exists, the route reports an
+error. Optional fields are `source`, `last_verified`, and `note`. Lupin ignores
+a top-level key that starts with `_`. The Models page shows the file path.
 
 ```json
 {
@@ -104,35 +74,28 @@ the file path.
 
 ## Fleet setup
 
-A fleet has:
-
-- **One coordinator.** This is a Redis server that all machines can reach.
-  Do not bind it to `0.0.0.0`. Use a private network, for example a
-  tailnet.
+- **One coordinator.** A Redis server that all machines can reach. Do not bind
+  it to `0.0.0.0`. Use a private network, for example a tailnet.
 - **Workers.** Each worker runs `lupin agent` and runs loops in Herdr.
-- **Optional: one dispatch machine.** It runs `lupin serve` and the
-  `fleet-run` timer. It does not run loops.
+- **Optional: one dispatch machine.** It runs `lupin serve` and the `fleet-run`
+  timer. It does not run loops.
 
 Set the Redis connection for each machine:
 
 | Variable | Use |
 | --- | --- |
-| `LUPIN_REDIS_HOST` | Redis host name. |
-| `LUPIN_REDIS_PORT` | Redis port. |
+| `LUPIN_REDIS_HOST`, `LUPIN_REDIS_PORT` | Redis host name and port. |
 | `LUPIN_REDIS_USERNAME` | Redis ACL user. |
 | `LUPIN_REDIS_PASSWORD` | Redis password. Give it through a secret manager. Do not put it in a command line. |
 
-Remote loop controls use signed commands. Each worker needs its own signing
-key. Lupin reads the keys from `LUPIN_CMD_SIGNING_KEYS_DIR`, or from the
-systemd `CREDENTIALS_DIRECTORY`. The file name is the worker name.
-
-The Redis key layout is in `docs/redis-schema.md`.
+Each worker needs its own key to sign remote loop commands. Lupin reads the keys
+from `LUPIN_CMD_SIGNING_KEYS_DIR` or the systemd `CREDENTIALS_DIRECTORY`.
 
 ## NixOS module
 
 `nixosModules.default` writes the service user, `lupin-agent.service`,
-`lupin-serve.service`, the `lupin-quota` timer, and the `delegation-loop`
-timer. Set `role` to `worker`, `dispatch`, or `both`.
+`lupin-serve.service`, the `lupin-quota` timer, and the `delegation-loop` timer.
+Set `role` to `worker`, `dispatch`, or `both`.
 
 ```nix
 services.lupin = {
@@ -146,65 +109,47 @@ services.lupin = {
 
 The module needs these secret files:
 
-- `redis.passwordFile`: a file with the Redis password. The module loads it
-  as the systemd credential `redis-password`. No unit gets the password in
-  its environment. Skip this option if the coordinator has no password.
-- `signingKeysDir`: a directory with one command-queue key for each worker.
-  The file name is the worker name and the file holds that worker's key.
-  On a worker, keep the directory root-owned with mode `0700` and the key
-  files mode `0400`. `lupin agent` receives only its own key as a systemd
-  credential, and every unit the loop `systemd-run` wrapper starts mounts the
-  directory inaccessible (`InaccessiblePaths=`), so a loop unit cannot read
-  any key. `lupin serve` and `fleet-run` need the whole directory read-only,
-  so on a dispatch machine `cfg.user` must be able to read it. With
-  `role = "both"`, `serve` holds the directory open to `cfg.user`, and a loop
-  unit on that machine can reach the keys through `serve`; use `worker` and
-  `dispatch` on separate machines when the keys must stay apart.
-- `credentialsFile`: a JSON file that maps a repository name to its GitHub
-  token file, for `LUPIN_LOOP_CREDENTIALS_FILE`. The agent, the dashboard,
-  and `fleet-run` read it. The wrapper allows `LoadCredential=gh-token:PATH`
-  only when `PATH` is one of the values in this file; without the file it
-  rejects `gh-token`.
+- `redis.passwordFile`: the Redis password file. The module loads it as the
+  systemd credential `redis-password`. Skip it if the coordinator has none.
+- `signingKeysDir`: a directory with one command-queue key per worker. The file
+  name is the worker name. On a worker, the directory must be root-owned with
+  mode `0700`, and the key files must have mode `0400`. `lupin agent` gets only
+  its own key (a systemd credential). The loop `systemd-run` wrapper adds
+  `--property=InaccessiblePaths=<signingKeysDir>` to every unit it starts. So a
+  loop unit cannot read a key or remove this property. `lupin serve` and
+  `fleet-run` need the whole directory read-only. On a dispatch machine,
+  `cfg.user` must be able to read it. With `role = "both"`, `serve` holds the
+  directory open to `cfg.user`. A loop unit on that machine can reach the keys
+  through `serve`. To keep the keys apart, use separate `worker` and `dispatch`
+  machines.
+- `credentialsFile`: a JSON file that maps a repository name to a GitHub token
+  file, for `LUPIN_LOOP_CREDENTIALS_FILE`. The agent, dashboard, and `fleet-run`
+  read it. The wrapper allows `LoadCredential=gh-token:PATH` only when `PATH` is
+  a value in this file. Otherwise it rejects `gh-token`.
 
 The default `serve.bind` is `127.0.0.1` and cannot be `0.0.0.0`. The default
 `serve.port` is 8788. The default package is the flake's
-`packages.<system>.default`.
+`packages.<system>.default`. Without `fleetConfig`, the module writes
+`/etc/lupin/fleet.json` from the `redis` options. To use one file for several
+machines, set `fleetConfig` to that file.
 
-Without `fleetConfig`, the module writes `/etc/lupin/fleet.json` from the
-`redis` options. To use one file for several machines, set `fleetConfig` to
-that file.
-
-The module also writes the sudo rules for the loop control path. The loop
-user can start and stop `lupin-*` units and the `delegation-loop` timer. The
-`systemd-run` rule names a wrapper, not `systemd-run` itself: the wrapper
-accepts only the options Lupin uses and the Lupin command, so the loop user
-cannot pass `--uid=0` or `--property=User=root`. The wrapper also adds
-`--property=InaccessiblePaths=<signingKeysDir>` itself after it validates the
-arguments, so a loop unit cannot remove it. Set `role = "dispatch"` to
-set `LUPIN_LOOP_COORDINATOR_ONLY` for `lupin serve` and `fleet-run`, which
-hides the local loop start control.
+The module also writes sudo rules for the loop user. The loop user can start and
+stop `lupin-*` units and the `delegation-loop` timer. The `systemd-run` rule
+names a wrapper, not `systemd-run` itself. The wrapper accepts only the options
+and command that Lupin uses. So the loop user cannot pass `--uid=0` or
+`--property=User=root`. `role = "dispatch"` sets `LUPIN_LOOP_COORDINATOR_ONLY`
+for `lupin serve` and `fleet-run`, which hides the local loop start control.
 
 ## Dashboard
 
-```sh
-lupin serve --bind 127.0.0.1 --port 8788
-```
-
-Then open `http://localhost:8788`. To see it from another computer, use an
-SSH tunnel:
-
-```sh
-ssh -N -L 8788:127.0.0.1:8788 MACHINE
-```
-
-The Repos and Roadmap pages read the Git checkouts in `LUPIN_LOOP_CODE_DIR`
-(default `/code`).
+Run `lupin serve --bind 127.0.0.1 --port 8788`. Then open
+`http://localhost:8788`. To see it from another computer, use an SSH tunnel:
+`ssh -N -L 8788:127.0.0.1:8788 MACHINE`. The Repos and Roadmap pages read the
+Git checkouts in `LUPIN_LOOP_CODE_DIR` (default `/code`).
 
 ## Commands
 
-Run `lupin --help` for all commands. Run `lupin <command> --help` for the
-options of one command. `AGENTS.md` gives the full behavior of each
-command.
+Run `lupin --help` for all commands. `lupin <command> --help` shows its options.
 
 | Job | Commands |
 | --- | --- |
@@ -224,52 +169,27 @@ command.
 
 Examples:
 
-```sh
-lupin roadmap --repo my-repo --stage all    # rank open issues
-lupin place 123 --explain                   # select a machine for issue 123
-lupin quota                                 # show provider quota
-lupin quest start --issue 123 --issue 124   # claim related issues as a quest
-lupin quest                                 # list quests and their progress
-lupin ledger read OWNER/REPO                # read the latest events
-```
+- `lupin place 123 --explain` shows which machine should run issue 123.
+- `lupin quest start --issue 123 --issue 124` claims two issues as one quest.
+- `lupin ledger read OWNER/REPO` shows the latest shared events.
 
 ## Development
 
-Enter the development shell. It has Python, pytest, and Redis:
-
-```sh
-nix develop
-```
-
-Run the tests from the repo root:
-
-```sh
-pytest -q
-```
-
-Run the full gate before you open a pull request:
-
-```sh
-nix flake check
-```
-
-Some tests start a local `redis-server`. Do not set `LUPIN_REDIS_HOST` to a
-shared Redis when you run the tests.
+Enter the development shell with `nix develop`. It has Python, pytest, Redis.
+Run the tests from the repo root with `pytest -q`. Before you open a pull
+request, run the full gate with `nix flake check`. Some tests start a local
+`redis-server`. Do not set `LUPIN_REDIS_HOST` to a shared Redis in tests.
 
 ## Contributing
 
-Open pull requests against the `main` branch. The owner merges approved pull
-requests into `main`. The loop orchestrator can also merge, when the four
-conditions in `AGENTS.md` are true. A reviewer who did not write the change must
-approve it. `AGENTS.md` gives the full rules.
+Open pull requests against `main`. The owner merges approved pull requests. A
+loop never merges. A reviewer who did not write the change must approve it.
 
 ## Known limits
 
-- There is no license file yet. Until there is one, you have no right to
-  copy or change this code.
+- There is no license file yet. You have no right to copy or change this code.
 - Some defaults name the owner's machines and user name.
-- Lupin is tested only on Linux. The flake builds for macOS, but loop
-  workers need systemd.
+- Only Linux is tested. The flake builds for macOS. Loop workers need systemd.
 
 ## Documentation
 
