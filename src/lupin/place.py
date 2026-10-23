@@ -341,9 +341,11 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
     not the machine ranking). `route()`'s result carries `wait_seconds` when
     every option it tried is currently blocked -- this skips straight to
     "no pick" without even filtering machines, since a blocked provider is
-    blocked for every machine alike. It carries `downgraded_from` when
-    `route()` already moved off a blocked pick onto another one; this just
-    passes that through for `--explain`/`--json` to show.
+    blocked for every machine alike. A quota deferral with an unknown reset
+    has `reason` but no `wait_seconds`; it also skips machine selection. It
+    carries `downgraded_from` when `route()` already moved off a blocked pick
+    onto another one; this just passes that through for `--explain`/`--json`
+    to show.
     """
     issue, task_label = _resolve_task(task, connection)
     category, size = classify_mod.classify(issue)
@@ -360,7 +362,7 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
     )
     now = time.time()
 
-    if wait_seconds is not None:
+    if wait_seconds is not None or choice.get("reason") is not None:
         skipped, candidates, pick = (
             {"offline": 0, "other_provider": 0, "no_key": 0, "read_failed": 0},
             [],

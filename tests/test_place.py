@@ -344,6 +344,28 @@ def test_place_reports_a_wait_without_filtering_machines(redis_port, flush_redis
     assert result["candidates"] == []
     assert result["skipped"] == {"offline": 0, "other_provider": 0, "no_key": 0, "read_failed": 0}
 
+def test_place_does_not_select_machine_for_unknown_quota_reset(
+    redis_port, flush_redis, monkeypatch
+):
+    """A quota block without a reset is still a deferral, not a machine pick."""
+    _write_machine(redis_port, "mac-studio", quota=_CLAUDE_QUOTA)
+    monkeypatch.setattr(
+        place.route_mod,
+        "route",
+        lambda *a, **kw: {
+            "model": "opus",
+            "effort": "high",
+            "wait_seconds": None,
+            "reason": "all allowed models are blocked by quota",
+        },
+    )
+
+    result = place.place("retry backoff", _kw(redis_port))
+
+    assert result["pick"] is None
+    assert result["candidates"] == []
+    assert result["wait_seconds"] is None
+
 
 def test_place_reports_routes_downgrade_and_ranks_the_new_provider(redis_port, flush_redis, monkeypatch):
     """route() already moved off a blocked pick onto another provider --
