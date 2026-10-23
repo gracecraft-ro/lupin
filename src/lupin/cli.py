@@ -1253,6 +1253,8 @@ def _format_place_explain(result: dict) -> str:
     elif result.get("wait_seconds") is not None:
         wait = place_mod.format_duration(result["wait_seconds"])
         lines.append(f"every candidate is out of quota -- wait {wait}, same model")
+    elif result.get("reason"):
+        lines.append(f"deferred: {result['reason']}")
     lines.append("")
     if result["candidates"]:
         lines.append(_format_place_table(result))
@@ -1295,6 +1297,8 @@ def _cmd_place(args: argparse.Namespace) -> int:
                 f"wait {wait}, same model ({result['model']})",
                 file=sys.stderr,
             )
+        elif result.get("reason"):
+            print(f"deferred: {result['reason']}", file=sys.stderr)
         else:
             print(f"no online machine runs provider {result['provider']!r}", file=sys.stderr)
         return 2

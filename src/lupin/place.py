@@ -354,6 +354,7 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
     provider = provider_for_model(model)
     wait_seconds = choice.get("wait_seconds")
     downgraded_from = choice.get("downgraded_from")
+    reason = choice.get("reason")
 
     records = machines.machines(connection)
     issue_number_match = _ISSUE_NUMBER_RE.match(task.strip())
@@ -389,4 +390,5 @@ def place(task: str, connection: dict, *, tiers: dict | None = None) -> dict:
         "skipped": skipped,
         "wait_seconds": wait_seconds,
         "downgraded_from": downgraded_from,
+        "reason": reason,
     }

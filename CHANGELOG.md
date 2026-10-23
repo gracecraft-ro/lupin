@@ -47,6 +47,7 @@ All notable changes to Lupin. The version has one source:
   than the blocked model, then defers with a reason.
 - OMP prompt jobs do not wait for caller stdin to close.
 - Claim reads use Redis `TTL` for the remaining time.
+- `lupin place` reports quota deferrals when no reset time is available.
 
 ## 0.1.0
 
