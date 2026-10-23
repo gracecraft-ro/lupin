@@ -410,6 +410,27 @@ class RoutePacingTests(unittest.TestCase):
         self.assertIn("wait_seconds", result)
         self.assertIsNotNone(result["wait_seconds"])
 
+    def test_weekly_claude_quota_without_reset_is_still_blocked(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [{"model": "sonnet", "effort": "high"}],
+                }
+            }
+        }
+        rows = [{
+            "provider": "claude",
+            "duration": QuotaDuration.WEEKLY,
+            "used_pct": 91,
+            "resets_at": None,
+        }]
+
+        result = _route_with_prices("coding", "size-m", tiers=tiers, quota_rows=rows)
+
+        self.assertEqual(result["model"], "sonnet")
+        self.assertEqual(result["reason"], "all allowed models are blocked by quota")
+        self.assertIsNone(result["wait_seconds"])
+
     def test_wait_reports_the_earliest_reset_among_everything_tried(self):
         rows = [
             self._row("claude", 100, 5 * HOUR_MS),
