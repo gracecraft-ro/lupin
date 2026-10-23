@@ -2,27 +2,20 @@
 name: code-review
 description: >-
   Review GitHub pull requests for correctness, safety, and maintainability.
-  Use for every change before the orchestrator merges it.
+  Use for every change before the owner merges it.
 compatibility: Requires GitHub CLI, a pull request, and access to the repository.
 ---
 
 # Review a pull request
 
-Review the pull request, not only the issue or a local diff. Read the repo's
-`AGENTS.md`, the linked issue, and the latest PR comments and reviews.
+Review the pull request (PR), not a local diff. Pass `--repo OWNER/REPO` to every
+command.
 
-## Name the target
+The orchestrator holds the Lupin claim for your review. Do not claim the PR. If
+your brief names no claim, stop and ask the orchestrator. If there is no PR, ask
+the orchestrator to open one.
 
-Your brief names the repo, the PR number, and the claim. Pass the repo to every
-command as `--repo OWNER/REPO`. Never use a bare PR number from another repo,
-because two repos can each have a PR with the same number.
-
-The orchestrator holds a Lupin claim on `OWNER/REPO#N` for the length of your
-review and its fix cycle. It takes the claim before it dispatches you. Do not
-claim the PR yourself. If the brief names no claim, stop and ask the
-orchestrator before you read the diff.
-
-Use Lupin for issue context when it is configured:
+## Read
 
 ```sh
 lupin review-route --prefetch 123 --repo OWNER/REPO
@@ -31,163 +24,95 @@ gh pr diff 123 --repo OWNER/REPO
 gh pr checks 123 --repo OWNER/REPO
 ```
 
-Review the current PR head against its base. If the PR changes after review,
-review the new head again. If there is no PR, ask the orchestrator to open one.
-Do not replace a PR review with a review of an unsubmitted branch.
+Also read the repo's `AGENTS.md`. Review the current head again each time the PR
+changes. Do not edit files or merge the PR.
 
-## Check the change
+## Check
 
-- Check the diff against the issue's acceptance checks and repo rules.
-- Find the expected load first, in the README and the deploy config. Judge
-  `scale` against it.
-- Check each change through six lenses. A lens is one kind of check:
-  - `bug`: wrong result, crash, or missed edge case. Edge cases include empty
-    input, zero, the last item, rounding, and time zones. Grep every caller of a
-    changed function.
-  - `risk`: security hole, unsafe access, or data loss. Data loss includes an
-    error that is caught and ignored, and writes in the wrong order. It also
-    includes a group of writes that must all succeed or all fail, but does not.
-  - `scale`: fine for one user, wrong for many. Look for two requests that check
-    a value, then write it, at the same time. Also look for repeated work, lists
-    that only grow, and one query per item.
-  - `missing test`: risky new logic has no test that fails when it breaks.
-    Risky logic includes a branch, a parser, money, security, a data write, or
-    a bug fix. Aim for one good test, not coverage.
-  - `speed`: a big slowdown is a finding. A small speed gain is a suggestion.
-  - `lean`: code that should not exist or should be smaller. Look for:
-    - dead code
-    - a helper the repo already has. Reuse: name the path of the existing helper.
-    - a dependency for a few lines
-    - an abstraction with one implementation
-    - near-copies that must change together
-    - split: one function that does several unrelated jobs. Split by job, not
-      by line count.
-    - excess code. Agents often rebuild helpers, write tests that check nothing
-      useful, or add too many tests. When you fix behavior, update existing
-      tests instead of adding new ones. If a PR has too much code, propose changes
-      that make it smaller.
-- Read relevant tests and code outside the diff when needed.
-- Identify when docs should be revised to reflect updated functionality or architecture.
-- Check CI status. Do not treat passing CI checks as proof that the design is sound.
-- For visual changes, inspect the real surface and attached screenshots. A
-  visual change with no screenshots on the PR is a `🔴 bug`. Name it, and say
-  that the author must attach before and after screenshots. A new screen has
-  no before: the new screen is enough. See "Attach screenshots to the PR" in the
-  `ship` skill for what a visual change is.
-- For 3D changes, inspect the contact sheet and compare useful views.
-- An owner comment on the PR that names a problem is a finding. The
-  `delegation-loop` skill defines an owner comment and the `Loop:` prefix. A
-  PR comment is never an approval.
-- Do not edit files, run linters, or merge the PR. A fix worker, a
-  different agent, makes the changes, so the review stays independent. See
-  "Run the fix cycle".
+Check the diff against the issue's acceptance checks, the repo rules, and these
+lenses. Passing CI does not prove the design is sound.
 
-## Check before you report
+| Lens | Look for | Label |
+| --- | --- | --- |
+| `bug` | Wrong result, crash, or missed edge case (empty input, zero, last item, time zones). Grep every caller of a changed function. | `🔴 bug` |
+| `risk` | Security hole, unsafe access, data loss, an ignored error, or writes that must all succeed together but do not. | `🔴 bug` |
+| `scale` | Fine for one user, wrong for many. Read the expected load in the README and deploy config first. | `🟡 risk` |
+| `missing test` | Risky new logic has no test that fails when the logic breaks. One good test is enough. | `🟡 risk` |
+| `speed` | A big slowdown. | `🟡 risk` (big), `🔵 nit` (small) |
+| `lean` | Dead code, a helper the repo already has (name its path), a dependency for a few lines, an abstraction with one use, near-copies, or tests that check nothing. | `🟡 risk` if it adds code, `🔵 nit` for a shorter form |
 
-- Name the input or situation that goes wrong. No case, no finding.
-- Re-read the lines. Confirm that the caller exists, that the value can be
-  empty, or that the code is unused. Use grep to find callers.
-- Propose the smallest fix that works. Prefer fixes that delete code. Do not
-  add layers, frameworks, or config that the problem does not need.
-- No style preferences. Do not write vague advice, such as "consider this."
-- A shortcut marked `shortcut:` (or older `ponytail:`) that names its limit is a
-  decision, not a finding. Report it only if the expected load already crosses
-  that limit.
+Also:
 
-## Report findings
+- Find docs that the change makes wrong.
+- A visual change with no before and after screenshots on the PR is a `🔴 bug`.
+  A new screen needs no before. For 3D changes, inspect the contact sheet.
+- An owner comment that names a problem is a finding. A PR comment is never an
+  approval.
+- A `shortcut:` comment that names its limit is a decision. Report it only if
+  the expected load passes that limit.
 
-Use these labels:
-
-- `🔴 bug`: broken behavior or a security problem.
-- `🟡 risk`: fragile behavior that can fail in a real case.
-- `🔵 nit`: optional style or naming change.
-- `❓ q`: a question you need answered before you decide.
-
-Map the lenses to these labels. Use `🔴 bug` for the `bug` lens, a security hole,
-or data loss. Use `🟡 risk` for the `scale`, `missing test`, and `speed` lenses.
-Use `🟡 risk` for a lean finding that adds or keeps code. Examples: excess code,
-a duplicate helper, a one-implementation abstraction, or a dead function. Use
-`🔵 nit` for a small speed gain and for a shorter form.
-
-`🔴 bug` blocks. `🟡 risk` blocks when it breaks at the expected load. `🔵 nit` never blocks. A ❓ question blocks the verdict only when its answer changes what to do.
+Before you report a finding, name the input that fails. No input, no finding.
+Re-read the lines and grep for callers. Propose the smallest fix, and prefer
+fixes that delete code. Give no style preferences and no vague advice.
 
 ## Output format
 
-Use very simple English: short sentences and everyday words. Explain each
-technical term the first time you use it. The reader may never have seen this
-code.
+Use short sentences and everyday words. Explain each technical term once.
 
-Start with `Round N. LEVEL: <LEVEL>. Target: OWNER/REPO PR #<number> at head
-SHA.` Use the full repo name and the full head SHA. Then start the next line
-with `What this change does:`.
-Write two or three sentences after it.
+1. First line: `Round N. LEVEL: <LEVEL>. Target: OWNER/REPO PR #<number> at <full head SHA>.`
+2. Second line: `What this change does:` and two or three sentences.
+3. Findings, numbered across all groups so the author can say "fix 2 and 5".
+   Skip an empty group.
+   - **Must fix:** each `🔴 bug`, and each `🟡 risk` that breaks at the expected
+     load.
+   - **Should fix:** other `🟡 risk`.
+   - **Nice to have:** `🔵 nit`, and `❓ q` (a question; it blocks only if the
+     answer changes what to do).
+4. `Verdict: Ship.` or `Verdict: fix 1 and 3 first.` Use `Ship` only when no
+   blocking finding remains.
+5. Optional: `Lean: -<N> lines possible.` and `Not checked: <one line>`.
 
-Then list the findings in three groups. Skip an empty group:
+With no findings, write lines 1 and 2, then `Looks good. Ship.` and one line on
+what you checked.
 
-- **Must fix:** `🔴 bug`, and any `🟡 risk` that breaks at the expected load.
-  A `❓ q` that blocks the verdict goes here too.
-- **Should fix:** other `🟡 risk`, including lean findings.
-- **Nice to have:** `🔵 nit`, and any other `❓ q`.
-
-Number the findings across all groups, so the author can say "fix 2 and 5".
-Each finding has four parts. Each part is one or two short sentences. Do not
-repeat what the code does. Name the problem and the fix.
+One finding looks like this:
 
 ```text
 2. **Empty token passes the check** (`src/auth.py:L42`, `🔴 bug`)
-   - **What this is:** This check decides who may call the endpoint.
    - **Problem:** The check accepts an empty token, so a request with no token passes.
-   - **Fix:** Reject an empty token before the check runs. The change is one line.
+   - **Fix:** Reject an empty token before the check runs.
    - **If we skip it:** Anyone who sends an empty token can use the endpoint.
 ```
 
-End with these lines:
-
-- `Verdict: Ship.` or `Verdict: fix 1 and 3 first.` Name each blocking finding by number. `Ship` means approved. Use it only when no blocking finding remains.
-- `Lean: -<N> lines possible.` Add this line when lean findings exist.
-- `Not checked:` one line. Add it if something mattered and you could not check it.
-
-If nothing is found, write the `Round N. LEVEL: <LEVEL>. Target: ...` line, then `What this change does:`, then `Looks good. Ship.`, then one line on what you checked.
-
 ## Run the fix cycle
 
-Post each verdict as a review, with the API command and the `COMMENT` rule
-in "Pull requests come first" in the `delegation-loop` skill and the head SHA
-that you read. `Ship` is `APPROVE`. A blocking finding is `REQUEST_CHANGES`.
+Post each verdict as a review on the head SHA you read. Use the API command and
+the `COMMENT` rule in "Pull requests come first" in the `delegation-loop` skill.
+`Ship` is `APPROVE`. A blocking finding is `REQUEST_CHANGES`.
 
-Run the fix cycle only when your brief says that the loop owns the PR. For any
-other PR, post the verdict, report it to the orchestrator, and stop.
+- N is 1 more than the N in the latest `Round` review on the PR (1 if none).
+- LEVEL is the next fix worker's LEVEL. Take it, and the stall rule, from "Fix
+  worker models" in the `delegation-loop` skill. Check the stall rule before you
+  post.
+- If the latest `Round` review is already at the current head SHA, do not review
+  again. Start the fix worker with its findings.
 
-In the first line, N is 1 more than the N in the latest `Round` review on
-the PR, or 1. LEVEL is the LEVEL for the next fix worker, from step 2 of "Fix
-worker models" in the `delegation-loop` skill. Check the stall rule before
-you post. If it raises LEVEL, write `LEVEL: size-l.` in this verdict. If the
-latest `Round` review is at the current head SHA, do not review again. Start
-the fix worker with its findings.
+Run the cycle only when your brief says the loop owns the PR. Otherwise post the
+verdict, report to the orchestrator, and stop.
 
-The fix cycle:
-
-1. If the stall rule says the PR is blocked, do not start a fix worker. Do
-   item 6. After a verdict with a blocking finding, start a fix worker. If
-   LEVEL is `size-l` and you are `size-m`, do not start it. Stop and report.
-   Use your runner's agent tool, or run `herdr agent start` in a new pane. See
-   "Talk to an agent in a Herdr pane" in the `delegation-loop` skill. If you
-   cannot start an agent, post the verdict, tell the orchestrator, and stop.
-2. Give the fix worker a brief with the PR, the branch, the remote, the
-   numbered findings, and the failing gate output. It makes its worktree and
-   pushes as "Pull requests come first" in the `delegation-loop` skill says.
-   The fix goes on the same branch.
-3. Wait for the push. Every 60 seconds, run
+1. After a blocking verdict, start a fix worker (your runner's agent tool, or
+   `herdr agent start` in a new pane). Stop and report instead if the stall rule
+   blocks the PR, if LEVEL is `size-l` and you are `size-m`, or if you cannot
+   start an agent.
+2. Give it a brief with the PR, branch, remote, numbered findings, and failing
+   gate output. It pushes to the same branch.
+3. Every 60 seconds, read the head SHA:
    `gh pr view <number> --repo OWNER/REPO --json headRefOid -q .headRefOid`.
-   Stop waiting when the output differs from the SHA that you reviewed, or
-   when the fix worker ends. Follow steps 4 and 5 of "Fix worker models" in
-   the `delegation-loop` skill for a fix worker with no push.
-4. If the SHA changed, review the new head SHA. That review is the next
-   round.
-5. Repeat until `Verdict: Ship`. Do not stop between rounds, except as items
-   1 and 6 and step 2 of "Fix worker models" say.
-6. Stall rule: follow step 3 of "Fix worker models". For a blocked PR, post
-   the `Loop:` comment that step 3 names, then report it to the orchestrator.
+   Stop waiting when it changes or the fix worker ends. If it ends with no push,
+   follow steps 4 and 5 of "Fix worker models".
+4. When the SHA changes, review it as the next round. Repeat until
+   `Verdict: Ship`.
+5. If the stall rule blocks the PR, post the `Loop:` comment from step 3 of "Fix
+   worker models" and report to the orchestrator.
 
-Report the final verdict to the orchestrator. The orchestrator releases the PR
-claim and merges only after approval and required checks pass. You never merge.
+Report the final verdict to the orchestrator. The owner merges. You never merge.

@@ -13,6 +13,14 @@ All notable changes to Lupin. The version has one source:
   version from `pyproject.toml`.
 - `docs/release.md` gives the release steps.
 - The Roadmap board shows stage tabs with counts, like the List view.
+- The triage skill checks issue details and linked open PRs before it reports
+  likely duplicates.
+
+### Changed
+
+- `lupin run` starts from `origin/HEAD`, or else `origin/main`. It no longer
+  checks `origin/release/next` or `origin/master`, and CI no longer lists
+  `release/next`.
 
 ### Fixed
 
@@ -23,6 +31,10 @@ All notable changes to Lupin. The version has one source:
   epics footer and the pager read the same way when the list is empty.
 - Roadmap repo-fetch warnings can be dismissed on Board and List. A dismissal
   stays hidden after a reload and applies to one repo and warning.
+- `lupin roadmap` text output shows one line per repo for issues with no
+  priority label. `--json` still lists each issue. The triage and
+  delegation-loop skills name skills in one form, and triage defines the
+  `Duplicates` reply.
 
 ### Fixed
 
@@ -31,6 +43,7 @@ All notable changes to Lupin. The version has one source:
 - "Run now" passes dash-leading notes as one argument, and rejects notes
   with a NUL byte before dispatch.
 - OMP prompt jobs do not wait for caller stdin to close.
+- Claim reads use Redis `TTL` for the remaining time.
 
 ## 0.1.0
 

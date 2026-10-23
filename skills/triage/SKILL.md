@@ -3,7 +3,7 @@ name: triage
 description: >-
   Prioritize GitHub issues and choose the next work to delegate. Use this
   skill when sorting a backlog, applying issue labels, checking dependencies,
-  or preparing an issue for Lupin routing.
+  or preparing an issue for Lupin routing. Please delegate this to an economical model.
 compatibility: Requires Lupin and GitHub CLI. Redis is required for fleet claims.
 ---
 
@@ -17,15 +17,15 @@ issue comments before making a decision. An issue body can be out of date.
 From a configured repository checkout, run:
 
 ```sh
-lupin roadmap --repo REPO --stage all --json
+lupin roadmap --repo OWNER/REPO --stage all --json
 lupin roadmap --dag --json
 lupin review-route --prefetch 123 --repo OWNER/REPO
 ```
 
 `roadmap` ranks open work. `roadmap --dag` shows issue dependencies across
 enabled repositories. `review-route --prefetch` fetches issue or pull request
-text and comments; it does not choose a model. Omit `--repo` when Lupin's
-enabled-repository list is the intended scope.
+text and comments; it does not choose a model. For `roadmap`, add `--repo
+OWNER/REPO` to read one repository. Omit it to read every enabled repository.
 
 Use the repository's label map if it has one. Keep its priority, size, type,
 and blocker labels. Use a separate `claimed` label for active work. Add it
@@ -73,8 +73,54 @@ benchmark category covers both.
 - Use `completely-blocked-on-human` only for a real human-only blocker. Record
   the exact missing action. Work on other issues while it is blocked.
 
+## Check for duplicate issues
+
+Before you write the `Duplicates` list, check each pair of similar issues.
+
+1. Read both issue bodies and comments.
+2. Check both issues' labels, including `claimed`.
+3. Check for open pull requests that reference either issue.
+4. Choose one verdict:
+   - `duplicate`: The issues ask for the same change. Name the issue to keep.
+   - `overlap`: The issues have different scopes. Name both and state the split.
+   - `not duplicate`: The issues ask for different changes. Give one reason.
+
+If either issue has the `claimed` label, use `overlap` or `not duplicate`. Use
+`duplicate` only if the owner confirms it.
+
+Write the `Duplicates` list in your reply to the orchestrator. Begin it with a
+line that reads `Duplicates:`. Then write one line per pair:
+`#N ~ #M — verdict: reason.` If no pair is similar, write `Duplicates: none.`
+
+Close the duplicates.
+
+## Writes that triage may make
+
+Triage may make these writes on the issues it reads:
+
+- **Labels.** Apply the repository's priority label and size label to each open
+  issue that does not have them. Apply the type and blocker labels from the
+  repository's label map when they apply. Do this when you decide the issue's
+  priority and size. Do not remove a label that a person set.
+- **Native blocked-by links.** Add a link when you find that one issue must
+  finish before another. Add it in GitHub's issue dependency feature. Do this
+  when you check dependencies.
+- **Comments.** Post a comment only to record a decision that a later reader
+  needs, for example the reason for a blocker. Start it with `Loop:`.
+
+Please also group / structure issues into epics, mark issues as sub-issues, etc. 
+
+You may close an addressed issue during triage. You may revise an issue's title or body.
+Claim labels and claim comments belong to the claim step below.
+
+A dependency that is only text ("Depends on #N") does not appear in
+`lupin roadmap --dag`. That command reads native blocked-by links only. Treat a
+text dependency as a blocker when you decide what to dispatch. Then add the
+native link, so `--dag` and `--stage blocked` show it.
+
 ## Route and reserve the issue
 
+If you are prepared to route and reserve the issue: 
 From the issue's repository checkout, `lupin place 123 --json` classifies the
 issue, recommends a model and effort, and ranks available machines. It does
 not claim the issue or start an agent. `lupin quota` displays the shared Redis
@@ -95,9 +141,10 @@ lupin release-claim OWNER/REPO#123 --holder SESSION
 ```
 
 A claim is stored in Redis. It does not add a GitHub label or comment, and it
-does not store the worktree path. After the claim succeeds, the claim owner
-adds the `claimed` label and comments with the machine, worktree, branch, and
-holder. When the claim ends, remove the label and comment with the result.
+does not store the worktree path. After the claim succeeds, the agent that made
+the claim adds the `claimed` label and a comment with the machine, worktree,
+branch, and holder. When the claim ends, remove the label and comment with the
+result.
 Start each comment with `Loop:`.
 Do not mark an issue as claimed if the Redis claim fails. Lupin has no local
 claim fallback.
@@ -108,7 +155,7 @@ start an agent or disable quota pacing. Do not claim those issues again.
 
 ## Handoff
 
-Give the worker a short brief:
+Finish with a a short brief:
 
 - Issue number, goal, and acceptance checks.
 - Current comments and open dependencies.
