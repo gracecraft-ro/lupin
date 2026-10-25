@@ -2653,6 +2653,99 @@ class LoopsRouteUnitTests(unittest.TestCase):
         self.assertNotIn("action=/loops/start", configured)
         self.assertIn("No repositories found.", empty)
 
+    def _gather_configured_remote_repo(self, records, local_repos=None):
+        with (
+            mock.patch.object(serve, "code_repos", return_value=local_repos or []),
+            mock.patch.object(serve.loop_runtime, "local_loops", return_value=[]),
+            mock.patch.object(serve, "enabled_repos", return_value=[]),
+            mock.patch.object(serve, "fleet_state", return_value={
+                "claims": {}, "machines": records, "fleet_error": None,
+            }),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            return serve.gather_loops({})
+
+    def test_offline_remote_repo_with_no_reported_loops_is_unavailable(self):
+        data = self._gather_configured_remote_repo([{
+            "name": "jesus",
+            "state": "offline",
+            "repos": [{"repo": "lupin", "enabled": True, "loopable": True}],
+            "loops": [],
+        }])
+        self.assertEqual(data["entries"], [])
+        self.assertEqual(
+            data["repos"][0]["configured_hosts"],
+            [{"name": "jesus", "state": "offline"}],
+        )
+
+        for group in ("repo", "machine"):
+            with self.subTest(group=group):
+                body = serve.render_loops(
+                    data, group=group, selected_repo="lupin",
+                    selected_tail=None, lines=60,
+                ).decode()
+                self.assertIn("lupin <span class=dim>State unavailable</span>", body)
+                self.assertIn("Loop state unavailable: jesus (offline).", body)
+                self.assertNotIn("No active loops.", body)
+                selected_group = "Repo" if group == "repo" else "Machine"
+                self.assertIn(f"aria-current=page>{selected_group}</a>", body)
+                if group == "machine":
+                    self.assertIn("Configured repositories", body)
+
+    def test_online_remote_repo_with_no_reported_loops_shows_no_active_loops(self):
+        data = self._gather_configured_remote_repo([{
+            "name": "jesus",
+            "state": "online",
+            "repos": [{"repo": "lupin", "enabled": True, "loopable": True}],
+            "loops": [],
+        }])
+
+        for group in ("repo", "machine"):
+            with self.subTest(group=group):
+                body = serve.render_loops(
+                    data, group=group, selected_repo="lupin",
+                    selected_tail=None, lines=60,
+                ).decode()
+                self.assertIn("lupin <span class=dim>No active loops</span>", body)
+                self.assertIn("No active loops.", body)
+                self.assertNotIn("Loop state unavailable", body)
+                selected_group = "Repo" if group == "repo" else "Machine"
+                self.assertIn(f"aria-current=page>{selected_group}</a>", body)
+                if group == "machine":
+                    self.assertIn("Configured repositories", body)
+
+    def test_local_repo_does_not_hide_offline_or_unknown_remote_hosts(self):
+        data = self._gather_configured_remote_repo(
+            [
+                {
+                    "name": "jesus",
+                    "state": "offline",
+                    "repos": [{"repo": "lupin", "enabled": True}],
+                    "loops": [],
+                },
+                {
+                    "name": "old-worker",
+                    "state": "unknown",
+                    "repos": [{"repo": "lupin", "enabled": True}],
+                    "loops": [],
+                },
+            ],
+            local_repos=[{"repo": "lupin", "loopable": True}],
+        )
+
+        self.assertEqual(data["entries"][0]["status"], "stopped")
+        body = serve.render_loops(
+            data, group="repo", selected_repo="lupin",
+            selected_tail=None, lines=60,
+        ).decode()
+        self.assertIn("State unavailable", body)
+        self.assertIn(
+            "Loop state unavailable: jesus (offline), old-worker (unknown).",
+            body,
+        )
+        self.assertNotIn("No active loops.", body)
+
+
     def test_loops_group_selector_marks_the_current_group(self):
         data = {
             "entries": [],

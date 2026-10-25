@@ -588,7 +588,14 @@ def merge_repo_inventory(
     local_repos: list[dict], machine_records: list[dict], local_host: str
 ) -> list[dict]:
     """Add repo inventories from other machines to this machine's repo list."""
-    repos = {repo["repo"]: {**repo, "local": True} for repo in local_repos}
+    repos = {
+        repo["repo"]: {
+            **repo,
+            "local": True,
+            "configured_hosts": [{"name": local_host, "state": "online"}],
+        }
+        for repo in local_repos
+    }
     remote = {}
     for record in machine_records:
         host = record.get("name")
@@ -623,6 +630,7 @@ def merge_repo_inventory(
                     "running_hosts": set(),
                     "enabled_hosts": set(),
                     "enable_hosts": set(),
+                    "configured_hosts": {},
                 },
             )
             is_enabled = item.get("enabled") is True
@@ -630,6 +638,11 @@ def merge_repo_inventory(
             entry["loopable"] |= item.get("loopable") is True
             label = f"{host} (offline)" if record.get("state") == "offline" else host
             entry["hosts"].add(label)
+            entry["configured_hosts"][host] = (
+                record.get("state")
+                if record.get("state") in ("online", "draining", "offline")
+                else "unknown"
+            )
             if record.get("state") == "online":
                 actions = record.get("actions", [])
                 if is_enabled and "loop.run" in actions:
@@ -640,10 +653,16 @@ def merge_repo_inventory(
                 entry["running_hosts"].add(host)
 
     for repo, entry in remote.items():
+        remote_hosts = [
+            {"name": host, "state": state}
+            for host, state in sorted(entry["configured_hosts"].items())
+        ]
         if repo in repos:
             repos[repo]["fleet_enabled"] = entry["enabled"]
             repos[repo]["enabled_hosts"] = sorted(entry["enabled_hosts"])
             repos[repo]["enable_hosts"] = sorted(entry["enable_hosts"])
+            repos[repo]["configured_hosts"].extend(remote_hosts)
+            repos[repo]["configured_hosts"].sort(key=lambda host: host["name"])
             continue
         state = "enabled" if entry["enabled"] else "disabled"
         repos[repo] = {
@@ -655,6 +674,7 @@ def merge_repo_inventory(
             "running": bool(entry["running_hosts"]),
             "running_machines": ", ".join(sorted(entry["running_hosts"])),
             "machine": ", ".join(sorted(entry["hosts"])),
+            "configured_hosts": remote_hosts,
             "enabled_hosts": sorted(entry["enabled_hosts"]),
             "enable_hosts": sorted(entry["enable_hosts"]),
         }
@@ -2897,16 +2917,31 @@ def render_loops(
     configured_repo_names = {repo["repo"] for repo in data.get("repos", [])}
     entry_repo_names = {entry["repo"] for entry in entries}
     configured_only = sorted(configured_repo_names - entry_repo_names)
+    repo_inventory = {repo["repo"]: repo for repo in data.get("repos", [])}
+
+    def unavailable_message(repo: str) -> str | None:
+        hosts = [
+            host
+            for host in repo_inventory.get(repo, {}).get("configured_hosts", [])
+            if host.get("state") not in ("online", "draining")
+        ]
+        if not hosts:
+            return None
+        details = ", ".join(
+            f"{host.get('name') or 'unknown'} ({host.get('state') or 'unknown'})"
+            for host in hosts
+        )
+        return f"Loop state unavailable: {details}."
+
     selected = next((e for e in entries if e["repo"] == selected_repo), None)
 
     def row(entry: dict) -> str:
         sel = " sel" if entry["repo"] == selected_repo else ""
         dot = LOOP_STATUS_DOT.get(entry["status"], "idle")
-        label = (
-            "No active loops"
-            if entry["status"] == "stopped"
-            else LOOP_STATUS_LABEL.get(entry["status"], entry["status"])
-        )
+        unavailable = unavailable_message(entry["repo"])
+        label = LOOP_STATUS_LABEL.get(entry["status"], entry["status"])
+        if entry["status"] == "stopped":
+            label = "State unavailable" if unavailable else "No active loops"
         return (
             f"<a class='loops-row{sel}' href='{_loops_url(entry['repo'], group, lines)}'>"
             f"<span class='dot {dot}'></span> {esc(entry['repo'])} "
@@ -2955,9 +2990,17 @@ def render_loops(
     if selected is None:
         if selected_repo and selected_repo in configured_repo_names:
             main.append(f"<div class=row><span class=big>{esc(selected_repo)}</span></div>")
-            main.append("<p class=dim>No active loops.</p>")
+            unavailable = unavailable_message(selected_repo)
+            detail = esc(unavailable) if unavailable else "No active loops."
+            main.append(f"<p class=dim>{detail}</p>")
         elif not entries and configured_repo_names:
-            main.append("<p class=dim>No active loops.</p>")
+            unavailable = None
+            for repo in sorted(configured_repo_names):
+                unavailable = unavailable_message(repo)
+                if unavailable:
+                    break
+            detail = esc(unavailable) if unavailable else "No active loops."
+            main.append(f"<p class=dim>{detail}</p>")
         elif not entries:
             main.append("<p class=dim>No repositories found.</p>")
         else:
@@ -3011,7 +3054,9 @@ def render_loops(
                 else:
                     main.append(f"<p class=dim>No SSH target is set for {esc(selected['machine'])}.</p>")
         elif selected["status"] == "stopped":
-            main.append("<p class=dim>No active loops.</p>")
+            unavailable = unavailable_message(selected["repo"])
+            detail = esc(unavailable) if unavailable else "No active loops."
+            main.append(f"<p class=dim>{detail}</p>")
         else:
             main.append("<p class=dim>State cannot be verified; actions are disabled.</p>")
         main.append("<div class=row style='margin-top:1rem'>")
