@@ -607,17 +607,12 @@ def quota_source_label(provider: str) -> str:
 
 
 def snapshot() -> dict[str, dict]:
-    """One number per provider: `{provider: {pct_left, resets_at, source}}`.
-    When `pct_left` is None the entry also has `note`, the reason.
+    """One primary percentage plus all windows per provider.
 
     `quota_usage()` can return several rows per provider -- one per
-    window (5 hours, 7 days, 30 days). This picks the 5-hour row when
-    there is one (the window every reader tags "primary"/"session"), since
-    that is the window that actually blocks the next request; otherwise it
-    falls back to the first row for that provider. A provider with no
-    usable percentage (an error or a "no data" note) still gets an entry,
-    with `pct_left`/`resets_at` as `None` -- callers (`machines.py`'s
-    heartbeat, eventually `place`) decide what to do with missing data.
+    window (5 hours, 7 days, 30 days). `pct_left` and `resets_at` keep the
+    existing 5-hour-first summary. `windows` lists each window for readers
+    that need to show long-term limits too.
 
     With more than one account, this picks one row for each account as
     above. Then it keeps the account with the most quota left on its
@@ -674,10 +669,22 @@ def snapshot() -> dict[str, dict]:
     for provider, row in chosen.items():
         used = row.get("used_pct")
         pct_left = None if not isinstance(used, (int, float)) else max(0.0, 100 - used)
+        key = best[provider]
+        windows = []
+        for window in account_rows[key]:
+            if window.get("duration") is None:
+                continue
+            used = window.get("used_pct")
+            windows.append({
+                "label": window.get("label"),
+                "pct_left": None if not isinstance(used, (int, float)) else max(0.0, 100 - used),
+                "resets_at": window.get("resets_at"),
+            })
         entry = {
             "pct_left": pct_left,
             "resets_at": row.get("resets_at"),
             "source": quota_source_label(provider),
+            "windows": windows,
         }
         if pct_left is None:
             entry["note"] = row.get("note")

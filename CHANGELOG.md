@@ -7,6 +7,9 @@ All notable changes to Lupin. The version has one source:
 
 ### Added
 
+- `route`, `place`, and `review-route` accept repeated `--exclude-provider`
+  options. `place` shows every quota window, including the weekly limit.
+
 - `lupin logs` shows events from a loop run. Lupin keeps up to 20 logs per
   repo and removes logs older than 30 days.
 - `lupin --version` prints the package version. The flake reads the same

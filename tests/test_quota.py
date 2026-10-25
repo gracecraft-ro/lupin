@@ -705,11 +705,16 @@ class SnapshotTests(unittest.TestCase):
             "pct_left": 60,
             "resets_at": 2,
             "source": quota.quota_source_label("claude"),
+            "windows": [
+                {"label": None, "pct_left": 90, "resets_at": 1},
+                {"label": None, "pct_left": 60, "resets_at": 2},
+            ],
         })
         self.assertEqual(result["openai"], {
             "pct_left": 75,
             "resets_at": 3,
             "source": quota.quota_source_label("openai"),
+            "windows": [{"label": None, "pct_left": 75, "resets_at": 3}],
         })
 
     def test_picks_the_account_with_the_most_quota_left(self):
@@ -741,6 +746,45 @@ class SnapshotTests(unittest.TestCase):
 
         self.assertEqual(result["openai"]["pct_left"], 50)
         self.assertEqual(result["openai"]["pct_left"], pace.headroom(rows, "openai", later))
+        self.assertEqual(
+            result["openai"]["windows"],
+            [
+                {"label": None, "pct_left": 50, "resets_at": later},
+                {"label": None, "pct_left": 50, "resets_at": later},
+            ],
+        )
+
+    def test_snapshot_includes_every_window_for_the_selected_account(self):
+        rows = [
+            {
+                "provider": "claude",
+                "account": "plus",
+                "duration": quota.QuotaDuration.FIVE_HOURS,
+                "label": "5 Hour limit",
+                "used_pct": 2,
+                "resets_at": 3,
+            },
+            {
+                "provider": "claude",
+                "account": "plus",
+                "duration": quota.QuotaDuration.WEEKLY,
+                "label": "Weekly limit",
+                "used_pct": 91,
+                "resets_at": None,
+            },
+        ]
+        with mock.patch.object(quota, "quota_usage", return_value=rows):
+            result = quota.snapshot()
+
+        self.assertEqual(result["claude"]["pct_left"], 98)
+        self.assertEqual(
+            result["claude"]["windows"],
+            [
+                {"label": "5 Hour limit", "pct_left": 98, "resets_at": 3},
+                {"label": "Weekly limit", "pct_left": 9, "resets_at": None},
+            ],
+        )
+        self.assertNotIn("account", result["claude"])
 
     def test_ignores_a_window_with_no_reset_when_ranking_logins(self):
         # Issue #207, review finding 1: login "a" has room on both windows.
