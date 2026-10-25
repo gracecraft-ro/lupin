@@ -2401,6 +2401,28 @@ class GatherLoopsTests(unittest.TestCase):
         self.assertEqual([row["repo"] for row in data["entries"]], ["x"])
         self.assertEqual(data["entries"][0]["status"], "stopped")
 
+    def test_gather_loops_includes_remote_repo_without_an_active_loop(self):
+        machine_records = [{
+            "name": "jesus",
+            "state": "online",
+            "actions": ["loop.run"],
+            "repos": [{"repo": "lupin", "enabled": True, "loopable": True}],
+            "loops": [],
+        }]
+        with (
+            mock.patch.object(serve, "code_repos", return_value=[]),
+            mock.patch.object(serve.loop_runtime, "local_loops", return_value=[]),
+            mock.patch.object(serve, "enabled_repos", return_value=[]),
+            mock.patch.object(serve, "fleet_state", return_value={
+                "claims": {}, "machines": machine_records, "fleet_error": None,
+            }),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            data = serve.gather_loops({})
+        self.assertEqual(data["entries"], [])
+        self.assertEqual([repo["repo"] for repo in data["repos"]], ["lupin"])
+        self.assertEqual(data["repos"][0]["enabled_hosts"], ["jesus"])
+
     def test_gather_loops_lists_remote_loops_when_server_has_no_code_dir(self):
         machine_records = [
             {"name": "jesus", "state": "online",
@@ -2585,15 +2607,75 @@ class NumberedLoopDashboardTests(unittest.TestCase):
 class LoopsRouteUnitTests(unittest.TestCase):
     """Routing logic for controls that use Lupin and Herdr."""
 
-    def test_loops_route_renders(self):
+    def test_loops_route_selects_configured_repo_when_no_loop_is_active(self):
         handler = _loops_handler()
         handler.path = "/loops"
-        with mock.patch.object(
-            serve, "gather_loops",
-            return_value={"entries": [], "machines": [], "fleet_error": None, "local_host": "h"},
-        ):
+        data = {
+            "entries": [],
+            "repos": [{"repo": "lupin"}],
+            "machines": [],
+            "fleet_error": None,
+            "local_host": "h",
+        }
+        with mock.patch.object(serve, "gather_loops", return_value=data):
             handler.do_GET()
-        handler.reply.assert_called_once()
+
+        body = handler.reply.call_args.args[0].decode()
+        self.assertIn("lupin", body)
+        self.assertIn("No active loops.", body)
+        self.assertNotIn("No repositories found.", body)
+
+    def test_loops_empty_state_distinguishes_configured_repos_from_none(self):
+        base = {
+            "entries": [],
+            "machines": [],
+            "fleet_error": None,
+            "local_host": "h",
+        }
+        configured = serve.render_loops(
+            {**base, "repos": [{"repo": "lupin"}]},
+            group="repo",
+            selected_repo="lupin",
+            selected_tail=None,
+            lines=60,
+        ).decode()
+        empty = serve.render_loops(
+            {**base, "repos": []},
+            group="repo",
+            selected_repo="",
+            selected_tail=None,
+            lines=60,
+        ).decode()
+
+        self.assertIn("lupin", configured)
+        self.assertIn("No active loops.", configured)
+        self.assertNotIn("No repositories found.", configured)
+        self.assertNotIn("action=/loops/start", configured)
+        self.assertIn("No repositories found.", empty)
+
+    def test_loops_group_selector_marks_the_current_group(self):
+        data = {
+            "entries": [],
+            "repos": [{"repo": "lupin"}],
+            "local_host": "h",
+            "machines": [],
+            "fleet_error": None,
+        }
+        for group, selected_label, other_label in (
+            ("repo", "Repo", "Machine"),
+            ("machine", "Machine", "Repo"),
+        ):
+            with self.subTest(group=group):
+                body = serve.render_loops(
+                    data,
+                    group=group,
+                    selected_repo="lupin",
+                    selected_tail=None,
+                    lines=60,
+                ).decode()
+                self.assertIn("Group by", body)
+                self.assertIn(f"aria-current=page>{selected_label}</a>", body)
+                self.assertNotIn(f"aria-current=page>{other_label}</a>", body)
 
     def test_loops_route_rejects_bad_lines(self):
         handler = _loops_handler()
@@ -2614,7 +2696,7 @@ class LoopsRouteUnitTests(unittest.TestCase):
     def test_loops_route_uses_herdr_peek_and_shows_state_ids(self):
         entries = [_loop_entry("a", "running", "h", session="herdr-a", workspace_id="w", pane_id="p")]
         handler = _loops_handler()
-        handler.path = "/loops?repo=a"
+        handler.path = "/loops?repo=a&group=machine"
         with (
             mock.patch.object(
                 serve, "gather_loops",
@@ -2631,6 +2713,8 @@ class LoopsRouteUnitTests(unittest.TestCase):
         self.assertIn("pane: p", body)
         self.assertIn("Attach: <code>herdr --session herdr-a</code>", body)
         self.assertIn("Herdr state: running", body)
+        self.assertIn("aria-current=page>Machine</a>", body)
+        self.assertIn("class='loops-row sel' href='/loops?repo=a&group=machine&lines=60'", body)
 
     def test_remote_attach_command_uses_the_configured_ssh_target(self):
         data = {
