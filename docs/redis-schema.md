@@ -8,7 +8,8 @@ This is the data model `lupin` uses once the `redis` backend exists
 | Key | Type | Holds | Replaces |
 | --- | --- | --- | --- |
 | `slot:<name>` | sorted set (member = holder, score = expiry in ms) | `bmo`, the declared `repo:<repo>` UI cap, and enforced `loop-<repo>` fleet locks (one active worker per repo). | `omp.lock` |
-| `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since), with a TTL | one claim per GitHub issue; the loop monitor renews the claims of its run's holder (`LUPIN_CLAIM_HOLDER`) | nothing today |
+| `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since), with a TTL | one claim per issue or PR; the loop monitor renews its holder's claim (`LUPIN_CLAIM_HOLDER`). GitHub's `claimed` label mirrors active issue claims, not PR claims. | nothing today |
+| `claim-index:<owner>/<repo>#<n>` | string, no TTL | target whose `claimed` label needs reconciliation | nothing today |
 | `ledger:<owner>/<repo>` | stream (`XADD`/`XRANGE`) | `ts host event issue status branch summary highlights evidence decisions next children` | `.loop/loop-state.json` is ignored; no local fallback |
 | `machine:<name>` | string (JSON), with a TTL | one fleet machine's status — see Fleet keys below | nothing today |
 | `focus:<quest>` | string (JSON), no TTL | which machine a quest is pinned to — see Fleet keys below | nothing today |
@@ -34,6 +35,29 @@ These are new keys for the fleet CLI (issues #6–#14, split from #2) and the
 cross-machine command queue (issue #28, split from #27). They stay under
 `v1`: `v1` is the shape of each key, not the whole file, and adding a key
 doesn't change the shape of any key that already exists.
+
+## GitHub claim labels
+
+Lupin adds the `claimed` label after a successful Redis claim on an issue. It
+creates the repository label when needed. Lupin does not label pull requests.
+If label sync fails for a new claim, Lupin reports the error and releases that
+claim. If the same holder repeats a claim, Lupin reports the error and keeps
+the existing claim active. A renewal adds the label again when needed. If label
+sync fails during renewal or release, Lupin reports the error; the Redis
+renewal or release stays in effect.
+
+The claim index has no TTL. Lupin clears an entry only after it confirms that
+the Redis claim is gone and the GitHub label is synced.
+
+`lupin reconcile` adds missing labels for active claims and removes labels when
+Redis has no active claim. It checks indexed targets and all local repository
+checkouts, including disabled ones. GitHub API failures appear as warnings and
+make `lupin reconcile` exit with code 1. Each run is one pass. A scheduler must
+call it. If successful passes run at least once every `T` seconds, cleanup
+takes at most `T` seconds plus one pass after the Redis claim expires. A failed
+pass or one that cannot get the reconcile slot does not count. This repository
+sets no reconcile schedule. Without a scheduler, there is no fixed maximum
+delay.
 
 ## Acquire and release
 

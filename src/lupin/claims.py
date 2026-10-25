@@ -70,30 +70,39 @@ def _key(target: str) -> str:
     return f"{PREFIX}claim:{target}"
 
 
+def _label_index_key(target: str) -> str:
+    return f"{PREFIX}claim-index:{target}"
+
+
 def _value(session: str) -> str:
     return json.dumps({"host": socket.gethostname(), "session": session, "since": time.time()})
 
 
-# KEYS[1] = claim:<target>, ARGV[1] = session, ARGV[2] = value (JSON),
-# ARGV[3] = ttl_ms. Claiming is idempotent for the same session (a retry
-# renews instead of failing). Returns 1 (claimed or renewed) or 0 (someone
-# else holds it).
+# KEYS[1] = claim:<target>, KEYS[2] = claim-index:<target>.
+# ARGV[1] = session, ARGV[2] = value (JSON), ARGV[3] = ttl_ms.
+# Claiming is idempotent for the same session. Returns 1 for a new claim, 2
+# when the same session already held it, or 0 when another session holds it.
 _CLAIM_SCRIPT = """
 local current = redis.call('GET', KEYS[1])
+local same_holder = false
 if current then
     local ok, decoded = pcall(cjson.decode, current)
     if not ok or decoded.session ~= ARGV[1] then
         return 0
     end
+    same_holder = true
 end
+redis.call('SET', KEYS[2], '1')
 redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+if same_holder then
+    return 2
+end
 return 1
 """
 
-# KEYS[1] = claim:<target>, ARGV[1] = session, ARGV[2] = value (JSON),
-# ARGV[3] = ttl_ms. Unlike the claim script, never creates a new claim --
-# only pushes the TTL out if `session` is the current holder. Returns 1
-# (renewed) or 0 (not held by this session).
+# KEYS[1] = claim:<target>, KEYS[2] = claim-index:<target>.
+# ARGV[1] = session, ARGV[2] = value (JSON), ARGV[3] = ttl_ms. This never
+# creates a claim; it only renews one held by `session`.
 _RENEW_SCRIPT = """
 local current = redis.call('GET', KEYS[1])
 if not current then
@@ -103,7 +112,28 @@ local ok, decoded = pcall(cjson.decode, current)
 if not ok or decoded.session ~= ARGV[1] then
     return 0
 end
+redis.call('SET', KEYS[2], '1')
 redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+return 1
+"""
+
+# KEYS[1] = claim:<target>, KEYS[2] = claim-index:<target>. Keep the index
+# while a Redis claim is active.
+_INDEX_IF_ACTIVE_SCRIPT = """
+if not redis.call('GET', KEYS[1]) then
+    return 0
+end
+redis.call('SET', KEYS[2], '1')
+return 1
+"""
+
+# Delete the label index only when the claim key is still absent. A concurrent
+# claim writes both keys in its own script.
+_CLEAR_INDEX_IF_UNCLAIMED_SCRIPT = """
+if redis.call('GET', KEYS[1]) then
+    return 0
+end
+redis.call('DEL', KEYS[2])
 return 1
 """
 
@@ -133,8 +163,8 @@ def claim(
     redis_port: int | None = None,
     redis_username: str | None = None,
     redis_password: str | None = None,
-) -> None:
-    """Atomically take `target` (an `OWNER/REPO#N` string) for `holder`.
+) -> bool:
+    """Take `target` for `holder`; return whether this created a new claim.
 
     Idempotent for the same holder -- a retry renews rather than failing.
     Raises `ClaimHeld` if another holder already has it, or
@@ -145,7 +175,10 @@ def claim(
     value = _value(holder)
     try:
         result = _call_with_retry(
-            lambda: client.eval(_CLAIM_SCRIPT, 1, _key(target), holder, value, int(ttl * 1000))
+            lambda: client.eval(
+                _CLAIM_SCRIPT, 2, _key(target), _label_index_key(target),
+                holder, value, int(ttl * 1000)
+            )
         )
         if not result:
             current = _call_with_retry(lambda: client.get(_key(target)))
@@ -155,6 +188,7 @@ def claim(
         raise CoordinatorUnreachable(target) from exc
     if not result:
         raise ClaimHeld(target, current)
+    return result == 1
 
 
 def renew_claim(
@@ -176,7 +210,10 @@ def renew_claim(
     value = _value(holder)
     try:
         result = _call_with_retry(
-            lambda: client.eval(_RENEW_SCRIPT, 1, _key(target), holder, value, int(ttl * 1000))
+            lambda: client.eval(
+                _RENEW_SCRIPT, 2, _key(target), _label_index_key(target),
+                holder, value, int(ttl * 1000)
+            )
         )
     except redis.exceptions.AuthenticationError as exc:
         raise _auth_failed(exc) from exc
@@ -212,7 +249,10 @@ def renew_holder_claims(
         )
         for key in keys:
             if _call_with_retry(
-                lambda k=key: client.eval(_RENEW_SCRIPT, 1, k, holder, value, int(ttl * 1000))
+                lambda k=key: client.eval(
+                    _RENEW_SCRIPT, 2, k, _label_index_key(k[len(prefix) :]),
+                    holder, value, int(ttl * 1000)
+                )
             ):
                 renewed.append(key[len(prefix) :])
     except redis.exceptions.AuthenticationError as exc:
@@ -239,6 +279,75 @@ def release_claim(
     client = _client(redis_host, redis_port, redis_username, redis_password)
     try:
         result = _call_with_retry(lambda: client.eval(_RELEASE_SCRIPT, 1, _key(target), holder))
+    except redis.exceptions.AuthenticationError as exc:
+        raise _auth_failed(exc) from exc
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
+        raise CoordinatorUnreachable(target) from exc
+    return bool(result)
+
+
+def _indexed_targets(
+    *,
+    client: "redis.Redis | None" = None,
+    redis_host: str | None = None,
+    redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
+) -> set[str]:
+    client = client or _client(redis_host, redis_port, redis_username, redis_password)
+    prefix = f"{PREFIX}claim-index:"
+    try:
+        keys = _call_with_retry(
+            lambda: list(client.scan_iter(match=f"{prefix}*", count=SCAN_COUNT))
+        )
+    except redis.exceptions.AuthenticationError as exc:
+        raise _auth_failed(exc) from exc
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
+        raise CoordinatorUnreachable("claim label index") from exc
+    return {key[len(prefix) :] for key in keys}
+
+
+def _mark_label_index_if_active(
+    target: str,
+    *,
+    client: "redis.Redis | None" = None,
+    redis_host: str | None = None,
+    redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
+) -> bool:
+    target = parse_target(target)
+    client = client or _client(redis_host, redis_port, redis_username, redis_password)
+    try:
+        result = _call_with_retry(
+            lambda: client.eval(
+                _INDEX_IF_ACTIVE_SCRIPT, 2, _key(target), _label_index_key(target)
+            )
+        )
+    except redis.exceptions.AuthenticationError as exc:
+        raise _auth_failed(exc) from exc
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
+        raise CoordinatorUnreachable(target) from exc
+    return bool(result)
+
+
+def _clear_label_index_if_unclaimed(
+    target: str,
+    *,
+    client: "redis.Redis | None" = None,
+    redis_host: str | None = None,
+    redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
+) -> bool:
+    target = parse_target(target)
+    client = client or _client(redis_host, redis_port, redis_username, redis_password)
+    try:
+        result = _call_with_retry(
+            lambda: client.eval(
+                _CLEAR_INDEX_IF_UNCLAIMED_SCRIPT, 2, _key(target), _label_index_key(target)
+            )
+        )
     except redis.exceptions.AuthenticationError as exc:
         raise _auth_failed(exc) from exc
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:

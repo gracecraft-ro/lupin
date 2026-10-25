@@ -11,7 +11,13 @@ import time
 import pytest
 import redis as redis_lib
 
-from lupin import cli, claims, slots
+from lupin import claim_labels, cli, claims, slots
+
+
+@pytest.fixture(autouse=True)
+def _disable_github_claim_labels(monkeypatch):
+    monkeypatch.setattr(claim_labels, "add_claimed_label", lambda target: None)
+    monkeypatch.setattr(claim_labels, "remove_claimed_label", lambda target: None)
 
 
 class _FakePipeline:
@@ -417,3 +423,22 @@ def test_claim_without_holder_or_lupin_claim_holder_is_a_usage_error(capsys):
         cli.main(["claim", "acme/repo#4"])
     assert exc.value.code == 2
     assert "--holder" in capsys.readouterr().err
+
+
+def test_cli_claim_label_failure_exits_one_and_rolls_back(
+    redis_port, flush_redis, capsys, monkeypatch
+):
+    def fail(_target):
+        raise claim_labels.GitHubAPIError(403, "write denied")
+
+    monkeypatch.setattr(claim_labels, "add_claimed_label", fail)
+    common = ["--redis-host", "127.0.0.1", "--redis-port", str(redis_port)]
+
+    code = cli.main(["claim", "acme/repo#4", "--holder", "worker", *common])
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert "the Redis claim was released" in captured.err
+    assert claims.claims_for(
+        ["acme/repo"], redis_host="127.0.0.1", redis_port=redis_port
+    ) == {}
