@@ -1410,7 +1410,7 @@ def render_dashboard(state: dict) -> bytes:
         if not fleet_machines:
             body.append(
                 "<div class='card dim'>No machines registered. "
-                "Run <code>lupin join</code>.</div>"
+                "Run <code>lupin join &lt;redis-host&gt;[:port]</code>.</div>"
             )
         else:
             body.append("<div class='card scroll'><table>")

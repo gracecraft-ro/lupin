@@ -1385,7 +1385,7 @@ class FleetDashboardRenderTests(unittest.TestCase):
     def test_missing_fleet_keys_degrade_to_empty_sections(self):
         page = serve.render_dashboard(dict(self.base_state)).decode()
         self.assertIn(
-            "No machines registered. Run <code>lupin join</code>.",
+            "No machines registered. Run <code>lupin join &lt;redis-host&gt;[:port]</code>.",
             page,
         )
         self.assertIn("No claimed issues.", page)
