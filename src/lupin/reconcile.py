@@ -157,9 +157,15 @@ def _sync_claim_labels(repos: list[str], connection: dict, *, code_dir: str) -> 
     for repo_key, (owner, name) in sorted(repo_ids.items()):
         owner_repo = f"{owner}/{name}"
         active = active_by_repo.get(repo_key, set())
+        active_numbers = {
+            int(target.rsplit("#", 1)[1]) for target in active
+        }
         for target in sorted(active):
             try:
-                claim_labels.sync_claimed_label(target, client=client)
+                github_target = f"{owner_repo}#{target.rsplit('#', 1)[1]}"
+                claim_labels.sync_claimed_label(
+                    target, github_target=github_target, client=client
+                )
             except claim_labels.GitHubAPIError as exc:
                 warnings.append(f"GitHub claim label sync failed for {target}: {exc}")
         try:
@@ -169,11 +175,26 @@ def _sync_claim_labels(repos: list[str], connection: dict, *, code_dir: str) -> 
                 f"GitHub claim label sync failed for {owner_repo}: {exc}"
             )
             continue
-        labeled_targets = {f"{owner_repo}#{number}" for number in labeled}
-        stale = (targets_by_repo.get(repo_key, set()) | labeled_targets) - active
+        indexed_targets = targets_by_repo.get(repo_key, set())
+        indexed_numbers = {
+            int(target.rsplit("#", 1)[1]) for target in indexed_targets
+        }
+        stale = {
+            target
+            for target in indexed_targets
+            if int(target.rsplit("#", 1)[1]) not in active_numbers
+        }
+        stale.update(
+            f"{owner_repo}#{number}"
+            for number in labeled
+            if number not in active_numbers and number not in indexed_numbers
+        )
         for target in sorted(stale):
             try:
-                claim_labels.sync_claimed_label(target, client=client)
+                github_target = f"{owner_repo}#{target.rsplit('#', 1)[1]}"
+                claim_labels.sync_claimed_label(
+                    target, github_target=github_target, client=client
+                )
             except claim_labels.GitHubAPIError as exc:
                 warnings.append(f"GitHub claim label sync failed for {target}: {exc}")
     return warnings

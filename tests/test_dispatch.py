@@ -19,10 +19,10 @@ from lupin import slots_redis
 
 
 @pytest.fixture(autouse=True)
-def _disable_github_claim_labels(monkeypatch):
-    monkeypatch.setattr(claim_labels, "add_claimed_label", lambda target: None)
-    monkeypatch.setattr(claim_labels, "remove_claimed_label", lambda target: None)
-
+def _disable_claim_label_sync(monkeypatch):
+    monkeypatch.setattr(
+        claim_labels, "sync_claimed_label", lambda target, **connection: None
+    )
 
 ISSUE = {
     "kind": "issue",

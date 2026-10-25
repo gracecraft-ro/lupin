@@ -491,6 +491,50 @@ def test_reconcile_keeps_active_label_when_local_repo_case_differs(
     assert claims._indexed_targets(**connection) == {target}
 
 
+def test_reconcile_keeps_active_labels_when_targets_use_mixed_repo_case(
+    redis_port, flush_redis, monkeypatch
+):
+    connection = _kw(redis_port)
+    targets = ["Acme/Repo#17", "acme/repo#18"]
+    for number, target in zip((17, 18), targets):
+        claims.claim(target, f"worker-{number}", **connection)
+    labeled = {17, 18}
+    listed = []
+    added = []
+    removed = []
+
+    monkeypatch.setattr(
+        reconcile.roadmap,
+        "_repo_identity",
+        lambda path: ("acme", "repo", None),
+    )
+
+    def list_claimed(owner, repo):
+        listed.append((owner, repo))
+        return sorted(labeled)
+
+    def add_label(target):
+        added.append(target)
+        labeled.add(int(target.rsplit("#", 1)[1]))
+
+    def remove_label(target):
+        removed.append(target)
+        labeled.discard(int(target.rsplit("#", 1)[1]))
+
+    monkeypatch.setattr(claim_labels, "list_claimed_issues", list_claimed)
+    monkeypatch.setattr(claim_labels, "add_claimed_label", add_label)
+    monkeypatch.setattr(claim_labels, "remove_claimed_label", remove_label)
+
+    warnings = reconcile._sync_claim_labels(["repo"], connection, code_dir="/repos")
+
+    assert warnings == []
+    assert listed == [("acme", "repo")]
+    assert added == ["acme/repo#17", "acme/repo#18"]
+    assert removed == []
+    assert labeled == {17, 18}
+    assert claims._indexed_targets(**connection) == set(targets)
+
+
 def test_reconcile_removes_unindexed_label_from_local_repo(
     redis_port, flush_redis, monkeypatch
 ):

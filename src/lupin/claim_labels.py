@@ -154,12 +154,15 @@ def remove_claimed_label(target: str) -> None:
 
 
 
-def sync_claimed_label(target: str, **connection) -> None:
+def sync_claimed_label(
+    target: str, *, github_target: str | None = None, **connection
+) -> None:
     """Make the GitHub label match the current Redis claim."""
+    label_target = target if github_target is None else github_target
     while True:
         if claims._mark_label_index_if_active(target, **connection):
             try:
-                add_claimed_label(target)
+                add_claimed_label(label_target)
             except GitHubAPIError:
                 claims._mark_label_index(target, **connection)
                 raise
@@ -167,7 +170,7 @@ def sync_claimed_label(target: str, **connection) -> None:
             if claims._mark_label_index_if_active(target, **connection):
                 return
 
-        remove_claimed_label(target)
+        remove_claimed_label(label_target)
         if claims._clear_label_index_if_unclaimed(target, **connection):
             return
 
