@@ -1473,6 +1473,38 @@ class RoadmapTests(unittest.TestCase):
         self.assertIn("Showing <b>0</b> of 0 issues", empty)
 
 
+    def test_repository_identity_errors_render_as_unknown_issue_count(self):
+        render = lambda title, body, css, js: body
+        identity_errors = [
+            (None, "GitHub returned invalid repository data"),
+            ({"name": "alpha"}, "GitHub returned no repository owner or name"),
+        ]
+
+        for identity, warning in identity_errors:
+            with self.subTest(warning=warning):
+                with mock.patch.object(
+                    roadmap, "_run_json", return_value=(identity, None)
+                ):
+                    issues, _comments, warnings = roadmap.load_github(
+                        "/missing/identity-repo"
+                    )
+
+                model = roadmap.build_model(
+                    issues, {}, [], warnings=warnings, repo="alpha"
+                )
+                page = roadmap.render_combined_page(
+                    ["alpha"], {"alpha": model}, render
+                )
+
+                self.assertTrue(model["issueFetchFailed"])
+                self.assertIn("unknown open issues", page)
+                self.assertIn(
+                    f"<details class='repo-warnings'><summary>alpha: {warning}</summary>",
+                    page,
+                )
+                self.assertNotIn("no open issues", page)
+
+
     def test_failed_issue_fetch_is_unknown_and_warning_is_visible(self):
         model = roadmap.build_model(
             [],

@@ -815,6 +815,8 @@ def build_model(
                 (
                     "GitHub issue data is unavailable",
                     "GitHub returned invalid issue data",
+                    "GitHub returned invalid repository data",
+                    "GitHub returned no repository owner or name",
                     "GitHub repository data is unavailable",
                 )
             )
