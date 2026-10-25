@@ -6,6 +6,7 @@ Uses the real `redis-server` fixtures in `conftest.py` -- `redis_port`,
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -132,6 +133,25 @@ def test_claim_succeeds_and_is_visible_in_redis(redis_port, flush_redis):
     value = raw.get("lupin:v1:claim:gracecraft/lupin#6")
     assert value is not None
     assert '"session": "host-a:session-1"' in value or "session" in value
+
+
+def test_claim_generation_rotates_on_retry_and_survives_renewal(
+    redis_port, flush_redis
+):
+    target = "gracecraft/lupin#6"
+    key = f"lupin:v1:claim:{target}"
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+
+    claims.claim(target, "same-holder", generation="first", **kw)
+    assert json.loads(raw.get(key))["generation"] == "first"
+    assert "generation" not in claims.claims_for(["gracecraft/lupin"], **kw)[target]
+
+    assert claims.renew_claim(target, "same-holder", **kw) is True
+    assert json.loads(raw.get(key))["generation"] == "first"
+
+    assert claims.claim(target, "same-holder", generation="second", **kw) is False
+    assert json.loads(raw.get(key))["generation"] == "second"
 
 
 def test_claim_is_idempotent_for_the_same_holder(redis_port, flush_redis):

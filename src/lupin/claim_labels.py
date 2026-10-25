@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import uuid
 from urllib.parse import urlencode
 
 from . import claims
@@ -173,7 +174,10 @@ def claim(
     target: str, holder: str, *, ttl: float = claims.DEFAULT_TTL, **connection
 ) -> bool:
     """Take a Redis claim, then apply its GitHub label."""
-    created = claims.claim(target, holder, ttl=ttl, **connection)
+    generation = uuid.uuid4().hex
+    created = claims.claim(
+        target, holder, ttl=ttl, generation=generation, **connection
+    )
     try:
         add_claimed_label(target)
     except GitHubAPIError as exc:
@@ -183,7 +187,9 @@ def claim(
                 "the existing Redis claim remains active"
             ) from exc
         try:
-            rolled_back = claims.release_claim(target, holder, **connection)
+            rolled_back = claims.release_claim(
+                target, holder, expected_generation=generation, **connection
+            )
         except Exception as rollback_error:
             raise ClaimLabelSyncError(
                 f"could not add the {LABEL!r} label to {target}: {exc}; "
