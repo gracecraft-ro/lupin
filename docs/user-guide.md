@@ -214,9 +214,10 @@ request that waits for a person to merge it still counts. So `--every` keeps
 running while a repo has work. If Redis denies a claim read, each issue counts
 as not claimed and the event says `claims: unreadable`. If Lupin cannot read a
 count, work left is unknown. Rules 2 and 4 then do not apply, and `--every`
-does not stop. The PR count uses the shared GitHub cache key `open-prs`, which
-only `supervise` fills. If the pinned cache machine is online but does not run
-`supervise`, other machines cannot get that count.
+does not stop. The shared GitHub cache key `open-prs` holds the PR count.
+Only `supervise` fills this cache. Other machines can read the count until
+it expires. If no count is cached or it has expired, they cannot refresh it
+while the pinned cache machine is online but not running `supervise`.
 
 The nudge starts with `Supervisor:` and goes to the loop's pane. A loop with
 no pane ID gets no nudge. Before sending, Lupin takes the loop lock without
