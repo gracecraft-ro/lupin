@@ -132,14 +132,18 @@ def _sync_claim_labels(repos: list[str], connection: dict, *, code_dir: str) -> 
     active_by_repo: dict[str, set[str]] = {}
     targets_by_repo: dict[str, set[str]] = {}
     repo_ids = {}
-    for target in targets:
+    for target in sorted(targets):
         owner_repo = target.rpartition("#")[0]
         owner, name = owner_repo.split("/", 1)
-        targets_by_repo.setdefault(owner_repo, set()).add(target)
-        repo_ids[owner_repo] = (owner, name)
-    for target in active_claims:
-        active_by_repo.setdefault(target.rpartition("#")[0], set()).add(target)
-
+        repo_key = owner_repo.casefold()
+        targets_by_repo.setdefault(repo_key, set()).add(target)
+        repo_ids.setdefault(repo_key, (owner, name))
+    for target in sorted(active_claims):
+        owner_repo = target.rpartition("#")[0]
+        owner, name = owner_repo.split("/", 1)
+        repo_key = owner_repo.casefold()
+        active_by_repo.setdefault(repo_key, set()).add(target)
+        repo_ids[repo_key] = (owner, name)
     warnings = []
     for repo in dict.fromkeys(repos):
         owner, name, error = roadmap._repo_identity(os.path.join(code_dir, repo))
@@ -148,10 +152,11 @@ def _sync_claim_labels(repos: list[str], connection: dict, *, code_dir: str) -> 
                 f"GitHub claim label sync failed for {repo}: {error}"
             )
             continue
-        repo_ids[f"{owner}/{name}"] = (owner, name)
+        repo_ids.setdefault(f"{owner}/{name}".casefold(), (owner, name))
 
-    for owner_repo, (owner, name) in sorted(repo_ids.items()):
-        active = active_by_repo.get(owner_repo, set())
+    for repo_key, (owner, name) in sorted(repo_ids.items()):
+        owner_repo = f"{owner}/{name}"
+        active = active_by_repo.get(repo_key, set())
         for target in sorted(active):
             try:
                 claim_labels.sync_claimed_label(target, client=client)
@@ -165,7 +170,7 @@ def _sync_claim_labels(repos: list[str], connection: dict, *, code_dir: str) -> 
             )
             continue
         labeled_targets = {f"{owner_repo}#{number}" for number in labeled}
-        stale = (targets_by_repo.get(owner_repo, set()) | labeled_targets) - active
+        stale = (targets_by_repo.get(repo_key, set()) | labeled_targets) - active
         for target in sorted(stale):
             try:
                 claim_labels.sync_claimed_label(target, client=client)
