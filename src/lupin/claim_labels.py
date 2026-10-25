@@ -153,6 +153,25 @@ def remove_claimed_label(target: str) -> None:
             raise
 
 
+
+def sync_claimed_label(target: str, **connection) -> None:
+    """Make the GitHub label match the current Redis claim."""
+    while True:
+        if claims._mark_label_index_if_active(target, **connection):
+            try:
+                add_claimed_label(target)
+            except GitHubAPIError:
+                claims._mark_label_index(target, **connection)
+                raise
+            claims._mark_label_index(target, **connection)
+            if claims._mark_label_index_if_active(target, **connection):
+                return
+
+        remove_claimed_label(target)
+        if claims._clear_label_index_if_unclaimed(target, **connection):
+            return
+
+
 def list_claimed_issues(owner: str, repo: str) -> list[int]:
     query = urlencode({"state": "all", "labels": LABEL, "per_page": 100})
     pages = _api(
@@ -179,11 +198,11 @@ def claim(
         target, holder, ttl=ttl, generation=generation, **connection
     )
     try:
-        add_claimed_label(target)
+        sync_claimed_label(target, **connection)
     except GitHubAPIError as exc:
         if not created:
             raise ClaimLabelSyncError(
-                f"could not add the {LABEL!r} label to {target}: {exc}; "
+                f"could not sync the {LABEL!r} label for {target}: {exc}; "
                 "the existing Redis claim remains active"
             ) from exc
         try:
@@ -192,7 +211,7 @@ def claim(
             )
         except Exception as rollback_error:
             raise ClaimLabelSyncError(
-                f"could not add the {LABEL!r} label to {target}: {exc}; "
+                f"could not sync the {LABEL!r} label for {target}: {exc}; "
                 f"could not confirm Redis rollback: {rollback_error}"
             ) from exc
         if not rolled_back:
@@ -201,7 +220,7 @@ def claim(
                 "could not confirm that the Redis claim was released"
             ) from exc
         raise ClaimLabelSyncError(
-            f"could not add the {LABEL!r} label to {target}: {exc}; "
+            f"could not sync the {LABEL!r} label for {target}: {exc}; "
             "the Redis claim was released"
         ) from exc
     return created
@@ -212,7 +231,7 @@ def renew_claim(target: str, holder: str, **connection) -> bool:
     if not renewed:
         return False
     try:
-        add_claimed_label(target)
+        sync_claimed_label(target, **connection)
     except GitHubAPIError as exc:
         raise ClaimLabelSyncError(
             f"renewed the Redis claim for {target}, but could not ensure the "
@@ -226,7 +245,7 @@ def renew_holder_claims(holder: str, **connection) -> list[str]:
     errors = []
     for target in renewed:
         try:
-            add_claimed_label(target)
+            sync_claimed_label(target, **connection)
         except GitHubAPIError as exc:
             errors.append(f"{target}: {exc}")
     if errors:
@@ -243,13 +262,7 @@ def release_claim(target: str, holder: str, **connection) -> bool:
         return False
 
     try:
-        if claims._mark_label_index_if_active(target, **connection):
-            add_claimed_label(target)
-            return True
-        remove_claimed_label(target)
-        if not claims._clear_label_index_if_unclaimed(target, **connection):
-            if claims._mark_label_index_if_active(target, **connection):
-                add_claimed_label(target)
+        sync_claimed_label(target, **connection)
     except GitHubAPIError as exc:
         raise ClaimLabelSyncError(
             f"released the Redis claim for {target}, but could not sync the "

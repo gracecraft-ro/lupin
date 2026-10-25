@@ -153,10 +153,8 @@ def _sync_claim_labels(repos: list[str], connection: dict, *, code_dir: str) -> 
     for owner_repo, (owner, name) in sorted(repo_ids.items()):
         active = active_by_repo.get(owner_repo, set())
         for target in sorted(active):
-            if not claims._mark_label_index_if_active(target, client=client):
-                continue
             try:
-                claim_labels.add_claimed_label(target)
+                claim_labels.sync_claimed_label(target, client=client)
             except claim_labels.GitHubAPIError as exc:
                 warnings.append(f"GitHub claim label sync failed for {target}: {exc}")
         try:
@@ -169,25 +167,10 @@ def _sync_claim_labels(repos: list[str], connection: dict, *, code_dir: str) -> 
         labeled_targets = {f"{owner_repo}#{number}" for number in labeled}
         stale = (targets_by_repo.get(owner_repo, set()) | labeled_targets) - active
         for target in sorted(stale):
-            if claims._mark_label_index_if_active(target, client=client):
-                try:
-                    claim_labels.add_claimed_label(target)
-                except claim_labels.GitHubAPIError as exc:
-                    warnings.append(f"GitHub claim label sync failed for {target}: {exc}")
-                continue
-            if target in labeled_targets:
-                try:
-                    claim_labels.remove_claimed_label(target)
-                except claim_labels.GitHubAPIError as exc:
-                    warnings.append(f"GitHub claim label sync failed for {target}: {exc}")
-                    continue
-            if not claims._clear_label_index_if_unclaimed(target, client=client):
-                if claims._mark_label_index_if_active(target, client=client):
-                    try:
-                        claim_labels.add_claimed_label(target)
-                    except claim_labels.GitHubAPIError as exc:
-                        warnings.append(f"GitHub claim label sync failed for {target}: {exc}")
-    return warnings
+            try:
+                claim_labels.sync_claimed_label(target, client=client)
+            except claim_labels.GitHubAPIError as exc:
+                warnings.append(f"GitHub claim label sync failed for {target}: {exc}")
 
 
 def _scan_focuses(client) -> dict[str, dict]:

@@ -179,6 +179,49 @@ def test_claim_fails_when_already_held_by_someone_else(redis_port, flush_redis):
         claims.claim("gracecraft/lupin#6", "second-holder", **kw)
 
 
+def test_claim_held_hides_generation_and_shows_safe_holder_fields(
+    redis_port, flush_redis
+):
+    target = "gracecraft/lupin#6"
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set(
+        f"{claims.PREFIX}claim:{target}",
+        json.dumps(
+            {
+                "host": "safe-host",
+                "session": "safe-holder",
+                "since": 123,
+                "generation": "private-generation",
+            }
+        ),
+    )
+
+    with pytest.raises(claims.ClaimHeld) as exc:
+        claims.claim(target, "other-holder", **kw)
+
+    message = str(exc.value)
+    assert "private-generation" not in message
+    assert "host='safe-host'" in message
+    assert "session='safe-holder'" in message
+    assert "since=123" in message
+
+
+@pytest.mark.parametrize("raw_value", ["not-json", "[1, 2]"])
+def test_claim_held_uses_unknown_holder_for_malformed_values(
+    redis_port, flush_redis, raw_value
+):
+    target = "gracecraft/lupin#6"
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    raw.set(f"{claims.PREFIX}claim:{target}", raw_value)
+
+    with pytest.raises(claims.ClaimHeld) as exc:
+        claims.claim(target, "other-holder", **kw)
+
+    assert str(exc.value).endswith("unknown holder")
+
+
 def test_renew_claim_fails_for_non_holder(redis_port, flush_redis):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
     claims.claim("gracecraft/lupin#6", "real-holder", **kw)

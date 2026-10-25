@@ -48,8 +48,11 @@ existing claim active. A renewal adds the label again when needed. If label sync
 fails during renewal or release, Lupin reports the error; the Redis renewal or
 release stays in effect.
 
-The claim index has no TTL. Lupin clears an entry only after it confirms that
-the Redis claim is gone and the GitHub label is synced.
+The claim index has no TTL. After a successful GitHub add, Lupin writes the
+index again and checks Redis. If no claim remains, it removes the label, then
+clears the index only if Redis still has no claim. If a new claim appears while
+Lupin removes the label, it adds the label and checks again. A GitHub or Redis
+error does not trigger index cleanup. Reconcile can retry the sync.
 
 `lupin reconcile` adds missing labels for active claims and removes labels when
 Redis has no active claim. It checks indexed targets and all local repository

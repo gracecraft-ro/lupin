@@ -189,6 +189,33 @@ def test_claim_adds_label_after_redis_claim(redis_port, flush_redis, monkeypatch
     assert added == [target]
 
 
+
+def test_delayed_label_add_after_release_removes_label_and_index(
+    redis_port, flush_redis, monkeypatch
+):
+    target = "acme/repo#17"
+    connection = _kw(redis_port)
+    labeled = False
+
+    def delayed_add(item):
+        nonlocal labeled
+        claim_labels.release_claim(item, "worker", **connection)
+        labeled = True
+
+    def remove_label(_item):
+        nonlocal labeled
+        labeled = False
+
+    monkeypatch.setattr(claim_labels, "add_claimed_label", delayed_add)
+    monkeypatch.setattr(claim_labels, "remove_claimed_label", remove_label)
+
+    assert claim_labels.claim(target, "worker", **connection) is True
+
+    assert claims.claims_for(["acme/repo"], **connection) == {}
+    assert labeled is False
+    assert claims._indexed_targets(**connection) == set()
+
+
 def test_label_add_failure_rolls_back_new_redis_claim(redis_port, flush_redis, monkeypatch):
     def fail(_target):
         raise claim_labels.GitHubAPIError(403, "write denied")
@@ -199,6 +226,7 @@ def test_label_add_failure_rolls_back_new_redis_claim(redis_port, flush_redis, m
         claim_labels.claim("acme/repo#17", "worker", **_kw(redis_port))
 
     assert claims.claims_for(["acme/repo"], **_kw(redis_port)) == {}
+    assert claims._indexed_targets(**_kw(redis_port)) == {"acme/repo#17"}
 
 
 def test_failed_initial_label_sync_does_not_release_successful_same_holder_retry(
@@ -370,6 +398,7 @@ def test_release_label_failure_is_not_reported_as_fully_synced(
         claim_labels.release_claim(target, "worker", **_kw(redis_port))
 
     assert claims.claims_for(["acme/repo"], **_kw(redis_port)) == {}
+    assert claims._indexed_targets(**_kw(redis_port)) == {target}
 
 
 def test_release_redis_failure_is_not_mislabeled_as_github_failure(monkeypatch):

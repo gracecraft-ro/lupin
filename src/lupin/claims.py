@@ -50,7 +50,17 @@ class ClaimHeld(Exception):
     """Raised by `claim` when someone else already holds this issue."""
 
     def __init__(self, target: str, current_raw: str | None):
-        detail = current_raw or "unknown holder"
+        claim = _claim_object(current_raw) if current_raw else None
+        details = []
+        if claim is not None:
+            for key in ("host", "session"):
+                value = claim.get(key)
+                if isinstance(value, str):
+                    details.append(f"{key}={value!r}")
+            since = claim.get("since")
+            if isinstance(since, (int, float)) and not isinstance(since, bool):
+                details.append(f"since={since!r}")
+        detail = ", ".join(details) or "unknown holder"
         super().__init__(f"{target} is already claimed: {detail}")
 
 
@@ -362,6 +372,27 @@ def _mark_label_index_if_active(
     except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
         raise CoordinatorUnreachable(target) from exc
     return bool(result)
+
+
+def _mark_label_index(
+    target: str,
+    *,
+    client: "redis.Redis | None" = None,
+    redis_host: str | None = None,
+    redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
+) -> None:
+    """Keep a target indexed while a GitHub label update may be in flight."""
+    target = parse_target(target)
+    client = client or _client(redis_host, redis_port, redis_username, redis_password)
+    try:
+        _call_with_retry(lambda: client.set(_label_index_key(target), "1"))
+    except redis.exceptions.AuthenticationError as exc:
+        raise _auth_failed(exc) from exc
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
+        raise CoordinatorUnreachable(target) from exc
+
 
 
 def _clear_label_index_if_unclaimed(

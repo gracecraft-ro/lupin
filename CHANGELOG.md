@@ -50,6 +50,8 @@ All notable changes to Lupin. The version has one source:
 - OMP prompt jobs do not wait for caller stdin to close.
 - Claim reads use Redis `TTL` for the remaining time.
 - `lupin place` reports quota deferrals when no reset time is available.
+- Claim label sync rechecks Redis after GitHub writes. Claim-conflict errors
+  show safe holder fields without exposing the internal generation.
 
 ## 0.1.0
 
