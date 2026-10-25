@@ -2029,7 +2029,7 @@ def _reported_agent_state(status: object) -> str:
     return "unknown"
 
 
-def local_loops() -> list[dict]:
+def local_loops(*, include_unmanaged: bool = False) -> list[dict]:
     result = []
     if LOOPS_DIR.is_dir():
         for path in sorted(LOOPS_DIR.glob("*.json")):
@@ -2068,45 +2068,47 @@ def local_loops() -> list[dict]:
         agents = _agents(SESSION_NAME)
     except LoopError:
         agents = []
-    groups: dict[str, list[dict]] = {}
+    unmanaged_agents = []
     for agent in agents:
-        repo = _agent_repo(agent)
-        if repo:
-            groups.setdefault(repo, []).append(agent)
-
-    for repo, agents_for_repo in groups.items():
-        panes = [
-            {
-                "workspace_id": agent.get("workspace_id"),
-                "pane_id": agent.get("pane_id"),
-                "agent_status": agent.get("agent_status", "unknown"),
-                "agent": agent.get("agent"),
-            }
-            for agent in agents_for_repo
+        workspace_id = agent.get("workspace_id")
+        pane_id = agent.get("pane_id")
+        matches = [
+            row for row in result
+            if (
+                workspace_id and workspace_id == row.get("workspace_id")
+                or pane_id and pane_id == row.get("pane_id")
+            )
         ]
-        state = max(
-            (_reported_agent_state(agent.get("agent_status")) for agent in agents_for_repo),
-            key=lambda item: {"needs_attention": 3, "running": 2, "done": 1, "unknown": 0}[item],
-        )
-        existing_rows = [row for row in result if loop_repo(row["repo"]) == repo]
-        if not existing_rows:
-            first = agents_for_repo[0]
-            result.append({
-                "repo": repo,
-                "platform": first.get("agent"),
-                "state": state,
-                "since": first.get("started_at"),
+        if not matches:
+            unmanaged_agents.append(agent)
+            continue
+        pane = {
+            "workspace_id": workspace_id,
+            "pane_id": pane_id,
+            "agent_status": agent.get("agent_status", "unknown"),
+            "agent": agent.get("agent"),
+        }
+        state = _reported_agent_state(agent.get("agent_status"))
+        for row in matches:
+            row.setdefault("panes", []).append(pane)
+            if state != "unknown":
+                row["state"] = state
+
+    if include_unmanaged:
+        result.extend(
+            {
+                "repo": None,
+                "managed": False,
+                "state": agent.get("agent_status") or "unknown",
+                "since": agent.get("started_at"),
                 "backend": "herdr",
                 "session": SESSION_NAME,
-                "workspace_id": first.get("workspace_id"),
-                "pane_id": first.get("pane_id"),
-                "panes": panes,
-            })
-        else:
-            for existing in existing_rows:
-                existing["panes"] = panes
-                if state != "unknown":
-                    existing["state"] = state
+                "workspace_id": agent.get("workspace_id"),
+                "pane_id": agent.get("pane_id"),
+                "agent": agent.get("agent"),
+            }
+            for agent in unmanaged_agents
+        )
     return result
 
 def attach_argv(repo: str, machine: str, local_host: str, ssh_target: str | None) -> list[str]:
@@ -2334,7 +2336,9 @@ def schedule_local(args: list[str]) -> str:
 
 def status_rows(repos: list[str] | None = None) -> list[dict]:
     enabled = enabled_repos()
-    values = {row["repo"]: row for row in local_loops()}
+    rows = local_loops(include_unmanaged=repos is None)
+    unmanaged = [row for row in rows if row.get("managed") is False]
+    values = {row["repo"]: row for row in rows if row.get("managed") is not False}
     selected = repos if repos is not None else list(dict.fromkeys([*enabled, *values]))
     return [
         values.get(repo, {
@@ -2346,7 +2350,7 @@ def status_rows(repos: list[str] | None = None) -> list[dict]:
             "since": None,
         })
         for repo in selected
-    ]
+    ] + unmanaged
 
 
 def _print_json(value: Any) -> None:
