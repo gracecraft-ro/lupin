@@ -164,7 +164,17 @@ def test_agent_repo_uses_origin_for_worktree_paths(tmp_path: Path):
     assert loop_runtime._agent_repo({"cwd": str(checkout)}) == "widgets"
 
 
-def test_local_loops_matches_agents_by_saved_workspace_or_pane_id(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize(
+    ("statuses", "initial_state"),
+    [
+        (("idle", "blocked"), "working"),
+        (("blocked", "idle"), "working"),
+        (("idle", "working"), "blocked"),
+    ],
+)
+def test_local_loops_matches_agents_by_saved_workspace_or_pane_id(
+    monkeypatch, tmp_path: Path, statuses: tuple[str, str], initial_state: str
+):
     loops_dir = tmp_path / "herdr-loops"
     loops_dir.mkdir()
     (loops_dir / "widgets.json").write_text(
@@ -177,21 +187,26 @@ def test_local_loops_matches_agents_by_saved_workspace_or_pane_id(monkeypatch, t
     monkeypatch.setattr(
         loop_runtime,
         "loop_state",
-        lambda repo: {"repo": repo, "state": "working", "workspace_id": "saved", "pane_id": "saved:p1"},
+        lambda repo: {
+            "repo": repo,
+            "state": initial_state,
+            "workspace_id": "saved",
+            "pane_id": "saved:p1",
+        },
     )
     monkeypatch.setattr(loop_runtime, "_agents", lambda session: [
         {
             "cwd": "/tmp/not-the-repo",
             "workspace_id": "saved",
             "pane_id": "w3:p1",
-            "agent_status": "idle",
+            "agent_status": statuses[0],
             "agent": "omp",
         },
         {
             "cwd": "/tmp/not-the-repo",
             "workspace_id": "other",
             "pane_id": "saved:p1",
-            "agent_status": "blocked",
+            "agent_status": statuses[1],
             "agent": "claude",
         },
         {

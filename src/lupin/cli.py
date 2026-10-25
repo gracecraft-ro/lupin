@@ -1128,7 +1128,7 @@ def _cmd_join(args: argparse.Namespace) -> int:
             redis_username=args.redis_username,
             redis_password=args.redis_password,
             config_path=args.config_path,
-            loops=loop_runtime.local_loops(),
+            loops=loop_runtime.local_loops(include_unmanaged=True),
             repos=serve.local_repo_inventory(),
         )
     except _REDIS_REFUSED as exc:
@@ -1145,7 +1145,7 @@ def _cmd_heartbeat(args: argparse.Namespace) -> int:
     try:
         record = machines.heartbeat(
             _fleet_connection(args),
-            loops=loop_runtime.local_loops(),
+            loops=loop_runtime.local_loops(include_unmanaged=True),
             repos=serve.local_repo_inventory(),
         )
     except _REDIS_REFUSED as exc:

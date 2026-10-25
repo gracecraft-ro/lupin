@@ -2017,12 +2017,20 @@ def _agent_repo(agent: dict) -> str | None:
         return None
 
 
+_AGENT_STATE_PRIORITY = {
+    "unknown": 0,
+    "done": 1,
+    "running": 2,
+    "needs_attention": 3,
+}
+
+
 def _reported_agent_state(status: object) -> str:
     if not isinstance(status, str):
         return "unknown"
-    if status in {"idle", "working"}:
+    if status in {"idle", "working", "running"}:
         return "running"
-    if status == "blocked":
+    if status in {"blocked", "needs_attention"}:
         return "needs_attention"
     if status == "done":
         return "done"
@@ -2091,7 +2099,10 @@ def local_loops(*, include_unmanaged: bool = False) -> list[dict]:
         state = _reported_agent_state(agent.get("agent_status"))
         for row in matches:
             row.setdefault("panes", []).append(pane)
-            if state != "unknown":
+            current_state = _reported_agent_state(row.get("state"))
+            if current_state != "unknown":
+                row["state"] = current_state
+            if _AGENT_STATE_PRIORITY[state] > _AGENT_STATE_PRIORITY[current_state]:
                 row["state"] = state
 
     if include_unmanaged:

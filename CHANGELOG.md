@@ -23,7 +23,8 @@ All notable changes to Lupin. The version has one source:
   `release/next`.
 
 - `lupin loops` matches Herdr agents to saved loops by pane or workspace ID.
-  Other agents show as unmanaged.
+  Other agents show as unmanaged in local and remote listings. A blocked pane
+  keeps the loop in `needs_attention`.
 
 ### Fixed
 
