@@ -171,16 +171,24 @@ def _fallback_entries(
 
 
 def _initial_entry(
-    row: dict, tier: str, excluded_providers: frozenset[str]
+    row: dict,
+    tier: str,
+    excluded_providers: frozenset[str],
+    *,
+    bmo_available: bool = True,
 ) -> tuple[str, int, dict] | None:
     """First allowed entry in `tier`, or the nearest lower tier."""
     tier_index = _TIER_ORDER.index(tier)
     tier_walk = (tier,) + tuple(reversed(_TIER_ORDER[:tier_index]))
     for candidate_tier in tier_walk:
         for index, entry in enumerate(row.get(candidate_tier, [])):
-            if provider_for_model(entry["model"]) not in excluded_providers:
-                return candidate_tier, index, entry
+            if provider_for_model(entry["model"]) in excluded_providers:
+                continue
+            if not bmo_available and entry["model"].startswith("bmo:"):
+                continue
+            return candidate_tier, index, entry
     return None
+
 
 
 def _model_prices(model: str, snapshot: dict | None) -> list[dict] | None:
@@ -263,6 +271,8 @@ def _apply_pacing(
     tier: str,
     quota_rows: list[dict],
     excluded_providers: frozenset[str] = frozenset(),
+    *,
+    bmo_available: bool = True,
 ) -> dict:
     """Apply quota pacing and safe fallback rules.
 
@@ -276,7 +286,9 @@ def _apply_pacing(
     has quota. A deferral keeps the blocked model as context; callers must
     not run it.
     """
-    selected = _initial_entry(row, tier, excluded_providers)
+    selected = _initial_entry(
+        row, tier, excluded_providers, bmo_available=bmo_available
+    )
     if selected is None:
         providers = ", ".join(sorted(excluded_providers))
         raise RouteInputError(
@@ -411,4 +423,6 @@ def route(
         ) from error
 
     live_quota_rows = quota_mod.quota_usage() if quota_rows is None else quota_rows
-    return _apply_pacing(row, tier, live_quota_rows, frozenset(excluded))
+    return _apply_pacing(
+        row, tier, live_quota_rows, frozenset(excluded), bmo_available=bmo_available
+    )

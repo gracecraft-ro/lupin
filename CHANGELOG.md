@@ -26,6 +26,8 @@ All notable changes to Lupin. The version has one source:
   `release/next`.
 
 ### Fixed
+- `route --no-bmo` stays off BMO models after exclusions or quota fallback.
+  Claude quota windows are deduplicated against OMP data and labeled.
 
 - The Roadmap page family uses one set of stage words (In progress, Ready,
   Later, Blocked) on the board, the list, the detail panel and the queue

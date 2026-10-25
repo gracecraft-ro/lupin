@@ -198,6 +198,56 @@ class QuotaUsageTests(unittest.TestCase):
         self.assertEqual(opencode_row["used_pct"], 64.0)
         self.assertEqual(opencode_row["resets_at"], reset_at_ms)
 
+
+    def test_claude_oauth_fallback_does_not_duplicate_omp_windows(self):
+        report = {
+            "reports": [{
+                "provider": "claude",
+                "limits": [
+                    {
+                        "id": "five_hour",
+                        "label": "5-hour window",
+                        "window": {"durationMs": 18_000_000},
+                        "amount": {"usedFraction": 0.2},
+                    },
+                    {
+                        "id": "seven_day",
+                        "label": "Weekly window",
+                        "window": {"durationMs": 604_800_000},
+                        "amount": {"usedFraction": 0.4},
+                    },
+                ],
+            }],
+        }
+        oauth_rows = [
+            {
+                "provider": "claude",
+                "duration": quota.QuotaDuration.FIVE_HOURS,
+                "label": "5 hours",
+                "used_pct": 30,
+            },
+            {
+                "provider": "claude",
+                "duration": quota.QuotaDuration.WEEKLY,
+                "label": "7 days",
+                "used_pct": 50,
+            },
+        ]
+        with (
+            mock.patch.object(quota, "run", return_value=(0, json.dumps(report))),
+            mock.patch.object(quota, "claude_oauth_quota", return_value=oauth_rows),
+        ):
+            rows = [row for row in quota.quota_usage() if row["provider"] == "claude"]
+
+        self.assertEqual(
+            [(row["duration"], row["label"], row["used_pct"]) for row in rows],
+            [
+                (quota.QuotaDuration.FIVE_HOURS, "5-hour window", 20.0),
+                (quota.QuotaDuration.WEEKLY, "Weekly window", 40.0),
+            ],
+        )
+
+
     def test_uses_latest_codex_snapshot_when_omp_fails(self):
         sessions = os.path.join(self.tempdir.name, "sessions")
         session_dir = os.path.join(sessions, "2026", "10", "03")
@@ -661,6 +711,9 @@ class ClaudeOauthQuotaTests(unittest.TestCase):
         self.assertEqual(
             [row["duration"] for row in rows],
             [quota.QuotaDuration.FIVE_HOURS, quota.QuotaDuration.WEEKLY],
+        )
+        self.assertEqual(
+            [row["label"] for row in rows], ["5 hours", "7 days"]
         )
         self.assertTrue(all(isinstance(row["resets_at"], int) for row in rows))
         self.assertEqual(

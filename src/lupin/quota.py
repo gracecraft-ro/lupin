@@ -381,6 +381,7 @@ def claude_oauth_quota() -> list[dict]:
             rows.append({
                 "provider": "claude",
                 "duration": duration,
+                "label": duration.label,
                 "used_pct": min(100, max(0, used)),
                 "resets_at": quota_reset_timestamp(limit.get("resets_at")),
                 "generated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
@@ -481,7 +482,16 @@ def opencode_go_quota() -> list[dict]:
 def add_quota_fallbacks(rows: list[dict]) -> list[dict]:
     if not any(row.get("provider") == "opencode-go" and "used_pct" in row for row in rows):
         rows.extend(opencode_go_quota())
-    rows.extend(claude_oauth_quota())
+    existing = {
+        (row.get("provider"), row.get("account"), row.get("duration"))
+        for row in rows
+        if row.get("duration") is not None
+    }
+    rows.extend(
+        row for row in claude_oauth_quota()
+        if row.get("duration") is None
+        or (row.get("provider"), row.get("account"), row.get("duration")) not in existing
+    )
     return rows
 
 

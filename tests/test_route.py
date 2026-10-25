@@ -250,6 +250,30 @@ class RouteTests(unittest.TestCase):
 
         self.assertEqual(result, {"model": "sonnet", "effort": "high"})
 
+    def test_bmo_timeout_does_not_return_bmo_after_provider_exclusions(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier0": [{"model": "bmo:qwen3.8-flash-next", "effort": "low"}],
+                    "tier1": [
+                        {"model": "sonnet", "effort": "medium"},
+                        {"model": "opencode-go/qwen3.8-max", "effort": "medium"},
+                        {"model": "openai/gpt-5", "effort": "medium"},
+                    ],
+                }
+            }
+        }
+        with self.assertRaisesRegex(route.RouteInputError, "no model"):
+            route.route(
+                "coding",
+                "size-xs",
+                bmo_available=False,
+                tiers=tiers,
+                quota_rows=[],
+                excluded_providers=["claude", "opencode-go", "openai"],
+            )
+
+
     def test_high_effort_primary_does_not_escalate_the_review(self):
         # The primary pass already ran at "high". The review still gets
         # tier1's base entry (medium), not the high-effort entry -- it
