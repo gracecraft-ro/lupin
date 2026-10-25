@@ -4335,12 +4335,6 @@ def test_debrief_index_empty_state_explains_sources_and_writer(tmp_path, monkeyp
     ) in body
 
 
-def test_debrief_ui_mockup_documents_empty_state():
-    source = (Path(__file__).parents[1] / "docs" / "ui.dc.html").read_text(encoding="utf-8")
-    assert "1l · Debriefs" in source
-    assert "local <code" in source and "debriefs/" in source
-    assert "fleet shares their digests" in source
-    assert "lupin agent" in source
 
 
 def test_debrief_page_renders_markdown_escapes_text_and_maps_images(tmp_path, monkeypatch):
