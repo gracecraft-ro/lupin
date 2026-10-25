@@ -328,6 +328,20 @@ def quota_duration(limit: dict, window: dict) -> QuotaDuration:
         return QuotaDuration.MONTHLY
     return QuotaDuration.OTHER
 
+def _claude_identity() -> dict | None:
+    """Read Claude's OAuth account email for in-memory matching."""
+    try:
+        with open(CLAUDE_CREDENTIALS_FILE, encoding="utf-8") as credentials_file:
+            credentials = json.load(credentials_file)
+    except (OSError, ValueError):
+        return None
+    try:
+        email = credentials["oauthAccount"]["emailAddress"]
+    except (KeyError, TypeError):
+        return None
+    return {"email": email.strip().lower()} if isinstance(email, str) and email.strip() else None
+
+
 def _claude_token() -> str | None:
     """The OAuth access token, or None when the file or token is missing.
 
@@ -487,11 +501,33 @@ def add_quota_fallbacks(rows: list[dict]) -> list[dict]:
         for row in rows
         if row.get("duration") is not None
     }
+    fallback_rows = claude_oauth_quota()
+    identity = _claude_identity()
+    report_by_identity = {}
+    for row in rows:
+        if row.get("provider") != "claude":
+            continue
+        metadata = row.get("_metadata")
+        if not isinstance(metadata, dict):
+            continue
+        report_by_identity.setdefault(
+            str(metadata.get("email") or "").strip().lower(),
+            set(),
+        ).add(row.get("account"))
+    if identity is not None:
+        labels = report_by_identity.get(identity["email"], set())
+        if len(labels) == 1 and None not in labels:
+            account = next(iter(labels))
+            for row in fallback_rows:
+                if row.get("provider") == "claude":
+                    row["account"] = account
     rows.extend(
-        row for row in claude_oauth_quota()
+        row for row in fallback_rows
         if row.get("duration") is None
         or (row.get("provider"), row.get("account"), row.get("duration")) not in existing
     )
+    for row in rows:
+        row.pop("_metadata", None)
     return rows
 
 
@@ -588,6 +624,7 @@ def quota_usage() -> list[dict]:
         who.update(_reset_credits(report))
         limits = report.get("limits") or []
         if not limits:
+            who["_metadata"] = report.get("metadata")
             for note in report.get("notes") or ["no quota data reported"]:
                 rows.append({"provider": provider, "note": note, "generated_at": generated_at, **who})
             continue
@@ -595,6 +632,9 @@ def quota_usage() -> list[dict]:
             amount = limit.get("amount") or {}
             window = limit.get("window") or {}
             used_fraction = amount.get("usedFraction")
+            metadata = report.get("metadata")
+            if isinstance(metadata, dict):
+                who["_metadata"] = metadata
             rows.append({
                 "provider": provider,
                 "duration": quota_duration(limit, window),
