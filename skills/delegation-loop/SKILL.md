@@ -366,8 +366,10 @@ check.
 
 For a visual PR, check for uploaded screenshots from `user-attachments` before
 dispatch. `/ship` owns screenshot capture and upload. An `evidence/` path is
-not an attachment. If screenshots are missing or cannot be uploaded, ask the
-owner in a `Loop:` PR comment, then take the next item.
+not an attachment.
+If upload fails, follow `/ship`'s recovery: copy the files before `lupin stop`,
+attach them with the repo-authorized token, and post the report before stopping
+the worktree. Ask the owner only if recovery fails; then take the next item.
 
 Sync only when GitHub reports `CONFLICTING`:
 
