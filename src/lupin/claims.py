@@ -329,6 +329,33 @@ def release_claim(
     return bool(result)
 
 
+def _scan_claim_values(
+    *,
+    client: "redis.Redis | None" = None,
+    redis_host: str | None = None,
+    redis_port: int | None = None,
+    redis_username: str | None = None,
+    redis_password: str | None = None,
+) -> dict[str, str | bytes]:
+    """Return every active claim's exact target and stored value."""
+    client = client or _client(redis_host, redis_port, redis_username, redis_password)
+    prefix = f"{PREFIX}claim:"
+    try:
+        keys = _call_with_retry(
+            lambda: list(client.scan_iter(match=f"{prefix}*", count=SCAN_COUNT))
+        )
+        result = {}
+        for key in keys:
+            raw = _call_with_retry(lambda k=key: client.get(k))
+            if raw is not None:
+                result[key[len(prefix) :]] = raw
+        return result
+    except redis.exceptions.AuthenticationError as exc:
+        raise _auth_failed(exc) from exc
+    except (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError) as exc:
+        raise CoordinatorUnreachable("claim scan") from exc
+
+
 def _indexed_targets(
     *,
     client: "redis.Redis | None" = None,

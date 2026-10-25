@@ -154,13 +154,31 @@ def remove_claimed_label(target: str) -> None:
 
 
 
+def _has_casefold_claim(target: str, **connection) -> bool:
+    owner_repo, number = claims.parse_target(target).rsplit("#", 1)
+    identity = (owner_repo.casefold(), int(number))
+    for other in claims._scan_claim_values(**connection):
+        try:
+            other_owner_repo, other_number = claims.parse_target(other).rsplit("#", 1)
+        except ValueError:
+            continue
+        if (other_owner_repo.casefold(), int(other_number)) == identity:
+            return True
+    return False
+
+
 def sync_claimed_label(
     target: str, *, github_target: str | None = None, **connection
 ) -> None:
     """Make the GitHub label match the current Redis claim."""
     label_target = target if github_target is None else github_target
     while True:
-        if claims._mark_label_index_if_active(target, **connection):
+        active = claims._mark_label_index_if_active(target, **connection)
+        if not active and _has_casefold_claim(target, **connection):
+            claims._mark_label_index(target, **connection)
+            active = True
+
+        if active:
             try:
                 add_claimed_label(label_target)
             except GitHubAPIError:
@@ -169,10 +187,16 @@ def sync_claimed_label(
             claims._mark_label_index(target, **connection)
             if claims._mark_label_index_if_active(target, **connection):
                 return
+            if _has_casefold_claim(target, **connection):
+                if claims._clear_label_index_if_unclaimed(target, **connection):
+                    if _has_casefold_claim(target, **connection):
+                        return
+                continue
 
         remove_claimed_label(label_target)
         if claims._clear_label_index_if_unclaimed(target, **connection):
-            return
+            if not _has_casefold_claim(target, **connection):
+                return
 
 
 def list_claimed_issues(owner: str, repo: str) -> list[int]:

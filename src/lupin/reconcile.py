@@ -42,11 +42,10 @@ straight into the focus record's JSON (not through `quest.write_focus`,
 which would also reset `since`/`pinned`). It is private bookkeeping for
 this module only -- nothing else reads it.
 
-Judgment call -- claims are scanned fleet-wide, not filtered to this
-machine's own enabled repos: unlike `claims.claims_for` (built for "is one
-of *my* issues claimed"), a lost claim belongs to the whole fleet, whether
-or not this particular caller has that repo checked out locally. So this
-module scans every `claim:*` key itself instead of calling `claims_for`.
+Judgment call -- reconcile checks claims across the fleet, not only repos enabled
+on this machine. Lost claims apply to any repo. `claims.claims_for` filters by
+exact repo names, so reconcile uses `claims._scan_claim_values` for the full
+claim scan.
 
 Not done here (explicitly out of scope for issue #14, not silently
 dropped):
@@ -111,18 +110,14 @@ def _client(connection: dict):
 
 
 def _scan_claims(client) -> dict[str, dict]:
-    """Every current claim, fleet-wide -- see this module's docstring for
-    why this scans directly instead of calling `claims.claims_for`.
-    """
-    prefix = f"{claims.PREFIX}claim:"
-    keys = _run(lambda: list(client.scan_iter(match=f"{prefix}*", count=slots_redis.SCAN_COUNT)))
-    result: dict[str, dict] = {}
-    for key in keys:
-        raw = _run(lambda k=key: client.get(k))
-        if raw is None:
-            continue
-        result[key[len(prefix) :]] = json.loads(raw)
-    return result
+    """Every current claim, fleet-wide."""
+    try:
+        return {
+            target: json.loads(raw)
+            for target, raw in claims._scan_claim_values(client=client).items()
+        }
+    except CoordinatorUnreachable as exc:
+        raise CoordinatorUnreachable("reconcile") from exc
 
 
 def _sync_claim_labels(repos: list[str], connection: dict, *, code_dir: str) -> list[str]:

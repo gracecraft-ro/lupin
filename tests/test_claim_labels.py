@@ -383,6 +383,38 @@ def test_release_keeps_label_when_another_claim_wins_the_race(
     assert claims.claims_for(["acme/repo"], **connection)[target]["session"] == "second"
 
 
+def test_release_keeps_label_until_case_variant_claim_is_released(
+    redis_port, flush_redis, monkeypatch
+):
+    connection = _kw(redis_port)
+    targets = ("Acme/Repo#17", "acme/repo#17")
+    labeled = False
+    removed = []
+
+    def add_label(_target):
+        nonlocal labeled
+        labeled = True
+
+    def remove_label(target):
+        nonlocal labeled
+        labeled = False
+        removed.append(target)
+
+    monkeypatch.setattr(claim_labels, "add_claimed_label", add_label)
+    monkeypatch.setattr(claim_labels, "remove_claimed_label", remove_label)
+    for target, holder in zip(targets, ("holder-a", "holder-b")):
+        claim_labels.claim(target, holder, **connection)
+
+    assert labeled is True
+    assert claim_labels.release_claim(targets[0], "holder-a", **connection) is True
+    assert labeled is True
+    assert removed == []
+
+    assert claim_labels.release_claim(targets[1], "holder-b", **connection) is True
+    assert labeled is False
+    assert removed == [targets[1]]
+
+
 def test_release_label_failure_is_not_reported_as_fully_synced(
     redis_port, flush_redis, monkeypatch
 ):
