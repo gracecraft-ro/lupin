@@ -8,7 +8,7 @@ This is the data model `lupin` uses once the `redis` backend exists
 | Key | Type | Holds | Replaces |
 | --- | --- | --- | --- |
 | `slot:<name>` | sorted set (member = holder, score = expiry in ms) | `bmo`, the declared `repo:<repo>` UI cap, and enforced `loop-<repo>` fleet locks (one active worker per repo). | `omp.lock` |
-| `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since, generation), with a TTL | one claim per issue or PR. Generation limits rollback to one attempt. GitHub's `claimed` label mirrors active issue claims, not PR claims. | nothing today |
+| `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since, generation), with a TTL | one claim per issue or PR. Generation limits rollback to one attempt. Same-holder claims and renewals give it a new value when present. GitHub's `claimed` label mirrors active issue claims, not PR claims. | nothing today |
 | `claim-index:<owner>/<repo>#<n>` | string, no TTL | target whose `claimed` label needs reconciliation | nothing today |
 | `ledger:<owner>/<repo>` | stream (`XADD`/`XRANGE`) | `ts host event issue status branch summary highlights evidence decisions next children` | `.loop/loop-state.json` is ignored; no local fallback |
 | `machine:<name>` | string (JSON), with a TTL | one fleet machine's status — see Fleet keys below | nothing today |
@@ -40,11 +40,13 @@ doesn't change the shape of any key that already exists.
 
 Lupin adds the `claimed` label after a successful Redis claim on an issue. It
 creates the repository label when needed. Lupin does not label pull requests.
-If label sync fails for a new claim, Lupin reports the error and releases that
-claim. If the same holder repeats a claim, Lupin reports the error and keeps
-the existing claim active. A renewal adds the label again when needed. If label
-sync fails during renewal or release, Lupin reports the error; the Redis
-renewal or release stays in effect.
+If label sync fails for a new claim, Lupin reports the error. It releases the
+claim only if its generation has not changed. A same-holder claim or renewal
+changes it when present, so an earlier failed sync cannot release that claim.
+If the same holder repeats a claim, Lupin reports the error and keeps the
+existing claim active. A renewal adds the label again when needed. If label sync
+fails during renewal or release, Lupin reports the error; the Redis renewal or
+release stays in effect.
 
 The claim index has no TTL. Lupin clears an entry only after it confirms that
 the Redis claim is gone and the GitHub label is synced.

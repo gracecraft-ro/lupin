@@ -135,7 +135,7 @@ def test_claim_succeeds_and_is_visible_in_redis(redis_port, flush_redis):
     assert '"session": "host-a:session-1"' in value or "session" in value
 
 
-def test_claim_generation_rotates_on_retry_and_survives_renewal(
+def test_claim_generation_rotates_on_retry_and_renewal(
     redis_port, flush_redis
 ):
     target = "gracecraft/lupin#6"
@@ -144,15 +144,26 @@ def test_claim_generation_rotates_on_retry_and_survives_renewal(
     raw = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
 
     claims.claim(target, "same-holder", generation="first", **kw)
-    assert json.loads(raw.get(key))["generation"] == "first"
+    first_generation = json.loads(raw.get(key))["generation"]
+    assert first_generation == "first"
     assert "generation" not in claims.claims_for(["gracecraft/lupin"], **kw)[target]
 
     assert claims.renew_claim(target, "same-holder", **kw) is True
-    assert json.loads(raw.get(key))["generation"] == "first"
+    assert json.loads(raw.get(key))["generation"] != first_generation
+    assert "generation" not in claims.claims_for(["gracecraft/lupin"], **kw)[target]
 
     assert claims.claim(target, "same-holder", generation="second", **kw) is False
     assert json.loads(raw.get(key))["generation"] == "second"
 
+    legacy_target = "gracecraft/lupin#7"
+    legacy_key = f"lupin:v1:claim:{legacy_target}"
+    raw.set(
+        legacy_key,
+        json.dumps({"host": "old-host", "session": "legacy-holder", "since": 1}),
+        ex=30,
+    )
+    assert claims.renew_claim(legacy_target, "legacy-holder", **kw) is True
+    assert "generation" not in json.loads(raw.get(legacy_key))
 
 def test_claim_is_idempotent_for_the_same_holder(redis_port, flush_redis):
     kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}

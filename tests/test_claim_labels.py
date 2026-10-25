@@ -224,6 +224,34 @@ def test_failed_initial_label_sync_does_not_release_successful_same_holder_retry
     assert claims.claims_for(["acme/repo"], **connection)[target]["session"] == "worker"
 
 
+def test_failed_initial_label_sync_preserves_concurrent_holder_renewal(
+    redis_port, flush_redis, monkeypatch
+):
+    target = "acme/repo#17"
+    connection = _kw(redis_port)
+    calls = 0
+    added = []
+
+    def add_label(item):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            assert claim_labels.renew_holder_claims("worker", **connection) == [
+                target
+            ]
+            raise claim_labels.GitHubAPIError(403, "write denied")
+        added.append(item)
+
+    monkeypatch.setattr(claim_labels, "add_claimed_label", add_label)
+
+    with pytest.raises(claim_labels.ClaimLabelSyncError):
+        claim_labels.claim(target, "worker", **connection)
+
+    assert calls == 2
+    assert added == [target]
+    assert claims.claims_for(["acme/repo"], **connection)[target]["session"] == "worker"
+
+
 def test_repeated_claim_label_failure_keeps_existing_claim(
     redis_port, flush_redis, monkeypatch
 ):

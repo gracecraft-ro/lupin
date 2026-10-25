@@ -5,8 +5,9 @@ module implements.
 
 This is one Redis string at `claim:<owner>/<repo>#<n>`. It stores JSON
 `{"host", "session", "since", "generation"}` with a TTL. `generation` marks a
-claim attempt. A same-holder retry gets a new value. Then a failed label
-update cannot release the newer claim. Redis expires the claim; it needs no
+claim attempt. A same-holder claim or renewal gives it a new value when
+present. Then a failed label update cannot release a newer claim. Legacy claims
+without a generation stay compatible. Redis expires the claim; it needs no
 pruning.
 
 Reuses `slots_redis._client` and `slots_redis._call_with_retry` as-is (same
@@ -101,8 +102,8 @@ return 1
 """
 
 # KEYS[1] = claim:<target>, KEYS[2] = claim-index:<target>.
-# ARGV[1] = session, ARGV[2] = value (JSON), ARGV[3] = ttl_ms. This never
-# creates a claim; it only renews one held by `session`.
+# ARGV[1] = session, ARGV[2] = value (JSON), ARGV[3] = ttl_ms,
+# ARGV[4] = generation. This only renews a claim held by `session`.
 _RENEW_SCRIPT = """
 local current = redis.call('GET', KEYS[1])
 if not current then
@@ -115,7 +116,7 @@ end
 redis.call('SET', KEYS[2], '1')
 local value = cjson.decode(ARGV[2])
 if decoded.generation then
-    value.generation = decoded.generation
+    value.generation = ARGV[4]
 end
 redis.call('SET', KEYS[1], cjson.encode(value), 'PX', ARGV[3])
 return 1
@@ -228,12 +229,13 @@ def renew_claim(
     """
     target = parse_target(target)
     client = _client(redis_host, redis_port, redis_username, redis_password)
+    generation = uuid.uuid4().hex
     value = _value(holder)
     try:
         result = _call_with_retry(
             lambda: client.eval(
                 _RENEW_SCRIPT, 2, _key(target), _label_index_key(target),
-                holder, value, int(ttl * 1000)
+                holder, value, int(ttl * 1000), generation
             )
         )
     except redis.exceptions.AuthenticationError as exc:
@@ -269,10 +271,11 @@ def renew_holder_claims(
             lambda: list(client.scan_iter(match=f"{prefix}*", count=SCAN_COUNT))
         )
         for key in keys:
+            generation = uuid.uuid4().hex
             if _call_with_retry(
-                lambda k=key: client.eval(
+                lambda k=key, g=generation: client.eval(
                     _RENEW_SCRIPT, 2, k, _label_index_key(k[len(prefix) :]),
-                    holder, value, int(ttl * 1000)
+                    holder, value, int(ttl * 1000), g
                 )
             ):
                 renewed.append(key[len(prefix) :])
