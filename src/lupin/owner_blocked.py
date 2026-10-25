@@ -90,6 +90,7 @@ def _ready_pr_rows(prs: list[dict] | None, repo: str, gaps: list[str]) -> list[t
             not pr["isDraft"]
             and row["merge"] == "clean"
             and row["checks"] == "pass"
+            and row["review"] == "APPROVED"
             and row["approval_at_head"]
         ):
             rows.append((pr, row))

@@ -76,6 +76,7 @@ def test_report_includes_labeled_issues_and_only_ready_to_merge_prs():
         _pr(23, statusCheckRollup=[{"state": "IN_PROGRESS"}]),
         _pr(24, reviews=[{**_pr()["reviews"][0], "commit_id": "old-sha"}]),
         _pr(25, mergeable="CONFLICTING"),
+        _pr(26, reviewDecision="REVIEW_REQUIRED"),
     ]
 
     report = _report(
@@ -91,7 +92,7 @@ def test_report_includes_labeled_issues_and_only_ready_to_merge_prs():
     assert "@owner" in report and "Choose 30 days." in report
     assert "PR #21: Ready for owner merge" in report
     assert "@reviewer" in report and "@merge-owner" in report
-    for number in (22, 23, 24, 25):
+    for number in (22, 23, 24, 25, 26):
         assert f"PR #{number}:" not in report
     assert "Issue #15:" not in report
     assert not digest.is_quiet(report)
