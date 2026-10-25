@@ -226,8 +226,14 @@ def claim(
     return created
 
 
-def renew_claim(target: str, holder: str, **connection) -> bool:
-    renewed = claims.renew_claim(target, holder, **connection)
+def renew_claim(
+    target: str,
+    holder: str,
+    *,
+    ttl: float = claims.DEFAULT_TTL,
+    **connection,
+) -> bool:
+    renewed = claims.renew_claim(target, holder, ttl=ttl, **connection)
     if not renewed:
         return False
     try:
@@ -240,8 +246,10 @@ def renew_claim(target: str, holder: str, **connection) -> bool:
     return True
 
 
-def renew_holder_claims(holder: str, **connection) -> list[str]:
-    renewed = claims.renew_holder_claims(holder, **connection)
+def renew_holder_claims(
+    holder: str, *, ttl: float = claims.DEFAULT_TTL, **connection
+) -> list[str]:
+    renewed = claims.renew_holder_claims(holder, ttl=ttl, **connection)
     errors = []
     for target in renewed:
         try:

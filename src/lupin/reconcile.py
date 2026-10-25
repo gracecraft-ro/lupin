@@ -171,6 +171,7 @@ def _sync_claim_labels(repos: list[str], connection: dict, *, code_dir: str) -> 
                 claim_labels.sync_claimed_label(target, client=client)
             except claim_labels.GitHubAPIError as exc:
                 warnings.append(f"GitHub claim label sync failed for {target}: {exc}")
+    return warnings
 
 
 def _scan_focuses(client) -> dict[str, dict]:
