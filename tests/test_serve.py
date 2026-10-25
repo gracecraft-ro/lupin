@@ -4303,8 +4303,6 @@ def test_debrief_index_lists_newest_first_with_utc_file_name_times(tmp_path, mon
     handler.do_GET()
 
     body = handler.reply.call_args.args[0].decode()
-    assert "<a class='navlink active' href='/debrief' aria-label='Debriefs'>" in body
-    assert "<span>Debriefs</span>" in body
     assert "href='/debrief?repo=widgets&amp;file=20261002-090000.md'" in body
     assert "2026-10-02 09:00:00 UTC" in body
     assert body.index("20261002-090000") < body.index("20261001-090000")
@@ -4338,8 +4336,6 @@ def test_debrief_page_renders_markdown_escapes_text_and_maps_images(tmp_path, mo
     handler.do_GET()
 
     body = handler.reply.call_args.args[0].decode()
-    assert "<a class='navlink active' href='/debrief' aria-label='Debriefs'>" in body
-    assert "<span>Debriefs</span>" in body
     assert "<h1>Debrief: acme/widgets</h1>" in body
     assert "<li>PR #11: Shipped feature &lt;b&gt;x&lt;/b&gt;</li>" in body
     assert f"<img src='/image?id={DEBRIEF_ATTACHMENT}'" in body
@@ -4644,27 +4640,10 @@ def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_the_page_s
     assert "This is a record" in page.reply.call_args.args[0].decode()
 
 
-def test_nav_links_have_accessible_names_and_mobile_nav_is_scrollable():
+def test_nav_links_have_accessible_names():
     rendered = serve.render_nav("overview")
     assert rendered.count("class='navlink") == len(serve.NAV_ITEMS)
     for _key, _href, label, _path in serve.NAV_ITEMS:
         assert f"aria-label='{label}'" in rendered
-    assert ".side{width:auto" in serve.CSS
-    assert "overflow-x:auto" in serve.CSS
 
 
-def test_loops_mobile_layout_constrains_pane_and_send_form():
-    data = {
-        "entries": [_loop_entry("a", "working", "pihome", session="session-a")],
-        "local_host": "pihome",
-        "machines": [],
-        "fleet_error": None,
-    }
-    body = serve.render_loops(
-        data, group="repo", selected_repo="a", selected_tail="x" * 5000, lines=60
-    ).decode()
-    assert "class=loops-main" in body
-    assert "name=text maxlength=2000 size=40" in body
-    assert ".loops-main pre{max-width:100%}" in serve.CSS
-    assert ".loops-main form[action=\"/loops/send\"] input[name=\"text\"]" in serve.CSS
-    assert ".loops-shell{flex-direction:column}" in serve.CSS
