@@ -4443,6 +4443,35 @@ def test_evidence_route_refuses_with_404_over_http(tmp_path, monkeypatch, query)
     assert refused.value.code == 404
 
 
+def test_missing_debrief_404_skips_dashboard_status_reads(tmp_path, monkeypatch):
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    with (
+        mock.patch.object(serve.digest, "read_one", return_value=None),
+        mock.patch.object(
+            serve.machines,
+            "machines",
+            side_effect=AssertionError("error response read machine data"),
+        ) as machine_read,
+        mock.patch.object(
+            serve,
+            "timers",
+            side_effect=AssertionError("error response read timer data"),
+        ) as timer_read,
+        _live_dashboard({}) as port,
+    ):
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/debrief?repo=widgets&file=missing.md",
+                timeout=15,
+            )
+        body = refused.value.read()
+
+    assert refused.value.code == 404
+    assert b"no such debrief" in body
+    machine_read.assert_not_called()
+    timer_read.assert_not_called()
+
+
 DEBRIEF_SHOT_REL = "20261010-120000-6h-screenshots/debrief.png"
 
 

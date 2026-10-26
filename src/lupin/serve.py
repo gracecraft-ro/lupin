@@ -3353,13 +3353,13 @@ class Handler(BaseHTTPRequestHandler):
     def reply(self, body: bytes, status: int = 200) -> None:
         marker = DASHBOARD_STATUS_SLOT.encode("ascii")
         if marker in body:
-            body = body.replace(
-                marker,
-                render_dashboard_status(
+            status_html = b""
+            if status < 400:
+                status_html = render_dashboard_status(
                     self.fleet_connection,
                     getattr(self, "dashboard_status_data", None),
-                ).encode("utf-8"),
-            )
+                ).encode("utf-8")
+            body = body.replace(marker, status_html)
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
