@@ -84,10 +84,9 @@ Check every control in the journey:
 - For spacing, a 24 CSS px diameter circle centered on each small target's
   bounding box must not touch another target or another small target's circle.
   Record the exception and evidence. Do not assume an exception applies.
-- Then apply any stricter repo rule, even if a WCAG exception applies. Existing
-  [issue #69](https://github.com/gracecraft-software/lupin/issues/69) sets
-  44 x 44 CSS px for every button, select, and checkbox on `/loops` and
-  `/machines` at 390 x 844. Record the rule used.
+- Then apply any stricter repo rule, even if a WCAG exception applies. For
+  issue #69's scope only, buttons, selects, and checkboxes on `/loops` and
+  `/machines` at 390 x 844 need 44 x 44 CSS px. Record the rule used.
 - Set the viewport to 320 CSS px wide. Check that text, controls, and the main
   journey reflow without page-level horizontal scrolling or clipped content.
 - Turn on `prefers-reduced-motion: reduce`. Repeat the journey. Check that
@@ -173,3 +172,7 @@ unavailable. File each separate finding as its own ticket unless findings share
 a cause and fix. Use the repo's issue labels and P0 to P3 rules. Include user
 impact, steps, expected result, evidence, a recommendation, and verifiable
 acceptance checks. Stop if continuing could cause harm.
+
+Link an existing issue only when its page, control, and acceptance checks match
+the finding. If scope or evidence does not match, leave it unassigned. Topic
+alone is not enough.
