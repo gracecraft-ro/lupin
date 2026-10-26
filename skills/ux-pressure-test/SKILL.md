@@ -65,14 +65,29 @@ Check every control in the journey:
   screen reader can read.
 - Use a screen reader only when one is available. Name the screen reader and
   version. Keyboard checks alone are not a screen-reader test.
-- Measure text and control contrast in the rendered state. WCAG 2.2 AA needs at
-  least 4.5:1 for normal text and 3:1 for large text and UI parts. Large text is
-  at least 24 CSS px regular or about 19 CSS px bold. Use the rendered foreground
-  and background colors. Compute the ratio with relative luminance. If an image,
-  transparency, or gradient prevents a reliable value, say so; do not guess.
-- Measure each touch target's width and height with its CSS box. Each must be
-  at least 24 CSS px, or meet the stricter value in the repo. Record both
-  dimensions and the rule used.
+- Measure text contrast in the rendered state. WCAG 2.2 AA needs at least
+  4.5:1 for normal text and 3:1 for large text. Large text is at least 24 CSS px
+  regular or about 19 CSS px bold.
+- For non-text contrast, use [WCAG 2.2 SC 1.4.11](https://www.w3.org/WAI/WCAG22/Understanding/non-text-contrast.html).
+  Check for 3:1 contrast against adjacent colors only when visual information
+  is needed to identify a control or its state. Do not apply this rule to
+  decorative parts that do not identify a control or state. Use rendered
+  foreground and background colors. Compute the ratio with relative luminance.
+  If an image, transparency, or gradient prevents a reliable value, say so; do
+  not guess.
+- Measure each touch target's width and height with its CSS box. WCAG 2.2
+  [SC 2.5.8](https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html)
+  needs at least 24 x 24 CSS px unless an exception applies: spacing, an
+  equivalent control on the same page, a target within a sentence or block of
+  text, size set by the user agent and not changed by the author, or essential
+  presentation.
+- For spacing, a 24 CSS px diameter circle centered on each small target's
+  bounding box must not touch another target or another small target's circle.
+  Record the exception and evidence. Do not assume an exception applies.
+- Then apply any stricter repo rule, even if a WCAG exception applies. Existing
+  [issue #69](https://github.com/gracecraft-software/lupin/issues/69) sets
+  44 x 44 CSS px for every button, select, and checkbox on `/loops` and
+  `/machines` at 390 x 844. Record the rule used.
 - Set the viewport to 320 CSS px wide. Check that text, controls, and the main
   journey reflow without page-level horizontal scrolling or clipped content.
 - Turn on `prefers-reduced-motion: reduce`. Repeat the journey. Check that
@@ -109,11 +124,13 @@ limits. Do not mix cold-cache and warm-cache results.
   known bytes and the number of entries with an unknown size. A zero size can
   mean a cache hit or blocked cross-origin timing; do not count it as zero bytes
   without proof.
-- **Memory:** Record memory before the journey and after 10 repeats of the same
-  safe actions. Use `measureUserAgentSpecificMemory()` when available. Otherwise
-  use `performance.memory.usedJSHeapSize` and label it `JavaScript heap proxy`.
-  This is not total browser or device memory. If neither works, write
-  `unavailable`.
+- **Memory:** Record memory on a named page and visible state. Run 10 repeats of
+  the same safe actions, then measure again on that same page and state. Use
+  `measureUserAgentSpecificMemory()` when available. Otherwise use
+  `performance.memory.usedJSHeapSize` and label it `JavaScript heap proxy`.
+  This is not total browser or device memory. If you cannot keep or restore the
+  same page and state, write `unavailable`; do not compare different pages or
+  states. If neither memory API works, write `unavailable`.
 
 Use the same action order and wait for the same visible result each time. Keep
 one latency result per main action in the report. Do not average different
