@@ -2854,7 +2854,7 @@ def _quota_handoff_harness(
     return state
 
 
-def test_monitor_skips_low_quota_provider_after_slot_wait_and_resumes_alternate(
+def test_monitor_cancels_low_quota_slot_wait_and_resumes_alternate(
     monkeypatch, tmp_path: Path, redis_port, flush_redis
 ):
     now = time.time()
@@ -2883,13 +2883,16 @@ def test_monitor_skips_low_quota_provider_after_slot_wait_and_resumes_alternate(
         loop_runtime._quota_watch_tick(repo, session, workspace, watch_state)
         watch_finished.set()
 
-    def acquire(slot, _holder, **_kwargs):
-        lease = f"{slot}:lease-{len(leases) + 1}"
-        leases.append(lease)
-        if len(leases) == 1:
+    def acquire(slot, _holder, *, cancel_wait, **_kwargs):
+        if "original_wait_cancelled" not in state:
             snapshot["opencode-go"]["rows"][0]["used_pct"] = 92
             slot_waiting.set()
             assert watch_finished.wait(5)
+            state["original_wait_cancelled"] = cancel_wait()
+            assert state["original_wait_cancelled"]
+            return None
+        lease = f"{slot}:lease-{len(leases) + 1}"
+        leases.append(lease)
         return lease
 
     def release(lease, **_kwargs):
@@ -2920,6 +2923,7 @@ def test_monitor_skips_low_quota_provider_after_slot_wait_and_resumes_alternate(
         ["acme/repo"], redis_host="127.0.0.1", redis_port=redis_port,
     )
     assert slot_waiting.is_set() and watch_finished.is_set()
+    assert state["original_wait_cancelled"]
     assert len(state["commands"]) == 1
     assert launch[launch.index("--provider") + 1] == "openai-codex"
     assert state["workspace_creates"] == 1
@@ -2930,7 +2934,7 @@ def test_monitor_skips_low_quota_provider_after_slot_wait_and_resumes_alternate(
     assert "agent_missing" in metadata["quota_handoff"]["reason"]
     assert state["claim_holder"] in prompt
     assert held["acme/repo#60"]["session"] == state["claim_holder"]
-    assert released == ["omp:lease-1", "omp:lease-2"]
+    assert released == ["omp:lease-1"]
 
 
 def test_monitor_requests_quota_handoff_before_limit_and_saves_all_sections(

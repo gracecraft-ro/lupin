@@ -16,8 +16,9 @@ All notable changes to Lupin. The version has one source:
 - The triage skill checks issue details and linked open PRs before it reports
   likely duplicates.
 - Running loops save a quota handoff before the active provider runs out. A
-  pending handoff stops a waiting agent from starting. Loops resume in the same
-  workspace with a configured provider that has fresh quota.
+  pending handoff cancels the slot wait, so the low-quota agent does not start.
+  Loops resume in the same workspace with a configured provider that has fresh
+  quota.
 
 ### Changed
 

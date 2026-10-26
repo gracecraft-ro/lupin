@@ -1855,10 +1855,15 @@ def _monitor_loop(
             repo, metadata, "slot_wait", slot=agent_platform, scope="agent",
             wait_seconds=wait_s,
         )
-        rc = slots.hold(
-            command, slot=agent_platform, holder=unit_name(repo), wait=wait_s,
-            ttl=LEASE_TTL, max_holders=max_holders, before_run=can_start_agent,
-        )
+        try:
+            rc = slots.hold(
+                command, slot=agent_platform, holder=unit_name(repo), wait=wait_s,
+                ttl=LEASE_TTL, max_holders=max_holders, before_run=can_start_agent,
+            )
+        except slots.SlotFull:
+            if not can_start_agent():
+                return 0
+            raise
         if rc is None:
             return 0
         metadata["agent_exit_code"] = rc
