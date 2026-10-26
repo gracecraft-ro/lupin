@@ -1550,7 +1550,7 @@ def quota_duration_label(row: dict) -> str:
     duration = row.get("duration", QuotaDuration.OTHER)
     if isinstance(duration, QuotaDuration) and duration is not QuotaDuration.OTHER:
         return duration.label
-    return row.get("label", "Other")
+    return str(row.get("label") or "Other")
 
 
 def quota_progress_pct(row: dict) -> float | None:

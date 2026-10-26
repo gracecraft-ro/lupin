@@ -388,6 +388,36 @@ class QuotaRenderingTests(unittest.TestCase):
             page.index("class=quota-matrix"), page.index("<h2>7-day totals</h2>")
         )
 
+    def test_usage_matrix_uses_other_for_null_unknown_window_label(self):
+        row = {
+            "provider": "openai",
+            "duration": serve.QuotaDuration.OTHER,
+            "label": None,
+            "used_pct": 42,
+            "resets_at": 302_400_000,
+            "generated_at": "2026-01-01 00:00:00",
+        }
+        snapshot = {
+            "openai": {
+                "rows": [row],
+                "fetched_at": "2026-01-01T00:00:00+00:00",
+                "fetched_by": "synthetic",
+            }
+        }
+        with (
+            mock.patch.object(quota_cache, "read_snapshot", return_value=snapshot),
+            mock.patch.object(usage_cache, "read_snapshot", return_value={}),
+        ):
+            page = serve.render_usage().decode()
+
+        parser = _QuotaMatrixParser()
+        parser.feed(page)
+        self.assertEqual(
+            [cell["text"].strip() for cell in parser.rows[0]],
+            ["Provider / account", "Other"],
+        )
+        self.assertEqual(parser.windows[0]["data-window-duration"], "OTHER")
+
     def test_usage_page_names_the_account_of_each_row(self):
         reset_at_ms = 1_790_547_474_348
         rows = [
