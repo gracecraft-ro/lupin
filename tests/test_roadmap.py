@@ -39,7 +39,7 @@ class RoadmapTests(unittest.TestCase):
         ):
             model = roadmap.cached_model("lupin", "/repo")
 
-        fetch.assert_called_once_with("lupin", "/repo")
+        fetch.assert_called_once_with("lupin", "/repo", connection=None)
         self.assertIn({"from": 16, "to": 18, "kind": "depends"}, model["edges"])
         stages = {stage["name"]: stage["numbers"] for stage in model["stages"]}
         self.assertIn(18, stages["Blocked or held"])
@@ -1817,6 +1817,66 @@ class DependencyDagTests(unittest.TestCase):
         )
         self.assertIn("owner{login}", roadmap.DEPENDENCY_GRAPHQL)
 
+    def test_cached_model_uses_redis_connection_for_versioned_dependencies(self):
+        issues = [
+            {"number": 3, "title": "Blocker", "body": "", "labels": []},
+            {"number": 10, "title": "Blocked", "body": "", "labels": []},
+        ]
+        response = {
+            "data": {
+                "repository": {
+                    "issues": {
+                        "nodes": [
+                            {
+                                "number": 10,
+                                "blockedBy": {
+                                    "nodes": [
+                                        {
+                                            "number": 3,
+                                            "repository": {
+                                                "name": "api",
+                                                "owner": {"login": "acme"},
+                                            },
+                                        }
+                                    ]
+                                },
+                                "blocking": {"nodes": []},
+                            },
+                            {
+                                "number": 3,
+                                "blockedBy": {"nodes": []},
+                                "blocking": {"nodes": []},
+                            },
+                        ],
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                    }
+                }
+            }
+        }
+        connection = {"redis_host": "redis.example", "redis_port": 6380}
+
+        with (
+            mock.patch.object(
+                roadmap, "cached_github", return_value=(issues, {}, [])
+            ),
+            mock.patch.object(roadmap, "_read_ledger", return_value=([], None)),
+            mock.patch.object(
+                roadmap, "_repo_identity", return_value=("acme", "api", None)
+            ),
+            mock.patch.object(roadmap, "_run_json", return_value=(response, None)),
+            mock.patch.object(
+                roadmap.gh_cache,
+                "cached_gh_json",
+                side_effect=lambda *args, **_kwargs: args[3](),
+            ) as cached_gh_json,
+        ):
+            model = roadmap.cached_model("api", "/repo", connection=connection)
+
+        args, kwargs = cached_gh_json.call_args
+        self.assertEqual(args[:3], ("acme", "api", "dependencies:v2"))
+        self.assertEqual(kwargs["connection"], connection)
+        self.assertIn({"from": 3, "to": 10, "kind": "depends"}, model["edges"])
+
     def test_load_dependencies_warns_when_a_link_has_no_owner(self):
         links = {
             10: {"blockedBy": [{"repo": "core", "number": 3}], "blocking": []}
@@ -1862,7 +1922,7 @@ def test_roadmap_reads_latest_shared_events(redis_port, flush_redis, monkeypatch
         roadmap, "cached_github", lambda *args, **kwargs: (issues, {}, [])
     )
     monkeypatch.setattr(roadmap, "_repo_identity", lambda _path: ("acme", "repo", None))
-    monkeypatch.setattr(roadmap, "cached_dependencies", lambda *_args: ({}, []))
+    monkeypatch.setattr(roadmap, "cached_dependencies", lambda *_args, **_kwargs: ({}, []))
 
     before = roadmap.cached_model("repo", "/repo", connection=connection)
     ledger.append_event(
@@ -1932,7 +1992,7 @@ def test_roadmap_ignores_local_ledger_history_and_empty_stream(
         roadmap, "cached_github", lambda *args, **kwargs: ([issue], {}, [])
     )
     monkeypatch.setattr(roadmap, "_repo_identity", lambda _path: ("acme", "repo", None))
-    monkeypatch.setattr(roadmap, "cached_dependencies", lambda *_args: ({}, []))
+    monkeypatch.setattr(roadmap, "cached_dependencies", lambda *_args, **_kwargs: ({}, []))
 
     model = roadmap.cached_model("repo", str(tmp_path), connection=connection)
 
@@ -1950,7 +2010,7 @@ def test_roadmap_shows_empty_ledger_on_unavailable_coordinator(
         roadmap, "cached_github", lambda *args, **kwargs: ([issue], {}, [])
     )
     monkeypatch.setattr(roadmap, "_repo_identity", lambda _path: ("acme", "repo", None))
-    monkeypatch.setattr(roadmap, "cached_dependencies", lambda *_args: ({}, []))
+    monkeypatch.setattr(roadmap, "cached_dependencies", lambda *_args, **_kwargs: ({}, []))
 
     model = roadmap.cached_model(
         "repo", "/repo",

@@ -27,6 +27,9 @@ All notable changes to Lupin. The version has one source:
 
 ### Fixed
 
+- The Roadmap reads dependency links from its configured Redis connection. It
+  uses a new cache key for links that include repository owners.
+
 - The Roadmap page family uses one set of stage words (In progress, Ready,
   Later, Blocked) on the board, the list, the detail panel and the queue
   graph. The empty states keep the selected repositories visible, the note

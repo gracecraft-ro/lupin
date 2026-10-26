@@ -1098,7 +1098,9 @@ def _read_dependencies(repo_path: str, owner: str, name: str, *, connection: dic
             if not cursor:
                 return links, "GitHub returned incomplete pagination data"
 
-    links, error = gh_cache.cached_gh_json(owner, name, "dependencies", _fetch, connection=connection)
+    links, error = gh_cache.cached_gh_json(
+        owner, name, "dependencies:v2", _fetch, connection=connection
+    )
     # Same JSON-stringifies-int-keys fix as `_read_comments` above.
     if isinstance(links, dict):
         links = {int(number): value for number, value in links.items()}
@@ -1133,7 +1135,9 @@ def load_dependencies(repo_path: str, *, connection: dict | None = None):
 _DEPENDENCY_CACHE = {}
 
 
-def cached_dependencies(repo: str, repo_path: str):
+def cached_dependencies(
+    repo: str, repo_path: str, *, connection: dict | None = None
+):
     """Cached `load_dependencies`, same lifetime as `cached_github`.
 
     Kept in memory only (not written to the disk cache file): the disk
@@ -1141,16 +1145,14 @@ def cached_dependencies(repo: str, repo_path: str):
     and this cache is keyed by issue number -- not worth the mismatch risk
     for data that is cheap to refetch within one `serve` run.
 
-    Does not take a `connection` override -- `load_dependencies` resolves
-    the fleet's Redis location itself (see `gh_cache.cached_gh_json`), so
-    there is nothing for a caller at this level to supply.
+    Uses the optional Redis connection override passed by the server.
     """
     now = time.monotonic()
     with _CACHE_LOCK:
         cached = _DEPENDENCY_CACHE.get(repo)
         if cached and now - cached[0] < GITHUB_CACHE_SECONDS:
             return cached[1]
-        data = load_dependencies(repo_path)
+        data = load_dependencies(repo_path, connection=connection)
         _DEPENDENCY_CACHE[repo] = (time.monotonic(), data)
         return data
 
@@ -1361,7 +1363,9 @@ def cached_model(
     warnings = list(warnings)
     if ledger_error:
         warnings.append(ledger_error)
-    dependency_links, dependency_warnings = cached_dependencies(repo, repo_path)
+    dependency_links, dependency_warnings = cached_dependencies(
+        repo, repo_path, connection=connection
+    )
     warnings.extend(warning for warning in dependency_warnings if warning not in warnings)
     if dependency_warnings:
         dependency_links = None
