@@ -313,7 +313,11 @@ class OverviewContextTests(unittest.TestCase):
                 serve.roadmap, "_git_remote_url",
                 return_value="https://github.com/example/service-a.git",
             ),
-            mock.patch.object(serve.ledger, "read_events", return_value=events),
+            mock.patch.object(
+                serve.ledger,
+                "read_events_page",
+                return_value=(events, False),
+            ),
         ):
             updates, unavailable = serve._recent_updates(
                 [{"repo": "service-a"}], ["service-a"], {}
@@ -344,8 +348,8 @@ class OverviewContextTests(unittest.TestCase):
             "timestamp": f"2026-10-25T00:{index + 1:02d}:00Z",
         } for index in range(8))
 
-        def read_events(_repository, limit, **_connection):
-            return events[-limit:]
+        def read_events_page(_repository, limit, **_connection):
+            return events[-limit:], len(events) > limit
 
         with (
             mock.patch.object(
@@ -353,7 +357,7 @@ class OverviewContextTests(unittest.TestCase):
                 return_value="https://github.com/example/service-a.git",
             ),
             mock.patch.object(
-                serve.ledger, "read_events", side_effect=read_events
+                serve.ledger, "read_events_page", side_effect=read_events_page
             ),
         ):
             updates, unavailable = serve._recent_updates(
@@ -371,6 +375,104 @@ class OverviewContextTests(unittest.TestCase):
         self.assertIn("Older handoff.", page)
         self.assertNotIn("No recent updates.", page)
         self.assertNotIn("Supervisor pass", page)
+
+    def test_recent_updates_stop_at_cap_and_mark_incomplete(self):
+        events = [{
+            "event": "handoff",
+            "summary": "Older handoff.",
+            "timestamp": "2026-10-25T00:00:00Z",
+        }]
+        events.extend({
+            "event": "supervise",
+            "summary": f"Supervisor pass {index}.",
+            "timestamp": "2026-10-26T00:00:00Z",
+        } for index in range(1000))
+        read_limits = []
+        read_sizes = []
+
+        def read_events_page(_repository, limit, **_connection):
+            page = events[-limit:]
+            read_limits.append(limit)
+            read_sizes.append(len(page))
+            return page, len(events) > limit
+
+        with (
+            mock.patch.object(
+                serve.roadmap, "_git_remote_url",
+                return_value="https://github.com/example/service-a.git",
+            ),
+            mock.patch.object(
+                serve.ledger, "read_events_page", side_effect=read_events_page
+            ),
+        ):
+            updates, unavailable = serve._recent_updates(
+                [{"repo": "service-a"}], ["service-a"], {}
+            )
+
+        page = serve.render_dashboard(
+            self._base_state(
+                recent_updates=updates,
+                recent_updates_unavailable=unavailable,
+            )
+        ).decode()
+
+        self.assertEqual(read_limits, [256])
+        self.assertEqual(sum(read_sizes), 256)
+        self.assertTrue(unavailable)
+        self.assertEqual(updates, [])
+        self.assertIn("Recent updates are unavailable.", page)
+        self.assertNotIn("No recent updates.", page)
+        self.assertNotIn("Older handoff.", page)
+
+
+def test_recent_updates_detects_truncation_after_skipped_raw_entry(
+    redis_port, flush_redis
+):
+    connection = _kw(redis_port)
+    client = ledger._client(**connection)
+    key = ledger._stream_key("example/service-a")
+    client.xadd(key, {
+        "ts": "2026-10-25T00:00:00Z",
+        "host": "worker-a",
+        "event": "handoff",
+        "summary": "Older handoff.",
+    })
+    pipeline = client.pipeline()
+    for index in range(255):
+        pipeline.xadd(key, {
+            "ts": f"2026-10-26T00:{index % 60:02d}:00Z",
+            "host": "worker-a",
+            "event": "supervise",
+        })
+    pipeline.xadd(key, {
+        "ts": "2026-10-26T00:00:00Z",
+        "host": "worker-a",
+        "event": "supervise",
+        "summary": b"\xff",
+    })
+    pipeline.execute()
+    assert client.xlen(key) == 257
+
+    with mock.patch.object(
+        serve.roadmap, "_git_remote_url",
+        return_value="https://github.com/example/service-a.git",
+    ):
+        updates, unavailable = serve._recent_updates(
+            [{"repo": "service-a"}], ["service-a"], connection
+        )
+
+    page = serve.render_dashboard(
+        OverviewContextTests._base_state(
+            recent_updates=updates,
+            recent_updates_unavailable=unavailable,
+        )
+    ).decode()
+
+    assert unavailable
+    assert updates == []
+    assert "Recent updates are unavailable." in page
+    assert "No recent updates." not in page
+    assert "Older handoff." not in page
 
 
 class TimeFormattingTests(unittest.TestCase):

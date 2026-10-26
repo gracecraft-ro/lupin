@@ -38,6 +38,9 @@ All notable changes to Lupin. The version has one source:
   delegation-loop skills name skills in one form, and triage defines the
   `Duplicates` reply.
 
+- The Overview marks recent updates unavailable when a 256-event page leaves
+  older events unread and fewer than six visible updates.
+
 ### Fixed
 
 - New loop prompts include saved repo instructions when the worktree copy
