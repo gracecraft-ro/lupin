@@ -22,6 +22,9 @@ All notable changes to Lupin. The version has one source:
   checks `origin/release/next` or `origin/master`, and CI no longer lists
   `release/next`.
 
+- The Roadmap uses GitHub links for confirmed blockers. Text matches are
+  non-blocking notes.
+
 ### Fixed
 
 - The Roadmap page family uses one set of stage words (In progress, Ready,
