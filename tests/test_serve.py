@@ -17,7 +17,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from importlib import resources
 from unittest import mock
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import pytest
 import redis as redis_lib
@@ -1104,7 +1104,19 @@ class ModelTiersRefreshRouteTests(unittest.TestCase):
         handler.send_header = mock.Mock()
         handler.end_headers = mock.Mock()
         handler.fleet_connection = {"redis_host": "fleet"}
-        fake_snapshot = {"fetched_at": "2026-10-07T00:00:00+00:00", "subscriptions": {}}
+        fake_snapshot = {
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [{"id": "claude-opus"}, {"id": "claude-sonnet"}],
+                },
+                "opencode-go": {
+                    "live": True,
+                    "models": [{"id": "opencode-model"}],
+                },
+            },
+        }
         with (
             mock.patch.object(serve.model_fetch, "snapshot", return_value=fake_snapshot) as fake_fetch,
             mock.patch.object(serve.model_fetch, "save_snapshot") as fake_save,
@@ -1118,8 +1130,53 @@ class ModelTiersRefreshRouteTests(unittest.TestCase):
         location = next(
             call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
         )
-        self.assertIn("pulled%20today%27s%20model%20list", location)
+        message = unquote(location.partition("sent=")[2])
         self.assertTrue(location.startswith("/model-tiers?sent="))
+        self.assertIn("pulled today's model list and prices", message)
+        self.assertIn("claude: 2, opencode-go: 1", message)
+        self.assertIn("3 models shown", message)
+
+    def test_refresh_with_no_models_reports_subscription_errors(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        handler.fleet_connection = {}
+        fake_snapshot = {
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": False,
+                    "error": "unavailable (FileNotFoundError)",
+                    "models": [],
+                },
+                "opencode-go": {
+                    "live": False,
+                    "error": "no OpenCode Go API key available",
+                    "models": [],
+                },
+            },
+        }
+        with (
+            mock.patch.object(serve.model_fetch, "snapshot", return_value=fake_snapshot),
+            mock.patch.object(serve.model_fetch, "save_snapshot"),
+            mock.patch.object(serve.model_fetch, "publish_snapshot", return_value=True),
+        ):
+            handler.do_POST()
+        location = next(
+            call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
+        )
+        message = unquote(location.partition("sent=")[2])
+        self.assertIn("no models returned", message)
+        self.assertIn("claude: 0, opencode-go: 0", message)
+        self.assertIn("0 models shown", message)
+        self.assertIn("claude: unavailable (FileNotFoundError)", message)
+        self.assertIn("opencode-go: no OpenCode Go API key available", message)
+        self.assertNotIn("pulled today's model list and prices", message)
 
     def test_refresh_failure_redirects_with_message_not_a_500(self):
         handler = serve.Handler.__new__(serve.Handler)
