@@ -805,15 +805,28 @@ def _recent_updates(
             unavailable |= name in enabled
             continue
         owner, full_name = identity
-        try:
-            events = ledger.read_events(f"{owner}/{full_name}", limit=8, **connection)
-        except (CoordinatorUnreachable, redis.exceptions.RedisError):
-            unavailable = True
-            continue
+        limit = 8
+        previous_count = None
+        visible_events = []
+        while True:
+            try:
+                events = ledger.read_events(
+                    f"{owner}/{full_name}", limit=limit, **connection
+                )
+            except (CoordinatorUnreachable, redis.exceptions.RedisError):
+                unavailable = True
+                break
+            visible_events = [
+                event for event in events if event.get("event") != "supervise"
+            ]
+            if len(visible_events) >= 6 or (
+                previous_count is not None and len(events) <= previous_count
+            ):
+                break
+            previous_count = len(events)
+            limit *= 2
         updates.extend(
-            {**event, "repo": name}
-            for event in events
-            if event.get("event") != "supervise"
+            {**event, "repo": name} for event in visible_events[-6:]
         )
     updates.sort(
         key=lambda event: str(event.get("timestamp") or ""), reverse=True

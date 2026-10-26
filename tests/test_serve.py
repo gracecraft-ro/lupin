@@ -332,6 +332,46 @@ class OverviewContextTests(unittest.TestCase):
         self.assertNotIn("Supervisor pass.", page)
         self.assertEqual(sum(page.count(f"Update {i}.") for i in range(7)), 6)
 
+    def test_recent_updates_read_past_eight_supervisor_events(self):
+        events = [{
+            "event": "handoff",
+            "summary": "Older handoff.",
+            "timestamp": "2026-10-25T00:00:00Z",
+        }]
+        events.extend({
+            "event": "supervise",
+            "summary": f"Supervisor pass {index}.",
+            "timestamp": f"2026-10-25T00:{index + 1:02d}:00Z",
+        } for index in range(8))
+
+        def read_events(_repository, limit, **_connection):
+            return events[-limit:]
+
+        with (
+            mock.patch.object(
+                serve.roadmap, "_git_remote_url",
+                return_value="https://github.com/example/service-a.git",
+            ),
+            mock.patch.object(
+                serve.ledger, "read_events", side_effect=read_events
+            ),
+        ):
+            updates, unavailable = serve._recent_updates(
+                [{"repo": "service-a"}], ["service-a"], {}
+            )
+
+        page = serve.render_dashboard(
+            self._base_state(
+                recent_updates=updates,
+                recent_updates_unavailable=unavailable,
+            )
+        ).decode()
+
+        self.assertFalse(unavailable)
+        self.assertIn("Older handoff.", page)
+        self.assertNotIn("No recent updates.", page)
+        self.assertNotIn("Supervisor pass", page)
+
 
 class TimeFormattingTests(unittest.TestCase):
     def test_time_until_reset_formats_remaining_time(self):
