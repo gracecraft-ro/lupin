@@ -1882,16 +1882,8 @@ _ALIAS_PREFIX = re.compile(r"^(?:bmo|local):|^(?:opencode-go|openai-codex|openai
 
 
 def load_model_snapshot(connection: dict | None = None) -> dict | None:
-    """Read the fleet snapshot, then this host's file as a fallback."""
-    shared = model_fetch.read_shared_snapshot(**(connection or {}))
-    if shared is not None:
-        return shared
-    try:
-        with open(model_fetch.SNAPSHOT_FILE, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
+    """Return the newer fleet or local model snapshot."""
+    return model_fetch.latest_snapshot(**(connection or {}))
 
 
 def snapshot_models(snapshot: dict | None) -> list[dict]:

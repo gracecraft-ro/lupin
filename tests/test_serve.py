@@ -946,6 +946,7 @@ class AllModelsTableTests(unittest.TestCase):
         with (
             mock.patch.object(serve, "MODEL_TIERS_PATH", self.tiers_path),
             mock.patch.object(serve.model_fetch, "read_shared_snapshot", return_value=shared),
+            mock.patch.object(serve.model_fetch, "_read_local_snapshot", return_value=None),
             mock.patch.object(serve.benchmark_fetch, "read_snapshot", return_value=None),
         ):
             page = serve.render_model_tiers(connection={"redis_host": "fleet"}).decode()
@@ -1135,6 +1136,63 @@ class ModelTiersRefreshRouteTests(unittest.TestCase):
         self.assertIn("pulled today's model list and prices", message)
         self.assertIn("claude: 2, opencode-go: 1", message)
         self.assertIn("3 models shown", message)
+
+    def test_refresh_publish_failure_renders_newer_local_snapshot(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        handler.fleet_connection = {"redis_host": "fleet"}
+        fresh_snapshot = {
+            "fetched_at": "2026-10-08T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [{"id": "fresh-1"}, {"id": "fresh-2"}],
+                },
+            },
+        }
+        stale_shared_snapshot = {
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [{"id": "old-1"}],
+                },
+            },
+        }
+        with (
+            mock.patch.object(serve.model_fetch, "snapshot", return_value=fresh_snapshot),
+            mock.patch.object(serve.model_fetch, "save_snapshot") as fake_save,
+            mock.patch.object(serve.model_fetch, "publish_snapshot", return_value=False) as fake_publish,
+            mock.patch.object(
+                serve.model_fetch, "read_shared_snapshot", return_value=stale_shared_snapshot
+            ),
+            mock.patch.object(serve.model_fetch, "_read_local_snapshot", return_value=fresh_snapshot),
+            mock.patch.object(serve.benchmark_fetch, "read_snapshot", return_value=None),
+        ):
+            handler.do_POST()
+            fake_save.assert_called_once_with(fresh_snapshot)
+            fake_publish.assert_called_once_with(fresh_snapshot, redis_host="fleet")
+            location = next(
+                call.args[1]
+                for call in handler.send_header.call_args_list
+                if call.args[0] == "Location"
+            )
+            message = unquote(location.partition("sent=")[2])
+            page = serve.render_model_tiers(
+                sent=message, connection=handler.fleet_connection
+            ).decode()
+        self.assertIn("claude: 2", message)
+        self.assertIn("2 models shown", message)
+        self.assertIn("fleet cache unavailable", message)
+        self.assertIn("fresh-1", page)
+        self.assertIn("fresh-2", page)
+        self.assertNotIn("old-1", page)
 
     def test_refresh_with_no_models_reports_subscription_errors(self):
         handler = serve.Handler.__new__(serve.Handler)
