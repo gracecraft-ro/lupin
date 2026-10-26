@@ -2936,6 +2936,79 @@ def test_monitor_cancels_low_quota_slot_wait_and_resumes_alternate(
     assert held["acme/repo#60"]["session"] == state["claim_holder"]
     assert released == ["omp:lease-1"]
 
+def test_monitor_releases_acquired_lease_when_quota_handoff_arrives_before_launch(
+    monkeypatch, tmp_path: Path
+):
+    now = time.time()
+    snapshot = {
+        "opencode-go": _quota_entry([
+            _quota_row("opencode-go", 92, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+    real_hold = loop_runtime.slots.hold
+    real_acquire = loop_runtime.slots.acquire
+    _quota_handoff_harness(
+        monkeypatch, tmp_path, snapshot, ["opencode-go/deepseek-v4.1-flash"],
+    )
+
+    slot_root = tmp_path / "slots"
+    monkeypatch.setenv("LUPIN_STATE_ROOT", str(slot_root))
+    child_started = tmp_path / "child-started"
+    monkeypatch.setattr(
+        loop_runtime,
+        "_agent_command",
+        lambda *_args, **_kwargs: [
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(child_started)!r}).touch()",
+        ],
+    )
+
+    watch_context = {}
+    watch_ready = threading.Event()
+    acquired = []
+    pending_after_acquire = []
+
+    def watch(_repo, session, workspace, watch_state):
+        watch_context.update(session=session, workspace=workspace, state=watch_state)
+        watch_ready.set()
+
+    def acquire(slot, holder, **kwargs):
+        lease = real_acquire(slot, holder, **kwargs)
+        assert lease is not None
+        acquired.append(lease)
+        assert watch_ready.wait(5)
+        loop_runtime._quota_watch_tick(
+            "widgets", watch_context["session"], watch_context["workspace"],
+            watch_context["state"],
+        )
+        with watch_context["state"]["lock"]:
+            pending_after_acquire.append(watch_context["state"]["pending"] is not None)
+        return lease
+
+    server_checks = 0
+
+    def server_running(_session):
+        nonlocal server_checks
+        server_checks += 1
+        return server_checks == 1
+
+    monkeypatch.setattr(loop_runtime, "_quota_watch", watch)
+    monkeypatch.setattr(loop_runtime, "_server_running", server_running)
+    monkeypatch.setattr(loop_runtime.slots, "hold", real_hold)
+    monkeypatch.setattr(loop_runtime.slots, "acquire", acquire)
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    assert len(acquired) == 1 and acquired[0].startswith("omp:")
+    assert pending_after_acquire == [True]
+    assert not child_started.exists()
+    assert loop_runtime.slots.status(state_root=slot_root)["omp"]["holders"] == 0
+
+
+
 
 def test_monitor_requests_quota_handoff_before_limit_and_saves_all_sections(
     monkeypatch, tmp_path: Path
