@@ -29,6 +29,7 @@ import os
 import secrets
 import time
 from pathlib import Path
+from typing import Callable
 
 from . import _lease_runtime
 
@@ -244,11 +245,15 @@ def hold(
     ttl: float = DEFAULT_TTL,
     max_holders: int | None = None,
     state_root: str | Path | None = None,
-) -> int:
+    before_run: Callable[[], bool] | None = None,
+) -> int | None:
     """Acquire (unless `lease` is already held), run `command`, renewing the
     lease while it runs, and release on exit -- success, failure, or the
     child being killed by a signal. Returns the child's exit code, or
     128 + signal number if it was killed by one (the usual shell convention).
+
+    If `before_run` returns False after acquiring the lease, `hold` releases
+    the lease without running the command and returns `None`.
 
     Release always runs: it is in a `finally`, after `proc.wait()` returns --
     which it does even when the child was killed by SIGTERM or SIGKILL, since
@@ -274,6 +279,10 @@ def hold(
         lease = acquire(
             slot, holder, wait=wait, ttl=ttl, max_holders=max_holders, state_root=state_root
         )
+
+    if before_run is not None and not before_run():
+        release(lease, state_root=state_root)
+        return None
 
     return _lease_runtime.run_with_lease(
         command,

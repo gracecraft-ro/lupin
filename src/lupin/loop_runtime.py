@@ -1835,6 +1835,10 @@ def _monitor_loop(
     if provider:
         quota_watcher.start()
 
+    def can_start_agent() -> bool:
+        with watch["lock"]:
+            return watch["pending"] is None
+
     def run_agent(
         agent_platform: str, agent_prompt: str, *, launch_agent: bool, resume_agent: bool
     ) -> int:
@@ -1853,8 +1857,10 @@ def _monitor_loop(
         )
         rc = slots.hold(
             command, slot=agent_platform, holder=unit_name(repo), wait=wait_s,
-            ttl=LEASE_TTL, max_holders=max_holders,
+            ttl=LEASE_TTL, max_holders=max_holders, before_run=can_start_agent,
         )
+        if rc is None:
+            return 0
         metadata["agent_exit_code"] = rc
         _write_metadata(repo, metadata)
         _log_event(
