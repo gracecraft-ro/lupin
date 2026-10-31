@@ -280,7 +280,7 @@ class RouteTests(unittest.TestCase):
         # resolves to the packaged model-tiers.json.
         result = route.route("coding", "size-m", quota_rows=[])
 
-        self.assertEqual(result, {"model": "opencode-go/glm-5.3", "effort": "high"})
+        self.assertEqual(result, {"model": "haiku", "effort": "high"})
 
 
 class ProviderForModelTests(unittest.TestCase):
@@ -785,10 +785,10 @@ class RouteMultiAccountTests(unittest.TestCase):
 
 
 class PackagedTiersTests(unittest.TestCase):
-    def test_size_m_coding_with_readable_quota_picks_opencode_go_high(self):
+    def test_size_m_coding_with_readable_quota_picks_haiku_high(self):
         # Check 1 (issue #99): both accounts readable and unpressed, so no
         # block and no lean-in (resets are 2 days out). The pick is tier1's
-        # first entry, which must be the opencode-go row.
+        # first entry, which must be the haiku row.
         reset_ms = time.time() * 1000 + 2 * 24 * HOUR_MS
         rows = [
             {"provider": "claude", "duration": QuotaDuration.FIVE_HOURS,
@@ -798,7 +798,7 @@ class PackagedTiersTests(unittest.TestCase):
         ]
         result = route.route("coding", "size-m", quota_rows=rows)
 
-        self.assertEqual(result, {"model": "opencode-go/glm-5.3", "effort": "high"})
+        self.assertEqual(result, {"model": "haiku", "effort": "high"})
 
     def test_every_packaged_tier_entry_can_be_picked(self):
         # An entry route() never returns is dead config. Give each entry a
