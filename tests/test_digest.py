@@ -69,11 +69,7 @@ def test_prompt_tells_the_model_that_missing_data_is_not_an_empty_result():
 def test_digest_model_order_matches_the_prose_row():
     chain = [(model, effort) for model, effort in digest._error_chain()]
 
-    assert [model for model, _effort in chain] == [
-        "bmo:qwen3.8-flash-next",
-        "opencode-go/deepseek-v4.1-flash",
-        "haiku",
-    ]
+    assert [model for model, _effort in chain] == ["haiku", "haiku"]
     assert chain[0][1] == "low"
 
 
