@@ -583,6 +583,65 @@ def _valid_repo_name(repo: str) -> bool:
     return bool(REPO_NAME_RE.fullmatch(repo))
 
 
+def _git_init_at(directory_fd: int, repo_dir: Path) -> None:
+    """Initialize Git with the open repo directory as its working directory."""
+    try:
+        proc = subprocess.run(
+            ["git", "init", "--initial-branch=main"],
+            cwd=f"/dev/fd/{directory_fd}",
+            pass_fds=(directory_fd,),
+            capture_output=True,
+            text=True,
+            timeout=loop_runtime.GIT_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise loop_runtime.LoopError(f"could not run git in {repo_dir}: {exc}") from exc
+    if proc.returncode:
+        detail = (proc.stderr or proc.stdout).strip()
+        raise loop_runtime.LoopError(f"git init failed in {repo_dir}: {detail}")
+
+
+def _same_repo_directory(repo_fd: int, code_fd: int, repo: str) -> bool:
+    try:
+        current = os.stat(repo, dir_fd=code_fd, follow_symlinks=False)
+        return os.path.samestat(os.fstat(repo_fd), current)
+    except OSError:
+        return False
+
+
+def _remove_created_repo(repo_fd: int, code_fd: int, repo: str) -> None:
+    """Remove only files reached through the created directory descriptor."""
+    try:
+        docs_fd = os.open(
+            "docs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=repo_fd
+        )
+    except OSError:
+        docs_fd = None
+    if docs_fd is not None:
+        try:
+            os.unlink("delegation-loop.md", dir_fd=docs_fd)
+        except OSError:
+            pass
+        os.close(docs_fd)
+        try:
+            os.rmdir("docs", dir_fd=repo_fd)
+        except OSError:
+            pass
+    try:
+        shutil.rmtree(".git", dir_fd=repo_fd)
+    except OSError:
+        try:
+            os.unlink(".git", dir_fd=repo_fd)
+        except OSError:
+            pass
+    if _same_repo_directory(repo_fd, code_fd, repo):
+        try:
+            os.rmdir(repo, dir_fd=code_fd)
+        except OSError:
+            pass
+
+
 def _create_repo(repo: str, message: str) -> Path:
     message = message.strip()
     document = _delegation_doc_template(repo, message)
@@ -606,53 +665,51 @@ def _create_repo(repo: str, message: str) -> Path:
     if os.path.lexists(repo_dir):
         raise ValueError(f"repo path already exists: {repo}")
 
+    code_fd = os.open(code_dir, os.O_RDONLY | os.O_DIRECTORY)
+    repo_fd = None
     try:
-        repo_dir.mkdir()
-    except FileExistsError as exc:
-        raise ValueError(f"repo path already exists: {repo}") from exc
+        try:
+            os.mkdir(repo, dir_fd=code_fd)
+        except FileExistsError as exc:
+            raise ValueError(f"repo path already exists: {repo}") from exc
+        try:
+            repo_fd = os.open(
+                repo, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=code_fd
+            )
+        except OSError as exc:
+            raise OSError("repo directory changed during creation") from exc
 
-    docs_dir = repo_dir / "docs"
-    doc_path = docs_dir / "delegation-loop.md"
-    git_dir = repo_dir / ".git"
-    made_docs = False
-    made_doc = False
-    git_attempted = False
-    try:
-        git_attempted = True
+        docs_fd = None
         try:
-            loop_runtime._git(repo_dir, "init", "--initial-branch=main")
-        except loop_runtime.LoopError as exc:
-            raise OSError(f"could not initialize Git repo: {exc}") from exc
-        docs_dir.mkdir()
-        made_docs = True
-        with doc_path.open("x", encoding="utf-8") as doc:
-            made_doc = True
-            doc.write(document)
-    except BaseException:
-        if made_doc:
             try:
-                doc_path.unlink()
-            except OSError:
-                pass
-        if made_docs:
-            try:
-                docs_dir.rmdir()
-            except OSError:
-                pass
-        if git_attempted:
-            try:
-                if git_dir.is_dir() and not git_dir.is_symlink():
-                    shutil.rmtree(git_dir)
-                elif git_dir.exists() or git_dir.is_symlink():
-                    git_dir.unlink()
-            except OSError:
-                pass
-        try:
-            repo_dir.rmdir()
-        except OSError:
-            pass
-        raise
-    return repo_dir
+                _git_init_at(repo_fd, repo_dir)
+            except loop_runtime.LoopError as exc:
+                raise OSError(f"could not initialize Git repo: {exc}") from exc
+            os.mkdir("docs", dir_fd=repo_fd)
+            docs_fd = os.open(
+                "docs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=repo_fd
+            )
+            doc_fd = os.open(
+                "delegation-loop.md",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o666,
+                dir_fd=docs_fd,
+            )
+            with os.fdopen(doc_fd, "w", encoding="utf-8") as doc:
+                doc.write(document)
+            if not _same_repo_directory(repo_fd, code_fd, repo):
+                raise OSError("repo directory changed during creation")
+        except BaseException:
+            _remove_created_repo(repo_fd, code_fd, repo)
+            raise
+        finally:
+            if docs_fd is not None:
+                os.close(docs_fd)
+        return repo_dir
+    finally:
+        if repo_fd is not None:
+            os.close(repo_fd)
+        os.close(code_fd)
 
 
 def merge_repo_inventory(

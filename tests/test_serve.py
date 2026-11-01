@@ -3976,19 +3976,69 @@ class TestReposPageRoutes:
         code_dir = tmp_path / "code"
         code_dir.mkdir()
         monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        repo_dir = code_dir / "widgets"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        marker = outside / ".git" / "important"
+        marker.parent.mkdir()
+        marker.write_text("keep outside repo", encoding="utf-8")
+        git_init_at = serve._git_init_at
 
-        def fail_after_partial_init(repo_dir, *args):
-            (repo_dir / ".git").mkdir()
+        displaced = code_dir / "displaced"
+
+        def replace_repo_and_fail(repo_fd, repo_dir):
+            git_init_at(repo_fd, repo_dir)
+
+            os.rename(repo_dir, displaced)
+            repo_dir.symlink_to(outside, target_is_directory=True)
             raise serve.loop_runtime.LoopError("git init failed")
 
-        monkeypatch.setattr(serve.loop_runtime, "_git", fail_after_partial_init)
+        monkeypatch.setattr(serve, "_git_init_at", replace_repo_and_fail)
         handler = _repos_handler()
         _post_body(handler, "/repos/create", {"repo": "widgets"})
         handler.do_POST()
 
         assert handler.reply.call_args.args[1] == 500
         assert "could not initialize Git repo: git init failed" in handler.reply.call_args.args[0].decode()
-        assert list(code_dir.iterdir()) == []
+        assert repo_dir.is_symlink()
+        assert marker.read_text(encoding="utf-8") == "keep outside repo"
+        assert list(outside.iterdir()) == [marker.parent]
+        assert not (outside / "docs").exists()
+        assert list(displaced.iterdir()) == []
+
+    def test_create_route_does_not_redirect_git_or_document_when_repo_path_is_replaced(
+        self, tmp_path, monkeypatch
+    ):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        marker = outside / ".git" / "important"
+        marker.parent.mkdir()
+        marker.write_text("keep outside repo", encoding="utf-8")
+        repo_dir = code_dir / "widgets"
+        displaced = code_dir / "displaced"
+        git_init_at = serve._git_init_at
+
+
+        def replace_repo_after_git_init(repo_fd, path):
+            git_init_at(repo_fd, path)
+            os.rename(path, displaced)
+            path.symlink_to(outside, target_is_directory=True)
+
+        monkeypatch.setattr(serve, "_git_init_at", replace_repo_after_git_init)
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": "widgets"})
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 500
+        assert "repo directory changed during creation" in handler.reply.call_args.args[0].decode()
+        assert repo_dir.is_symlink()
+        assert marker.read_text(encoding="utf-8") == "keep outside repo"
+        assert list(outside.iterdir()) == [marker.parent]
+        assert not (outside / "docs" / "delegation-loop.md").exists()
+        assert list(displaced.iterdir()) == []
 
     @pytest.mark.parametrize("repo", ["", "bad/name", "widgets\n"])
     def test_create_route_rejects_invalid_names_without_creating_files(

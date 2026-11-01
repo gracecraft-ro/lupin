@@ -26,6 +26,9 @@ All notable changes to Lupin. The version has one source:
 
 ### Fixed
 
+- Repo creation anchors Git, document writes, and rollback to the directory
+  created for the request.
+
 - The Roadmap page family uses one set of stage words (In progress, Ready,
   Later, Blocked) on the board, the list, the detail panel and the queue
   graph. The empty states keep the selected repositories visible, the note
