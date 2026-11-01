@@ -390,21 +390,40 @@ class QuotaRenderingTests(unittest.TestCase):
             page.index("class=quota-matrix"), page.index("<h2>7-day totals</h2>")
         )
 
-    def test_usage_matrix_uses_other_for_null_unknown_window_label(self):
-        row = {
-            "provider": "openai",
-            "duration": serve.QuotaDuration.OTHER,
-            "label": None,
-            "used_pct": 42,
-            "resets_at": 302_400_000,
-            "generated_at": "2026-01-01 00:00:00",
-        }
+    def test_usage_matrix_distinguishes_other_windows_with_known_durations(self):
+        rows = [
+            {
+                "provider": "openai",
+                "duration": serve.QuotaDuration.OTHER,
+                "duration_ms": 7_200_000,
+                "label": None,
+                "used_pct": 42,
+                "resets_at": 3_600_000,
+            },
+            {
+                "provider": "claude",
+                "duration": serve.QuotaDuration.OTHER,
+                "duration_ms": 14_400_000,
+                "label": "",
+                "used_pct": 55,
+                "resets_at": 7_200_000,
+            },
+            {
+                "provider": "gemini",
+                "duration": serve.QuotaDuration.OTHER,
+                "duration_ms": 7_200_000,
+                "label": "Source window",
+                "used_pct": 70,
+                "resets_at": 3_600_000,
+            },
+        ]
         snapshot = {
-            "openai": {
+            row["provider"]: {
                 "rows": [row],
                 "fetched_at": "2026-01-01T00:00:00+00:00",
                 "fetched_by": "synthetic",
             }
+            for row in rows
         }
         with (
             mock.patch.object(quota_cache, "read_snapshot", return_value=snapshot),
@@ -416,9 +435,19 @@ class QuotaRenderingTests(unittest.TestCase):
         parser.feed(page)
         self.assertEqual(
             [cell["text"].strip() for cell in parser.rows[0]],
-            ["Provider / account", "Other"],
+            ["Provider / account", "Other · 2h", "Source window", "Other · 4h"],
         )
-        self.assertEqual(parser.windows[0]["data-window-duration"], "OTHER")
+        claude = next(row for row in parser.rows[1:] if "claude" in row[0]["text"])
+        self.assertEqual(claude[1]["text"].strip(), "—")
+        self.assertIn("55% used", claude[3]["text"])
+        gemini = next(row for row in parser.rows[1:] if "gemini" in row[0]["text"])
+        self.assertEqual(gemini[1]["text"].strip(), "—")
+        self.assertIn("70% used", gemini[2]["text"])
+        self.assertEqual(gemini[3]["text"].strip(), "—")
+        openai = next(row for row in parser.rows[1:] if "openai" in row[0]["text"])
+        self.assertIn("42% used", openai[1]["text"])
+        self.assertEqual(openai[2]["text"].strip(), "—")
+        self.assertEqual(openai[3]["text"].strip(), "—")
 
     def test_usage_page_names_the_account_of_each_row(self):
         reset_at_ms = 1_790_547_474_348

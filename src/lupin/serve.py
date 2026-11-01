@@ -1676,6 +1676,24 @@ def quota_window_key(row: dict) -> tuple[str, str, int | None]:
     return duration_value, quota_duration_label(row), quota_window_milliseconds(row)
 
 
+def quota_window_heading(row: dict) -> str:
+    label = quota_duration_label(row)
+    duration = row.get("duration", QuotaDuration.OTHER)
+    if row.get("label") or duration != QuotaDuration.OTHER:
+        return label
+    milliseconds = quota_window_milliseconds(row)
+    if milliseconds is None:
+        return label
+    parts = []
+    for unit, suffix in (
+        (86_400_000, "d"), (3_600_000, "h"), (60_000, "m"), (1_000, "s"), (1, "ms"),
+    ):
+        amount, milliseconds = divmod(milliseconds, unit)
+        if amount:
+            parts.append(f"{amount}{suffix}")
+    return f"{label} · {' '.join(parts)}"
+
+
 def render_quota_cell(row: dict, now_ms: int) -> str:
     duration_value, _label, _milliseconds = quota_window_key(row)
     reset_at_ms = row.get("resets_at")
@@ -1740,7 +1758,7 @@ def render_quota_matrix(
             message = plain_message(row.get("note", ""))
         else:
             window = quota_window_key(row)
-            window_labels[window] = quota_duration_label(row)
+            window_labels[window] = quota_window_heading(row)
             group["windows"].setdefault(window, []).append(row)
             continue
         if message:
