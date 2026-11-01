@@ -15,10 +15,22 @@ The superloop is the supervisor role for Lupin loops. Two parts do the work:
 
 Do not copy the rule text into other files. The text lives in code. Open `NUDGE_TEXT` in `<checkout>/src/lupin/supervise.py` and copy the text inside the quotes. Do not copy the Python.
 
+## Which level uses this skill
+
+This skill is for a loop supervisor. A loop supervisor is the orchestrator of one loop, acting with this skill. It does the loop steps below: blocks, nudges, and the hourly pass.
+
+A session above the loop supervisors (the supervisor of supervisors) does not do the loop steps. It does only this:
+
+- Check that each loop supervisor runs and records its passes in the ledger.
+- Pass owner updates to the loop supervisors unchanged.
+- Decide which questions need the owner. Record them and report them.
+
+It does not review, approve, comment on, merge, or edit a pull request. It does not change code, issues, or loop settings. It does not do a loop's work.
+
 Terms:
 
 - Loop: one Lupin run on one repo. It runs in one Herdr workspace.
-- Orchestrator: the main agent of a loop. It dispatches and merges work.
+- Orchestrator: the main agent of a loop. It dispatches work. The owner merges every pull request.
 - Research worker: an agent that answers one question. It reads and runs checks. It does not change code, issues, pull requests, or loops.
 - Ledger: the shared Lupin event record. It is stored in Redis.
 - Monitor log: the file that the hourly monitor writes. The owner gives its path.
