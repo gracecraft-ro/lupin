@@ -15,6 +15,9 @@ compatibility: >-
 Read the root `AGENTS.md`, `docs/delegation-loop.md` (if any), and the latest
 issue comments. Follow the repo's branch, worktree, test, and release rules.
 
+For routine PRs, do not add or edit `CHANGELOG.md`. Add release notes only
+when the owner explicitly asks.
+
 A loop pushes its branch to the `fork` remote, never to `origin` (`OWNER/REPO`)
 or `main`. It opens the PR on upstream against `main`, with `--head
 FORK_OWNER:<branch>`. Never create a new fork. Never open a PR or an issue on a
