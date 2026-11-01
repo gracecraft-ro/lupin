@@ -651,6 +651,8 @@ def _rename_noreplace(
 def _create_repo(repo: str, message: str) -> Path:
     message = message.strip()
     document = _delegation_doc_template(repo, message)
+    # Do not stage user-supplied message bytes before path validation.
+    staged_document = "" if message else document
     code_fd = None
     try:
         expected_root = os.stat(CODE_DIR)
@@ -740,7 +742,7 @@ def _create_repo(repo: str, message: str) -> Path:
             staged_doc_identity = os.fstat(staged_doc_fd)
             doc_identity = staged_doc_identity
             with os.fdopen(staged_doc_fd, "w", encoding="utf-8") as doc:
-                doc.write(document)
+                doc.write(staged_document)
 
             current_docs = os.stat("docs", dir_fd=repo_fd, follow_symlinks=False)
             if not os.path.samestat(os.fstat(docs_fd), current_docs):
@@ -764,8 +766,9 @@ def _create_repo(repo: str, message: str) -> Path:
                 dst_dir_fd=repo_fd,
                 follow_symlinks=False,
             )
-            os.unlink(staged_doc_name, dir_fd=repo_fd)
-            staged_doc_identity = None
+            current_docs = os.stat("docs", dir_fd=repo_fd, follow_symlinks=False)
+            if not os.path.samestat(os.fstat(docs_fd), current_docs):
+                raise OSError("docs directory changed during creation")
             _rename_noreplace(work_name, repo, src_dir_fd=code_fd, dst_dir_fd=code_fd)
             published = True
             current_repo = os.stat(repo, dir_fd=code_fd, follow_symlinks=False)
@@ -776,6 +779,39 @@ def _create_repo(repo: str, message: str) -> Path:
             current_docs = os.stat("docs", dir_fd=repo_fd, follow_symlinks=False)
             if not os.path.samestat(os.fstat(docs_fd), current_docs):
                 raise OSError("docs directory changed during creation")
+            if message:
+                staged_doc_fd = os.open(
+                    staged_doc_name,
+                    os.O_RDWR | os.O_NOFOLLOW,
+                    dir_fd=repo_fd,
+                )
+                try:
+                    if not os.path.samestat(
+                        staged_doc_identity, os.fstat(staged_doc_fd)
+                    ):
+                        raise OSError("staged document changed during creation")
+                    current_repo = os.stat(
+                        repo, dir_fd=code_fd, follow_symlinks=False
+                    )
+                    if not os.path.samestat(work_identity, current_repo):
+                        raise OSError("repo directory changed during publication")
+                    if not _same_root_directory(code_fd, code_dir):
+                        raise OSError("configured code directory changed during creation")
+                    current_docs = os.stat(
+                        "docs", dir_fd=repo_fd, follow_symlinks=False
+                    )
+                    if not os.path.samestat(os.fstat(docs_fd), current_docs):
+                        raise OSError("docs directory changed during creation")
+                    with os.fdopen(staged_doc_fd, "r+", encoding="utf-8") as doc:
+                        staged_doc_fd = None
+                        doc.seek(0)
+                        doc.truncate()
+                        doc.write(document)
+                finally:
+                    if staged_doc_fd is not None:
+                        os.close(staged_doc_fd)
+            os.unlink(staged_doc_name, dir_fd=repo_fd)
+            staged_doc_identity = None
         except BaseException:
             cleanup_docs_fd = docs_fd
             cleanup_docs_identity = docs_identity
@@ -827,7 +863,14 @@ def _create_repo(repo: str, message: str) -> Path:
                         # rmdir removes only an empty directory.
                         os.rmdir("docs", dir_fd=repo_fd)
                 except OSError:
-                    pass
+                    try:
+                        current_docs = os.stat(
+                            "docs", dir_fd=repo_fd, follow_symlinks=False
+                        )
+                        if stat.S_ISLNK(current_docs.st_mode):
+                            os.unlink("docs", dir_fd=repo_fd)
+                    except OSError:
+                        pass
             if close_cleanup_docs_fd:
                 try:
                     os.close(cleanup_docs_fd)

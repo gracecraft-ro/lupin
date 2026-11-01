@@ -4176,6 +4176,46 @@ class TestReposPageRoutes:
         assert not (code_dir / "widgets").exists()
         assert not list(code_dir.glob(".lupin-create-*"))
 
+    def test_create_route_keeps_message_private_when_docs_is_replaced_by_outside_symlink_before_link(
+        self, tmp_path, monkeypatch
+    ):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        outside_docs = tmp_path / "outside-docs"
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        real_link = os.link
+        moved = False
+        outside_observations = []
+
+        def replace_docs_before_link(source, destination, *args, **kwargs):
+            nonlocal moved
+            if destination == "docs/delegation-loop.md":
+                docs_path = next(code_dir.glob(".lupin-create-*/docs"))
+                os.rename(docs_path, outside_docs)
+                docs_path.symlink_to(outside_docs, target_is_directory=True)
+                moved = True
+                result = real_link(source, destination, *args, **kwargs)
+                outside_observations.append(
+                    (outside_docs / "delegation-loop.md").read_bytes()
+                )
+                return result
+            return real_link(source, destination, *args, **kwargs)
+
+        monkeypatch.setattr(serve.os, "link", replace_docs_before_link)
+        handler = _repos_handler()
+        _post_body(
+            handler, "/repos/create", {"repo": "widgets", "message": "private phrase"}
+        )
+        handler.do_POST()
+
+        assert moved
+        assert len(outside_observations) == 1
+        assert outside_observations == [b""]
+        assert handler.reply.call_args.args[1] == 500
+        assert list(outside_docs.iterdir()) == []
+        assert not (code_dir / "widgets").exists()
+        assert not list(code_dir.glob(".lupin-create-*"))
+
     @pytest.mark.parametrize("failure", ["stat", "open"])
     def test_create_route_cleans_staging_after_docs_stat_or_open_fails(
         self, tmp_path, monkeypatch, failure
