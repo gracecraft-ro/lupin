@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest import mock
 
@@ -511,6 +512,38 @@ class RoadmapTests(unittest.TestCase):
             "repo", ["repo"], {"repo": ([closed_issue], {}, [])}, render
         )
         self.assertIn("priority/P1", page)
+
+    def test_completed_page_displays_text_without_heading_and_bullet_markers(self):
+        closed_issue = {
+            "number": 58,
+            "title": "Readable description",
+            "body": "## Problem\n\n- item one\n- <script>alert(1)</script>",
+            "url": "",
+            "labels": [],
+        }
+        render = lambda title, body, css, js: body
+        page = roadmap.render_completed_page(
+            "repo", ["repo"], {"repo": ([closed_issue], {}, [])}, render
+        )
+
+        class VisibleText(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.parts = []
+
+            def handle_data(self, data):
+                self.parts.append(data)
+
+        visible = VisibleText()
+        visible.feed(page)
+        text = "".join(visible.parts)
+        self.assertIn("Problem", text)
+        self.assertIn("item one", text)
+        self.assertNotIn("## Problem", text)
+        self.assertNotIn("- item one", text)
+        self.assertIn("<script>alert(1)</script>", text)
+        self.assertIn("&lt;script&gt;", page)
+        self.assertNotIn("<script>alert(1)</script>", page)
 
     def test_failed_fetch_is_not_cached(self):
         """A read that came back empty *and* said why is an outage, not a
@@ -1709,6 +1742,64 @@ class RoadmapTests(unittest.TestCase):
         self.assertIn("Showing <b>1–2</b> of 2 issues", full)
         self.assertIn("Showing <b>0</b> of 0 issues", empty)
 
+
+    def test_repository_identity_errors_render_as_unknown_issue_count(self):
+        render = lambda title, body, css, js: body
+        identity_errors = [
+            (None, "GitHub returned invalid repository data"),
+            ({"name": "alpha"}, "GitHub returned no repository owner or name"),
+        ]
+
+        for identity, warning in identity_errors:
+            with self.subTest(warning=warning):
+                with mock.patch.object(
+                    roadmap, "_run_json", return_value=(identity, None)
+                ):
+                    issues, _comments, warnings = roadmap.load_github(
+                        "/missing/identity-repo"
+                    )
+
+                model = roadmap.build_model(
+                    issues, {}, [], warnings=warnings, repo="alpha"
+                )
+                page = roadmap.render_combined_page(
+                    ["alpha"], {"alpha": model}, render
+                )
+
+                self.assertTrue(model["issueFetchFailed"])
+                self.assertIn("unknown open issues", page)
+                self.assertIn(
+                    f"<details class='repo-warnings'><summary>alpha: {warning}</summary>",
+                    page,
+                )
+                self.assertNotIn("no open issues", page)
+
+
+    def test_failed_issue_fetch_is_unknown_and_warning_is_visible(self):
+        model = roadmap.build_model(
+            [],
+            {},
+            [],
+            warnings=["GitHub issue data is unavailable: auth failed"],
+            repo="alpha",
+        )
+        render = lambda title, body, css, js: body
+
+        page = roadmap.render_combined_page(["alpha"], {"alpha": model}, render)
+
+        self.assertIn("unknown open issues", page)
+        self.assertIn("GitHub issue data is unavailable: auth failed", page)
+        self.assertNotIn("no open issues", page)
+
+    def test_successful_empty_issue_fetch_still_reports_no_open_issues(self):
+        model = roadmap.build_model([], {}, [], repo="alpha")
+        render = lambda title, body, css, js: body
+
+        page = roadmap.render_combined_page(["alpha"], {"alpha": model}, render)
+
+        self.assertIn("0 open issues", page)
+        self.assertIn("no open issues", page)
+        self.assertNotIn("unknown open issues", page)
 
 class DependencyDagTests(unittest.TestCase):
     """build_dependency_dag combines blockedBy/blocking links -- GitHub's
