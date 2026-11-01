@@ -44,6 +44,10 @@ waits for the owner does not block the loop. A sync merges `main` into the PR
 branch to fix a conflict. A sync is a push. It changes the head SHA (the newest
 commit on the PR branch), so the PR needs a new review.
 
+When a repo has many open Dependabot PRs, start one subagent to combine them
+into one PR. Give that PR high priority.
+Delegate reviewers and fixers as needed until it is ready for production.
+
 Before it reads the backlog, the orchestrator (the agent that dispatches work)
 handles each open PR into `main`. Ignore draft PRs. Steps 2 and 3 apply only to
 a PR that the loop owns. The loop owns a PR when both are true:
@@ -114,6 +118,49 @@ title,body,labels > FILE` for the linked issue, or `gh pr view` with the same
    stall rule (step 3) before posting. That is the next round.
 6. `size-l` usually gives Opus. That is allowed here. Never use Fable without
    the user's approval.
+
+### Roll up Dependabot PRs
+
+A repo can have many open Dependabot PRs. Each one needs its own review and
+merge. The loop rolls them into one PR. Run this before the other PR work in
+each cycle.
+
+1. Trigger: the repo has two or more open PRs whose head branch starts with
+   `dependabot/`, and whose head repo is the repo itself. A single Dependabot
+   PR is handled as any other PR that the loop does not own.
+2. Claim: the orchestrator runs `lupin claim OWNER/REPO#N` for each Dependabot
+   PR before it dispatches. It leaves out each PR where the claim does not exit
+   0. Exit 2 means another holder has the PR. While the worker runs, it runs
+   `lupin renew-claim OWNER/REPO#N` for each claim.
+3. One worker: the orchestrator dispatches one worker for the whole roll-up, not
+   one for each PR. Route it with "Fix worker models" at LEVEL `size-m`. A major
+   version bump can break tests.
+4. Worker steps: the worker does these steps.
+   - Makes a branch from `main` and pushes it to the `fork` remote.
+   - Cherry-picks the one commit of each Dependabot PR. A bump that fixes a
+     security advisory goes first. Each bump stays one commit, so a bad bump can
+     be dropped.
+   - Runs the repo gate, as the repo `AGENTS.md` defines it.
+   - Leaves out each bump that conflicts or fails the gate. The PR body names
+     that bump and the first failing check.
+   - Opens one PR from the fork. The body lists each package with its old and
+     new version. The body says `Supersedes #A, #B`. It uses `Refs`, not
+     `Closes`, for those PRs.
+5. Fast-track: the orchestrator claims the roll-up PR with `lupin claim`. It
+   dispatches a reviewer in the same cycle, before other review work. The
+   reviewer checks that:
+   - the diff has only version changes,
+   - the lockfile matches the manifest,
+   - the release notes of each major bump show no breaking change that the
+     repo uses.
+   The fix cycle then runs as for any loop PR.
+6. Dependabot PRs stay untouched: the loop does not push to, close, or comment
+   on them. The owner closes them when the roll-up merges. Dependabot also
+   closes a PR itself when its bump is on `main`. Skip each Dependabot PR that
+   a roll-up PR names after `Supersedes`, and dispatch no reviewer for it.
+7. Release: when the roll-up PR is open, the orchestrator runs
+   `lupin release-claim OWNER/REPO#N` for each Dependabot claim. When the
+   roll-up PR is approved, it lists the PR as waiting for the owner.
 
 ## Install skills on loop hosts
 
@@ -225,14 +272,21 @@ one issue or PR, run:
 lupin dispatch OWNER/REPO#N
 ```
 
-It claims the item, writes a brief with the issue or PR context, and starts the
-loop. Add `--no-start` to write the brief only. Pass `--holder` or set
-`LUPIN_CLAIM_HOLDER` as for `lupin claim`.
-
-For issue work, give the worker the goal, acceptance checks, latest comments,
-dependencies, likely files, model and effort, machine, claim, worktree, and
-branch. Tell the worker to follow `/ship`; do not repeat its checklist. For
-visual work, require screenshots on the PR as `/ship` says.
+It claims the item, writes a markdown brief with the body and every comment
+(and, for a PR, every review and the changed files), and starts the loop with
+that brief. Add `--no-start` to write the brief only. Pass `--holder` or set
+`LUPIN_CLAIM_HOLDER` as for `lupin claim`. Give each worker a short brief with:
+issue goal and acceptance checks; latest comments and open dependencies; likely
+files and known parallel work; model, effort, and machine recommendation; claim
+or quest ID; machine, absolute worktree path, and branch; the existing test file
+to extend, or a statement that no test is needed; and smoke checks. Do not name a
+new test file. Ask the worker to report test changes in the PR with a line in
+this format: `tests: +A -R`. For a visual change, the brief must tell the worker
+to attach before and after screenshots to the PR, or the new screen if there is
+no before.
+See "Attach screenshots to the PR" in the `ship` skill. Tell implementation
+workers to follow `/ship` and `AGENTS.md`, rule 1 under "Pull requests, review,
+and handoff". Do not repeat the `/ship` implementation checklist.
 
 When an issue makes a major change to a web app's user interface or key user
 journey, and a preview is ready, dispatch a separate QA task with

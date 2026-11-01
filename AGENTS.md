@@ -1,32 +1,31 @@
-# lupin
+# lupin agent and repository rules
 
-`lupin` runs task loops on many machines. It has four jobs.
+This file contains agent instructions and repository rules. See the
+[user guide](docs/user-guide.md) for command and state behavior.
 
-1. Routing. It picks a model and an effort level for a task. Commands: `route`,
-   `classify`, `review-route`. `fetch-models` saves a daily snapshot of the
-   models each subscription can call, with prices.
-2. Slots. A slot limits how many callers use a resource at one time. Commands:
-   `acquire`, `hold`, `release`, `status`.
-3. Dashboard. It shows the loops and controls them. Command: `serve`.
-4. Fleet. It shares issue claims, machine records, quests (issues worked
-   together on one machine), scheduled runs, and repo events. Commands: `claim`,
-   `renew-claim`, `release-claim`, `join`, `heartbeat`, `drain`, `undrain`,
-   `machines`, `place`, `quest`, `reconcile`, `roadmap`, `ledger`, `fleet-run`.
-   Loop commands: `run`, `once`, `enable`, `disable`, `loops`, `stop`, `peek`,
-   `logs`, `attach`, `schedule`, `pause`, `resume`, `supervise`.
+## Host-specific setup
 
-Run `lupin --help` for the full list.
+Each run gets its repo's GitHub token as `GH_TOKEN`. The host maps repo names
+to token files with `LUPIN_LOOP_CREDENTIALS_FILE`; see `docs/configuration.md`.
 
-## Commands
+The coordinator reads one signing-key file per worker from
+`LUPIN_CMD_SIGNING_KEYS_DIR`, or from systemd's `CREDENTIALS_DIRECTORY` if the
+first setting is unset. Each worker runs `lupin agent` with its key. The sender
+also needs the target worker's key. Inject keys only into the Lupin process,
+through protected secret management. Do not put them in command arguments or
+global environment settings.
 
 ```
-lupin route <category> <size> [--no-bmo] [--primary-effort E] [--json]
+lupin route <category> <size> [--no-bmo] [--primary-effort E] \
+  [--exclude-provider PROVIDER ...] [--json]
 lupin classify --issue-json FILE [--diff-stat FILE] [--json]
 lupin fetch-models [--snapshot-file FILE] [--no-write] [--json]
 lupin fetch-benchmarks [--force] [--json]
 lupin quota [--json]
-lupin review-route (--category C --size S | --issue-json FILE) [--mode M]
+lupin review-route (--category C --size S | --issue-json FILE) [--mode M] \
+  [--exclude-provider PROVIDER ...]
 lupin review-route --prefetch N[,N...] [--repo OWNER/REPO] [--json]
+lupin place <task> [--exclude-provider PROVIDER ...] [--explain] [--json]
 lupin pr-status [--repo OWNER/REPO] [--json] [--full]
 lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
 lupin hold (--lease ID | <slot> --holder H --wait S) [--ttl SECONDS] -- <command>
@@ -59,12 +58,17 @@ lupin resume [--machine M | --all] [--json]
 
 `route` and `classify` print a plain result by default (`model effort`, or
 `category size`). A blocked route tries the other models in its tier, then
-lower tiers. It does not use a higher tier to avoid a quota wait. If quota
-blocks every allowed model, `route` prints a deferral reason and wait time
-instead of a model. Add `--json` for a JSON object; a deferred route includes
-`reason` and `wait_seconds`. If the category or size is not known, `route`
-and `review-route` print one line to stderr. The line lists valid values.
-The exit code is 2.
+lower tiers. It does not use a higher tier to avoid a quota wait. Repeat
+`--exclude-provider PROVIDER` on `route`, `review-route`, or `place` to skip
+those providers from the selected tier and lower tiers. The route never
+upgrades to a higher tier to find an allowed provider. An unknown provider
+prints one line to stderr and exits 2. If quota blocks every allowed model,
+`route` prints a deferral reason and wait time instead of a model. Add `--json`
+for a JSON object; a deferred route includes `reason` and `wait_seconds`.
+`place --explain` shows each quota window. `place --json` includes those rows
+in `quota.windows`; each has a label, the percent left, and its reset time.
+If the category or size is not known, `route` and `review-route` print one line
+to stderr. The line lists valid values. The exit code is 2.
 
 `ledger append` stores an event in Redis, with the time and host. Repeat
 `--child` for each split issue. Repeat a digest option to add more items.
@@ -189,14 +193,16 @@ first is unset. Each file name is the worker name. Each worker runs `lupin
 agent` with its key. The command queues runs. It does not wait for them to
 start.
 
-`supervise` checks this machine's loops with fixed rules. It uses no model. For
-each loop, it reads the Herdr state of the pane and the Lupin loop state. It
-also reads the systemd unit, the last 20 pane lines, and the newest handoff from
-this run. If Herdr does not list the loop's own pane, the Herdr state is
-`unknown`. The first rule that matches gives the verdict:
+`supervise` checks Lupin-owned loops with fixed rules. It uses no model. It
+lists hand-started Herdr agents as `unsupervised`; they get no verdict, nudge,
+or ledger event. For each Lupin-owned loop, it reads the Herdr state of the
+pane and the Lupin loop state. It also reads the systemd unit, the last 20 pane
+lines, and the newest handoff from this run. If Herdr does not list the loop's
+own pane, the Herdr state is `unknown`. The first rule that matches gives the
+verdict:
 
-1. `stopped`, reason "waiting for the owner". Herdr says `blocked`, or the Lupin
-   state is `needs_attention`. The loop is flagged. No nudge.
+1. `stopped`. Herdr says `blocked`, or the Lupin state is `needs_attention`.
+   The loop is flagged. No nudge. The reason is `blocked, research needed`.
 2. `stopped`. Work is left, and the unit is `inactive` or `failed`. The loop is
    flagged. A nudge is sent only when Herdr says `idle` or `done`.
 3. `busywork`. Herdr says `working`, and the pane text matches the last pass.
@@ -254,10 +260,12 @@ dashboard can start or stop that timer. The dispatch host has no Herdr and runs
 no loops. Use the dashboard for all machines, and Herdr on a worker for its
 loops.
 
-`loops` reads Herdr's agent list and Lupin's saved loop state. Saved state stays
-visible without Herdr. `idle` and `working` mean `running`. `blocked` means
-`needs_attention`. `peek` reads a found agent pane, and reports the backend,
-session, workspace, and pane IDs. It does not infer state from pane text.
+`loops` matches Herdr agents to saved Lupin loops by pane or workspace ID.
+Other agents show as unmanaged in local and remote listings and on the Machines
+page. Saved state stays visible without Herdr. `idle` and `working` mean
+`running`. `blocked` means `needs_attention`. If any matched pane is blocked,
+the loop is `needs_attention`. `peek` reads a found agent pane and reports the
+backend, session, workspace, and pane IDs. It does not infer state from pane text.
 
 Each machine has one Herdr session, `lupin-loops`, and one Herdr server. Each
 run has one workspace in that session. Each workspace gets its repo's GitHub
@@ -308,10 +316,16 @@ says when data is missing. It never calls missing data an empty result. A period
 with no change gets no digest, and the page says "no changes". A digest is a
 short story with up to 3 pictures, not a PR list. Periodic debriefs use fixed
 windows on the Los Angeles clock. The first machine to claim a window in Redis
-writes it. Only the 12-hour and 7-day windows get a digest. The other debriefs
-(6h, 24h, loop stops) are records only. The Debriefs page (`/debrief`) shows the
-debriefs of all workers. Redis holds text only. A screenshot file stays on its
-worker. A GitHub attachment image is shown through the dashboard.
+writes it. Only the 12-hour, 7-day, and daily owner-blocked reports are
+eligible for a digest.
+The owner-blocked report runs for Lupin's own repo. It lists open issues with
+the `completely-blocked-on-human` label and open, non-draft PRs that are
+mergeable, approved at the current head, and have passing checks. Other 6-hour,
+24-hour, and loop-stop debriefs are records only. The owner-blocked report uses
+the 24-hour window, but has its own claim and file. The Debriefs page (`/debrief`)
+shows debriefs from all workers and links each issue and PR. Redis holds text
+only. Screenshot files stay on their worker. The owner-blocked report does not
+capture screenshots. A GitHub attachment image is shown through the dashboard.
 
 The digest uses these models in order: bmo (`bmo:qwen3.8-flash-next`, tier0 in
 `model-tiers.json`), then `opencode-go/deepseek-v4.1-flash`, then Claude
@@ -479,6 +493,7 @@ does not appear. The serving user must be able to read each checkout. If another
 user owns a checkout, Git reports "dubious ownership", and the page shows no
 issues. Add the checkout to Git's `safe.directory` list.
 
+
 ## Dashboard mockups
 
 `docs/ui.dc.html` has the dashboard mockups. Read the matching section before
@@ -510,6 +525,7 @@ not add controls that the current code cannot support.
 - `src/lupin/claims.py`: `claim`, `renew-claim`, `release-claim`.
 - `src/lupin/dispatch.py`: `dispatch`.
 - `src/lupin/digest.py`: writes a digest for each debrief.
+- `src/lupin/owner_blocked.py`: builds Lupin's daily owner-blocked report.
 - `src/lupin/ledger.py`: appends and reads shared repo events.
 - `src/lupin/machines.py`: `join`, `heartbeat`, `drain`, `undrain`, `machines`.
 - `src/lupin/loops.py`: signed local or remote dispatch for loop controls.
