@@ -42,6 +42,10 @@ waits for the owner does not block the loop. A sync merges `main` into the PR
 branch to fix a conflict. A sync is a push. It changes the head SHA (the newest
 commit on the PR branch), so the PR needs a new review.
 
+When a repo has many open Dependabot PRs, start one subagent to combine them
+into one PR. Give that PR high priority.
+Delegate reviewers and fixers as needed until it is ready for production.
+
 Before it reads the backlog, the orchestrator (the agent that dispatches work)
 handles each open PR into `main`. Ignore draft PRs. Steps 2 and 3 apply only to
 a PR that the loop owns. The loop owns a PR when both are true:
