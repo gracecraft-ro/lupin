@@ -147,9 +147,7 @@ def _model_tiers_path() -> str:
     return tiers_config.path(MODEL_TIERS_PATH)
 
 def _model_tiers_source_label() -> str:
-    if tiers_config.SETTING in os.environ:
-        return os.path.basename(_model_tiers_path())
-    return "modules/ai/model-tiers.json"
+    return _model_tiers_path()
 
 # --------------------------------------------------------------------------
 # running read-only probes
@@ -418,6 +416,11 @@ def _roadmap_loader_script() -> str:
     holder.innerHTML=html;
     box.replaceWith(holder.content);
     if(window.lupinHideDismissedRoadmapWarnings)window.lupinHideDismissedRoadmapWarnings(document);
+    if(window.matchMedia("(max-width: 760px)").matches
+       && new URLSearchParams(window.location.search).has("issue")){
+      var detail=document.querySelector(".roadmap-detail:not(.roadmap-detail-empty)");
+      if(detail)detail.scrollIntoView({block:"start"});
+    }
   }).catch(function(){location.href=box.dataset.full;});
 })();
 """
@@ -1000,7 +1003,7 @@ box-shadow:0 3px 0 var(--line);padding:.9rem 1.1rem;margin-bottom:.7rem}
 .pill{font-size:.75rem;padding:.15rem .6rem;border-radius:99px;
 border:1px solid var(--line);color:var(--ink2)}
 .pill.on{color:var(--ok);border-color:var(--ok)}
-.pill.off{color:var(--warn);border-color:var(--warn)}
+.pill.off{color:var(--warnink);border-color:var(--warn)}
 .big{font-size:1.05rem;font-weight:600}
 pre{background:var(--term);color:var(--termink);border-radius:14px;
 padding:.6rem .7rem;overflow-x:auto;font:400 12px/1.5 var(--mono);margin:.6rem 0 0;
@@ -1099,6 +1102,7 @@ color:var(--dim)}
 .tier-pick{display:inline-flex;gap:.4rem;align-items:baseline;
 border:1px solid var(--line);border-radius:6px;padding:.1rem .45rem;
 background:var(--code)}
+.tier-pick.dim,.tier-pick .dim{color:var(--ink2)}
 .tier-model{font:500 .9rem ui-monospace,monospace}
 .tier-arrow{color:var(--dim)}
 .tier-note{margin:.15rem 0 0;font-size:.85rem}
@@ -1106,13 +1110,19 @@ background:var(--code)}
 .issue-details summary{cursor:pointer}
 .issue-body{white-space:pre-wrap;overflow-wrap:anywhere;margin:.35rem 0}
 .activity-comments{padding-left:1.5rem}
-.loops-shell{display:flex;gap:1rem;align-items:flex-start}
-.loops-side{width:260px;flex:none;padding:.6rem}
+.loops-shell{display:flex;gap:1rem;align-items:flex-start;min-width:0}
+.loops-side{width:260px;flex:none;min-width:0;padding:.6rem}
 .loops-main{flex:1;min-width:0}
+.loops-main>.card{min-width:0;overflow:hidden}
+.loops-main pre{max-width:100%}
+.loops-main form{min-width:0;max-width:100%}
+.loops-main form[action="/loops/send"]{display:flex!important;flex:1 1 100%;align-items:center}
+.loops-main form[action="/loops/send"] input[name="text"]{min-width:0;flex:1 1 12rem;width:auto}
 .loops-row{display:block;padding:.3rem .2rem;color:inherit}
 .loops-row.sel{font-weight:700}
 .loops-group{color:var(--ink3);margin-top:.6rem;font-size:.8rem}
 .err{color:#9b2226}
+@media(max-width:700px){.loops-shell{flex-direction:column}.loops-side{width:100%}.loops-main{width:100%}}
 """
 
 JS = """
@@ -1251,7 +1261,7 @@ def icon(d: str, size: int = 16) -> str:
 
 def render_nav(active: str) -> str:
     links = "".join(
-        f"<a class='navlink{' active' if key == active else ''}' href='{href}'>"
+        f"<a class='navlink{' active' if key == active else ''}' href='{href}' aria-label='{esc(label)}'>"
         f"{icon(path)}<span>{esc(label)}</span></a>"
         for key, href, label, path in NAV_ITEMS
     )
@@ -1315,7 +1325,13 @@ def render_dashboard(state: dict) -> bytes:
         '<div class="card stat">'
         f'<div class="stat-label">{icon("M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3", 13)}Live loops</div>'
         f'<div class="stat-value">{esc(len(loops))}</div>'
-        f'<div class="stat-note">{esc(len(enabled))} repos enabled</div></div>'
+        f'<div class="stat-note">{esc(len(enabled))} repos enabled'
+        + (
+            ". <a href='/repos'>Enable a repo</a> to start loops."
+            if not enabled
+            else ""
+        )
+        + "</div></div>"
     )
     if nxt:
         body.append(
@@ -1374,17 +1390,23 @@ def render_dashboard(state: dict) -> bytes:
     body.append(
         f'<div class="section-head">{icon("M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z", 15)}<h2>Coming up</h2></div>'
     )
-    body.append("<div class='card scroll'><table>")
-    body.append("<tr><th>repository</th><th>next</th><th>at</th><th>last</th></tr>")
-    for t in recurring + oneoffs:
-        when = f"<span data-until='{t['next']:.0f}'></span>" if t["next"] else "<span class=dim>-</span>"
-        at = time.strftime("%a %H:%M:%S %Z", time.localtime(t["next"])) if t["next"] else "-"
-        last = f"<span data-since='{t['last']:.0f}'></span>" if t["last"] else "<span class=dim>never</span>"
+    if recurring or oneoffs:
+        body.append("<div class='card scroll'><table>")
+        body.append("<tr><th>repository</th><th>next</th><th>at</th><th>last</th></tr>")
+        for t in recurring + oneoffs:
+            when = f"<span data-until='{t['next']:.0f}'></span>" if t["next"] else "<span class=dim>-</span>"
+            at = time.strftime("%a %H:%M:%S %Z", time.localtime(t["next"])) if t["next"] else "-"
+            last = f"<span data-since='{t['last']:.0f}'></span>" if t["last"] else "<span class=dim>never</span>"
+            body.append(
+                f"<tr><td>{esc(timer_repository(t['unit']))}</td><td>{when}</td>"
+                f"<td class=dim>{esc(at)}</td><td class=dim>{last}</td></tr>"
+            )
+        body.append("</table></div>")
+    else:
         body.append(
-            f"<tr><td>{esc(timer_repository(t['unit']))}</td><td>{when}</td>"
-            f"<td class=dim>{esc(at)}</td><td class=dim>{last}</td></tr>"
+            "<div class='card dim'>No upcoming runs. "
+            "<a href='/schedule'>Schedule one</a>.</div>"
         )
-    body.append("</table></div>")
 
     # ---- fleet (issue #15) -------------------------------------------
     body.append(
@@ -1396,7 +1418,10 @@ def render_dashboard(state: dict) -> bytes:
     else:
         fleet_machines = state.get("machines", [])
         if not fleet_machines:
-            body.append("<div class='card dim'>No machines registered.</div>")
+            body.append(
+                "<div class='card dim'>No machines registered. "
+                "Run <code>lupin join &lt;redis-host&gt;[:port]</code>.</div>"
+            )
         else:
             body.append("<div class='card scroll'><table>")
             body.append("<tr><th>machine</th><th>state</th><th>version</th><th>heartbeat</th></tr>")
@@ -3128,7 +3153,12 @@ def render_debrief_index(items: list[dict]) -> bytes:
         f"{' &middot; no changes' if item['quiet'] else '' if item['has_digest'] or item['record_only'] else ' &middot; no digest'}</span></li>"
         for item in items
     )
-    listing = f"<ul>{rows}</ul>" if rows else "<p class=dim>No debriefs yet.</p>"
+    listing = f"<ul>{rows}</ul>" if rows else (
+        "<div class=dim><p>No debriefs yet.</p>"
+        "<p>Debriefs are written to the local <code>debriefs/</code> folder. "
+        "The fleet shares their digests here. Run <code>lupin agent</code> "
+        "to write periodic debriefs.</p></div>"
+    )
     return page(
         "Debriefs",
         f"<header><h1>Debriefs</h1></header><div class=card>{listing}</div>",
