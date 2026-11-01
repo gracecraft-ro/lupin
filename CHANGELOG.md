@@ -7,49 +7,73 @@ All notable changes to Lupin. The version has one source:
 
 ### Added
 
+- `lupin supervise` lists hand-started Herdr agents as `unsupervised`. It gives
+  them no verdict or nudge and writes no ledger event for them.
+
 - `lupin logs` shows events from a loop run. Lupin keeps up to 20 logs per
   repo and removes logs older than 30 days.
 - `lupin --version` prints the package version. The flake reads the same
   version from `pyproject.toml`.
 - `docs/release.md` gives the release steps.
 - The Roadmap board shows stage tabs with counts, like the List view.
+- The Repos table has All, Enabled, Disabled, and No docs filters.
 - The triage skill checks issue details and linked open PRs before it reports
   likely duplicates.
+- The Machines page explains fleet-wide slot limits, shows holder IDs when
+  available, and marks draining machines with a diamond.
+- The `ux-pressure-test` skill checks accessibility, performance, and resilience.
+
 
 ### Changed
+
+- The Models page shows when it fetched model and benchmark data. It warns
+  about old or undated routing lists and compares current picks with verified
+  scores.
 
 - `lupin run` starts from `origin/HEAD`, or else `origin/main`. It no longer
   checks `origin/release/next` or `origin/master`, and CI no longer lists
   `release/next`.
+- The dashboard shows all navigation labels on phones without horizontal
+  scrolling.
 
 ### Fixed
+
+- `lupin run` waits for its worker to reach `running`. A failed new start returns
+  an error and removes its worktree or gives cleanup commands.
 
 - The Roadmap page family uses one set of stage words (In progress, Ready,
   Later, Blocked) on the board, the list, the detail panel and the queue
   graph. The empty states keep the selected repositories visible, the note
   under the board uses plain words, the priority filter offers P4, and the
   epics footer and the pager read the same way when the list is empty.
-- Failed benchmark pulls show one short message. The server log keeps the
-  error detail.
+- On phones, selecting a Roadmap issue scrolls its detail panel into view.
 - Roadmap repo-fetch warnings can be dismissed on Board and List. A dismissal
   stays hidden after a reload and applies to one repo and warning.
+- Completed Roadmap descriptions hide Markdown heading and bullet markers.
 - `lupin roadmap` text output shows one line per repo for issues with no
   priority label. `--json` still lists each issue. The triage and
   delegation-loop skills name skills in one form, and triage defines the
   `Duplicates` reply.
+- The Repos table scrolls horizontally inside its own area.
 
 ### Fixed
+
+- The Repos page names each action, labels concurrency changes, and clears
+  confirmation messages from the URL after they appear.
 
 - New loop prompts include saved repo instructions when the worktree copy
   is missing or different.
 - "Run now" passes dash-leading notes as one argument, and rejects notes
   with a NUL byte before dispatch.
+- The Overview shows a next step when no runs, machines, or enabled repos exist.
 - Routing and loop profiles block Claude's weekly quota above 90%. A blocked
   route tries only same- or lower-tier models with verified prices no higher
   than the blocked model, then defers with a reason.
 - OMP prompt jobs do not wait for caller stdin to close.
 - Claim reads use Redis `TTL` for the remaining time.
 - `lupin place` reports quota deferrals when no reset time is available.
+- The Models page shows the model-tier file path that Lupin loads.
+- Text on the Overview and Models pages meets WCAG AA contrast.
 
 ## 0.1.0
 
