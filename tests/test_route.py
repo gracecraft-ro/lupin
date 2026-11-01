@@ -535,7 +535,7 @@ class RoutePacingTests(unittest.TestCase):
             "coding",
             "size-m",
             tiers=tiers,
-            quota_rows=[self._row("claude", 44, 3.5 * 24 * HOUR_MS, QuotaDuration.WEEKLY)],
+            quota_rows=[self._row("claude", 45, 3.5 * 24 * HOUR_MS, QuotaDuration.WEEKLY)],
         )
         blocked = route.route(
             "coding",
@@ -562,6 +562,100 @@ class RoutePacingTests(unittest.TestCase):
         ):
             with self.assertRaises(route.RouteInputError):
                 route.route("coding", "size-m", tiers=tiers, quota_rows=[row])
+
+    def test_route_blocks_claude_when_weekly_row_is_missing(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [{"model": "sonnet", "effort": "high"}],
+                }
+            }
+        }
+        row = self._row("claude", 1, 2 * HOUR_MS)
+
+        result = route.route("coding", "size-m", tiers=tiers, quota_rows=[row])
+
+        self.assertEqual(result["reason"], "all allowed models are blocked by quota")
+        self.assertIsNone(result["wait_seconds"])
+
+    def test_weekly_target_wait_reports_when_usage_catches_up(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [{"model": "sonnet", "effort": "high"}],
+                }
+            }
+        }
+        row = self._row("claude", 50, 3.5 * 24 * HOUR_MS, QuotaDuration.WEEKLY)
+
+        result = route.route("coding", "size-m", tiers=tiers, quota_rows=[row])
+
+        self.assertEqual(result["reason"], "all allowed models are blocked by quota")
+        self.assertAlmostEqual(result["wait_seconds"], 9 * 60 * 60 + 20 * 60, delta=2)
+
+    def test_weekly_target_wait_uses_the_earliest_blocked_window(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [{"model": "sonnet", "effort": "high"}],
+                }
+            }
+        }
+        rows = [
+            self._row("claude", 50, 3.5 * 24 * HOUR_MS, QuotaDuration.WEEKLY),
+            self._row("claude", 100, 4 * HOUR_MS),
+        ]
+
+        result = route.route("coding", "size-m", tiers=tiers, quota_rows=rows)
+
+        self.assertAlmostEqual(result["wait_seconds"], 4 * 60 * 60, delta=2)
+
+    def test_weekly_target_wait_is_bounded_by_reset_above_its_ceiling(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [{"model": "sonnet", "effort": "high"}],
+                }
+            }
+        }
+        reset_ms = 3.5 * 24 * HOUR_MS
+        row = self._row("claude", 91, reset_ms, QuotaDuration.WEEKLY)
+
+        result = route.route("coding", "size-m", tiers=tiers, quota_rows=[row])
+
+        self.assertAlmostEqual(result["wait_seconds"], reset_ms / 1000, delta=2)
+
+    def test_zero_weekly_target_waits_until_reset(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [{"model": "sonnet", "effort": "high"}],
+                }
+            }
+        }
+        reset_ms = 3.5 * 24 * HOUR_MS
+        row = self._row("claude", 1, reset_ms, QuotaDuration.WEEKLY)
+        with mock.patch.dict(
+            "os.environ",
+            {route.pace.WEEKLY_DAILY_TARGETS_SETTING: '{"claude": 0}'},
+        ):
+            result = route.route("coding", "size-m", tiers=tiers, quota_rows=[row])
+
+        self.assertAlmostEqual(result["wait_seconds"], reset_ms / 1000, delta=2)
+
+    def test_openai_short_window_does_not_require_a_weekly_row(self):
+        tiers = {
+            "coding": {
+                "tiers": {
+                    "tier1": [{"model": "openai-codex/gpt-6-luna", "effort": "high"}],
+                }
+            }
+        }
+        row = self._row("openai", 50, 2 * HOUR_MS)
+
+        result = route.route("coding", "size-m", tiers=tiers, quota_rows=[row])
+
+        self.assertEqual(result, {"model": "openai-codex/gpt-6-luna", "effort": "high"})
 
     def test_wait_reports_the_earliest_reset_among_everything_tried(self):
         rows = [
@@ -736,7 +830,11 @@ class RoutePacingTests(unittest.TestCase):
         self.assertIsNotNone(result.get("wait_seconds"))
 
     def test_lean_in_bumps_one_tier_on_a_surplus(self):
-        rows = [self._row("claude", 10, 1 * HOUR_MS)]  # <50% used, <24h left
+        rows = [
+            self._row("claude", 10, 1 * HOUR_MS),
+            self._row("claude", 10, 23 * HOUR_MS, QuotaDuration.WEEKLY),
+        ]
+
         result = _route_with_prices("coding", "size-m", tiers=_TIERS, quota_rows=rows)
 
         self.assertEqual(result, {"model": "opus", "effort": "high"})
@@ -779,7 +877,10 @@ class RoutePacingTests(unittest.TestCase):
         self.assertEqual(result, {"model": "opencode-go/glm-5.3", "effort": "low"})
 
     def test_lean_in_never_goes_past_the_top_tier(self):
-        rows = [self._row("claude", 10, 1 * HOUR_MS)]
+        rows = [
+            self._row("claude", 10, 1 * HOUR_MS),
+            self._row("claude", 10, 23 * HOUR_MS, QuotaDuration.WEEKLY),
+        ]
         result = _route_with_prices("coding", "size-l", tiers=_TIERS, quota_rows=rows)
 
         self.assertEqual(result, {"model": "opus", "effort": "high"})

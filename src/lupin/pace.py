@@ -103,6 +103,10 @@ def _usable_rows(
     ]
 
 
+def _weekly_ceiling(provider: str) -> int:
+    return CLAUDE_WEEKLY_BLOCK_PCT if provider == "claude" else RESERVE_PCT
+
+
 def _window_blocked(
     row: dict, now_ms: float, weekly_targets: dict[str, float]
 ) -> bool:
@@ -116,7 +120,7 @@ def _window_blocked(
             return True
         duration_ms = duration.milliseconds
         elapsed_ms = max(0, min(duration_ms, duration_ms - (resets_at - now_ms)))
-        ceiling = CLAUDE_WEEKLY_BLOCK_PCT if provider == "claude" else RESERVE_PCT
+        ceiling = _weekly_ceiling(provider)
         target_pct = min(ceiling, weekly_targets[provider] * elapsed_ms / DAY_MS)
         return used_pct > target_pct
     if used_pct >= 100:
@@ -139,6 +143,11 @@ def _accounts(
 def _account_blocked(
     account_rows: list[dict], now_ms: float, weekly_targets: dict[str, float]
 ) -> bool:
+    provider = account_rows[0].get("provider")
+    if provider in weekly_targets and not any(
+        row.get("duration") == QuotaDuration.WEEKLY for row in account_rows
+    ):
+        return True
     return any(
         _window_blocked(row, now_ms, weekly_targets)
         for row in account_rows
@@ -152,7 +161,7 @@ def blocked(
     *,
     weekly_targets: dict[str, float] | None = None,
 ) -> bool:
-    """True if every usable account of `provider` has a blocked window."""
+    """True if every account with usable rows for `provider` is blocked."""
     targets = _weekly_targets(weekly_targets)
     accounts = _accounts(rows, provider, targets)
     return bool(accounts) and all(
@@ -233,6 +242,22 @@ def lean_in(
     )
 
 
+def _window_available_at(row: dict, weekly_targets: dict[str, float]) -> float:
+    reset_at = row["resets_at"]
+    provider = row.get("provider")
+    if row.get("duration") != QuotaDuration.WEEKLY or provider not in weekly_targets:
+        return reset_at
+
+    daily_target = weekly_targets[provider]
+    used_pct = row["used_pct"]
+    if daily_target == 0 or used_pct > _weekly_ceiling(provider):
+        return reset_at
+
+    week_start = reset_at - QuotaDuration.WEEKLY.milliseconds
+    catches_up_at = week_start + used_pct * DAY_MS / daily_target
+    return min(reset_at, catches_up_at)
+
+
 def earliest_reset(
     rows: list[dict],
     providers: list[str],
@@ -240,10 +265,10 @@ def earliest_reset(
     *,
     weekly_targets: dict[str, float] | None = None,
 ) -> float | None:
-    """Earliest reset among blocked windows for the providers."""
+    """Earliest time a blocked window can be used again."""
     targets = _weekly_targets(weekly_targets)
     waits = [
-        row["resets_at"]
+        _window_available_at(row, targets)
         for provider in providers
         for row in _usable_rows(rows, provider, targets)
         if isinstance(row.get("resets_at"), (int, float))

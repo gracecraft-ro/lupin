@@ -160,7 +160,9 @@ must be less than five minutes old and include usable quota for a candidate.
 Weekly targets use `LUPIN_WEEKLY_QUOTA_DAILY_TARGETS` and grow from each
 reset at the configured rate. Claude defaults to 90% over seven days, leaving
 10% unused. Routes and profiles share the 90% ceiling. Exact target usage is
-allowed; usage above it is blocked. A weekly row with no reset is blocked.
+allowed; usage above it is blocked. A configured provider account is blocked
+if it has other usable quota rows but no usable weekly row, or if its weekly
+row has no reset. Providers without a weekly target do not need a weekly row.
 Lupin skips blocked providers, then picks the candidate with the most quota
 headroom across its known windows. For a provider with more than one login,
 headroom is that of the best login that is not blocked. Profile order breaks

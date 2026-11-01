@@ -2580,6 +2580,29 @@ def test_select_orchestrator_blocks_claude_above_the_midweek_target(monkeypatch)
         "quota_headroom": 9,
     }
 
+def test_select_orchestrator_blocks_claude_when_weekly_row_is_missing(monkeypatch):
+    monkeypatch.delenv("LUPIN_WEEKLY_QUOTA_DAILY_TARGETS", raising=False)
+    now = time.time()
+    snapshot = {
+        "claude": _quota_entry([
+            _quota_row("claude", 1, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 50, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+
+    choice = loop_runtime.select_orchestrator(
+        ["claude", "openai-codex/gpt-6-luna"], snapshot, now=now
+    )
+
+    assert choice == {
+        "platform": "omp",
+        "provider": "openai-codex",
+        "model": "openai-codex/gpt-6-luna",
+        "quota_headroom": 50,
+    }
+
 
 def test_select_orchestrator_allows_claude_at_the_exact_midweek_target(monkeypatch):
     monkeypatch.delenv("LUPIN_WEEKLY_QUOTA_DAILY_TARGETS", raising=False)
@@ -2637,7 +2660,10 @@ def test_select_orchestrator_skips_a_provider_when_every_account_is_blocked():
             _quota_row("openai", 100, 20 * 24 * _HOUR_MS, QuotaDuration.MONTHLY, now, "free"),
             _quota_row("openai", 100, 4 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now, "plus"),
         ]),
-        "claude": _quota_entry([_quota_row("claude", 90, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now)]),
+        "claude": _quota_entry([
+            _quota_row("claude", 45, 3.5 * 24 * _HOUR_MS, QuotaDuration.WEEKLY, now),
+            _quota_row("claude", 90, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
     }
 
     choice = loop_runtime.select_orchestrator(["openai/gpt-5", "claude"], snapshot, now=now)

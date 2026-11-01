@@ -496,8 +496,10 @@ key wins over the directory.
   percentage points. Values must be finite numbers from 0 to 100. Entries
   override defaults. Lupin multiplies each rate by elapsed days since the
   weekly reset. It caps Claude at 90% and other providers at 95%. Usage at
-  the exact target is allowed. Lupin blocks a configured weekly row with no
-  reset time. For example, `{"claude": 15, "openai": 12}` sets both rates.
+  the exact target is allowed. Lupin blocks an account with other usable quota
+  rows if its configured weekly row is missing, unusable, or has no reset.
+  Providers without a weekly target do not need a weekly row. For example,
+  `{"claude": 15, "openai": 12}` sets both rates.
 - **Read by**: `src/lupin/pace.py`, used by route, profile selection, and
   quota account choice.
 - **Set by**: the user or host config. Loop units get this variable when set.
