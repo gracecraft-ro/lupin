@@ -120,8 +120,8 @@ def build_roadmap(
     Each claim: target, host, holder, age_seconds, ttl_seconds. It lists
     every active claim in `repos`, also for an issue that is no longer open.
 
-    `connection` reaches the shared `gh` cache, which owns the fleet Redis
-    location itself when it is None (see `gh_cache._resolve`).
+    `connection` reaches the shared issue and dependency caches. When it is
+    None, each cache uses its configured Redis location.
     """
     warnings: list[str] = []
     unprioritized: dict[str, list[int]] = {}
@@ -154,7 +154,7 @@ def build_roadmap(
         issues_by_repo[repo] = by_number
         open_numbers[repo] = set(by_number)
 
-    dag = roadmap.cached_dependency_dag(repos, code_dir)
+    dag = roadmap.cached_dependency_dag(repos, code_dir, connection=connection)
     for repo, messages in dag.get("warnings", {}).items():
         warnings.extend(f"{repo}: {m}" for m in messages)
 

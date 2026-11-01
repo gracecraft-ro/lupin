@@ -1264,7 +1264,9 @@ def build_dependency_dag(repo_links: dict[str, dict[int, dict]]) -> dict:
     }
 
 
-def cached_dependency_dag(repos: list[str], code_dir: str = CODE_DIR) -> dict:
+def cached_dependency_dag(
+    repos: list[str], code_dir: str = CODE_DIR, *, connection: dict | None = None
+) -> dict:
     """Fetch (cached) dependency links for every repo in `repos` and build
     one combined DAG -- the one-call version of build_dependency_dag for a
     caller (the `--dag` CLI output, a future `/roadmap` panel) that just
@@ -1274,7 +1276,9 @@ def cached_dependency_dag(repos: list[str], code_dir: str = CODE_DIR) -> dict:
     repo_links = {}
     warnings = {}
     for repo in repos:
-        links, repo_warnings = cached_dependencies(repo, os.path.join(code_dir, repo))
+        links, repo_warnings = cached_dependencies(
+            repo, os.path.join(code_dir, repo), connection=connection
+        )
         repo_links[repo] = links
         if repo_warnings:
             warnings[repo] = repo_warnings
