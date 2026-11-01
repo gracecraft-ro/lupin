@@ -51,9 +51,12 @@ every GitHub comment that you post with `Loop:`.
   where outside data enters, data-loss handling, security, or accessibility.
 - Write a comment only for the why, on one line. Mark a shortcut with a known
   limit: `shortcut: <limit>, <upgrade trigger>`.
-- Add or update a regression test for a behavior change. New non-trivial logic
-  (a branch, a loop, a parser, money, or security) gets one small test or an
-  assert. Trivial changes need none.
+- Add a test only if no existing test fails when you undo your change. Check:
+  undo the change, run the tests for that area, and read which tests fail. If
+  one fails, add no test. If none fails, add the smallest test to the existing
+  file for that area. Do not create a test file when one exists for the area.
+  Do not write an issue number in a test title or a test file name. Put the
+  test count in the PR as `tests: +A -R`.
 - Run the repo's documented gate, then run the changed feature and observe the
   result. Read the final diff. Recheck issue and PR comments before reporting.
 - The final report says what you skipped, what you did not check, and any risk
