@@ -51,10 +51,12 @@ every GitHub comment that you post with `Loop:`.
   where outside data enters, data-loss handling, security, or accessibility.
 - Write a comment only for the why, on one line. Mark a shortcut with a known
   limit: `shortcut: <limit>, <upgrade trigger>`.
-- Add a test only if no existing test fails when you undo your change. Check:
+- Add a test only if no test for that behavior fails when you undo your change. Check:
   undo the change, run the tests for that area, and read which tests fail. If
-  one fails, add no test. If none fails, add the smallest test to the existing
-  file for that area. Do not create a test file when one exists for the area.
+  an existing test for the same behavior fails, add no test; unrelated failures
+  do not count. If no test for that behavior fails, add the smallest test to
+  the existing file for that area.
+  Do not create a test file when one exists for the area.
   Do not write an issue number in a test title or a test file name. Put the
   test count in the PR as `tests: +A -R`.
 - Run the repo's documented gate, then run the changed feature and observe the
