@@ -1040,6 +1040,45 @@ def test_quota_plain_output_gives_each_accounts_status(monkeypatch, capsys):
     assert any(line.startswith("claude ") and "BLOCKED" in line and "5% left" in line for line in lines)
 
 
+def test_quota_plain_output_counts_account_note_as_unknown(monkeypatch, capsys):
+    rows = [
+        {"provider": "openai", "account": "plus", "duration": quota.QuotaDuration.MONTHLY,
+         "used_pct": 100, "resets_at": 4102444800000},
+        {"provider": "openai", "account": "free", "note": "free login has no quota data"},
+    ]
+    merged = {
+        "openai": {"rows": rows, "fetched_at": None, "fetched_by": "ralpha"},
+    }
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: {})
+    monkeypatch.setattr(cli.quota_cache, "refresh_snapshot", lambda **connection: merged)
+    monkeypatch.setattr(cli.usage_cache, "refresh_snapshot", lambda **connection: {})
+
+    assert cli.main(["quota"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "openai accounts: 0 open, 1 blocked, 1 unknown -- provider BLOCKED" in lines
+    assert any(
+        line.startswith("openai/free") and "unknown" in line and "free login has no quota data" in line
+        for line in lines
+    )
+
+
+def test_quota_plain_output_reports_note_only_provider_as_unknown(monkeypatch, capsys):
+    rows = [{"provider": "opencode-go", "note": "key expired"}]
+    merged = {
+        "opencode-go": {"rows": rows, "fetched_at": None, "fetched_by": "ralpha"},
+    }
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: {})
+    monkeypatch.setattr(cli.quota_cache, "refresh_snapshot", lambda **connection: merged)
+    monkeypatch.setattr(cli.usage_cache, "refresh_snapshot", lambda **connection: {})
+
+    assert cli.main(["quota"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "opencode-go accounts: 0 open, 0 blocked, 1 unknown -- provider unknown" in lines
+    assert any(line.startswith("opencode-go ") and "unknown" in line and "key expired" in line for line in lines)
+
+
 def test_route_unknown_category_or_size_is_a_usage_error_not_a_traceback(capsys):
     assert cli.main(["route", "code", "size-m"]) == 2
     err = capsys.readouterr().err

@@ -892,14 +892,18 @@ def _cmd_quota(args: argparse.Namespace) -> int:
     now_ms = time.time() * 1000
     for provider in sorted(merged):
         entry = merged[provider]
-        real_rows = [row for row in entry.get("rows", []) if isinstance(row.get("used_pct"), (int, float))]
-        if not real_rows:
-            notes = [row["note"] for row in entry.get("rows", []) if row.get("note")]
-            for note in notes or ["no quota data cached yet"]:
-                print(f"{provider}: {note}")
+        rows = entry.get("rows", [])
+        real_rows = [row for row in rows if isinstance(row.get("used_pct"), (int, float))]
+        note_rows = [
+            row for row in rows
+            if row.get("note") and not isinstance(row.get("used_pct"), (int, float))
+        ]
+        status_rows = real_rows + note_rows
+        if not status_rows:
+            print(f"{provider}: no quota data cached yet")
             continue
         accounts: dict[str | None, list[dict]] = {}
-        for row in real_rows:
+        for row in status_rows:
             accounts.setdefault(row.get("account"), []).append(row)
         states = [pace.account_state(rows, provider, now_ms) for rows in accounts.values()]
         open_count, blocked_count, unknown_count = states.count("open"), states.count("blocked"), states.count("unknown")
@@ -915,6 +919,9 @@ def _cmd_quota(args: argparse.Namespace) -> int:
             name = f"{provider}/{row['account']}" if row.get("account") else provider
             status = {"open": "open", "blocked": "BLOCKED", "unknown": "unknown"}[pace.account_state([row], provider, now_ms)]
             print(f"{name:<12} {status:<8} {label:<9} {left:.0f}% left   resets in {resets:<8} (fetched {age} via {fetched_by})")
+        for row in note_rows:
+            name = f"{provider}/{row['account']}" if row.get("account") else provider
+            print(f"{name:<12} unknown   {row['note']}")
     return 0
 
 
