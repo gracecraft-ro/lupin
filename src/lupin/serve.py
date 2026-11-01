@@ -21,6 +21,7 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -610,8 +611,22 @@ def _same_repo_directory(repo_fd: int, code_fd: int, repo: str) -> bool:
         return False
 
 
-def _remove_created_repo(repo_fd: int, code_fd: int, repo: str) -> None:
-    """Remove only files reached through the created directory descriptor."""
+def _same_root_directory(code_fd: int, code_dir: Path) -> bool:
+    try:
+        current = os.stat(code_dir, follow_symlinks=False)
+        return os.path.samestat(os.fstat(code_fd), current)
+    except OSError:
+        return False
+
+
+def _remove_created_repo(
+    repo_fd: int,
+    code_fd: int,
+    repo: str,
+    doc_identity: os.stat_result | None,
+    docs_identity: os.stat_result | None,
+) -> None:
+    """Remove only request-created files reached through open descriptors."""
     try:
         docs_fd = os.open(
             "docs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=repo_fd
@@ -620,12 +635,21 @@ def _remove_created_repo(repo_fd: int, code_fd: int, repo: str) -> None:
         docs_fd = None
     if docs_fd is not None:
         try:
-            os.unlink("delegation-loop.md", dir_fd=docs_fd)
-        except OSError:
-            pass
-        os.close(docs_fd)
+            if doc_identity is not None:
+                try:
+                    current = os.stat(
+                        "delegation-loop.md", dir_fd=docs_fd, follow_symlinks=False
+                    )
+                    if os.path.samestat(doc_identity, current):
+                        os.unlink("delegation-loop.md", dir_fd=docs_fd)
+                except OSError:
+                    pass
+        finally:
+            os.close(docs_fd)
         try:
-            os.rmdir("docs", dir_fd=repo_fd)
+            current = os.stat("docs", dir_fd=repo_fd, follow_symlinks=False)
+            if docs_identity is not None and os.path.samestat(docs_identity, current):
+                os.rmdir("docs", dir_fd=repo_fd)
         except OSError:
             pass
     try:
@@ -642,50 +666,76 @@ def _remove_created_repo(repo_fd: int, code_fd: int, repo: str) -> None:
             pass
 
 
+def _remove_unopened_repo(code_fd: int, repo: str, repo_identity: os.stat_result) -> None:
+    """Remove an empty directory only if the name still refers to our mkdir."""
+    try:
+        current = os.stat(repo, dir_fd=code_fd, follow_symlinks=False)
+        if os.path.samestat(repo_identity, current) and stat.S_ISDIR(current.st_mode):
+            os.rmdir(repo, dir_fd=code_fd)
+    except OSError:
+        pass
+
+
 def _create_repo(repo: str, message: str) -> Path:
     message = message.strip()
     document = _delegation_doc_template(repo, message)
+    code_fd = None
     try:
+        expected_root = os.stat(CODE_DIR)
         code_dir = Path(CODE_DIR).resolve(strict=True)
+        code_fd = os.open(code_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        if not os.path.samestat(expected_root, os.fstat(code_fd)):
+            raise OSError("configured code directory changed during creation")
     except (OSError, RuntimeError) as exc:
+        if code_fd is not None:
+            os.close(code_fd)
         raise OSError(f"configured code directory is unavailable: {exc}") from exc
-    if not code_dir.is_dir():
-        raise OSError(f"configured code directory is not a directory: {code_dir}")
-
-    repo_dir = code_dir / repo
-    try:
-        repo_dir.resolve(strict=False).relative_to(code_dir)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise ValueError("repo path is outside the configured code directory") from exc
-    if not _valid_repo_name(repo):
-        raise ValueError(
-            "invalid repo name: use 1–100 letters, numbers, dots, underscores, or hyphens; "
-            "start with a letter or number"
-        )
-    if os.path.lexists(repo_dir):
-        raise ValueError(f"repo path already exists: {repo}")
-
-    code_fd = os.open(code_dir, os.O_RDONLY | os.O_DIRECTORY)
     repo_fd = None
     try:
+        if not _same_root_directory(code_fd, code_dir):
+            raise OSError("configured code directory changed during creation")
+        repo_dir = code_dir / repo
+        try:
+            repo_dir.resolve(strict=False).relative_to(code_dir)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ValueError("repo path is outside the configured code directory") from exc
+        if not _valid_repo_name(repo):
+            raise ValueError(
+                "invalid repo name: use 1–100 letters, numbers, dots, underscores, or hyphens; "
+                "start with a letter or number"
+            )
+        try:
+            os.stat(repo, dir_fd=code_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ValueError(f"repo path already exists: {repo}")
+
         try:
             os.mkdir(repo, dir_fd=code_fd)
         except FileExistsError as exc:
             raise ValueError(f"repo path already exists: {repo}") from exc
+        repo_identity = os.stat(repo, dir_fd=code_fd, follow_symlinks=False)
         try:
             repo_fd = os.open(
                 repo, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=code_fd
             )
         except OSError as exc:
+            _remove_unopened_repo(code_fd, repo, repo_identity)
             raise OSError("repo directory changed during creation") from exc
+        if not os.path.samestat(repo_identity, os.fstat(repo_fd)):
+            raise OSError("repo directory changed during creation")
 
         docs_fd = None
+        doc_identity = None
+        docs_identity = None
         try:
             try:
                 _git_init_at(repo_fd, repo_dir)
             except loop_runtime.LoopError as exc:
                 raise OSError(f"could not initialize Git repo: {exc}") from exc
             os.mkdir("docs", dir_fd=repo_fd)
+            docs_identity = os.stat("docs", dir_fd=repo_fd, follow_symlinks=False)
             docs_fd = os.open(
                 "docs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=repo_fd
             )
@@ -695,12 +745,17 @@ def _create_repo(repo: str, message: str) -> Path:
                 0o666,
                 dir_fd=docs_fd,
             )
+            doc_identity = os.fstat(doc_fd)
             with os.fdopen(doc_fd, "w", encoding="utf-8") as doc:
                 doc.write(document)
+            if not _same_root_directory(code_fd, code_dir):
+                raise OSError("configured code directory changed during creation")
             if not _same_repo_directory(repo_fd, code_fd, repo):
                 raise OSError("repo directory changed during creation")
         except BaseException:
-            _remove_created_repo(repo_fd, code_fd, repo)
+            _remove_created_repo(
+                repo_fd, code_fd, repo, doc_identity, docs_identity
+            )
             raise
         finally:
             if docs_fd is not None:

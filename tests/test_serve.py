@@ -6,7 +6,7 @@ import sys
 import threading
 import urllib.error
 import urllib.request
-
+import errno
 import ipaddress
 import json
 import os
@@ -4040,6 +4040,114 @@ class TestReposPageRoutes:
         assert not (outside / "docs" / "delegation-loop.md").exists()
         assert list(displaced.iterdir()) == []
 
+
+    def test_create_route_rejects_a_replaced_code_root_before_creation(
+        self, tmp_path, monkeypatch
+    ):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        moved = tmp_path / "moved-code"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        marker = outside / "keep.txt"
+        marker.write_text("keep outside", encoding="utf-8")
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        real_open = os.open
+        replaced = False
+
+        def replace_root_before_open(path, flags, *args, **kwargs):
+            nonlocal replaced
+            if not replaced and Path(path) == code_dir and kwargs.get("dir_fd") is None:
+                replaced = True
+                os.rename(code_dir, moved)
+                code_dir.symlink_to(outside, target_is_directory=True)
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(serve.os, "open", replace_root_before_open)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": "widgets"})
+        handler.do_POST()
+
+        assert replaced
+        assert handler.reply.call_args.args[1] == 500
+        assert not (outside / "widgets").exists()
+        assert marker.read_text(encoding="utf-8") == "keep outside"
+        assert list(moved.iterdir()) == []
+
+    def test_create_route_keeps_concurrent_document_when_exclusive_open_fails(
+        self, tmp_path, monkeypatch
+    ):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        real_open = os.open
+        collided = False
+
+        def create_concurrent_doc(path, flags, *args, **kwargs):
+            nonlocal collided
+            if path == "delegation-loop.md" and flags & os.O_EXCL and not collided:
+                collided = True
+                fd = real_open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666,
+                               dir_fd=kwargs["dir_fd"])
+                os.write(fd, b"concurrent document")
+                os.close(fd)
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(serve.os, "open", create_concurrent_doc)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": "widgets"})
+        handler.do_POST()
+
+        concurrent_doc = code_dir / "widgets" / "docs" / "delegation-loop.md"
+        assert collided
+        assert handler.reply.call_args.args[1] == 500
+        assert concurrent_doc.read_bytes() == b"concurrent document"
+
+    def test_create_route_removes_new_directory_if_open_fails(self, tmp_path, monkeypatch):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        real_open = os.open
+
+        def fail_repo_open(path, flags, *args, **kwargs):
+            if path == "widgets" and kwargs.get("dir_fd") is not None:
+                raise OSError(errno.EMFILE, "too many open files")
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(serve.os, "open", fail_repo_open)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": "widgets"})
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 500
+        assert not (code_dir / "widgets").exists()
+
+    def test_create_route_keeps_replacement_directory_if_repo_open_fails(
+        self, tmp_path, monkeypatch
+    ):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        replacement = code_dir / "replacement"
+        replacement.mkdir()
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        real_open = os.open
+
+        def replace_then_fail_repo_open(path, flags, *args, **kwargs):
+            if path == "widgets" and kwargs.get("dir_fd") is not None:
+                created = code_dir / "widgets"
+                os.rename(created, code_dir / "displaced")
+                os.rename(replacement, created)
+                raise OSError(errno.EMFILE, "too many open files")
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(serve.os, "open", replace_then_fail_repo_open)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": "widgets"})
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 500
+        assert list((code_dir / "widgets").iterdir()) == []
+        assert (code_dir / "displaced").is_dir()
     @pytest.mark.parametrize("repo", ["", "bad/name", "widgets\n"])
     def test_create_route_rejects_invalid_names_without_creating_files(
         self, tmp_path, monkeypatch, repo
