@@ -32,6 +32,12 @@ changes. Do not edit files or merge the PR.
 Check the diff against the issue's acceptance checks, the repo rules, and these
 lenses. Passing CI does not prove the design is sound.
 
+Review critical RFCs and research as thoroughly as major logic or UI changes.
+Use the full independent review process. Check sources and evidence for key
+claims. State assumptions. Compare alternatives. Assess risks. Check that
+conclusions follow from evidence. Report unsupported claims or missing analysis
+as findings.
+
 | Lens | Look for | Label |
 | --- | --- | --- |
 | `bug` | Wrong result, crash, or missed edge case (empty input, zero, last item, time zones). Grep every caller of a changed function. | `🔴 bug` |
