@@ -12,11 +12,12 @@ control access to write routes.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import ctypes
 import html
 import ipaddress
 import json
 import os
-import concurrent.futures
 import re
 import shlex
 import shutil
@@ -621,6 +622,32 @@ def _remove_unopened_repo(code_fd: int, repo: str, repo_identity: os.stat_result
         pass
 
 
+def _rename_noreplace(
+    source: str, destination: str, *, src_dir_fd: int, dst_dir_fd: int
+) -> None:
+    """Rename a directory atomically, failing if the destination exists."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin":
+        rename = libc.renameatx_np
+        flags = 0x00000004  # RENAME_EXCL
+    else:
+        rename = libc.renameat2
+        flags = 1  # RENAME_NOREPLACE
+    rename.argtypes = [
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint
+    ]
+    rename.restype = ctypes.c_int
+    if rename(
+        src_dir_fd,
+        os.fsencode(source),
+        dst_dir_fd,
+        os.fsencode(destination),
+        flags,
+    ) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), destination)
+
+
 def _create_repo(repo: str, message: str) -> Path:
     message = message.strip()
     document = _delegation_doc_template(repo, message)
@@ -639,8 +666,9 @@ def _create_repo(repo: str, message: str) -> Path:
     repo_fd = None
     work_name = f".lupin-create-{os.urandom(16).hex()}"
     work_identity = None
+    staged_doc_name = f".lupin-document-{os.urandom(16).hex()}"
+    staged_doc_identity = None
     doc_identity = None
-    docs_identity = None
     docs_fd = None
     published = False
     try:
@@ -700,14 +728,15 @@ def _create_repo(repo: str, message: str) -> Path:
             )
             if not os.path.samestat(docs_identity, os.fstat(docs_fd)):
                 raise OSError("docs directory changed during creation")
-            doc_fd = os.open(
-                "delegation-loop.md",
+            staged_doc_fd = os.open(
+                staged_doc_name,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                0o666,
-                dir_fd=docs_fd,
+                0o600,
+                dir_fd=repo_fd,
             )
-            doc_identity = os.fstat(doc_fd)
-            with os.fdopen(doc_fd, "w", encoding="utf-8") as doc:
+            staged_doc_identity = os.fstat(staged_doc_fd)
+            doc_identity = staged_doc_identity
+            with os.fdopen(staged_doc_fd, "w", encoding="utf-8") as doc:
                 doc.write(document)
 
             current_docs = os.stat("docs", dir_fd=repo_fd, follow_symlinks=False)
@@ -719,15 +748,22 @@ def _create_repo(repo: str, message: str) -> Path:
             if not os.path.samestat(work_identity, current_work):
                 raise OSError("private repo directory changed during creation")
 
-            # Publish only after the complete repo is ready. A populated repo
-            # installed by another writer is not replaced by this rename.
             try:
                 os.stat(repo, dir_fd=code_fd, follow_symlinks=False)
             except FileNotFoundError:
                 pass
             else:
                 raise OSError(f"repo path appeared before publication: {repo}")
-            os.rename(work_name, repo, src_dir_fd=code_fd, dst_dir_fd=code_fd)
+            os.link(
+                staged_doc_name,
+                "delegation-loop.md",
+                src_dir_fd=repo_fd,
+                dst_dir_fd=docs_fd,
+                follow_symlinks=False,
+            )
+            os.unlink(staged_doc_name, dir_fd=repo_fd)
+            staged_doc_identity = None
+            _rename_noreplace(work_name, repo, src_dir_fd=code_fd, dst_dir_fd=code_fd)
             published = True
             current_repo = os.stat(repo, dir_fd=code_fd, follow_symlinks=False)
             if not os.path.samestat(work_identity, current_repo):
@@ -738,22 +774,31 @@ def _create_repo(repo: str, message: str) -> Path:
             if not os.path.samestat(os.fstat(docs_fd), current_docs):
                 raise OSError("docs directory changed during creation")
         except BaseException:
-            if docs_fd is not None and doc_identity is not None:
+            if docs_fd is not None:
                 try:
                     current_doc = os.stat(
                         "delegation-loop.md", dir_fd=docs_fd, follow_symlinks=False
                     )
-                    if os.path.samestat(doc_identity, current_doc):
+                    if (
+                        doc_identity is not None
+                        and os.path.samestat(doc_identity, current_doc)
+                    ):
                         os.unlink("delegation-loop.md", dir_fd=docs_fd)
+                except OSError:
+                    pass
+            if staged_doc_identity is not None:
+                try:
+                    current_staged_doc = os.stat(
+                        staged_doc_name, dir_fd=repo_fd, follow_symlinks=False
+                    )
+                    if os.path.samestat(staged_doc_identity, current_staged_doc):
+                        os.unlink(staged_doc_name, dir_fd=repo_fd)
                 except OSError:
                     pass
             if docs_fd is not None:
                 try:
-                    current_docs = os.stat("docs", dir_fd=repo_fd, follow_symlinks=False)
-                    if docs_identity is not None and os.path.samestat(
-                        docs_identity, current_docs
-                    ):
-                        os.rmdir("docs", dir_fd=repo_fd)
+                    # rmdir removes only an empty directory, never its contents.
+                    os.rmdir("docs", dir_fd=repo_fd)
                 except OSError:
                     pass
             try:

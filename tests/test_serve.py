@@ -4038,18 +4038,18 @@ class TestReposPageRoutes:
         monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
         existing = code_dir / "widgets"
         marker = existing / ".git" / "important"
-        real_rename = os.rename
+        real_publish = serve._rename_noreplace
         raced = False
 
-        def install_existing_repo(source, destination, *args, **kwargs):
+        def install_existing_repo(source, destination, **kwargs):
             nonlocal raced
-            if destination == "widgets" and kwargs.get("dst_dir_fd") is not None:
+            if destination == "widgets":
                 raced = True
                 marker.parent.mkdir(parents=True)
                 marker.write_text("existing repo data", encoding="utf-8")
-            return real_rename(source, destination, *args, **kwargs)
+            return real_publish(source, destination, **kwargs)
 
-        monkeypatch.setattr(serve.os, "rename", install_existing_repo)
+        monkeypatch.setattr(serve, "_rename_noreplace", install_existing_repo)
         handler = _repos_handler()
         _post_body(handler, "/repos/create", {"repo": "widgets"})
         handler.do_POST()
@@ -4059,36 +4059,81 @@ class TestReposPageRoutes:
         assert marker.read_text(encoding="utf-8") == "existing repo data"
         assert not (existing / "docs").exists()
 
-    def test_create_route_rejects_docs_directory_moved_after_open(
+    def test_create_route_preserves_empty_destination_created_before_publish(
         self, tmp_path, monkeypatch
     ):
         code_dir = tmp_path / "code"
         code_dir.mkdir()
-        outside = tmp_path / "outside"
         monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
-        real_open = os.open
-        moved = False
+        existing = code_dir / "widgets"
+        real_publish = serve._rename_noreplace
+        raced = False
 
-        def move_docs_before_document_open(path, flags, *args, **kwargs):
-            nonlocal moved
-            if path == "delegation-loop.md" and not moved:
-                moved = True
-                docs_path = next(code_dir.glob(".lupin-create-*/docs"))
-                repo_path = docs_path.parent
-                os.rename(docs_path, outside)
-                (repo_path / "docs").mkdir()
-            return real_open(path, flags, *args, **kwargs)
+        def install_empty_destination(source, destination, **kwargs):
+            nonlocal raced
+            if destination == "widgets":
+                raced = True
+                existing.mkdir()
+            return real_publish(source, destination, **kwargs)
 
-        monkeypatch.setattr(serve.os, "open", move_docs_before_document_open)
+        monkeypatch.setattr(serve, "_rename_noreplace", install_empty_destination)
         handler = _repos_handler()
         _post_body(handler, "/repos/create", {"repo": "widgets"})
         handler.do_POST()
 
+        assert raced
+        assert handler.reply.call_args.args[1] == 500
+        assert existing.is_dir()
+        assert list(existing.iterdir()) == []
+        assert not list(code_dir.glob(".lupin-create-*"))
+
+    def test_create_route_keeps_message_private_when_docs_moves_before_write(
+        self, tmp_path, monkeypatch
+    ):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        outside_docs = tmp_path / "outside-docs"
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        real_fdopen = os.fdopen
+        moved = False
+        outside_observations = []
+
+        class ObservedDocument:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.stream.close()
+
+            def write(self, contents):
+                nonlocal moved
+                docs_path = next(code_dir.glob(".lupin-create-*/docs"))
+                os.rename(docs_path, outside_docs)
+                docs_path.mkdir()
+                moved = True
+                self.stream.write(contents)
+                self.stream.flush()
+                outside_observations.append(
+                    [path.read_bytes() for path in outside_docs.rglob("*") if path.is_file()]
+                )
+
+        def observe_fdopen(fd, *args, **kwargs):
+            return ObservedDocument(real_fdopen(fd, *args, **kwargs))
+
+        monkeypatch.setattr(serve.os, "fdopen", observe_fdopen)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": "widgets", "message": "private phrase"})
+        handler.do_POST()
+
         assert moved
         assert handler.reply.call_args.args[1] == 500
+        assert outside_observations == [[]]
+        assert list(outside_docs.iterdir()) == []
         assert not (code_dir / "widgets").exists()
-        assert outside.is_dir()
-        assert not (outside / "delegation-loop.md").exists()
+        assert not list(code_dir.glob(".lupin-create-*"))
 
     def test_create_route_rejects_a_replaced_code_root_before_creation(
         self, tmp_path, monkeypatch
@@ -4123,26 +4168,30 @@ class TestReposPageRoutes:
         assert marker.read_text(encoding="utf-8") == "keep outside"
         assert list(moved.iterdir()) == []
 
-    def test_create_route_keeps_concurrent_document_when_exclusive_open_fails(
+    def test_create_route_keeps_concurrent_document_when_exclusive_link_fails(
         self, tmp_path, monkeypatch
     ):
         code_dir = tmp_path / "code"
         code_dir.mkdir()
         monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
-        real_open = os.open
+        real_link = os.link
         collided = False
 
-        def create_concurrent_doc(path, flags, *args, **kwargs):
+        def create_concurrent_doc(source, destination, *args, **kwargs):
             nonlocal collided
-            if path == "delegation-loop.md" and flags & os.O_EXCL and not collided:
+            if destination == "delegation-loop.md" and not collided:
                 collided = True
-                fd = real_open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666,
-                               dir_fd=kwargs["dir_fd"])
+                fd = os.open(
+                    destination,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o666,
+                    dir_fd=kwargs["dst_dir_fd"],
+                )
                 os.write(fd, b"concurrent document")
                 os.close(fd)
-            return real_open(path, flags, *args, **kwargs)
+            return real_link(source, destination, *args, **kwargs)
 
-        monkeypatch.setattr(serve.os, "open", create_concurrent_doc)
+        monkeypatch.setattr(serve.os, "link", create_concurrent_doc)
         handler = _repos_handler()
         _post_body(handler, "/repos/create", {"repo": "widgets"})
         handler.do_POST()
@@ -4227,6 +4276,7 @@ class TestReposPageRoutes:
 
         assert failed
         assert handler.reply.call_args.args[1] == 500
+        assert list(code_dir.iterdir()) == []
 
     @pytest.mark.parametrize("repo", ["", "bad/name", "widgets\n"])
     def test_create_route_rejects_invalid_names_without_creating_files(
