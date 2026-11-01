@@ -40,7 +40,7 @@ lenses. Passing CI does not prove the design is sound.
 | `missing test` | Risky new logic has no test that fails when the logic breaks. One good test is enough. | `🟡 risk` |
 | `speed` | A big slowdown. | `🟡 risk` (big), `🔵 nit` (small) |
 | `lean` | Dead code, a helper the repo already has (name its path), a dependency for a few lines, an abstraction with one use, near-copies, or tests that check nothing. | `🟡 risk` if it adds code, `🔵 nit` for a shorter form |
-| `test bloat` | A new test that fails in the same cases as an existing test. A new test file where one exists for the area. An issue number in a test title or file name. Table rows that run one code path. | `🟡 risk` |
+| `test bloat` | A new test that fails in the same cases as an existing test. A new test file where one exists for the area. An issue number in a test title or file name. Table rows that run one code path. Duplicate tests are `🟡 risk`, never `🔵 nit`. | `🟡 risk` |
 
 Also:
 
