@@ -27,6 +27,21 @@ A session above the loop supervisors (the supervisor of supervisors) does not do
 
 It does not review, approve, comment on, merge, or edit a pull request. It does not change code, issues, or loop settings. It does not do a loop's work.
 
+### Quota
+
+Owner rule: keep quota burn at a sustainable pace, and leave headroom for the owner.
+
+On each check:
+
+1. Run `lupin quota --json`. Read each window's `used_pct`, `resets_at`, and `fetched_by`. A row fetched by another machine is still valid. Check its `generated_at` time.
+2. Compute the elapsed share of each window: `1 - (resets_at - now) / window length`. A window is on pace when `used_pct` is at or below its elapsed share.
+3. A window at or above 75% used is at the owner reserve line. Do not start new work that uses it.
+4. A window above 90% for Claude is a hard stop. Defer all work routed to Claude (see "Hourly pass").
+5. A window that is over pace or at the reserve line: relay the owner rule to the loop supervisors, with the window name and its numbers. Do not change routing or quota settings yourself.
+6. If a window cannot be read, treat it as blocked for new starts on that provider. Record the block.
+7. Append each check to a sample log (UTC time, window, `used_pct`, `resets_at`). Compare with the last sample to get the burn rate. One sample alone does not show a rate.
+8. Record each over-pace, reserve-line, or blocked state in the ledger with status `deferred`.
+
 Terms:
 
 - Loop: one Lupin run on one repo. It runs in one Herdr workspace.
