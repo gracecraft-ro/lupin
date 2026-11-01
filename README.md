@@ -208,7 +208,8 @@ their own licenses.
 ## Known limits
 
 
-- Some defaults name the owner's machines and user name.
+- The bundled model tiers use the owner's local `bmo` model. Set
+  `LUPIN_MODEL_TIERS` to use another file.
 - Only Linux is tested. The flake builds for macOS. Loop workers need systemd.
 
 ## Documentation
