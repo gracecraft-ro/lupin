@@ -19,6 +19,7 @@ import os
 import concurrent.futures
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -218,17 +219,15 @@ def _repo_slot_name(repo: str) -> str:
     return f"{REPO_SLOT_PREFIX}{repo}"
 
 
-def _delegation_doc_template(repo: str) -> str:
-    """A minimal starting doc for a repo that has none yet ("Generate docs
-    and add", issue #23). No existing doc generator was found in this repo
-    (grepped for "generate"/"scaffold"/LOOP_DOC outside serve.py and
-    docs/) -- this is a plain fill-in-the-blanks skeleton, not a smart
-    generator.
-    """
+def _delegation_doc_template(repo: str, message: str = "") -> str:
+    """Return the starter delegation document."""
+    message = message.strip()
+    first_task = f"## Message for the loop\n\n{message}\n\n" if message else ""
     return (
         f"# {repo} -- the delegation loop\n\n"
         "This file gives repo-specific guidance. Fill it in with useful details;\n"
         "a loop can run without it.\n\n"
+        f"{first_task}"
         "## What this repo is for\n\n"
         "TODO: say what this repo does, and what the first loops should build.\n\n"
         "## Rules\n\n"
@@ -581,7 +580,79 @@ REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
 def _valid_repo_name(repo: str) -> bool:
-    return bool(REPO_NAME_RE.match(repo))
+    return bool(REPO_NAME_RE.fullmatch(repo))
+
+
+def _create_repo(repo: str, message: str) -> Path:
+    message = message.strip()
+    document = _delegation_doc_template(repo, message)
+    try:
+        code_dir = Path(CODE_DIR).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise OSError(f"configured code directory is unavailable: {exc}") from exc
+    if not code_dir.is_dir():
+        raise OSError(f"configured code directory is not a directory: {code_dir}")
+
+    repo_dir = code_dir / repo
+    try:
+        repo_dir.resolve(strict=False).relative_to(code_dir)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise ValueError("repo path is outside the configured code directory") from exc
+    if not _valid_repo_name(repo):
+        raise ValueError(
+            "invalid repo name: use 1–100 letters, numbers, dots, underscores, or hyphens; "
+            "start with a letter or number"
+        )
+    if os.path.lexists(repo_dir):
+        raise ValueError(f"repo path already exists: {repo}")
+
+    try:
+        repo_dir.mkdir()
+    except FileExistsError as exc:
+        raise ValueError(f"repo path already exists: {repo}") from exc
+
+    docs_dir = repo_dir / "docs"
+    doc_path = docs_dir / "delegation-loop.md"
+    git_dir = repo_dir / ".git"
+    made_docs = False
+    made_doc = False
+    git_attempted = False
+    try:
+        git_attempted = True
+        try:
+            loop_runtime._git(repo_dir, "init", "--initial-branch=main")
+        except loop_runtime.LoopError as exc:
+            raise OSError(f"could not initialize Git repo: {exc}") from exc
+        docs_dir.mkdir()
+        made_docs = True
+        with doc_path.open("x", encoding="utf-8") as doc:
+            made_doc = True
+            doc.write(document)
+    except BaseException:
+        if made_doc:
+            try:
+                doc_path.unlink()
+            except OSError:
+                pass
+        if made_docs:
+            try:
+                docs_dir.rmdir()
+            except OSError:
+                pass
+        if git_attempted:
+            try:
+                if git_dir.is_dir() and not git_dir.is_symlink():
+                    shutil.rmtree(git_dir)
+                elif git_dir.exists() or git_dir.is_symlink():
+                    git_dir.unlink()
+            except OSError:
+                pass
+        try:
+            repo_dir.rmdir()
+        except OSError:
+            pass
+        raise
+    return repo_dir
 
 
 def merge_repo_inventory(
@@ -2418,15 +2489,7 @@ def _repo_slot_controls(repo: str, current_max: int) -> str:
 
 
 def _render_add_panel(tab: str, repos: list[dict]) -> str:
-    """The "Add repo" card. "Existing repo" (issue #23) is fully wired:
-    a repo with a doc gets an "add to schedule" button, one without gets
-    "generate docs and add". "Clone from Git" and "Create new" are shown
-    but inert -- see this issue's report for why: both are real
-    filesystem/git-network operations (an arbitrary clone URL, process
-    spawning, file generation) with a bigger security surface than
-    anything else on this page, and landing them safely didn't fit this
-    pass.
-    """
+    """Render the add card for local checkouts and new directories."""
     tab = "new" if tab == "new" else "existing"
 
     def tab_link(value: str, label: str) -> str:
@@ -2438,13 +2501,18 @@ def _render_add_panel(tab: str, repos: list[dict]) -> str:
 
     if tab == "new":
         body = (
-            "<input type=text disabled placeholder='repo name, e.g. payments-sync' "
+            "<form method=post action=/repos/create>"
+            "<label for=repo-name>Repo name</label>"
+            "<input id=repo-name type=text name=repo required maxlength=100 "
+            "pattern='[A-Za-z0-9][A-Za-z0-9._-]{0,99}' placeholder='e.g. payments-sync' "
             "style='display:block;width:100%;max-width:420px;margin-bottom:.5rem'>"
-            "<textarea disabled placeholder='message for the loop (optional)' "
+            "<label for=repo-message>Message for the loop (optional)</label>"
+            "<textarea id=repo-message name=message "
+            "placeholder='What this repo is for and what the first loops should build.' "
             "style='display:block;width:100%;max-width:420px;height:80px;margin-bottom:.5rem'></textarea>"
-            "<button type=button disabled>Create repo</button>"
-            "<p class=dim>Not implemented yet -- scaffolding a new repo and generating its "
-            "delegation doc is a bigger surface than this pass takes on.</p>"
+            "<button type=submit>Create repo</button></form>"
+            f"<p class=dim>Creates a Git repo and {esc(LOOP_DOC)} under {esc(CODE_DIR)}. "
+            "It does not start or schedule a loop; use Add to schedule when ready.</p>"
         )
         return f"<div class=card>{tabs}{body}</div>"
 
@@ -3671,6 +3739,19 @@ class Handler(BaseHTTPRequestHandler):
             write_enabled_repos(enabled)
         self.redirect(f"/repos?sent={quote(f'{repo} added to the schedule', safe='')}")
 
+    def do_repos_create(self, form: dict) -> None:
+        repo = form.get("repo", [""])[0]
+        message = form.get("message", [""])[0].strip()
+        try:
+            _create_repo(repo, message)
+        except ValueError as exc:
+            self.reply(render_error(str(exc)), 400)
+            return
+        except OSError as exc:
+            self.reply(render_error(f"could not create repo: {exc}"), 500)
+            return
+        self.redirect(f"/repos?sent={quote(f'created {repo}', safe='')}")
+
     def do_repos_generate_docs(self, form: dict) -> None:
         repo = form.get("repo", [""])[0].strip()
         if not repo or not _valid_repo_name(repo) or not os.path.isdir(os.path.join(CODE_DIR, repo)):
@@ -4256,6 +4337,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.do_repos_enable(form)
             elif url.path == "/repos/add":
                 self.do_repos_add(form)
+            elif url.path == "/repos/create":
+                self.do_repos_create(form)
             elif url.path == "/repos/generate-docs":
                 self.do_repos_generate_docs(form)
             elif url.path == "/repos/remove":

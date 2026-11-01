@@ -15,6 +15,8 @@ All notable changes to Lupin. The version has one source:
 - The Roadmap board shows stage tabs with counts, like the List view.
 - The triage skill checks issue details and linked open PRs before it reports
   likely duplicates.
+- The Repos page creates a local Git repo and delegation document from a name
+  and an optional message. It does not add the repo to the schedule.
 
 ### Changed
 

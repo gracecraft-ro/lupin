@@ -3788,10 +3788,14 @@ class RepoRenderTests(unittest.TestCase):
         self.assertIn("action=/repos/generate-docs", page)
         self.assertIn("no delegation doc (optional)", page)
 
-    def test_add_panel_new_tab_is_disabled_with_a_note(self):
+    def test_add_panel_new_tab_has_a_create_form(self):
         page = serve.render_repos(self._data(), add="new").decode()
-        self.assertIn("Not implemented yet", page)
-        self.assertIn("disabled", page)
+        self.assertIn("action=/repos/create", page)
+        self.assertIn("name=repo", page)
+        self.assertIn("name=message", page)
+        self.assertIn("Create repo", page)
+        self.assertNotIn("Not implemented yet", page)
+        self.assertIn("does not start or schedule a loop", page)
 
     def test_add_panel_says_no_repos_found_when_code_repos_is_empty(self):
         """No local repos and no fleet report means there is nothing to add."""
@@ -3915,6 +3919,150 @@ class TestReposPageRoutes:
         _post_body(handler, "/repos/add", {"repo": "ghost"})
         handler.do_POST()
         assert handler.reply.call_args.args[1] == 400
+
+    @pytest.mark.parametrize("message", ["", "Build the first feature"])
+    def test_create_route_creates_repo_and_doc_without_scheduling(self, tmp_path, monkeypatch, message):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        repos_file = state_dir / "repos"
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        monkeypatch.setattr(serve, "REPOS_FILE", str(repos_file))
+        write_schedule = mock.Mock()
+        start_loop = mock.Mock()
+        run_loop = mock.Mock()
+        monkeypatch.setattr(serve, "write_enabled_repos", write_schedule)
+        monkeypatch.setattr(serve.loop_runtime, "start_loop", start_loop)
+        monkeypatch.setattr(serve, "run", run_loop)
+
+        handler = _repos_handler()
+        fields = {"repo": "widgets"}
+        if message:
+            fields["message"] = message
+        _post_body(handler, "/repos/create", fields)
+        handler.do_POST()
+
+        doc_path = code_dir / "widgets" / "docs" / "delegation-loop.md"
+        repo_dir = code_dir / "widgets"
+        assert (repo_dir / ".git").is_dir()
+        assert serve.loop_runtime._git(repo_dir, "branch", "--show-current").strip() == "main"
+        text = doc_path.read_text(encoding="utf-8")
+        assert "# widgets -- the delegation loop" in text
+        if message:
+            assert f"## Message for the loop\n\n{message}\n\n" in text
+        else:
+            assert "## Message for the loop" not in text
+        assert handler.reply.call_count == 0
+        handler.redirect.assert_called_once_with("/repos?sent=created%20widgets")
+
+        inventory = serve.code_repos()
+        assert inventory == [{
+            "repo": "widgets", "state": "disabled", "loopable": True, "has_doc": True,
+        }]
+        row = {**inventory[0], "running": False, "machine": "local", "max": None}
+        page = serve.render_repos({
+            "repos": [row], "machines": [], "fleet_error": None, "local_host": "local",
+        }, sent="created widgets").decode()
+        assert "created widgets" in page
+        assert "<b>widgets</b>" in page
+        assert "href='/repos?doc=widgets'" in page
+        assert not repos_file.exists()
+        write_schedule.assert_not_called()
+        start_loop.assert_not_called()
+        run_loop.assert_not_called()
+
+    def test_create_route_removes_partial_repo_when_git_initialization_fails(self, tmp_path, monkeypatch):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+
+        def fail_after_partial_init(repo_dir, *args):
+            (repo_dir / ".git").mkdir()
+            raise serve.loop_runtime.LoopError("git init failed")
+
+        monkeypatch.setattr(serve.loop_runtime, "_git", fail_after_partial_init)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": "widgets"})
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 500
+        assert "could not initialize Git repo: git init failed" in handler.reply.call_args.args[0].decode()
+        assert list(code_dir.iterdir()) == []
+
+    @pytest.mark.parametrize("repo", ["", "bad/name", "widgets\n"])
+    def test_create_route_rejects_invalid_names_without_creating_files(
+        self, tmp_path, monkeypatch, repo
+    ):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": repo})
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 400
+        assert "invalid repo name" in handler.reply.call_args.args[0].decode()
+        assert list(code_dir.iterdir()) == []
+
+
+    @pytest.mark.parametrize("repo", ["../escape", ".."])
+    def test_create_route_rejects_path_traversal_as_outside_directory(
+        self, tmp_path, monkeypatch, repo
+    ):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": repo})
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 400
+        assert "outside the configured code directory" in handler.reply.call_args.args[0].decode()
+        assert list(code_dir.iterdir()) == []
+        assert not (tmp_path / "escape").exists()
+
+    def test_create_route_rejects_an_existing_path_without_changing_it(self, tmp_path, monkeypatch):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        repo_dir = _make_repo(code_dir, "widgets", doc=False)
+        sentinel = repo_dir / "keep.txt"
+        sentinel.write_text("keep this file", encoding="utf-8")
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": "widgets"})
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 400
+        assert "already exists" in handler.reply.call_args.args[0].decode()
+        assert list(code_dir.iterdir()) == [repo_dir]
+        assert list(repo_dir.iterdir()) == [sentinel]
+        assert sentinel.read_text(encoding="utf-8") == "keep this file"
+
+    def test_create_route_rejects_a_symlink_escape_without_changing_files(self, tmp_path, monkeypatch):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        sentinel = outside / "keep.txt"
+        sentinel.write_text("keep this file", encoding="utf-8")
+        escaped = code_dir / "escape"
+        escaped.symlink_to(outside, target_is_directory=True)
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": "escape"})
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 400
+        assert "outside the configured code directory" in handler.reply.call_args.args[0].decode()
+        assert list(code_dir.iterdir()) == [escaped]
+        assert escaped.is_symlink()
+        assert list(outside.iterdir()) == [sentinel]
+        assert sentinel.read_text(encoding="utf-8") == "keep this file"
 
     def test_add_route_accepts_a_repo_without_a_delegation_doc(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))

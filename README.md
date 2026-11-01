@@ -147,6 +147,11 @@ Run `lupin serve --bind 127.0.0.1 --port 8788`. Then open
 `ssh -N -L 8788:127.0.0.1:8788 MACHINE`. The Repos and Roadmap pages read the
 Git checkouts in `LUPIN_LOOP_CODE_DIR` (default `/code`).
 
+In Repos, **Add repo → Create new** creates a Git repo and
+`docs/delegation-loop.md` under `LUPIN_LOOP_CODE_DIR`. The optional message goes
+in the document. This does not add the repo to the schedule; use **Add to
+schedule** when ready.
+
 ## Commands
 
 Run `lupin --help` for all commands. `lupin <command> --help` shows its options.
