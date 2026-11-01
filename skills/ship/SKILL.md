@@ -58,7 +58,7 @@ every GitHub comment that you post with `Loop:`.
   the existing file for that area.
   Do not create a test file when one exists for the area.
   Do not write an issue number in a test title or a test file name. Put the
-  test count in the PR as `tests: +A -R`.
+  test count in both the PR and the issue report as `tests: +A -R`.
 - Run the repo's documented gate, then run the changed feature and observe the
   result. Read the final diff. Recheck issue and PR comments before reporting.
 - The final report says what you skipped, what you did not check, and any risk
