@@ -516,6 +516,24 @@ class MachinesRouteUnitTests(unittest.TestCase):
         fake.assert_called_once_with({"redis_host": "127.0.0.1"}, strict=True)
         handler.reply.assert_called_once()
 
+    def test_render_machines_labels_unmanaged_agent_and_identity(self):
+        records = [{
+            "name": "worker",
+            "state": "online",
+            "loops": [{
+                "repo": None,
+                "managed": False,
+                "state": "working",
+                "agent": "omp",
+            }],
+        }]
+        with mock.patch.object(serve.machines, "hostname", return_value="reader"):
+            body = serve.render_machines(records, {}).decode()
+
+        self.assertIn("Unmanaged agent · omp", body)
+        self.assertIn("working", body)
+        self.assertNotIn("Unknown repo", body)
+
     def test_machines_route_unreachable_coordinator_is_502(self):
         handler = serve.Handler.__new__(serve.Handler)
         handler.path = "/machines"
@@ -4934,7 +4952,7 @@ def test_image_route_falls_back_to_github_when_redis_has_no_copy(monkeypatch, re
     assert asked == ["eba1e250-ae34-481a-9f8c-98503030f83e"] and handler.wfile.getvalue() == b"gh-bytes"
 
 
-def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_the_page_says_it_is_a_record(tmp_path, monkeypatch, redis_port, flush_redis):
+def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_page_says_no_digest(tmp_path, monkeypatch, redis_port, flush_redis):
     from lupin import digest as digest_mod
 
     monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
@@ -4950,7 +4968,7 @@ def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_the_page_s
     page.do_GET()
 
     assert "no digest" not in index.reply.call_args.args[0].decode()
-    assert "This is a record" in page.reply.call_args.args[0].decode()
+    assert "This debrief is a record without a digest." in page.reply.call_args.args[0].decode()
 
 
 def test_nav_links_have_accessible_names():
@@ -4958,5 +4976,3 @@ def test_nav_links_have_accessible_names():
     assert rendered.count("class='navlink") == len(serve.NAV_ITEMS)
     for _key, _href, label, _path in serve.NAV_ITEMS:
         assert f"aria-label='{label}'" in rendered
-
-
