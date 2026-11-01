@@ -2375,15 +2375,15 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
     if sent:
         body.append(f"<p class=dim>{esc(sent)}</p>")
     body.append(
-        "<section class='card model-freshness' aria-label='Data freshness'>"
+        "<section class='card model-freshness model-status' aria-label='Data freshness'>"
         f"<span class=dim>Model list: {_snapshot_age(snapshot.get('fetched_at') if snapshot else None)}{model_status}</span>"
         f"<span class=dim>Benchmark scores: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)} "
         f"({len(scored_benchmarks)}/{len(benchmark_scores)} scored)</span>"
         f"{score_freshness}{benchmark_status}"
-        "<span style='flex:1'></span>"
-        "<form method=post action='/model-tiers/refresh'>"
+        "<span class='model-status-spacer'></span>"
+        "<form class='model-status-action' method=post action='/model-tiers/refresh'>"
         "<button type=submit>Pull models</button></form>"
-        "<form method=post action='/model-tiers/refresh-benchmarks'>"
+        "<form class='model-status-action' method=post action='/model-tiers/refresh-benchmarks'>"
         "<button type=submit>Pull benchmarks</button></form></section>"
     )
     body.extend([
@@ -2449,6 +2449,13 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
 .model-tier-summary .tier-summary-name{font-weight:500}
 .model-tier-summary .tier-summary-score{white-space:nowrap}
 .model-tier-summary caption{text-align:left}
+.model-status-spacer{flex:1}
+@media(max-width:760px){
+.model-status{display:grid;gap:.75rem}
+.model-status-spacer{display:none}
+.model-status-action{margin:0}
+.model-status-action button{width:100%;white-space:nowrap}
+}
 """
     return page(
         "Model tiers", "".join(body), extra_css=extra_css, active="models"
