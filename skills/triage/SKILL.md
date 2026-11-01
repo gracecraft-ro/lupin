@@ -54,6 +54,10 @@ benchmark category covers both.
 
 ## Decide what is ready
 
+- Before dispatch, check each path named in the issue with
+  `git cat-file -e origin/main:<path>`. If a path is absent from `origin/main`,
+  comment on the issue and do not dispatch. If it exists only in an open PR,
+  name that PR in the comment.
 - Dispatch the PR work first in each cycle. Then use the free worker slots for
   new issues. See "Pull requests come first" in the `delegation-loop` skill.
 - Check the dependency graph and the latest comments. Do not dispatch an issue
