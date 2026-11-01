@@ -669,7 +669,9 @@ def _create_repo(repo: str, message: str) -> Path:
     staged_doc_name = f".lupin-document-{os.urandom(16).hex()}"
     staged_doc_identity = None
     doc_identity = None
+    docs_identity = None
     docs_fd = None
+    docs_created = False
     published = False
     try:
         if not _same_root_directory(code_fd, code_dir):
@@ -722,6 +724,7 @@ def _create_repo(repo: str, message: str) -> Path:
             except loop_runtime.LoopError as exc:
                 raise OSError(f"could not initialize Git repo: {exc}") from exc
             os.mkdir("docs", dir_fd=repo_fd)
+            docs_created = True
             docs_identity = os.stat("docs", dir_fd=repo_fd, follow_symlinks=False)
             docs_fd = os.open(
                 "docs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=repo_fd
@@ -756,9 +759,9 @@ def _create_repo(repo: str, message: str) -> Path:
                 raise OSError(f"repo path appeared before publication: {repo}")
             os.link(
                 staged_doc_name,
-                "delegation-loop.md",
+                "docs/delegation-loop.md",
                 src_dir_fd=repo_fd,
-                dst_dir_fd=docs_fd,
+                dst_dir_fd=repo_fd,
                 follow_symlinks=False,
             )
             os.unlink(staged_doc_name, dir_fd=repo_fd)
@@ -774,18 +777,35 @@ def _create_repo(repo: str, message: str) -> Path:
             if not os.path.samestat(os.fstat(docs_fd), current_docs):
                 raise OSError("docs directory changed during creation")
         except BaseException:
-            if docs_fd is not None:
+            cleanup_docs_fd = docs_fd
+            cleanup_docs_identity = docs_identity
+            close_cleanup_docs_fd = False
+            if docs_created and cleanup_docs_identity is None:
                 try:
-                    current_doc = os.stat(
-                        "delegation-loop.md", dir_fd=docs_fd, follow_symlinks=False
+                    cleanup_docs_fd = os.open(
+                        "docs",
+                        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=repo_fd,
                     )
-                    if (
-                        doc_identity is not None
-                        and os.path.samestat(doc_identity, current_doc)
-                    ):
-                        os.unlink("delegation-loop.md", dir_fd=docs_fd)
+                    close_cleanup_docs_fd = True
+                    cleanup_docs_identity = os.fstat(cleanup_docs_fd)
                 except OSError:
-                    pass
+                    cleanup_docs_fd = None
+            if doc_identity is not None:
+                for doc_name, doc_dir_fd in (
+                    ("delegation-loop.md", docs_fd),
+                    ("docs/delegation-loop.md", repo_fd),
+                ):
+                    if doc_dir_fd is None:
+                        continue
+                    try:
+                        current_doc = os.stat(
+                            doc_name, dir_fd=doc_dir_fd, follow_symlinks=False
+                        )
+                        if os.path.samestat(doc_identity, current_doc):
+                            os.unlink(doc_name, dir_fd=doc_dir_fd)
+                    except OSError:
+                        pass
             if staged_doc_identity is not None:
                 try:
                     current_staged_doc = os.stat(
@@ -795,10 +815,22 @@ def _create_repo(repo: str, message: str) -> Path:
                         os.unlink(staged_doc_name, dir_fd=repo_fd)
                 except OSError:
                     pass
-            if docs_fd is not None:
+            if docs_created and cleanup_docs_identity is not None:
                 try:
-                    # rmdir removes only an empty directory, never its contents.
-                    os.rmdir("docs", dir_fd=repo_fd)
+                    current_docs = os.stat(
+                        "docs", dir_fd=repo_fd, follow_symlinks=False
+                    )
+                    if (
+                        os.path.samestat(cleanup_docs_identity, current_docs)
+                        or docs_fd is not None
+                    ):
+                        # rmdir removes only an empty directory.
+                        os.rmdir("docs", dir_fd=repo_fd)
+                except OSError:
+                    pass
+            if close_cleanup_docs_fd:
+                try:
+                    os.close(cleanup_docs_fd)
                 except OSError:
                     pass
             try:

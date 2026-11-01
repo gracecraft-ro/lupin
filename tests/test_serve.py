@@ -4135,6 +4135,92 @@ class TestReposPageRoutes:
         assert not (code_dir / "widgets").exists()
         assert not list(code_dir.glob(".lupin-create-*"))
 
+    def test_create_route_keeps_message_private_when_docs_moves_before_link(
+        self, tmp_path, monkeypatch
+    ):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        outside_docs = tmp_path / "outside-docs"
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        real_link = os.link
+        moved = False
+        outside_observations = []
+
+        def move_docs_before_link(source, destination, *args, **kwargs):
+            nonlocal moved
+            if destination == "docs/delegation-loop.md":
+                docs_path = next(code_dir.glob(".lupin-create-*/docs"))
+                os.rename(docs_path, outside_docs)
+                docs_path.mkdir()
+                moved = True
+                outside_observations.append(
+                    [
+                        path.read_bytes()
+                        for path in outside_docs.rglob("*")
+                        if path.is_file()
+                    ]
+                )
+            return real_link(source, destination, *args, **kwargs)
+
+        monkeypatch.setattr(serve.os, "link", move_docs_before_link)
+        handler = _repos_handler()
+        _post_body(
+            handler, "/repos/create", {"repo": "widgets", "message": "private phrase"}
+        )
+        handler.do_POST()
+
+        assert moved
+        assert handler.reply.call_args.args[1] == 500
+        assert outside_observations == [[]]
+        assert list(outside_docs.iterdir()) == []
+        assert not (code_dir / "widgets").exists()
+        assert not list(code_dir.glob(".lupin-create-*"))
+
+    @pytest.mark.parametrize("failure", ["stat", "open"])
+    def test_create_route_cleans_staging_after_docs_stat_or_open_fails(
+        self, tmp_path, monkeypatch, failure
+    ):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        real_stat = os.stat
+        real_open = os.open
+        failed = False
+
+        def fail_docs_stat(path, *args, **kwargs):
+            nonlocal failed
+            if (
+                failure == "stat"
+                and path == "docs"
+                and kwargs.get("dir_fd") is not None
+                and not failed
+            ):
+                failed = True
+                raise OSError(errno.EIO, "injected docs stat failure")
+            return real_stat(path, *args, **kwargs)
+
+        def fail_docs_open(path, *args, **kwargs):
+            nonlocal failed
+            if (
+                failure == "open"
+                and path == "docs"
+                and kwargs.get("dir_fd") is not None
+                and not failed
+            ):
+                failed = True
+                raise OSError(errno.EMFILE, "injected docs open failure")
+            return real_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(serve.os, "stat", fail_docs_stat)
+        monkeypatch.setattr(serve.os, "open", fail_docs_open)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": "widgets"})
+        handler.do_POST()
+
+        assert failed
+        assert handler.reply.call_args.args[1] == 500
+        assert list(code_dir.iterdir()) == []
+
     def test_create_route_rejects_a_replaced_code_root_before_creation(
         self, tmp_path, monkeypatch
     ):
@@ -4179,7 +4265,7 @@ class TestReposPageRoutes:
 
         def create_concurrent_doc(source, destination, *args, **kwargs):
             nonlocal collided
-            if destination == "delegation-loop.md" and not collided:
+            if destination == "docs/delegation-loop.md" and not collided:
                 collided = True
                 fd = os.open(
                     destination,
