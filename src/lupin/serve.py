@@ -26,7 +26,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
@@ -147,9 +147,7 @@ def _model_tiers_path() -> str:
     return tiers_config.path(MODEL_TIERS_PATH)
 
 def _model_tiers_source_label() -> str:
-    if tiers_config.SETTING in os.environ:
-        return os.path.basename(_model_tiers_path())
-    return "modules/ai/model-tiers.json"
+    return _model_tiers_path()
 
 # --------------------------------------------------------------------------
 # running read-only probes
@@ -418,6 +416,11 @@ def _roadmap_loader_script() -> str:
     holder.innerHTML=html;
     box.replaceWith(holder.content);
     if(window.lupinHideDismissedRoadmapWarnings)window.lupinHideDismissedRoadmapWarnings(document);
+    if(window.matchMedia("(max-width: 760px)").matches
+       && new URLSearchParams(window.location.search).has("issue")){
+      var detail=document.querySelector(".roadmap-detail:not(.roadmap-detail-empty)");
+      if(detail)detail.scrollIntoView({block:"start"});
+    }
   }).catch(function(){location.href=box.dataset.full;});
 })();
 """
@@ -622,10 +625,13 @@ def merge_repo_inventory(
                     "hosts": set(),
                     "running_hosts": set(),
                     "enabled_hosts": set(),
+                    "already_enabled_hosts": set(),
                     "enable_hosts": set(),
                 },
             )
             is_enabled = item.get("enabled") is True
+            if is_enabled:
+                entry["already_enabled_hosts"].add(host)
             entry["enabled"] |= is_enabled
             entry["loopable"] |= item.get("loopable") is True
             label = f"{host} (offline)" if record.get("state") == "offline" else host
@@ -643,6 +649,7 @@ def merge_repo_inventory(
         if repo in repos:
             repos[repo]["fleet_enabled"] = entry["enabled"]
             repos[repo]["enabled_hosts"] = sorted(entry["enabled_hosts"])
+            repos[repo]["already_enabled_hosts"] = sorted(entry["already_enabled_hosts"])
             repos[repo]["enable_hosts"] = sorted(entry["enable_hosts"])
             continue
         state = "enabled" if entry["enabled"] else "disabled"
@@ -656,6 +663,7 @@ def merge_repo_inventory(
             "running_machines": ", ".join(sorted(entry["running_hosts"])),
             "machine": ", ".join(sorted(entry["hosts"])),
             "enabled_hosts": sorted(entry["enabled_hosts"]),
+            "already_enabled_hosts": sorted(entry["already_enabled_hosts"]),
             "enable_hosts": sorted(entry["enable_hosts"]),
         }
     return sorted(repos.values(), key=lambda repo: repo["repo"])
@@ -1000,7 +1008,7 @@ box-shadow:0 3px 0 var(--line);padding:.9rem 1.1rem;margin-bottom:.7rem}
 .pill{font-size:.75rem;padding:.15rem .6rem;border-radius:99px;
 border:1px solid var(--line);color:var(--ink2)}
 .pill.on{color:var(--ok);border-color:var(--ok)}
-.pill.off{color:var(--warn);border-color:var(--warn)}
+.pill.off{color:var(--warnink);border-color:var(--warn)}
 .big{font-size:1.05rem;font-weight:600}
 pre{background:var(--term);color:var(--termink);border-radius:14px;
 padding:.6rem .7rem;overflow-x:auto;font:400 12px/1.5 var(--mono);margin:.6rem 0 0;
@@ -1035,10 +1043,13 @@ color:var(--ink2);flex-wrap:wrap}
 .loop-empty{display:flex;gap:14px;align-items:center}
 @media(max-width:860px){
 .shell{flex-direction:column}
-.side{width:auto;height:auto;position:static;flex-direction:row;align-items:center;
-gap:14px;padding:12px 16px;overflow-x:auto}
-.navlinks{display:flex;flex-direction:row;gap:4px}
-.navlink span{display:none}
+.side{width:auto;height:auto;position:static;flex-direction:column;align-items:stretch;
+gap:8px;padding:12px 16px;overflow:visible}
+.brand{padding:0 8px}
+.navlinks{display:grid;grid-template-columns:repeat(auto-fit,minmax(6.5rem,1fr));gap:4px}
+.navlink{min-height:48px;flex-direction:column;justify-content:center;gap:4px;
+padding:6px 4px;text-align:center;font-size:12px}
+.navlink span{display:block}
 main{padding:1rem 1rem 3rem}
 .stat-row{grid-template-columns:1fr}
 }
@@ -1099,6 +1110,7 @@ color:var(--dim)}
 .tier-pick{display:inline-flex;gap:.4rem;align-items:baseline;
 border:1px solid var(--line);border-radius:6px;padding:.1rem .45rem;
 background:var(--code)}
+.tier-pick.dim,.tier-pick .dim{color:var(--ink2)}
 .tier-model{font:500 .9rem ui-monospace,monospace}
 .tier-arrow{color:var(--dim)}
 .tier-note{margin:.15rem 0 0;font-size:.85rem}
@@ -1106,13 +1118,19 @@ background:var(--code)}
 .issue-details summary{cursor:pointer}
 .issue-body{white-space:pre-wrap;overflow-wrap:anywhere;margin:.35rem 0}
 .activity-comments{padding-left:1.5rem}
-.loops-shell{display:flex;gap:1rem;align-items:flex-start}
-.loops-side{width:260px;flex:none;padding:.6rem}
+.loops-shell{display:flex;gap:1rem;align-items:flex-start;min-width:0}
+.loops-side{width:260px;flex:none;min-width:0;padding:.6rem}
 .loops-main{flex:1;min-width:0}
+.loops-main>.card{min-width:0;overflow:hidden}
+.loops-main pre{max-width:100%}
+.loops-main form{min-width:0;max-width:100%}
+.loops-main form[action="/loops/send"]{display:flex!important;flex:1 1 100%;align-items:center}
+.loops-main form[action="/loops/send"] input[name="text"]{min-width:0;flex:1 1 12rem;width:auto}
 .loops-row{display:block;padding:.3rem .2rem;color:inherit}
 .loops-row.sel{font-weight:700}
 .loops-group{color:var(--ink3);margin-top:.6rem;font-size:.8rem}
 .err{color:#9b2226}
+@media(max-width:700px){.loops-shell{flex-direction:column}.loops-side{width:100%}.loops-main{width:100%}}
 """
 
 JS = """
@@ -1255,7 +1273,7 @@ def icon(d: str, size: int = 16) -> str:
 
 def render_nav(active: str) -> str:
     links = "".join(
-        f"<a class='navlink{' active' if key == active else ''}' href='{href}'>"
+        f"<a class='navlink{' active' if key == active else ''}' href='{href}' aria-label='{esc(label)}'>"
         f"{icon(path)}<span>{esc(label)}</span></a>"
         for key, href, label, path in NAV_ITEMS
     )
@@ -1319,7 +1337,13 @@ def render_dashboard(state: dict) -> bytes:
         '<div class="card stat">'
         f'<div class="stat-label">{icon("M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3", 13)}Live loops</div>'
         f'<div class="stat-value">{esc(len(loops))}</div>'
-        f'<div class="stat-note">{esc(len(enabled))} repos enabled</div></div>'
+        f'<div class="stat-note">{esc(len(enabled))} repos enabled'
+        + (
+            ". <a href='/repos'>Enable a repo</a> to start loops."
+            if not enabled
+            else ""
+        )
+        + "</div></div>"
     )
     if nxt:
         body.append(
@@ -1378,17 +1402,23 @@ def render_dashboard(state: dict) -> bytes:
     body.append(
         f'<div class="section-head">{icon("M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z", 15)}<h2>Coming up</h2></div>'
     )
-    body.append("<div class='card scroll'><table>")
-    body.append("<tr><th>repository</th><th>next</th><th>at</th><th>last</th></tr>")
-    for t in recurring + oneoffs:
-        when = f"<span data-until='{t['next']:.0f}'></span>" if t["next"] else "<span class=dim>-</span>"
-        at = time.strftime("%a %H:%M:%S %Z", time.localtime(t["next"])) if t["next"] else "-"
-        last = f"<span data-since='{t['last']:.0f}'></span>" if t["last"] else "<span class=dim>never</span>"
+    if recurring or oneoffs:
+        body.append("<div class='card scroll'><table>")
+        body.append("<tr><th>repository</th><th>next</th><th>at</th><th>last</th></tr>")
+        for t in recurring + oneoffs:
+            when = f"<span data-until='{t['next']:.0f}'></span>" if t["next"] else "<span class=dim>-</span>"
+            at = time.strftime("%a %H:%M:%S %Z", time.localtime(t["next"])) if t["next"] else "-"
+            last = f"<span data-since='{t['last']:.0f}'></span>" if t["last"] else "<span class=dim>never</span>"
+            body.append(
+                f"<tr><td>{esc(timer_repository(t['unit']))}</td><td>{when}</td>"
+                f"<td class=dim>{esc(at)}</td><td class=dim>{last}</td></tr>"
+            )
+        body.append("</table></div>")
+    else:
         body.append(
-            f"<tr><td>{esc(timer_repository(t['unit']))}</td><td>{when}</td>"
-            f"<td class=dim>{esc(at)}</td><td class=dim>{last}</td></tr>"
+            "<div class='card dim'>No upcoming runs. "
+            "<a href='/schedule'>Schedule one</a>.</div>"
         )
-    body.append("</table></div>")
 
     # ---- fleet (issue #15) -------------------------------------------
     body.append(
@@ -1400,7 +1430,10 @@ def render_dashboard(state: dict) -> bytes:
     else:
         fleet_machines = state.get("machines", [])
         if not fleet_machines:
-            body.append("<div class='card dim'>No machines registered.</div>")
+            body.append(
+                "<div class='card dim'>No machines registered. "
+                "Run <code>lupin join &lt;redis-host&gt;[:port]</code>.</div>"
+            )
         else:
             body.append("<div class='card scroll'><table>")
             body.append("<tr><th>machine</th><th>state</th><th>version</th><th>heartbeat</th></tr>")
@@ -2016,6 +2049,166 @@ def _snapshot_age(fetched_at: str | None) -> str:
         return "never pulled"
     return f"<span data-since='{epoch:.0f}'></span>"
 
+def _stale_tier_categories(rows: list[dict]) -> tuple[list[str], list[str]]:
+    today = date.today()
+    cutoff = today - timedelta(days=30)
+    stale = []
+    missing = []
+    for row in rows:
+        if "error" in row:
+            continue
+        category = str(row.get("category") or "unknown")
+        try:
+            verified = date.fromisoformat(row.get("last_verified"))
+        except (TypeError, ValueError):
+            missing.append(category)
+        else:
+            if verified < cutoff:
+                stale.append(category)
+    return stale, missing
+
+
+def _render_tier_verification_warning(rows: list[dict]) -> str:
+    stale, missing = _stale_tier_categories(rows)
+    messages = []
+    if stale:
+        names = ", ".join(esc(name) for name in stale)
+        count = len(stale)
+        noun = "category" if count == 1 else "categories"
+        verb = "has" if count == 1 else "have"
+        messages.append(
+            f"{count} model-tier {noun} {verb} not been verified in over 30 days: {names}."
+        )
+    if missing:
+        names = ", ".join(esc(name) for name in missing)
+        messages.append(f"Verification dates are missing for: {names}.")
+    if not messages:
+        return ""
+    return (
+        "<div class='card model-tier-warning' role='status'>"
+        f"{' '.join(messages)}</div>"
+    )
+
+
+def _render_tier_summary_benchmarks(category: dict | None) -> str:
+    if not category:
+        return "<span class=dim>No verified benchmark data.</span>"
+    benchmarks = category.get("benchmarks") or []
+    if not benchmarks:
+        note = category.get("note") or "No verified benchmark data."
+        return f"<span class=dim>{esc(note)}</span>"
+    rows = []
+    for benchmark in benchmarks:
+        name = esc(benchmark.get("name") or "Benchmark")
+        source = benchmark.get("source")
+        if isinstance(source, str) and source.startswith(("https://", "http://")):
+            name = (
+                f"<a href='{esc(source)}' target='_blank' rel='noopener'>{name}</a>"
+            )
+        rows.append(
+            f"<div>{name}<div class=dim>{esc(benchmark.get('metric') or '')}</div></div>"
+        )
+    return "".join(rows)
+
+
+def _render_tier_summary_scores(scores: list[dict]) -> str:
+    if not scores:
+        return "<span class=dim>No verified score</span>"
+    rows = []
+    for score in scores:
+        title = f"{score['benchmark']} · {score['metric']} · {score['source']}"
+        rows.append(
+            "<div class=tier-summary-score>"
+            f"<span class=mono title='{esc(title)}'>{score['score']:g}</span> "
+            f"<span class=dim>{esc(score['benchmark'])}</span></div>"
+        )
+    return "".join(rows)
+
+
+def _render_tier_summary_cell(
+    tier_row: dict,
+    tier: str,
+    category_id: str,
+    models: list[dict],
+    scores_by_model: dict,
+) -> str:
+    entries = tier_row.get("tiers", {}).get(tier)
+    picks = [
+        pick for pick in (entries if isinstance(entries, list) else [])
+        if isinstance(pick, dict) and pick.get("model")
+    ]
+    if not picks:
+        return "<span class=dim>none</span>"
+
+    pick = picks[0]
+    alias = pick["model"]
+    model = match_live_model(alias, models)
+    if model:
+        model_name = model.get("display_name") or model["id"]
+    else:
+        model_name = alias
+    cell = [
+        f"<div class=tier-summary-name>{esc(model_name)}</div>",
+        f"<div class=dim>effort {esc(pick.get('effort') or '-')}</div>",
+    ]
+    if model and model_name != model["id"]:
+        cell.append(f"<div class=dim><code>{esc(model['id'])}</code></div>")
+    if len(picks) > 1:
+        fallbacks = len(picks) - 1
+        suffix = "s" if fallbacks != 1 else ""
+        cell.append(f"<div class=dim>+{fallbacks} fallback{suffix}</div>")
+    if model:
+        scores = scores_by_model.get(model["id"], {}).get(category_id, [])
+        cell.append(_render_tier_summary_scores(scores))
+    else:
+        cell.append(
+            "<span class=dim>No live model match; no verified score</span>"
+        )
+    return "<div class=tier-summary-pick>" + "".join(cell) + "</div>"
+
+
+def render_tier_comparison(
+    rows: list[dict],
+    categories: list[dict],
+    models: list[dict],
+    scores_by_model: dict,
+) -> str:
+    benchmarks_by_category = {
+        category["id"]: category for category in categories
+    }
+    rendered = []
+    for row in rows:
+        if "error" in row:
+            continue
+        category_id = row["category"]
+        cells = "".join(
+            f"<td class='tier-summary-cell {tier}'>"
+            f"{_render_tier_summary_cell(row, tier, category_id, models, scores_by_model)}"
+            "</td>"
+            for tier in MODEL_TIER_ORDER
+        )
+        rendered.append(
+            "<tr>"
+            f"<th scope=row>{esc(category_id)}</th>"
+            f"<td>{_render_tier_summary_benchmarks(benchmarks_by_category.get(category_id))}</td>"
+            f"{cells}"
+            f"<td>{esc(row.get('source') or 'not recorded')}</td>"
+            f"<td>{esc(row.get('last_verified') or '-')}</td>"
+            "</tr>"
+        )
+    if not rendered:
+        return "<div class='card dim'>No category picks to compare.</div>"
+    headers = "".join(
+        f"<th scope=col>{esc(tier)}</th>" for tier in MODEL_TIER_ORDER
+    )
+    return (
+        "<div class='card scroll'><table class=model-tier-summary>"
+        "<caption class=dim>First pick in each tier. All fallbacks appear in the routing cards below.</caption>"
+        "<thead><tr><th scope=col>Category</th><th scope=col>Benchmark</th>"
+        f"{headers}<th scope=col>Routing source</th><th scope=col>Last verified</th>"
+        f"</tr></thead><tbody>{''.join(rendered)}</tbody></table></div>"
+    )
+
 
 def _format_score(scores: list[dict]) -> str:
     if not scores:
@@ -2147,25 +2340,63 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
     benchmark_categories, scores_by_model, performance = benchmark_catalog.matrix(models, benchmark_snapshot)
     notes_by_model = benchmark_catalog.notes_by_model(benchmark_snapshot)
     benchmark_scores = (benchmark_snapshot or {}).get("scores") or []
-    scored_benchmarks = sum(
-        1 for score in benchmark_scores
-        if isinstance(score, dict) and score.get("score") is not None
+    scored_benchmarks = [
+        score for score in benchmark_scores
+        if isinstance(score, dict)
+        and isinstance(score.get("score"), (int, float))
+        and not isinstance(score.get("score"), bool)
+    ]
+    stale_benchmarks = [
+        score for score in scored_benchmarks
+        if not benchmark_fetch._is_fresh(score)
+    ]
+    subscriptions = (snapshot or {}).get("subscriptions")
+    if not isinstance(subscriptions, dict):
+        subscriptions = {}
+    stale_model_sources = sorted(
+        name for name, item in subscriptions.items()
+        if isinstance(item, dict) and item.get("live") is False
     )
+    model_status = (
+        f" <span class=stale>not live: {esc(', '.join(stale_model_sources))}</span>"
+        if stale_model_sources else ""
+    )
+    benchmark_status = (
+        "<span class=stale>latest refresh unavailable</span>"
+        if benchmark_snapshot and benchmark_snapshot.get("live") is False else ""
+    )
+    if stale_benchmarks:
+        count = len(stale_benchmarks)
+        noun = "score" if count == 1 else "scores"
+        score_freshness = f"<span class=stale>{count} stale source {noun}</span>"
+    elif scored_benchmarks:
+        score_freshness = "<span class=dim>all source scores fresh</span>"
+    else:
+        score_freshness = "<span class=dim>no verified scores</span>"
     body = [
         f'<header><h1>{icon("M7 7h10v10H7zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3")}Models</h1></header>',
     ]
     if sent:
         body.append(f"<p class=dim>{esc(sent)}</p>")
     body.append(
-        "<div class='card' style='display:flex;align-items:center;gap:1rem'>"
-        f"<span class=dim>Last pulled: {_snapshot_age(snapshot.get('fetched_at') if snapshot else None)}</span>"
-        f"<span class=dim>General scores: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)} ({scored_benchmarks}/{len(benchmark_scores)} scored)</span>"
+        "<section class='card model-freshness' aria-label='Data freshness'>"
+        f"<span class=dim>Model list: {_snapshot_age(snapshot.get('fetched_at') if snapshot else None)}{model_status}</span>"
+        f"<span class=dim>Benchmark scores: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)} "
+        f"({len(scored_benchmarks)}/{len(benchmark_scores)} scored)</span>"
+        f"{score_freshness}{benchmark_status}"
         "<span style='flex:1'></span>"
         "<form method=post action='/model-tiers/refresh'>"
         "<button type=submit>Pull models</button></form>"
         "<form method=post action='/model-tiers/refresh-benchmarks'>"
-        "<button type=submit>Pull benchmarks</button></form></div>"
+        "<button type=submit>Pull benchmarks</button></form></section>"
     )
+    body.extend([
+        _render_tier_verification_warning(rows),
+        "<h2>Category and tier comparison</h2>",
+        "<p class=dim>First pick in each tier. Scores use exact model IDs and verified sources. "
+        "See every fallback in the routing cards below.</p>",
+        render_tier_comparison(rows, benchmark_categories, models, scores_by_model),
+    ])
     body.extend([
         "<h2>Routing by task category</h2>",
         "<p class=dim>Read from <code>"
@@ -2214,7 +2445,18 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
             models, benchmark_categories, scores_by_model, performance, notes_by_model
         ),
     ])
-    return page("Model tiers", "".join(body), active="models")
+    extra_css = """
+.model-freshness{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
+.model-tier-warning{background:var(--warnbg);border-color:var(--warnline);box-shadow:none}
+.model-tier-summary th,.model-tier-summary td{vertical-align:top}
+.model-tier-summary .tier-summary-cell{min-width:9rem}
+.model-tier-summary .tier-summary-name{font-weight:500}
+.model-tier-summary .tier-summary-score{white-space:nowrap}
+.model-tier-summary caption{text-align:left}
+"""
+    return page(
+        "Model tiers", "".join(body), extra_css=extra_css, active="models"
+    )
 
 
 def _heartbeat_epoch(stamp: str | None) -> float | None:
@@ -2227,20 +2469,23 @@ def _heartbeat_epoch(stamp: str | None) -> float | None:
         return None
 
 
-def _slot_controls(slot: str, current_max: int) -> str:
+def _slot_controls(slot: str, current_max: int | None) -> str:
     """Fleet-wide slot limit controls with race-free next values."""
-    fewer = max(1, current_max - 1)
-    more = current_max + 1
-    fewer_disabled = " disabled" if current_max <= 1 else ""
+    unknown = current_max is None
+    fewer = max(1, current_max - 1) if current_max is not None else 1
+    more = current_max + 1 if current_max is not None else 2
+    fewer_disabled = " disabled" if unknown or current_max <= 1 else ""
+    more_disabled = " disabled" if unknown else ""
+    reason = " title='Slot limit is unavailable'" if unknown else ""
     return (
         "<form method=post action='/machines/slot-max' style='display:inline'>"
         f"<input type=hidden name=slot value='{esc(slot)}'>"
         f"<input type=hidden name=max value='{fewer}'>"
-        f"<button type=submit aria-label='Fewer slots'{fewer_disabled}>−</button></form>"
+        f"<button type=submit aria-label='Fewer slots'{fewer_disabled}{reason}>−</button></form>"
         "<form method=post action='/machines/slot-max' style='display:inline'>"
         f"<input type=hidden name=slot value='{esc(slot)}'>"
         f"<input type=hidden name=max value='{more}'>"
-        "<button type=submit aria-label='More slots'>+</button></form>"
+        f"<button type=submit aria-label='More slots'{more_disabled}{reason}>+</button></form>"
     )
 
 
@@ -2276,17 +2521,34 @@ def render_machines(
     if slot_status:
         body.append("<section class=machine-slots><h2>Fleet-wide capacity</h2>")
         body.append(
-            "<p class=dim>Each slot has one shared limit across all machines.</p>"
+            "<p class=dim>A slot limits how many callers can use that resource "
+            "at the same time, across all machines.</p>"
             "<div class=machine-slot-list>"
         )
         for slot_name, info in sorted(slot_status.items()):
-            used = info.get("holders", 0)
+            used = info.get("holders")
             slot_max = info.get("max")
-            controls = _slot_controls(slot_name, slot_max if slot_max is not None else 1)
+            used_label = esc(used) if used is not None else "?"
+            max_label = esc(slot_max) if slot_max is not None else "?"
+            controls = _slot_controls(slot_name, slot_max)
+            holder_names = info.get("holder_names")
+            if isinstance(holder_names, list) and holder_names:
+                holder_details = (
+                    "<span class=machine-slot-holders>Current holder IDs: "
+                    + ", ".join(f"<code>{esc(name)}</code>" for name in holder_names)
+                    + "</span>"
+                )
+            elif used == 0:
+                holder_details = "<span class=machine-slot-holders>No current holders</span>"
+            elif used is None:
+                holder_details = "<span class=machine-slot-holders>Holder count unavailable</span>"
+            else:
+                holder_details = "<span class=machine-slot-holders>Holder IDs unavailable</span>"
             body.append(
                 f"<div class=machine-slot><b>{esc(slot_name)}</b>"
-                f"<span class=mono>{esc(used)} / {esc(slot_max) if slot_max is not None else '-'}</span>"
-                f"<span class=slot-controls>{controls}</span></div>"
+                f"<span class=mono>{used_label} / {max_label}</span>"
+                f"<span class=slot-controls>{controls}</span>"
+                f"{holder_details}</div>"
             )
         body.append("</div></section>")
 
@@ -2357,7 +2619,7 @@ def render_machines(
 .machine-slots h2{margin:0 0 .25rem}
 .machine-slots>p{margin:.2rem 0 .65rem;font-size:13px}
 .machine-slot-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:.6rem}
-.machine-slot{display:flex;align-items:center;gap:.8rem;background:var(--surface);
+.machine-slot{display:flex;flex-wrap:wrap;align-items:center;gap:.55rem .8rem;background:var(--surface);
 border:1px solid var(--line);border-radius:12px;padding:.65rem .8rem}
 .slot-controls{display:flex;gap:4px}
 .slot-controls button{width:24px;height:24px;padding:0;border:1px solid var(--line);
@@ -2367,6 +2629,8 @@ border-radius:6px;background:var(--surface);color:var(--ink);cursor:pointer;font
 .machine-slot>b{flex:1;overflow-wrap:anywhere}
 .machine-slot .mono{font-size:13px;white-space:nowrap}
 .slot-controls{white-space:nowrap}
+.machine-slot-holders{flex:1 0 100%;min-width:0;overflow-wrap:anywhere;font-size:12px;color:var(--ink3)}
+.machine-slot-holders code{font:inherit;color:var(--ink2)}
 .machine-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}
 .machine-card{display:grid;gap:.7rem;align-content:start;background:var(--surface);
 border:1px solid var(--line);border-radius:18px;box-shadow:0 3px 0 var(--line);padding:1rem 1.1rem}
@@ -2374,7 +2638,8 @@ border:1px solid var(--line);border-radius:18px;box-shadow:0 3px 0 var(--line);p
 .machine-heading>b{font-size:16px;overflow-wrap:anywhere}
 .machine-dot{width:8px;height:8px;flex:none;border-radius:2px;background:var(--warn)}
 .machine-dot.online{background:var(--ok)}
-.machine-dot.draining{background:var(--warn)}
+.machine-dot.offline{background:var(--warn)}
+.machine-dot.draining{background:var(--lav);transform:rotate(45deg)}
 .machine-local,.machine-provider{font-size:12px;padding:1px 8px;border-radius:6px;
 background:var(--lavbg);color:var(--lav)}
 .machine-state{margin-left:auto;font-size:13px;color:var(--ink2)}
@@ -2399,25 +2664,24 @@ REPOS_ICON = "M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6
 
 
 def _repo_slot_controls(repo: str, current_max: int) -> str:
-    """Same fewer/more button-pair shape `_slot_controls` uses on the
-    Machines page, but the form only ever posts `repo` -- `do_repos_slot_max`
-    derives the actual slot name (`_repo_slot_name`) itself, so a request
-    can only ever change the one slot that belongs to the repo it named,
-    never an arbitrary slot string chosen by the browser.
-    """
+    """Render controls for changing this repo's concurrency limit."""
     fewer = max(1, current_max - 1)
     more = current_max + 1
     fewer_disabled = " disabled" if current_max <= 1 else ""
+    fewer_label = f"Decrease concurrency limit for {repo} to {fewer}"
+    more_label = f"Increase concurrency limit for {repo} to {more}"
     return (
         "<form method=post action=/repos/slot-max style='display:inline'>"
         f"<input type=hidden name=repo value='{esc(repo)}'>"
         f"<input type=hidden name=max value='{fewer}'>"
-        f"<button type=submit{fewer_disabled} aria-label='Lower max'>&minus;</button></form> "
+        f"<button type=submit{fewer_disabled} title='{esc(fewer_label)}' "
+        f"aria-label='{esc(fewer_label)}'>&minus;</button></form> "
         f"<span class=mono>{current_max}</span> "
         "<form method=post action=/repos/slot-max style='display:inline'>"
         f"<input type=hidden name=repo value='{esc(repo)}'>"
         f"<input type=hidden name=max value='{more}'>"
-        "<button type=submit aria-label='Raise max'>+</button></form>"
+        f"<button type=submit title='{esc(more_label)}' "
+        f"aria-label='{esc(more_label)}'>+</button></form>"
     )
 
 
@@ -2473,12 +2737,14 @@ def _render_add_panel(tab: str, repos: list[dict]) -> str:
         add_form = (
             "<form method=post action=/repos/add style='display:inline'>"
             f"<input type=hidden name=repo value='{esc(repo)}'>"
-            "<button type=submit>Add to schedule</button></form>"
+            f"<button type=submit title='Add {esc(repo)} to the recurring schedule'>"
+            "Add to schedule</button></form>"
         )
         generate_form = (
             "<form method=post action=/repos/generate-docs style='display:inline'>"
             f"<input type=hidden name=repo value='{esc(repo)}'>"
-            "<button type=submit>Generate docs and add</button></form>"
+            f"<button type=submit title='Generate docs and add {esc(repo)} to the recurring schedule'>"
+            "Generate docs and add</button></form>"
             if not r.get("has_doc")
             else ""
         )
@@ -2516,7 +2782,8 @@ def _render_doc_panel(repo: str, text: str, edit: bool) -> str:
             f"<textarea name=text spellcheck=false "
             "style='width:100%;height:230px;font-family:monospace;box-sizing:border-box'>"
             f"{esc(text)}</textarea>"
-            "<div class=row style='margin-top:.4rem'><button type=submit>Save</button>"
+            f"<div class=row style='margin-top:.4rem'><button type=submit "
+            f"title='Save changes to {esc(repo)}/{esc(LOOP_DOC)}'>Save</button>"
             f"<a href='{view_href}'>cancel</a></div></form>"
         )
     else:
@@ -2542,7 +2809,7 @@ def _render_schedule_panel(repo: str) -> str:
         f"<b>Schedule a one-off run for {esc(repo)}</b>"
         f"<input type=hidden name=repo value='{esc(repo)}'>"
         "<input type=text name=when placeholder='15:00, +2h, tomorrow 09:00' required>"
-        "<button type=submit>Schedule</button>"
+        "<button type=submit title='Schedule a one-off run'>Schedule one-off run</button>"
         "<a href='/repos'>Cancel</a>"
         "</form>"
         "<p class=dim>Runs once, in addition to the recurring schedule. Same as "
@@ -2560,7 +2827,7 @@ def _render_remove_panel(repo: str) -> str:
         f"running. Files in {esc(CODE_DIR)} are untouched. Type the repo name to confirm.</div></div>"
         f"<input type=hidden name=repo value='{esc(repo)}'>"
         f"<input type=text name=confirm placeholder='{esc(repo)}' required>"
-        "<button type=submit>Remove repo</button>"
+        "<button type=submit title='Remove this repo from the schedule'>Remove repo</button>"
         "<a href='/repos'>Cancel</a>"
         "</form></div>"
     )
@@ -2568,26 +2835,38 @@ def _render_remove_panel(repo: str) -> str:
 
 def _remote_repo_controls(repo: str, entry: dict) -> str:
     controls = []
+    for machine in entry.get("already_enabled_hosts", []):
+        controls.append(
+            "<button type=button disabled "
+            f"title='{esc(repo)} is already enabled on {esc(machine)}' "
+            f"aria-label='Enable {esc(repo)} on {esc(machine)} (already enabled)' "
+            "style='opacity:.45;cursor:not-allowed'>"
+            f"Enable on {esc(machine)}</button>"
+        )
     for machine in entry.get("enabled_hosts", []):
         controls.append(
             "<form method=post action=/loops/start style='display:inline'>"
             f"<input type=hidden name=repo value='{esc(repo)}'>"
             f"<input type=hidden name=machine value='{esc(machine)}'>"
-            f"<button type=submit>Start on {esc(machine)}</button></form>"
+            f"<button type=submit title='Start {esc(repo)} on {esc(machine)}' "
+            f"aria-label='Start {esc(repo)} on {esc(machine)}'>"
+            f"Start on {esc(machine)}</button></form>"
         )
     for machine in entry.get("enable_hosts", []):
         controls.append(
             "<form method=post action=/repos/enable style='display:inline'>"
             f"<input type=hidden name=repo value='{esc(repo)}'>"
             f"<input type=hidden name=machine value='{esc(machine)}'>"
-            f"<button type=submit>Enable on {esc(machine)}</button></form>"
+            f"<button type=submit title='Enable {esc(repo)} on {esc(machine)}' "
+            f"aria-label='Enable {esc(repo)} on {esc(machine)}'>"
+            f"Enable on {esc(machine)}</button></form>"
         )
     return " ".join(controls)
 
 
 def _render_repo_table(repos: list[dict], local_host: str) -> str:
     rows = [
-        "<tr><th>repo</th><th>state</th><th>loops &middot; max</th>"
+        "<tr><th>repo</th><th>state</th><th>loops &middot; concurrency</th>"
         "<th>machine</th><th>roadmap</th><th>actions</th></tr>"
     ]
     for r in repos:
@@ -2612,13 +2891,20 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
         sess_label = "running" if r["running"] else "stopped"
         current_max = r["max"] if r["max"] is not None else 1
         stepper = _repo_slot_controls(repo, current_max)
-        roadmap_link = f"<a href='/roadmap?repo={quote(repo, safe='')}'>Roadmap</a>"
+        roadmap_link = (
+            f"<a href='/roadmap?repo={quote(repo, safe='')}' "
+            f"title='Open the roadmap for {esc(repo)}'>Roadmap</a>"
+        )
         doc_action = (
-            f"<a href='/repos?doc={quote(repo, safe='')}'>doc</a>"
+            f"<a href='/repos?doc={quote(repo, safe='')}' "
+            f"title='View {esc(repo)}/{esc(LOOP_DOC)}'>doc</a>"
             if r.get("has_doc")
             else "<span class=dim>no doc (optional)</span>"
         )
-        schedule_link = f"<a href='/repos?schedule={quote(repo, safe='')}'>Schedule&hellip;</a>"
+        schedule_link = (
+            f"<a href='/repos?schedule={quote(repo, safe='')}' "
+            f"title='Schedule a one-off run for {esc(repo)}'>Schedule one-off&hellip;</a>"
+        )
         if r["state"] == "enabled":
             place_choice = "spread" if _coordinator_only() else local_host
             run_form = (
@@ -2626,15 +2912,21 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
                 f"<input type=hidden name=repo value='{esc(repo)}'>"
                 "<input type=hidden name=cnt value=1>"
                 f"<input type=hidden name=place value='{esc(place_choice)}'>"
-                "<button type=submit>Run now</button></form>"
+                f"<button type=submit title='Start one loop for {esc(repo)} now' "
+                f"aria-label='Start one loop for {esc(repo)} now'>Run now</button></form>"
             )
-            remove_link = f"<a href='/repos?remove={quote(repo, safe='')}'>Remove</a>"
+            remove_link = (
+                f"<a href='/repos?remove={quote(repo, safe='')}' "
+                f"title='Remove {esc(repo)} from recurring and one-off schedules'>Remove</a>"
+            )
             actions = f"{run_form} {schedule_link} &middot; {doc_action} &middot; {remove_link}"
         else:
             add_btn = (
                 "<form method=post action=/repos/add style='display:inline'>"
                 f"<input type=hidden name=repo value='{esc(repo)}'>"
-                "<button type=submit>Add to schedule</button></form>"
+                f"<button type=submit title='Add {esc(repo)} to the recurring schedule' "
+                f"aria-label='Add {esc(repo)} to the recurring schedule'>"
+                "Add to schedule</button></form>"
             )
             actions = f"{add_btn} {schedule_link} &middot; {doc_action}"
         remote_controls = _remote_repo_controls(repo, r)
@@ -2645,7 +2937,38 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
             f"<td><span class='dot {dot}'></span> {esc(sess_label)} {stepper}</td>"
             f"<td>{esc(r['machine'])}</td><td>{roadmap_link}</td><td>{actions}</td></tr>"
         )
-    return "<div class=card><table>" + "".join(rows) + "</table></div>"
+    return "<div class='card scroll'><table>" + "".join(rows) + "</table></div>"
+
+
+_REPO_FILTERS = (
+    ("all", "All"),
+    ("enabled", "Enabled"),
+    ("disabled", "Disabled"),
+    ("no-docs", "No docs"),
+)
+
+
+def _repo_filter_rows(repos: list[dict], repo_filter: str) -> list[dict]:
+    if repo_filter == "enabled":
+        return [repo for repo in repos if repo["state"] == "enabled"]
+    if repo_filter == "disabled":
+        return [repo for repo in repos if repo["state"] == "disabled"]
+    if repo_filter == "no-docs":
+        return [repo for repo in repos if repo.get("has_doc") is False]
+    return repos
+
+
+def _render_repo_filters(active: str) -> str:
+    links = []
+    for value, label in _REPO_FILTERS:
+        href = "/repos" if value == "all" else f"/repos?filter={quote(value, safe='')}"
+        css = "pill on" if value == active else "pill"
+        current = " aria-current='page'" if value == active else ""
+        links.append(
+            f"<a class='{css}' href='{href}'{current} style='display:inline-block'>"
+            f"{label}</a>"
+        )
+    return "<nav class=row aria-label='Repository filters'>" + "".join(links) + "</nav>"
 
 
 def render_repos(
@@ -2658,6 +2981,7 @@ def render_repos(
     schedule_repo: str | None = None,
     remove_repo: str | None = None,
     sent: str | None = None,
+    repo_filter: str = "all",
 ) -> bytes:
     """Show local repos and repos reported by other machines.
 
@@ -2666,6 +2990,9 @@ def render_repos(
     `data` comes from `gather_repos()`. Query flags open a panel.
     """
     repos = data["repos"]
+    if repo_filter not in {"all", "enabled", "disabled", "no-docs"}:
+        repo_filter = "all"
+    visible_repos = _repo_filter_rows(repos, repo_filter)
     local_host = data["local_host"]
     body = [f'<header><h1>{icon(REPOS_ICON)}Repos</h1></header>']
 
@@ -2674,7 +3001,12 @@ def render_repos(
 
     add_href = "/repos" if add else "/repos?add=existing"
     add_label = "Close" if add else "Add repo"
-    body.append(f"<div class=row style='margin-bottom:.6rem'><span class=sp></span><a href='{add_href}'>{esc(add_label)}</a></div>")
+    body.append(
+        "<div class='row' style='margin-bottom:.6rem'>"
+        f"{_render_repo_filters(repo_filter)}"
+        "<span class=sp></span>"
+        f"<a href='{add_href}'>{esc(add_label)}</a></div>"
+    )
 
     if add:
         body.append(_render_add_panel(add, repos))
@@ -2690,8 +3022,12 @@ def render_repos(
             "<div class=card><p class=dim>No repos yet. Add one to start scheduling loops.</p>"
             "<a href='/repos?add=existing'>Add your first repo</a></div>"
         )
+    elif not visible_repos:
+        body.append(
+            "<div class=card><p class=dim>No repositories match this filter.</p></div>"
+        )
     else:
-        body.append(_render_repo_table(repos, local_host))
+        body.append(_render_repo_table(visible_repos, local_host))
 
     fleet_error = data.get("fleet_error")
     if fleet_error:
@@ -2700,7 +3036,15 @@ def render_repos(
             "(loop status and concurrency caps below are limited to this machine).</p>"
         )
 
-    return page("Repos", "".join(body), active="repos", extra_js=DOC_EDITOR_JS)
+    extra_js = DOC_EDITOR_JS
+    if sent is not None:
+        extra_js += (
+            ";{const url=new URL(location.href);"
+            "if(url.searchParams.has(\"sent\")){"
+            "url.searchParams.delete(\"sent\");"
+            "history.replaceState(null,\"\",url);}}"
+        )
+    return page("Repos", "".join(body), active="repos", extra_js=extra_js)
 
 
 TIMER_WINDOW_S = 4 * 3600  # the mockup's 4-hour timeline strip
@@ -3109,7 +3453,12 @@ def render_debrief_index(items: list[dict]) -> bytes:
         f"{' &middot; no changes' if item['quiet'] else '' if item['has_digest'] or item['record_only'] else ' &middot; no digest'}</span></li>"
         for item in items
     )
-    listing = f"<ul>{rows}</ul>" if rows else "<p class=dim>No debriefs yet.</p>"
+    listing = f"<ul>{rows}</ul>" if rows else (
+        "<div class=dim><p>No debriefs yet.</p>"
+        "<p>Debriefs are written to the local <code>debriefs/</code> folder. "
+        "The fleet shares their digests here. Run <code>lupin agent</code> "
+        "to write periodic debriefs.</p></div>"
+    )
     return page(
         "Debriefs",
         f"<header><h1>Debriefs</h1></header><div class=card>{listing}</div>",
@@ -3409,7 +3758,7 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/machines":
             try:
                 records = machines.machines(self.fleet_connection, strict=True)
-                slot_status = slots_redis.status(**self.fleet_connection)
+                slot_status = slots_redis.status(include_holder_names=True, **self.fleet_connection)
                 timer_list = timers()
                 recurring_timer = next(
                     (timer for timer in timer_list if timer["unit"] == "delegation-loop.timer"),
@@ -3607,6 +3956,7 @@ class Handler(BaseHTTPRequestHandler):
                 schedule_repo=(query.get("schedule") or "").strip() or None,
                 remove_repo=(query.get("remove") or "").strip() or None,
                 sent=query.get("sent"),
+                repo_filter=query.get("filter") or "all",
             )
         )
 
@@ -3623,22 +3973,31 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("cannot reach the redis coordinator"), 502)
             return
         record = next((row for row in records if row.get("name") == machine), None)
+        if not record:
+            self.reply(render_error(f"remote machine {machine} is not registered"), 400)
+            return
+        if record.get("state") == "offline":
+            self.reply(render_error(f"machine {machine} is offline"), 400)
+            return
+        if record.get("state") != "online":
+            self.reply(render_error(f"machine {machine} is not online"), 400)
+            return
         known_repo = next(
             (
-                item for item in (record or {}).get("repos", [])
+                item for item in record.get("repos", [])
                 if isinstance(item, dict) and item.get("repo") == repo
             ),
             None,
         )
+        if known_repo and known_repo.get("enabled") is True:
+            self.reply(render_error(f"{repo} is already enabled on {machine}"), 400)
+            return
         if (
-            not record
-            or record.get("state") != "online"
-            or not known_repo
-            or known_repo.get("enabled") is True
+            not known_repo
             or known_repo.get("loopable") is not True
             or "repo.enable" not in record.get("actions", [])
         ):
-            self.reply(render_error("remote repository cannot be enabled on that machine"), 400)
+            self.reply(render_error(f"remote repository cannot be enabled on {machine}"), 400)
             return
         signing_key = self._signing_key_for(machine)
         if not signing_key:
@@ -3752,7 +4111,8 @@ class Handler(BaseHTTPRequestHandler):
         except CoordinatorUnreachable:
             self.reply(render_error("cannot reach the machine registry"), 502)
             return
-        self.redirect("/repos")
+        sent = f"Concurrency limit for {repo} changed to {max_value}"
+        self.redirect(f"/repos?sent={quote(sent, safe='')}")
 
     def do_repos_schedule(self, form: dict) -> None:
         """Schedule one local one-off run through Lupin."""

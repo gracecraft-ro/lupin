@@ -6,7 +6,7 @@ This file is optional. Read the root `AGENTS.md` first.
 
 This repo is `OWNER/REPO`. The owner mounts a local checkout at
 `/code/<checkout>`. A loop agent does not edit this main checkout. Each run gets
-its own Git worktree in the loop state directory. See "State" in `AGENTS.md`.
+its own Git worktree in the loop state directory. See [State](user-guide.md#state).
 
 ## Lupin commands for a pass
 
@@ -87,6 +87,18 @@ goes to upstream `main`. In this repo:
    in that merge. Do not rebase. A sync is a push, so it needs a new review.
 7. PRs come first. In each cycle, dispatch PR work before new issues. A PR in a
    fix cycle does not delay new work.
+
+## Dependabot backlogs
+
+For a large open backlog of Dependabot PRs, dispatch one worker to inspect every
+source PR. The worker combines every compatible, unique dependency update in one
+new branch and one PR. It removes duplicate package updates and does not omit an
+update. Do not change or push to a Dependabot branch, or close or merge a source
+Dependabot PR. List every source PR as `Supersedes #N`; do not use closing
+keywords. If any update is not safe to combine, stop and report the exact
+blocker. Do not split the work or drop an update. Immediately dispatch an
+independent reviewer at the bundle PR's exact head SHA. Follow "Pull request and
+review" above for approval, hosted checks, and owner merge.
 
 ### Preview server
 
