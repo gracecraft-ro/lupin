@@ -46,6 +46,25 @@ def test_help_is_user_facing(capsys):
     assert "size" in route_help
 
 
+def test_route_command_excludes_multiple_providers(monkeypatch, capsys):
+    monkeypatch.setattr(cli.route_mod.quota_mod, "quota_usage", lambda: [])
+
+    code = cli.main([
+        "route",
+        "coding",
+        "size-m",
+        "--exclude-provider",
+        "claude",
+        "--exclude-provider",
+        "opencode-go",
+        "--json",
+    ])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["model"] == "openai-codex/gpt-6-sol"
+
+
 def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     monkeypatch, tmp_path, capsys, make_checkout
 ):
@@ -69,11 +88,14 @@ def test_run_creates_herdr_worker_metadata_and_systemd_unit(
         ),
     )
     launched = []
-    monkeypatch.setattr(
-        loop_runtime,
-        "_systemd_run",
-        lambda repo, kind, command, **kwargs: launched.append((repo, kind, command, kwargs)) or (0, ""),
-    )
+
+    def systemd_run(repo, kind, command, **kwargs):
+        launched.append((repo, kind, command, kwargs))
+        metadata = loop_runtime._read_metadata(repo)
+        loop_runtime._set_loop_state(repo, metadata, "running")
+        return 0, ""
+
+    monkeypatch.setattr(loop_runtime, "_systemd_run", systemd_run)
 
     assert cli.main(["run", "widgets", "--json"]) == 0
 
@@ -88,7 +110,7 @@ def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     assert "--session" in command
     assert options["claude_limits"] is True
     metadata = json.loads((state_dir / "herdr-loops" / "widgets.json").read_text(encoding="utf-8"))
-    assert metadata["state"] == "starting"
+    assert metadata["state"] == "running"
     assert metadata["platform"] == "claude"
     assert Path(metadata["prompt_file"]).is_file()
     assert loop_runtime.run_log.valid_run_id(metadata["run_id"])
@@ -360,6 +382,37 @@ def test_loops_unreadable_repos_file_exits_one_without_traceback(monkeypatch, tm
     assert f"could not read {repos}" in err
     assert "Traceback" not in err
 
+
+def test_loops_json_shows_checkout_agent_as_unmanaged(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "missing")
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"lupin": "claude"})
+    monkeypatch.setattr(
+        loop_runtime,
+        "_agents",
+        lambda session: [
+            {
+                "cwd": "/home/user/code/lupin",
+                "workspace_id": "w3V",
+                "pane_id": "w3V:p1",
+                "agent_status": "working",
+                "agent": "claude",
+            }
+        ],
+    )
+
+    assert cli.main(["loops", "--json"]) == 0
+
+    rows = json.loads(capsys.readouterr().out)
+    loop = next(row for row in rows if row.get("repo") == "lupin")
+    unmanaged = next(row for row in rows if row.get("managed") is False)
+    assert loop["state"] == "stopped"
+    assert unmanaged["repo"] is None
+    assert unmanaged["pane_id"] == "w3V:p1"
+    assert unmanaged["workspace_id"] == "w3V"
+    assert unmanaged["agent"] == "claude"
+
+    assert cli.main(["loops"]) == 0
+    assert "unmanaged: working (herdr)" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
