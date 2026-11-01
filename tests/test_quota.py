@@ -198,6 +198,47 @@ class QuotaUsageTests(unittest.TestCase):
         self.assertEqual(opencode_row["used_pct"], 64.0)
         self.assertEqual(opencode_row["resets_at"], reset_at_ms)
 
+
+    def test_claude_oauth_fallback_matches_its_omp_account(self):
+        reports = {
+            "reports": [
+                {
+                    "provider": "claude",
+                    "metadata": {"planType": "pro", "email": "first@example.com"},
+                    "limits": [{
+                        "id": "five_hour", "label": "5 hours",
+                        "window": {"durationMs": 18_000_000, "resetsAt": 100_000},
+                        "amount": {"usedFraction": 0.25},
+                    }],
+                },
+                {
+                    "provider": "claude",
+                    "metadata": {"planType": "pro", "email": "oauth@example.com"},
+                    "limits": [{
+                        "id": "five_hour", "label": "5 hours",
+                        "window": {"durationMs": 18_000_000, "resetsAt": 200_000},
+                        "amount": {"usedFraction": 0.75},
+                    }],
+                },
+            ],
+        }
+        oauth_rows = [{
+            "provider": "claude",
+            "duration": quota.QuotaDuration.FIVE_HOURS,
+            "used_pct": 75,
+            "resets_at": 200_000,
+        }]
+        with (
+            mock.patch.object(quota, "run", return_value=(0, json.dumps(reports))),
+            mock.patch.object(quota, "claude_oauth_quota", return_value=oauth_rows),
+        ):
+            rows = [row for row in quota.quota_usage() if row["provider"] == "claude"]
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual({row["account"] for row in rows}, {
+            "pro-" + __import__("hashlib").sha256(b"first@example.com\\0").hexdigest()[:6],
+            "pro-" + __import__("hashlib").sha256(b"oauth@example.com\\0").hexdigest()[:6],
+        })
     def test_uses_latest_codex_snapshot_when_omp_fails(self):
         sessions = os.path.join(self.tempdir.name, "sessions")
         session_dir = os.path.join(sessions, "2026", "10", "03")

@@ -24,7 +24,7 @@
           pyproject = true;
           src = self;
           build-system = [ pkgs.python3Packages.setuptools ];
-          # python3Packages.redis is the `redis` backend's only runtime
+          # `python3Packages.redis` is the `redis` backend's only runtime
           # dependency (issue #210).
           dependencies = [ pkgs.python3Packages.redis ];
           doCheck = false;

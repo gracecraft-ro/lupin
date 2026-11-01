@@ -1603,6 +1603,7 @@ def test_start_loop_removes_its_new_worktree_when_the_service_does_not_start(
     assert "worktree" not in metadata
 
 
+
 def test_start_loop_reports_a_worktree_git_keeps_when_the_service_does_not_start(
     monkeypatch, tmp_path: Path, make_checkout
 ):
