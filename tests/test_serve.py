@@ -1390,6 +1390,61 @@ class ModelTiersRefreshBenchmarksRouteTests(unittest.TestCase):
         )
         self.assertIn(detail, "\n".join(logs.output))
 
+    def test_refresh_benchmarks_logs_full_redacted_errors_before_bounds(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh-benchmarks"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        diagnostics = [
+            "first diagnostic " + "a" * 320 + " api_key=synthetic-secret-1 first-tail-after-300",
+            "second diagnostic " + "b" * 320 + " ghp_testsecret123 second-tail-after-300",
+        ]
+        results = [mock.Mock(returncode=1, stdout="", stderr=detail) for detail in diagnostics]
+        snapshot = {}
+
+        def refresh(**_kwargs):
+            snapshot.update(
+                serve.benchmark_fetch.fetch_benchmark_scores(["model"], connection={})
+            )
+            return snapshot
+
+        with (
+            mock.patch.object(serve.benchmark_fetch.subprocess, "run", side_effect=results),
+            mock.patch.object(
+                serve.benchmark_fetch,
+                "_resolve_workers",
+                return_value=(["worker-one", "worker-two"], None),
+            ),
+            mock.patch.object(serve.benchmark_fetch, "_zero_price_model_ids", return_value=[]),
+            mock.patch.object(serve.benchmark_fetch, "refresh_snapshot", side_effect=refresh),
+            self.assertLogs(level="WARNING") as logs,
+        ):
+            handler.do_POST()
+
+        handler.send_response.assert_called_once_with(303)
+        location = next(
+            call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
+        )
+        self.assertEqual(
+            unquote(location.split("sent=", 1)[1]),
+            "Benchmark pull did not complete. Check the server logs for details.",
+        )
+        log = "\n".join(logs.output)
+        self.assertIn("first-tail-after-300", log)
+        self.assertIn("second-tail-after-300", log)
+        self.assertIn("[redacted]", log)
+        self.assertNotIn("synthetic-secret-1", log)
+        self.assertNotIn("ghp_testsecret123", log)
+        self.assertEqual(len(snapshot["stale_reason"]), 500)
+        self.assertNotIn("second-tail-after-300", snapshot["stale_reason"])
+        self.assertNotIn("ghp_testsecret123", snapshot["stale_reason"])
+        self.assertNotIn("synthetic-secret-1", snapshot["stale_reason"])
+        self.assertNotIn("ghp_testsecret123", location)
+
 
 class RoadmapCliTests(unittest.TestCase):
     def setUp(self):
