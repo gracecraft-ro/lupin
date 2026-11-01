@@ -18,6 +18,7 @@ from pathlib import Path
 from importlib import resources
 from unittest import mock
 from urllib.parse import quote, unquote
+from xml.etree import ElementTree
 
 import pytest
 import redis as redis_lib
@@ -496,6 +497,43 @@ class DashboardRouteTests(unittest.TestCase):
         self.assertIn("href='/favicon.ico' type='image/svg+xml'", head)
         self.assertIn("name=viewport", head)
 
+    def test_favicon_matches_lupin_flower_pixels(self):
+        rows = [
+            "l", "lPl", "PlP", "lPlPl", "PlPlP", "lPlPlPl", "PlllllllP",
+            "PlelllelP", "PbllellbP", "PlllllllP", "lPlPlPlPl", "PlPlPlP",
+            "lPlPl", "g", "GG..g..GG", "GGG.g.GGG", ".GGGgGGG.", "g",
+        ]
+        palette = {
+            "l": "#d4c3f7",
+            "P": "#8a63d9",
+            "e": "#2a2340",
+            "b": "#f4a6c4",
+            "g": "#3f8a5a",
+            "G": "#93d1a0",
+        }
+        root = ElementTree.fromstring(serve.FAVICON)
+        self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
+        self.assertEqual(root.attrib["viewBox"], "0 0 13 18")
+
+        actual = {}
+        for rect in root:
+            self.assertEqual(rect.tag, "{http://www.w3.org/2000/svg}rect")
+            x, y, width, height = (
+                int(rect.attrib[key]) for key in ("x", "y", "width", "height")
+            )
+            self.assertEqual(height, 1)
+            for col in range(x, x + width):
+                self.assertNotIn((col, y), actual)
+                actual[col, y] = rect.attrib["fill"]
+
+        expected = {}
+        for y, row in enumerate(rows):
+            row = ("." * ((13 - len(row)) // 2) + row).ljust(13, ".")
+            for x, char in enumerate(row):
+                if char != ".":
+                    expected[x, y] = palette[char]
+        self.assertEqual(actual, expected)
+
 
 class MachinesRouteUnitTests(unittest.TestCase):
     """Routing/dispatch logic only -- mocked machines/slots_redis calls, no
@@ -515,6 +553,24 @@ class MachinesRouteUnitTests(unittest.TestCase):
             handler.do_GET()
         fake.assert_called_once_with({"redis_host": "127.0.0.1"}, strict=True)
         handler.reply.assert_called_once()
+
+    def test_render_machines_labels_unmanaged_agent_and_identity(self):
+        records = [{
+            "name": "worker",
+            "state": "online",
+            "loops": [{
+                "repo": None,
+                "managed": False,
+                "state": "working",
+                "agent": "omp",
+            }],
+        }]
+        with mock.patch.object(serve.machines, "hostname", return_value="reader"):
+            body = serve.render_machines(records, {}).decode()
+
+        self.assertIn("Unmanaged agent · omp", body)
+        self.assertIn("working", body)
+        self.assertNotIn("Unknown repo", body)
 
     def test_machines_route_unreachable_coordinator_is_502(self):
         handler = serve.Handler.__new__(serve.Handler)
@@ -4978,7 +5034,7 @@ def test_image_route_falls_back_to_github_when_redis_has_no_copy(monkeypatch, re
     assert asked == ["eba1e250-ae34-481a-9f8c-98503030f83e"] and handler.wfile.getvalue() == b"gh-bytes"
 
 
-def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_the_page_says_it_is_a_record(tmp_path, monkeypatch, redis_port, flush_redis):
+def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_page_says_no_digest(tmp_path, monkeypatch, redis_port, flush_redis):
     from lupin import digest as digest_mod
 
     monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
@@ -4994,7 +5050,7 @@ def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_the_page_s
     page.do_GET()
 
     assert "no digest" not in index.reply.call_args.args[0].decode()
-    assert "This is a record" in page.reply.call_args.args[0].decode()
+    assert "This debrief is a record without a digest." in page.reply.call_args.args[0].decode()
 
 
 def test_nav_links_have_accessible_names():
@@ -5002,5 +5058,3 @@ def test_nav_links_have_accessible_names():
     assert rendered.count("class='navlink") == len(serve.NAV_ITEMS)
     for _key, _href, label, _path in serve.NAV_ITEMS:
         assert f"aria-label='{label}'" in rendered
-
-
