@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -58,6 +59,7 @@ UNFINISHED_GIT_STATES = (
     ("REVERT_HEAD", "revert"),
 )
 SERVER_START_TIMEOUT = 30.0
+WORKER_START_TIMEOUT = HERDR_TIMEOUT * 2 + SERVER_START_TIMEOUT + 10.0
 PANE_READ_TIMEOUT = 60.0
 SYSTEMCTL_CHECK_TIMEOUT = 3.0
 SYSTEMCTL_STOP_TIMEOUT = 30.0
@@ -959,18 +961,23 @@ def _clear_previous_worktree(repo: str, metadata: dict | None) -> str:
     return note
 
 
-def _finish_failed_start(repo: str, value: dict, resume: bool) -> str:
+def _finish_failed_start(
+    repo: str,
+    value: dict,
+    resume: bool,
+    *,
+    remove_worktree: bool = True,
+) -> str:
     """Record a failed start and remove what it made. Return a note for the message.
 
-    A resume keeps the recorded worktree, so the next resume can reuse it.
-    Otherwise remove the worktree and its branch. When git keeps the worktree,
-    the note names its path. Metadata is written even if removal raises.
+    A resume keeps its worktree. A caller can also keep it when the worker
+    cannot be stopped safely.
     """
     previous_state = value.get("state")
     value["state"] = "failed"
     removed_note = ""
     try:
-        if not resume:
+        if not resume and remove_worktree:
             try:
                 _, removed_note = _remove_worktree(repo, value)
             except LoopError as exc:
@@ -984,7 +991,76 @@ def _finish_failed_start(repo: str, value: dict, resume: bool) -> str:
             )
         if value["prompt_file"]:
             Path(value["prompt_file"]).unlink(missing_ok=True)
+    if not resume and remove_worktree:
+        checkout = CODE_DIR / base_repo(repo)
+        if value.get("worktree"):
+            removed_note += (
+                f"; run `git -C {shlex.quote(str(checkout))} worktree remove "
+                f"{shlex.quote(str(value['worktree']))}` after saving its changes"
+            )
+        if value.get("branch"):
+            removed_note += (
+                f"; after its work is merged, run "
+                f"`git -C {shlex.quote(str(checkout))} branch -d "
+                f"{shlex.quote(str(value['branch']))}`"
+            )
     return removed_note
+
+
+def _wait_for_worker_start(repo: str, worker_unit: str) -> tuple[dict | None, str]:
+    deadline = time.monotonic() + WORKER_START_TIMEOUT
+    next_status_check = 0.0
+    while True:
+        try:
+            metadata = _read_metadata(repo)
+        except LoopError as exc:
+            return None, f"could not read worker state: {exc}"
+        if metadata is None:
+            return None, "worker state disappeared before reaching running"
+        state = metadata.get("state")
+        if state == "running":
+            return metadata, ""
+        if state != "starting":
+            return metadata, f"worker entered {state or 'unknown'} state before reaching running"
+        now = time.monotonic()
+        if now >= deadline:
+            return metadata, f"worker did not reach running within {WORKER_START_TIMEOUT:g}s"
+        if now >= next_status_check:
+            try:
+                _, service_state = _run(
+                    ["systemctl", "is-active", f"{worker_unit}.service"],
+                    timeout=SYSTEMCTL_CHECK_TIMEOUT,
+                )
+            except LoopError as exc:
+                return metadata, f"could not check worker service: {exc}"
+            if service_state not in {"active", "activating", "deactivating"}:
+                return metadata, "worker exited before reaching running"
+            next_status_check = now + 1.0
+        time.sleep(0.25)
+
+
+def _stop_failed_worker(repo: str) -> str:
+    unit = f"{unit_name(repo)}.service"
+    try:
+        _, state = _run(
+            ["systemctl", "is-active", unit], timeout=SYSTEMCTL_CHECK_TIMEOUT
+        )
+    except LoopError as exc:
+        return f"; could not check worker service: {exc}"
+    if state in {"inactive", "failed", "unknown"}:
+        return ""
+    if state not in {"active", "activating", "deactivating"}:
+        return f"; could not confirm worker service state ({state or 'no output'})"
+    try:
+        rc, output = _run(
+            _sudo_argv("systemctl", "stop", unit), timeout=SYSTEMCTL_STOP_TIMEOUT
+        )
+    except LoopError as exc:
+        return f"; could not stop worker service: {exc}"
+    if rc:
+        detail = output or f"exit code {rc}"
+        return f"; could not stop worker service: {detail}"
+    return ""
 
 
 def start_loop(
@@ -1131,6 +1207,32 @@ def start_loop(
             )
             removed_note = _finish_failed_start(repo, value, resume)
             return False, (output or f"could not start loop service for {repo}") + removed_note
+        startup_metadata, startup_error = _wait_for_worker_start(repo, worker_unit)
+        if startup_error:
+            try:
+                latest = _read_metadata(repo)
+            except LoopError:
+                latest = None
+            latest = latest or startup_metadata or value
+            _log_event(
+                repo, latest, "error",
+                error_type="WorkerStartError", message=startup_error,
+            )
+            stop_note = _stop_failed_worker(repo)
+            if latest.get("workspace_id"):
+                return False, (
+                    f"{startup_error}{stop_note}; workspace needs review; "
+                    f"run `lupin stop {repo}` to hand off and clean its worktree"
+                )
+            removed_note = _finish_failed_start(
+                repo, latest, resume, remove_worktree=not bool(stop_note)
+            )
+            if stop_note:
+                removed_note += (
+                    f"; run `lupin stop {repo}` to stop the worker and "
+                    "clean its worktree"
+                )
+            return False, f"{startup_error}{stop_note}{removed_note}"
         return True, (
             f"started {repo} ({selected}) in Herdr session {session}; "
             f"worktree {worktree}{previous_note}"
@@ -1817,9 +1919,17 @@ def write_due_periodic_debriefs(now: datetime | None = None) -> None:
         checkout = CODE_DIR / repo
         if not checkout.is_dir():
             continue
-        for period in debrief.PERIODS:
+        periods = [(period, period) for period in debrief.PERIODS]
+        if repo == "lupin":
+            periods.append((debrief.OWNER_BLOCKED_PERIOD, "24h"))
+        for period, window_period in periods:
             try:
-                if not debrief.window_due(STATE_DIR, repo, period, now):
+                is_due = (
+                    debrief.owner_blocked_window_due(STATE_DIR, repo, now)
+                    if period == debrief.OWNER_BLOCKED_PERIOD
+                    else debrief.window_due(STATE_DIR, repo, period, now)
+                )
+                if not is_due:
                     continue
                 if not client_tried:
                     client_tried = True
@@ -1827,12 +1937,15 @@ def write_due_periodic_debriefs(now: datetime | None = None) -> None:
                         client = slots_redis.debrief_client(*debrief._redis_connection())
                     except (ValueError, OSError) as exc:  # A fleet config file that cannot be read.
                         print(f"lupin agent: debrief claims off: {exc}", file=sys.stderr)
-                end = debrief.finished_window_end(period, now)
+                end = debrief.finished_window_end(window_period, now)
                 if not debrief.claim_window(client, repo, period, end, machine):
                     continue  # Another machine writes this window.
                 written = False
                 try:
-                    debrief.write_window(STATE_DIR, repo, checkout, period, now=now)
+                    if period == debrief.OWNER_BLOCKED_PERIOD:
+                        debrief.write_owner_blocked_window(STATE_DIR, repo, checkout, now=now)
+                    else:
+                        debrief.write_window(STATE_DIR, repo, checkout, period, now=now)
                     written = wrote = True
                 finally:
                     debrief.finish_window(client, repo, period, end, machine, written=written)
@@ -2017,19 +2130,27 @@ def _agent_repo(agent: dict) -> str | None:
         return None
 
 
+_AGENT_STATE_PRIORITY = {
+    "unknown": 0,
+    "done": 1,
+    "running": 2,
+    "needs_attention": 3,
+}
+
+
 def _reported_agent_state(status: object) -> str:
     if not isinstance(status, str):
         return "unknown"
-    if status in {"idle", "working"}:
+    if status in {"idle", "working", "running"}:
         return "running"
-    if status == "blocked":
+    if status in {"blocked", "needs_attention"}:
         return "needs_attention"
     if status == "done":
         return "done"
     return "unknown"
 
 
-def local_loops() -> list[dict]:
+def local_loops(*, include_unmanaged: bool = False) -> list[dict]:
     result = []
     if LOOPS_DIR.is_dir():
         for path in sorted(LOOPS_DIR.glob("*.json")):
@@ -2068,45 +2189,50 @@ def local_loops() -> list[dict]:
         agents = _agents(SESSION_NAME)
     except LoopError:
         agents = []
-    groups: dict[str, list[dict]] = {}
+    unmanaged_agents = []
     for agent in agents:
-        repo = _agent_repo(agent)
-        if repo:
-            groups.setdefault(repo, []).append(agent)
-
-    for repo, agents_for_repo in groups.items():
-        panes = [
-            {
-                "workspace_id": agent.get("workspace_id"),
-                "pane_id": agent.get("pane_id"),
-                "agent_status": agent.get("agent_status", "unknown"),
-                "agent": agent.get("agent"),
-            }
-            for agent in agents_for_repo
+        workspace_id = agent.get("workspace_id")
+        pane_id = agent.get("pane_id")
+        matches = [
+            row for row in result
+            if (
+                workspace_id and workspace_id == row.get("workspace_id")
+                or pane_id and pane_id == row.get("pane_id")
+            )
         ]
-        state = max(
-            (_reported_agent_state(agent.get("agent_status")) for agent in agents_for_repo),
-            key=lambda item: {"needs_attention": 3, "running": 2, "done": 1, "unknown": 0}[item],
-        )
-        existing_rows = [row for row in result if loop_repo(row["repo"]) == repo]
-        if not existing_rows:
-            first = agents_for_repo[0]
-            result.append({
-                "repo": repo,
-                "platform": first.get("agent"),
-                "state": state,
-                "since": first.get("started_at"),
+        if not matches:
+            unmanaged_agents.append(agent)
+            continue
+        pane = {
+            "workspace_id": workspace_id,
+            "pane_id": pane_id,
+            "agent_status": agent.get("agent_status", "unknown"),
+            "agent": agent.get("agent"),
+        }
+        state = _reported_agent_state(agent.get("agent_status"))
+        for row in matches:
+            row.setdefault("panes", []).append(pane)
+            current_state = _reported_agent_state(row.get("state"))
+            if current_state != "unknown":
+                row["state"] = current_state
+            if _AGENT_STATE_PRIORITY[state] > _AGENT_STATE_PRIORITY[current_state]:
+                row["state"] = state
+
+    if include_unmanaged:
+        result.extend(
+            {
+                "repo": None,
+                "managed": False,
+                "state": agent.get("agent_status") or "unknown",
+                "since": agent.get("started_at"),
                 "backend": "herdr",
                 "session": SESSION_NAME,
-                "workspace_id": first.get("workspace_id"),
-                "pane_id": first.get("pane_id"),
-                "panes": panes,
-            })
-        else:
-            for existing in existing_rows:
-                existing["panes"] = panes
-                if state != "unknown":
-                    existing["state"] = state
+                "workspace_id": agent.get("workspace_id"),
+                "pane_id": agent.get("pane_id"),
+                "agent": agent.get("agent"),
+            }
+            for agent in unmanaged_agents
+        )
     return result
 
 def attach_argv(repo: str, machine: str, local_host: str, ssh_target: str | None) -> list[str]:
@@ -2334,7 +2460,9 @@ def schedule_local(args: list[str]) -> str:
 
 def status_rows(repos: list[str] | None = None) -> list[dict]:
     enabled = enabled_repos()
-    values = {row["repo"]: row for row in local_loops()}
+    rows = local_loops(include_unmanaged=repos is None)
+    unmanaged = [row for row in rows if row.get("managed") is False]
+    values = {row["repo"]: row for row in rows if row.get("managed") is not False}
     selected = repos if repos is not None else list(dict.fromkeys([*enabled, *values]))
     return [
         values.get(repo, {
@@ -2346,7 +2474,7 @@ def status_rows(repos: list[str] | None = None) -> list[dict]:
             "since": None,
         })
         for repo in selected
-    ]
+    ] + unmanaged
 
 
 def _print_json(value: Any) -> None:
