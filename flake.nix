@@ -2,7 +2,7 @@
   description = "lupin -- model routing and slot leases for multi-machine delegation loops";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/8ce4ef6cb6f871616146b9fe26d2a5ae594e94fe";
+    nixpkgs.url = "github:NixOS/nixpkgs/1c89083e451e891152365b799595cf7790a43325";
     oh-my-pi = {
       url = "github:can1357/oh-my-pi/cde91bb38674d365e8c3916d05d2292273bb8554";
       inputs.nixpkgs.follows = "nixpkgs";
