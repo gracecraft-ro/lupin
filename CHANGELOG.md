@@ -29,6 +29,7 @@ All notable changes to Lupin. The version has one source:
   graph. The empty states keep the selected repositories visible, the note
   under the board uses plain words, the priority filter offers P4, and the
   epics footer and the pager read the same way when the list is empty.
+- On phones, selecting a Roadmap issue scrolls its detail panel into view.
 - Roadmap repo-fetch warnings can be dismissed on Board and List. A dismissal
   stays hidden after a reload and applies to one repo and warning.
 - `lupin roadmap` text output shows one line per repo for issues with no
@@ -42,6 +43,7 @@ All notable changes to Lupin. The version has one source:
   is missing or different.
 - "Run now" passes dash-leading notes as one argument, and rejects notes
   with a NUL byte before dispatch.
+- The Overview shows a next step when no runs, machines, or enabled repos exist.
 - Routing and loop profiles block Claude's weekly quota above 90%. A blocked
   route tries only same- or lower-tier models with verified prices no higher
   than the blocked model, then defers with a reason.
@@ -49,6 +51,7 @@ All notable changes to Lupin. The version has one source:
 - Claim reads use Redis `TTL` for the remaining time.
 - `lupin place` reports quota deferrals when no reset time is available.
 - The Models page shows the model-tier file path that Lupin loads.
+- Text on the Overview and Models pages meets WCAG AA contrast.
 
 ## 0.1.0
 

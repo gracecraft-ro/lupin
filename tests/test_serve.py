@@ -114,6 +114,8 @@ class TimerTests(unittest.TestCase):
             ):
                 page = serve.render_dashboard(state).decode()
 
+        self.assertIn("<th>repository</th>", page)
+        self.assertNotIn("No runs are scheduled.", page)
         self.assertIn("all enabled repos", page)
         self.assertIn("<td>repo-one, repo-two", page)
         run.assert_not_called()
@@ -1389,8 +1391,23 @@ class FleetDashboardRenderTests(unittest.TestCase):
 
     def test_missing_fleet_keys_degrade_to_empty_sections(self):
         page = serve.render_dashboard(dict(self.base_state)).decode()
-        self.assertIn("No machines registered.", page)
+        self.assertIn(
+            "No machines registered. Run <code>lupin join &lt;redis-host&gt;[:port]</code>.",
+            page,
+        )
         self.assertIn("No claimed issues.", page)
+
+    def test_empty_overview_states_show_next_steps(self):
+        page = serve.render_dashboard(dict(self.base_state)).decode()
+        self.assertIn(
+            "No upcoming runs. <a href='/schedule'>Schedule one</a>.",
+            page,
+        )
+        self.assertNotIn("<th>repository</th>", page)
+        self.assertIn(
+            "0 repos enabled. <a href='/repos'>Enable a repo</a> to start loops.",
+            page,
+        )
 
     def test_fleet_error_shown_instead_of_machine_table(self):
         state = dict(self.base_state, fleet_error="machine registry: connection refused")
@@ -4310,8 +4327,6 @@ def test_debrief_index_lists_newest_first_with_utc_file_name_times(tmp_path, mon
     handler.do_GET()
 
     body = handler.reply.call_args.args[0].decode()
-    assert "<a class='navlink active' href='/debrief'>" in body
-    assert "<span>Debriefs</span>" in body
     assert "href='/debrief?repo=widgets&amp;file=20261002-090000.md'" in body
     assert "2026-10-02 09:00:00 UTC" in body
     assert body.index("20261002-090000") < body.index("20261001-090000")
@@ -4328,13 +4343,20 @@ def test_debrief_index_shows_the_period_of_a_periodic_debrief(tmp_path, monkeypa
     assert "2026-10-02 09:00:00 UTC -6h" in body
 
 
-def test_debrief_index_says_when_there_are_none(tmp_path, monkeypatch):
+def test_debrief_index_empty_state_explains_sources_and_writer(tmp_path, monkeypatch):
     monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
 
     handler = _get_handler("/debrief", {})
     handler.do_GET()
 
-    assert b"No debriefs yet." in handler.reply.call_args.args[0]
+    body = handler.reply.call_args.args[0].decode()
+    assert (
+        "<p>No debriefs yet.</p><p>Debriefs are written to the local "
+        "<code>debriefs/</code> folder. The fleet shares their digests here. "
+        "Run <code>lupin agent</code> to write periodic debriefs.</p>"
+    ) in body
+
+
 
 
 def test_debrief_page_renders_markdown_escapes_text_and_maps_images(tmp_path, monkeypatch):
@@ -4345,8 +4367,6 @@ def test_debrief_page_renders_markdown_escapes_text_and_maps_images(tmp_path, mo
     handler.do_GET()
 
     body = handler.reply.call_args.args[0].decode()
-    assert "<a class='navlink active' href='/debrief'>" in body
-    assert "<span>Debriefs</span>" in body
     assert "<h1>Debrief: acme/widgets</h1>" in body
     assert "<li>PR #11: Shipped feature &lt;b&gt;x&lt;/b&gt;</li>" in body
     assert f"<img src='/image?id={DEBRIEF_ATTACHMENT}'" in body
@@ -4649,3 +4669,12 @@ def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_the_page_s
 
     assert "no digest" not in index.reply.call_args.args[0].decode()
     assert "This is a record" in page.reply.call_args.args[0].decode()
+
+
+def test_nav_links_have_accessible_names():
+    rendered = serve.render_nav("overview")
+    assert rendered.count("class='navlink") == len(serve.NAV_ITEMS)
+    for _key, _href, label, _path in serve.NAV_ITEMS:
+        assert f"aria-label='{label}'" in rendered
+
+
