@@ -1,23 +1,19 @@
-# lupin
+# lupin agent and repository rules
 
-`lupin` runs task loops on many machines. It has four jobs.
+This file contains agent instructions and repository rules. See the
+[user guide](docs/user-guide.md) for command and state behavior.
 
-1. Routing. It picks a model and an effort level for a task. Commands: `route`,
-   `classify`, `review-route`. `fetch-models` saves a daily snapshot of the
-   models each subscription can call, with prices.
-2. Slots. A slot limits how many callers use a resource at one time. Commands:
-   `acquire`, `hold`, `release`, `status`.
-3. Dashboard. It shows the loops and controls them. Command: `serve`.
-4. Fleet. It shares issue claims, machine records, quests (issues worked
-   together on one machine), scheduled runs, and repo events. Commands: `claim`,
-   `renew-claim`, `release-claim`, `join`, `heartbeat`, `drain`, `undrain`,
-   `machines`, `place`, `quest`, `reconcile`, `roadmap`, `ledger`, `fleet-run`.
-   Loop commands: `run`, `once`, `enable`, `disable`, `loops`, `stop`, `peek`,
-   `logs`, `attach`, `schedule`, `pause`, `resume`, `supervise`.
+## Host-specific setup
 
-Run `lupin --help` for the full list.
+Each run gets its repo's GitHub token as `GH_TOKEN`. The host maps repo names
+to token files with `LUPIN_LOOP_CREDENTIALS_FILE`; see `docs/configuration.md`.
 
-## Commands
+The coordinator reads one signing-key file per worker from
+`LUPIN_CMD_SIGNING_KEYS_DIR`, or from systemd's `CREDENTIALS_DIRECTORY` if the
+first setting is unset. Each worker runs `lupin agent` with its key. The sender
+also needs the target worker's key. Inject keys only into the Lupin process,
+through protected secret management. Do not put them in command arguments or
+global environment settings.
 
 ```
 lupin route <category> <size> [--no-bmo] [--primary-effort E] [--json]
@@ -480,6 +476,7 @@ The Repos and Roadmap pages read the checkouts in `LUPIN_LOOP_CODE_DIR` (default
 does not appear. The serving user must be able to read each checkout. If another
 user owns a checkout, Git reports "dubious ownership", and the page shows no
 issues. Add the checkout to Git's `safe.directory` list.
+
 
 ## Dashboard mockups
 
