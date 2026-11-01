@@ -1638,18 +1638,18 @@ def render_quota_summary(rows: list[dict], now_ms: int) -> str:
     ]
     next_reset = min(resets, key=lambda row: row["resets_at"], default=None)
     attention = (
-        ", ".join(f"{quota_row_name(row)} {quota_duration_label(row)}" for row in ahead)
+        ", ".join(f"{quota_row_name(row)} {quota_window_heading(row)}" for row in ahead)
         if ahead else "None"
     )
     most_value = (
-        f"{quota_row_name(most_used)} · {quota_duration_label(most_used)}"
+        f"{quota_row_name(most_used)} · {quota_window_heading(most_used)}"
         if most_used else "Not available"
     )
     most_note = (
         f"{quota_progress_pct(most_used):.0f}% used" if most_used else "No quota data"
     )
     next_value = (
-        f"{quota_row_name(next_reset)} · {quota_duration_label(next_reset)}"
+        f"{quota_row_name(next_reset)} · {quota_window_heading(next_reset)}"
         if next_reset else "Not available"
     )
     next_note = (

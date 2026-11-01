@@ -254,6 +254,39 @@ class QuotaRenderingTests(unittest.TestCase):
         self.assertIn("3d 12h", rendered)
         self.assertIn("42% used", rendered)
 
+    def test_quota_summary_distinguishes_other_windows_by_duration(self):
+        rows = [
+            {
+                "provider": "openai",
+                "account": "plus",
+                "duration": serve.QuotaDuration.OTHER,
+                "duration_ms": 7_200_000,
+                "label": None,
+                "used_pct": 90,
+                "resets_at": 1_800_000,
+            },
+            {
+                "provider": "openai",
+                "account": "plus",
+                "duration": serve.QuotaDuration.OTHER,
+                "duration_ms": 14_400_000,
+                "label": "",
+                "used_pct": 95,
+                "resets_at": 3_600_000,
+            },
+        ]
+        summary = serve.render_quota_summary(rows, now_ms=0)
+
+        self.assertIn(
+            "openai (plus) Other · 2h, openai (plus) Other · 4h", summary
+        )
+        self.assertIn(
+            "quota-summary-value>openai (plus) · Other · 4h</div>", summary
+        )
+        self.assertIn(
+            "quota-summary-value>openai (plus) · Other · 2h</div>", summary
+        )
+
     def test_unclassified_window_keeps_its_pace_marker(self):
         # Issue #80: the legend and the footer promise the marker, so a row
         # whose window the page cannot name keeps one.
