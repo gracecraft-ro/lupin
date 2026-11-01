@@ -191,6 +191,49 @@ fix worker did not push.` Its first line is `Round N. LEVEL: <LEVEL>.`, as in
 6. `size-l` usually gives Opus. That is allowed here. Never use Fable without
    the user's approval.
 
+### Roll up Dependabot PRs
+
+A repo can have many open Dependabot PRs. Each one needs its own review and
+merge. The loop rolls them into one PR. Run this before the other PR work in
+each cycle.
+
+1. Trigger: the repo has two or more open PRs whose head branch starts with
+   `dependabot/`, and whose head repo is the repo itself. A single Dependabot
+   PR is handled as any other PR that the loop does not own.
+2. Claim: the orchestrator runs `lupin claim OWNER/REPO#N` for each Dependabot
+   PR before it dispatches. It leaves out each PR where the claim does not exit
+   0. Exit 2 means another holder has the PR. While the worker runs, it runs
+   `lupin renew-claim OWNER/REPO#N` for each claim.
+3. One worker: the orchestrator dispatches one worker for the whole roll-up, not
+   one for each PR. Route it with "Fix worker models" at LEVEL `size-m`. A major
+   version bump can break tests.
+4. Worker steps: the worker does these steps.
+   - Makes a branch from `main` and pushes it to the `fork` remote.
+   - Cherry-picks the one commit of each Dependabot PR. A bump that fixes a
+     security advisory goes first. Each bump stays one commit, so a bad bump can
+     be dropped.
+   - Runs the repo gate, as the repo `AGENTS.md` defines it.
+   - Leaves out each bump that conflicts or fails the gate. The PR body names
+     that bump and the first failing check.
+   - Opens one PR from the fork. The body lists each package with its old and
+     new version. The body says `Supersedes #A, #B`. It uses `Refs`, not
+     `Closes`, for those PRs.
+5. Fast-track: the orchestrator claims the roll-up PR with `lupin claim`. It
+   dispatches a reviewer in the same cycle, before other review work. The
+   reviewer checks that:
+   - the diff has only version changes,
+   - the lockfile matches the manifest,
+   - the release notes of each major bump show no breaking change that the
+     repo uses.
+   The fix cycle then runs as for any loop PR.
+6. Dependabot PRs stay untouched: the loop does not push to, close, or comment
+   on them. The owner closes them when the roll-up merges. Dependabot also
+   closes a PR itself when its bump is on `main`. Skip each Dependabot PR that
+   a roll-up PR names after `Supersedes`, and dispatch no reviewer for it.
+7. Release: when the roll-up PR is open, the orchestrator runs
+   `lupin release-claim OWNER/REPO#N` for each Dependabot claim. When the
+   roll-up PR is approved, it lists the PR as waiting for the owner.
+
 ## Install skills on loop hosts
 
 The `skills/` tree is the source. The Lupin command does not install it. A Nix
