@@ -228,7 +228,8 @@ each cycle.
    The fix cycle then runs as for any loop PR.
 6. Dependabot PRs stay untouched: the loop does not push to, close, or comment
    on them. The owner closes them when the roll-up merges. Dependabot also
-   closes a PR itself when its bump is on `main`.
+   closes a PR itself when its bump is on `main`. Skip each Dependabot PR that
+   a roll-up PR names after `Supersedes`, and dispatch no reviewer for it.
 7. Release: when the roll-up PR is open, the orchestrator runs
    `lupin release-claim OWNER/REPO#N` for each Dependabot claim. When the
    roll-up PR is approved, it lists the PR as waiting for the owner.
