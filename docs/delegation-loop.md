@@ -88,6 +88,10 @@ goes to upstream `main`. In this repo:
 7. PRs come first. In each cycle, dispatch PR work before new issues. A PR in a
    fix cycle does not delay new work.
 
+## Dependabot backlogs
+
+For a large open backlog of Dependabot PRs, dispatch one worker to inspect every source PR. The worker combines every compatible, unique dependency update in one new branch and one PR. It removes duplicate package updates and does not omit any update. Do not change, push to, or close a Dependabot branch or PR. List every source PR as `Supersedes #N`; do not use closing keywords. If any update is not safe to combine, stop and report the exact blocker. Do not split the work or drop an update. Immediately dispatch an independent reviewer at the bundle PR's exact head SHA. The current head must have the reviewer's approval, and hosted checks must pass, before the PR is ready. The owner merges the bundle PR.
+
 ### Preview server
 
 This repo follows "Preview server" in the `delegation-loop` skill, plus:
