@@ -3984,12 +3984,8 @@ class TestReposPageRoutes:
         marker.write_text("keep outside repo", encoding="utf-8")
         git_init_at = serve._git_init_at
 
-        displaced = code_dir / "displaced"
-
         def replace_repo_and_fail(repo_fd, repo_dir):
             git_init_at(repo_fd, repo_dir)
-
-            os.rename(repo_dir, displaced)
             repo_dir.symlink_to(outside, target_is_directory=True)
             raise serve.loop_runtime.LoopError("git init failed")
 
@@ -4004,9 +4000,8 @@ class TestReposPageRoutes:
         assert marker.read_text(encoding="utf-8") == "keep outside repo"
         assert list(outside.iterdir()) == [marker.parent]
         assert not (outside / "docs").exists()
-        assert list(displaced.iterdir()) == []
 
-    def test_create_route_does_not_redirect_git_or_document_when_repo_path_is_replaced(
+    def test_create_route_does_not_write_through_repo_symlink_added_during_init(
         self, tmp_path, monkeypatch
     ):
         code_dir = tmp_path / "code"
@@ -4015,31 +4010,85 @@ class TestReposPageRoutes:
         outside.mkdir()
         marker = outside / ".git" / "important"
         marker.parent.mkdir()
-        marker.write_text("keep outside repo", encoding="utf-8")
+        marker.write_text("keep outside", encoding="utf-8")
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
         repo_dir = code_dir / "widgets"
-        displaced = code_dir / "displaced"
         git_init_at = serve._git_init_at
 
-
-        def replace_repo_after_git_init(repo_fd, path):
+        def add_repo_symlink_after_init(repo_fd, path):
             git_init_at(repo_fd, path)
-            os.rename(path, displaced)
-            path.symlink_to(outside, target_is_directory=True)
+            repo_dir.symlink_to(outside, target_is_directory=True)
 
-        monkeypatch.setattr(serve, "_git_init_at", replace_repo_after_git_init)
-        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        monkeypatch.setattr(serve, "_git_init_at", add_repo_symlink_after_init)
         handler = _repos_handler()
         _post_body(handler, "/repos/create", {"repo": "widgets"})
         handler.do_POST()
 
         assert handler.reply.call_args.args[1] == 500
-        assert "repo directory changed during creation" in handler.reply.call_args.args[0].decode()
         assert repo_dir.is_symlink()
-        assert marker.read_text(encoding="utf-8") == "keep outside repo"
-        assert list(outside.iterdir()) == [marker.parent]
-        assert not (outside / "docs" / "delegation-loop.md").exists()
-        assert list(displaced.iterdir()) == []
+        assert marker.read_text(encoding="utf-8") == "keep outside"
+        assert not (outside / "docs").exists()
+        assert not list(code_dir.glob(".lupin-create-*"))
 
+    def test_create_route_preserves_repo_installed_before_atomic_publish(
+        self, tmp_path, monkeypatch
+    ):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        existing = code_dir / "widgets"
+        marker = existing / ".git" / "important"
+        real_rename = os.rename
+        raced = False
+
+        def install_existing_repo(source, destination, *args, **kwargs):
+            nonlocal raced
+            if destination == "widgets" and kwargs.get("dst_dir_fd") is not None:
+                raced = True
+                marker.parent.mkdir(parents=True)
+                marker.write_text("existing repo data", encoding="utf-8")
+            return real_rename(source, destination, *args, **kwargs)
+
+        monkeypatch.setattr(serve.os, "rename", install_existing_repo)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": "widgets"})
+        handler.do_POST()
+
+        assert raced
+        assert handler.reply.call_args.args[1] == 500
+        assert marker.read_text(encoding="utf-8") == "existing repo data"
+        assert not (existing / "docs").exists()
+
+    def test_create_route_rejects_docs_directory_moved_after_open(
+        self, tmp_path, monkeypatch
+    ):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        outside = tmp_path / "outside"
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        real_open = os.open
+        moved = False
+
+        def move_docs_before_document_open(path, flags, *args, **kwargs):
+            nonlocal moved
+            if path == "delegation-loop.md" and not moved:
+                moved = True
+                docs_path = next(code_dir.glob(".lupin-create-*/docs"))
+                repo_path = docs_path.parent
+                os.rename(docs_path, outside)
+                (repo_path / "docs").mkdir()
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(serve.os, "open", move_docs_before_document_open)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": "widgets"})
+        handler.do_POST()
+
+        assert moved
+        assert handler.reply.call_args.args[1] == 500
+        assert not (code_dir / "widgets").exists()
+        assert outside.is_dir()
+        assert not (outside / "delegation-loop.md").exists()
 
     def test_create_route_rejects_a_replaced_code_root_before_creation(
         self, tmp_path, monkeypatch
@@ -4098,10 +4147,10 @@ class TestReposPageRoutes:
         _post_body(handler, "/repos/create", {"repo": "widgets"})
         handler.do_POST()
 
-        concurrent_doc = code_dir / "widgets" / "docs" / "delegation-loop.md"
+        private_docs = next(code_dir.glob(".lupin-create-*/docs"))
         assert collided
         assert handler.reply.call_args.args[1] == 500
-        assert concurrent_doc.read_bytes() == b"concurrent document"
+        assert (private_docs / "delegation-loop.md").read_bytes() == b"concurrent document"
 
     def test_create_route_removes_new_directory_if_open_fails(self, tmp_path, monkeypatch):
         code_dir = tmp_path / "code"
@@ -4110,7 +4159,7 @@ class TestReposPageRoutes:
         real_open = os.open
 
         def fail_repo_open(path, flags, *args, **kwargs):
-            if path == "widgets" and kwargs.get("dir_fd") is not None:
+            if isinstance(path, str) and path.startswith(".lupin-create-"):
                 raise OSError(errno.EMFILE, "too many open files")
             return real_open(path, flags, *args, **kwargs)
 
@@ -4120,7 +4169,7 @@ class TestReposPageRoutes:
         handler.do_POST()
 
         assert handler.reply.call_args.args[1] == 500
-        assert not (code_dir / "widgets").exists()
+        assert list(code_dir.iterdir()) == []
 
     def test_create_route_keeps_replacement_directory_if_repo_open_fails(
         self, tmp_path, monkeypatch
@@ -4133,8 +4182,8 @@ class TestReposPageRoutes:
         real_open = os.open
 
         def replace_then_fail_repo_open(path, flags, *args, **kwargs):
-            if path == "widgets" and kwargs.get("dir_fd") is not None:
-                created = code_dir / "widgets"
+            if isinstance(path, str) and path.startswith(".lupin-create-"):
+                created = code_dir / path
                 os.rename(created, code_dir / "displaced")
                 os.rename(replacement, created)
                 raise OSError(errno.EMFILE, "too many open files")
@@ -4146,8 +4195,39 @@ class TestReposPageRoutes:
         handler.do_POST()
 
         assert handler.reply.call_args.args[1] == 500
-        assert list((code_dir / "widgets").iterdir()) == []
+        private_path = next(code_dir.glob(".lupin-create-*"))
+        assert list(private_path.iterdir()) == []
         assert (code_dir / "displaced").is_dir()
+
+    def test_create_route_removes_private_directory_when_identity_stat_fails(
+        self, tmp_path, monkeypatch
+    ):
+        code_dir = tmp_path / "code"
+        code_dir.mkdir()
+        monkeypatch.setattr(serve, "CODE_DIR", str(code_dir))
+        real_stat = os.stat
+        failed = False
+
+        def fail_private_identity_stat(path, *args, **kwargs):
+            nonlocal failed
+            if (
+                isinstance(path, str)
+                and path.startswith(".lupin-create-")
+                and kwargs.get("dir_fd") is not None
+                and not failed
+            ):
+                failed = True
+                raise OSError(errno.EIO, "injected stat failure")
+            return real_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(serve.os, "stat", fail_private_identity_stat)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/create", {"repo": "widgets"})
+        handler.do_POST()
+
+        assert failed
+        assert handler.reply.call_args.args[1] == 500
+
     @pytest.mark.parametrize("repo", ["", "bad/name", "widgets\n"])
     def test_create_route_rejects_invalid_names_without_creating_files(
         self, tmp_path, monkeypatch, repo

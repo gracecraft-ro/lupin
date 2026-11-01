@@ -603,67 +603,12 @@ def _git_init_at(directory_fd: int, repo_dir: Path) -> None:
         raise loop_runtime.LoopError(f"git init failed in {repo_dir}: {detail}")
 
 
-def _same_repo_directory(repo_fd: int, code_fd: int, repo: str) -> bool:
-    try:
-        current = os.stat(repo, dir_fd=code_fd, follow_symlinks=False)
-        return os.path.samestat(os.fstat(repo_fd), current)
-    except OSError:
-        return False
-
-
 def _same_root_directory(code_fd: int, code_dir: Path) -> bool:
     try:
         current = os.stat(code_dir, follow_symlinks=False)
         return os.path.samestat(os.fstat(code_fd), current)
     except OSError:
         return False
-
-
-def _remove_created_repo(
-    repo_fd: int,
-    code_fd: int,
-    repo: str,
-    doc_identity: os.stat_result | None,
-    docs_identity: os.stat_result | None,
-) -> None:
-    """Remove only request-created files reached through open descriptors."""
-    try:
-        docs_fd = os.open(
-            "docs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=repo_fd
-        )
-    except OSError:
-        docs_fd = None
-    if docs_fd is not None:
-        try:
-            if doc_identity is not None:
-                try:
-                    current = os.stat(
-                        "delegation-loop.md", dir_fd=docs_fd, follow_symlinks=False
-                    )
-                    if os.path.samestat(doc_identity, current):
-                        os.unlink("delegation-loop.md", dir_fd=docs_fd)
-                except OSError:
-                    pass
-        finally:
-            os.close(docs_fd)
-        try:
-            current = os.stat("docs", dir_fd=repo_fd, follow_symlinks=False)
-            if docs_identity is not None and os.path.samestat(docs_identity, current):
-                os.rmdir("docs", dir_fd=repo_fd)
-        except OSError:
-            pass
-    try:
-        shutil.rmtree(".git", dir_fd=repo_fd)
-    except OSError:
-        try:
-            os.unlink(".git", dir_fd=repo_fd)
-        except OSError:
-            pass
-    if _same_repo_directory(repo_fd, code_fd, repo):
-        try:
-            os.rmdir(repo, dir_fd=code_fd)
-        except OSError:
-            pass
 
 
 def _remove_unopened_repo(code_fd: int, repo: str, repo_identity: os.stat_result) -> None:
@@ -690,7 +635,14 @@ def _create_repo(repo: str, message: str) -> Path:
         if code_fd is not None:
             os.close(code_fd)
         raise OSError(f"configured code directory is unavailable: {exc}") from exc
+
     repo_fd = None
+    work_name = f".lupin-create-{os.urandom(16).hex()}"
+    work_identity = None
+    doc_identity = None
+    docs_identity = None
+    docs_fd = None
+    published = False
     try:
         if not _same_root_directory(code_fd, code_dir):
             raise OSError("configured code directory changed during creation")
@@ -712,23 +664,30 @@ def _create_repo(repo: str, message: str) -> Path:
             raise ValueError(f"repo path already exists: {repo}")
 
         try:
-            os.mkdir(repo, dir_fd=code_fd)
+            os.mkdir(work_name, dir_fd=code_fd)
         except FileExistsError as exc:
-            raise ValueError(f"repo path already exists: {repo}") from exc
-        repo_identity = os.stat(repo, dir_fd=code_fd, follow_symlinks=False)
+            raise OSError("could not reserve a private repo directory") from exc
+        try:
+            work_identity = os.stat(
+                work_name, dir_fd=code_fd, follow_symlinks=False
+            )
+        except OSError:
+            # The random private path is ours; rmdir removes only an empty dir.
+            try:
+                os.rmdir(work_name, dir_fd=code_fd)
+            except OSError:
+                pass
+            raise
         try:
             repo_fd = os.open(
-                repo, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=code_fd
+                work_name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=code_fd
             )
         except OSError as exc:
-            _remove_unopened_repo(code_fd, repo, repo_identity)
-            raise OSError("repo directory changed during creation") from exc
-        if not os.path.samestat(repo_identity, os.fstat(repo_fd)):
-            raise OSError("repo directory changed during creation")
+            _remove_unopened_repo(code_fd, work_name, work_identity)
+            raise OSError("could not open private repo directory") from exc
+        if not os.path.samestat(work_identity, os.fstat(repo_fd)):
+            raise OSError("private repo directory changed during creation")
 
-        docs_fd = None
-        doc_identity = None
-        docs_identity = None
         try:
             try:
                 _git_init_at(repo_fd, repo_dir)
@@ -739,6 +698,8 @@ def _create_repo(repo: str, message: str) -> Path:
             docs_fd = os.open(
                 "docs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=repo_fd
             )
+            if not os.path.samestat(docs_identity, os.fstat(docs_fd)):
+                raise OSError("docs directory changed during creation")
             doc_fd = os.open(
                 "delegation-loop.md",
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
@@ -748,24 +709,81 @@ def _create_repo(repo: str, message: str) -> Path:
             doc_identity = os.fstat(doc_fd)
             with os.fdopen(doc_fd, "w", encoding="utf-8") as doc:
                 doc.write(document)
+
+            current_docs = os.stat("docs", dir_fd=repo_fd, follow_symlinks=False)
+            if not os.path.samestat(os.fstat(docs_fd), current_docs):
+                raise OSError("docs directory changed during creation")
             if not _same_root_directory(code_fd, code_dir):
                 raise OSError("configured code directory changed during creation")
-            if not _same_repo_directory(repo_fd, code_fd, repo):
-                raise OSError("repo directory changed during creation")
+            current_work = os.stat(work_name, dir_fd=code_fd, follow_symlinks=False)
+            if not os.path.samestat(work_identity, current_work):
+                raise OSError("private repo directory changed during creation")
+
+            # Publish only after the complete repo is ready. A populated repo
+            # installed by another writer is not replaced by this rename.
+            try:
+                os.stat(repo, dir_fd=code_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise OSError(f"repo path appeared before publication: {repo}")
+            os.rename(work_name, repo, src_dir_fd=code_fd, dst_dir_fd=code_fd)
+            published = True
+            current_repo = os.stat(repo, dir_fd=code_fd, follow_symlinks=False)
+            if not os.path.samestat(work_identity, current_repo):
+                raise OSError("repo directory changed during publication")
+            if not _same_root_directory(code_fd, code_dir):
+                raise OSError("configured code directory changed during creation")
+            current_docs = os.stat("docs", dir_fd=repo_fd, follow_symlinks=False)
+            if not os.path.samestat(os.fstat(docs_fd), current_docs):
+                raise OSError("docs directory changed during creation")
         except BaseException:
-            _remove_created_repo(
-                repo_fd, code_fd, repo, doc_identity, docs_identity
-            )
-            raise
-        finally:
+            if docs_fd is not None and doc_identity is not None:
+                try:
+                    current_doc = os.stat(
+                        "delegation-loop.md", dir_fd=docs_fd, follow_symlinks=False
+                    )
+                    if os.path.samestat(doc_identity, current_doc):
+                        os.unlink("delegation-loop.md", dir_fd=docs_fd)
+                except OSError:
+                    pass
             if docs_fd is not None:
-                os.close(docs_fd)
+                try:
+                    current_docs = os.stat("docs", dir_fd=repo_fd, follow_symlinks=False)
+                    if docs_identity is not None and os.path.samestat(
+                        docs_identity, current_docs
+                    ):
+                        os.rmdir("docs", dir_fd=repo_fd)
+                except OSError:
+                    pass
+            try:
+                shutil.rmtree(".git", dir_fd=repo_fd)
+            except OSError:
+                pass
+            if published:
+                try:
+                    current_repo = os.stat(repo, dir_fd=code_fd, follow_symlinks=False)
+                    if os.path.samestat(work_identity, current_repo):
+                        os.rmdir(repo, dir_fd=code_fd)
+                except OSError:
+                    pass
+            else:
+                try:
+                    current_work = os.stat(
+                        work_name, dir_fd=code_fd, follow_symlinks=False
+                    )
+                    if os.path.samestat(work_identity, current_work):
+                        os.rmdir(work_name, dir_fd=code_fd)
+                except OSError:
+                    pass
+            raise
         return repo_dir
     finally:
+        if docs_fd is not None:
+            os.close(docs_fd)
         if repo_fd is not None:
             os.close(repo_fd)
         os.close(code_fd)
-
 
 def merge_repo_inventory(
     local_repos: list[dict], machine_records: list[dict], local_host: str
