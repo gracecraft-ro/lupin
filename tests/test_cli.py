@@ -1009,6 +1009,37 @@ def test_quota_prints_the_account_beside_the_provider(monkeypatch, capsys):
     assert any(line.startswith("claude ") and "60% left" in line for line in lines)
 
 
+def test_quota_plain_output_gives_each_accounts_status(monkeypatch, capsys):
+    openai = [
+        {"provider": "openai", "account": "free", "duration": quota.QuotaDuration.MONTHLY,
+         "used_pct": 100, "resets_at": 4102444800000},
+        {"provider": "openai", "account": "plus", "duration": quota.QuotaDuration.FIVE_HOURS,
+         "used_pct": 0, "resets_at": 4102444800000},
+        {"provider": "openai", "account": "team", "duration": quota.QuotaDuration.FIVE_HOURS,
+         "used_pct": 10, "resets_at": None},
+    ]
+    claude = [
+        {"provider": "claude", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 95, "resets_at": None},
+    ]
+    merged = {
+        "openai": {"rows": openai, "fetched_at": None, "fetched_by": "ralpha"},
+        "claude": {"rows": claude, "fetched_at": None, "fetched_by": "jesus"},
+    }
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: {})
+    monkeypatch.setattr(cli.quota_cache, "refresh_snapshot", lambda **connection: merged)
+    monkeypatch.setattr(cli.usage_cache, "refresh_snapshot", lambda **connection: {})
+
+    assert cli.main(["quota"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "openai accounts: 1 open, 1 blocked, 1 unknown -- provider usable" in lines
+    assert "claude accounts: 0 open, 1 blocked, 0 unknown -- provider BLOCKED" in lines
+    assert any(line.startswith("openai/free") and "BLOCKED" in line and "0% left" in line for line in lines)
+    assert any(line.startswith("openai/plus") and " open " in line and "100% left" in line for line in lines)
+    assert any(line.startswith("openai/team") and " unknown " in line for line in lines)
+    assert any(line.startswith("claude ") and "BLOCKED" in line and "5% left" in line for line in lines)
+
+
 def test_route_unknown_category_or_size_is_a_usage_error_not_a_traceback(capsys):
     assert cli.main(["route", "code", "size-m"]) == 2
     err = capsys.readouterr().err

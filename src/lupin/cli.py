@@ -30,6 +30,7 @@ from . import ledger
 from . import loops as loops_mod
 from . import machines
 from . import model_fetch
+from . import pace
 from . import place as place_mod
 from . import pr_status
 from . import quest as quest_mod
@@ -888,6 +889,7 @@ def _cmd_quota(args: argparse.Namespace) -> int:
     if not merged:
         print("no quota data available yet -- run this on a machine with real provider credentials")
         return 0
+    now_ms = time.time() * 1000
     for provider in sorted(merged):
         entry = merged[provider]
         real_rows = [row for row in entry.get("rows", []) if isinstance(row.get("used_pct"), (int, float))]
@@ -896,6 +898,13 @@ def _cmd_quota(args: argparse.Namespace) -> int:
             for note in notes or ["no quota data cached yet"]:
                 print(f"{provider}: {note}")
             continue
+        accounts: dict[str | None, list[dict]] = {}
+        for row in real_rows:
+            accounts.setdefault(row.get("account"), []).append(row)
+        states = [pace.account_state(rows, provider, now_ms) for rows in accounts.values()]
+        open_count, blocked_count, unknown_count = states.count("open"), states.count("blocked"), states.count("unknown")
+        verdict = "usable" if open_count else "BLOCKED" if blocked_count else "unknown"
+        print(f"{provider} accounts: {open_count} open, {blocked_count} blocked, {unknown_count} unknown -- provider {verdict}")
         age = _ago(entry.get("fetched_at"))
         fetched_by = entry.get("fetched_by", "-")
         for row in real_rows:
@@ -904,7 +913,8 @@ def _cmd_quota(args: argparse.Namespace) -> int:
             left = max(0.0, 100 - row["used_pct"])
             resets = serve.time_until_reset(row.get("resets_at"))
             name = f"{provider}/{row['account']}" if row.get("account") else provider
-            print(f"{name:<12} {label:<9} {left:.0f}% left   resets in {resets:<8} (fetched {age} via {fetched_by})")
+            status = {"open": "open", "blocked": "BLOCKED", "unknown": "unknown"}[pace.account_state([row], provider, now_ms)]
+            print(f"{name:<12} {status:<8} {label:<9} {left:.0f}% left   resets in {resets:<8} (fetched {age} via {fetched_by})")
     return 0
 
 

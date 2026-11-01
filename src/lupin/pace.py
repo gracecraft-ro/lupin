@@ -98,6 +98,17 @@ def _account_blocked(account_rows: list[dict], now_ms: float) -> bool:
     )
 
 
+def account_state(account_rows: list[dict], provider: str, now_ms: float) -> str:
+    """`blocked`, `open`, or `unknown` for the rows of one account.
+
+    `unknown` means no usable row, the same test `blocked` uses.
+    """
+    usable = _usable_rows(account_rows, provider)
+    if not usable:
+        return "unknown"
+    return "blocked" if _account_blocked(usable, now_ms) else "open"
+
+
 def blocked(rows: list[dict], provider: str, now_ms: float) -> bool:
     """True if every account of `provider` has a blocked window.
 
