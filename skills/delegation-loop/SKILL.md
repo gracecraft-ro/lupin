@@ -307,9 +307,12 @@ that brief. Add `--no-start` to write the brief only. Pass `--holder` or set
 `LUPIN_CLAIM_HOLDER` as for `lupin claim`. Give each worker a short brief with:
 issue goal and acceptance checks; latest comments and open dependencies; likely
 files and known parallel work; model, effort, and machine recommendation; claim
-or quest ID; machine, absolute worktree path, and branch; required tests and
-smoke checks. For a visual change, the brief must tell the worker to attach
-before and after screenshots to the PR, or the new screen if there is no before.
+or quest ID; machine, absolute worktree path, and branch; the existing test file
+to extend, or a statement that no test is needed; and smoke checks. Do not name a
+new test file. Ask the worker to report test changes in the PR with a line in
+this format: `tests: +A -R`. For a visual change, the brief must tell the worker
+to attach before and after screenshots to the PR, or the new screen if there is
+no before.
 See "Attach screenshots to the PR" in the `ship` skill. Tell implementation
 workers to follow `AGENTS.md`, rule 1 under "Pull requests, review, and
 handoff". Do not repeat the `/ship` implementation checklist.
