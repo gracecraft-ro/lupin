@@ -13,14 +13,16 @@ from __future__ import annotations
 import functools
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
 from unittest import mock
 
+import redis as redis_lib
 import pytest
 
-from lupin import claims, cli, machines, roadmap, roadmap_cli
+from lupin import claims, cli, gh_cache, machines, roadmap, roadmap_cli
 from lupin.slots import CoordinatorUnreachable
 
 
@@ -289,7 +291,7 @@ class EmptyStateTests(unittest.TestCase):
              ), \
              mock.patch.object(
                  roadmap, "cached_dependency_dag",
-                 side_effect=lambda repos, code_dir: {
+                 side_effect=lambda repos, code_dir, **kwargs: {
                      "repos": {
                          "api-gateway": [
                              {"number": 422, "blockedBy": [], "blocking": []},
@@ -382,7 +384,7 @@ class DagViewTests(unittest.TestCase):
                      (open_issues.get(repo, []), {}, []) if state == "open" else ([], {}, [])
                  ),
              ), \
-             mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir: dag):
+             mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir, **kwargs: dag):
             text, code = roadmap_cli.run(
                 "api-gateway", 10, "ready", True, False, False, claims_lookup=lambda repos: {}
             )
@@ -419,7 +421,7 @@ class DagViewTests(unittest.TestCase):
                      (open_issues.get(repo, []), {}, []) if state == "open" else ([], {}, [])
                  ),
              ), \
-             mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir: dag):
+             mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir, **kwargs: dag):
             text, code = roadmap_cli.run(
                 None, 10, "ready", True, False, False,
                 enabled_repos=lambda: ["api-gateway", "billing-core"],
@@ -457,7 +459,7 @@ class DagViewTests(unittest.TestCase):
                      (open_issues.get(repo, []), {}, []) if state == "open" else ([], {}, [])
                  ),
              ), \
-             mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir: dag):
+             mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir, **kwargs: dag):
             text, code = roadmap_cli.run(
                 "api-gateway", 10, "ready", True, False, False, claims_lookup=lambda repos: {}
             )
@@ -483,7 +485,7 @@ class JsonOutputTests(unittest.TestCase):
                      (open_issues.get(repo, []), {}, []) if state == "open" else ([], {}, [])
                  ),
              ), \
-             mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir: dag):
+             mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir, **kwargs: dag):
             text, code = roadmap_cli.run(
                 "api-gateway", 10, "ready", False, True, False, claims_lookup=lambda repos: {}
             )
@@ -635,7 +637,7 @@ class FleetRoadmapTests(unittest.TestCase):
                 ),
             ),
             mock.patch.object(
-                roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir: self.dag
+                roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir, **kwargs: self.dag
             ),
         ]
         for patch in patches:
@@ -763,7 +765,7 @@ class ClaimsArrayTests(unittest.TestCase):
                      (open_issues.get(repo, []), {}, []) if state == "open" else ([], {}, [])
                  ),
              ), \
-             mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir: dag), \
+             mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir, **kwargs: dag), \
              mock.patch.object(roadmap_cli, "_now", return_value=10_000.0):
             result = roadmap_cli.run(
                 "bodysmith", 10, "ready", False, as_json, False, claims_lookup=claims_lookup
@@ -903,7 +905,7 @@ def test_roadmap_json_reads_other_machines_and_claims_from_redis(redis_port, flu
                  (open_issues.get(repo, []), {}, []) if state == "open" else ([], {}, [])
              ),
          ), \
-         mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir: dag):
+         mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir, **kwargs: dag):
         text, code = roadmap_cli.run(
             None, 10, "all", False, True, False,
             code_dir=str(tmp_path),
@@ -947,7 +949,7 @@ def _cli_roadmap(redis_port, capsys, code_dir, argv, cycles=()):
                  ([_issue(161, "stretch plan", "P1")], {}, []) if state == "open" else ([], {}, [])
              ),
          ), \
-         mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir: dag), \
+         mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir, **kwargs: dag), \
          mock.patch.dict(os.environ, {"LUPIN_LOOP_CODE_DIR": code_dir}), \
          mock.patch.object(machines, "resolve_connection", return_value=connection), \
          mock.patch("lupin.serve.enabled_repos", return_value=[]):
@@ -1053,7 +1055,189 @@ def test_default_claim_lookup_raises_on_a_corrupt_claim(redis_port, flush_redis,
                  (open_issues.get(repo, []), {}, []) if state == "open" else ([], {}, [])
              ),
          ), \
-         mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir: dag), \
+         mock.patch.object(roadmap, "cached_dependency_dag", side_effect=lambda repos, code_dir, **kwargs: dag), \
          mock.patch.object(claims, "_client", return_value=raw), \
          pytest.raises(ValueError, match="not a JSON object"):
         roadmap_cli.run("bodysmith", 10, "ready", False, False, False, code_dir=str(tmp_path))
+
+
+def test_cli_roadmap_reads_blocking_dependency_from_override_redis(
+    redis_port, auth_redis_port, flush_redis, tmp_path, monkeypatch, capsys, make_checkout
+):
+    default = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    override = redis_lib.Redis(
+        host="127.0.0.1", port=auth_redis_port, password="test-pass", decode_responses=True
+    )
+    cache_prefix = f"{gh_cache.PREFIX}gh-cache:acme/api:"
+    dependencies_key = f"{cache_prefix}dependencies:v2"
+    blocker = _issue(10, "Prerequisite")
+    blocked = _issue(20, "Dependent")
+    dependency_links = {
+        "10": {
+            "blockedBy": [],
+            "blocking": [{"repo": "api", "owner": "acme", "number": 20}],
+        },
+        "20": {
+            "blockedBy": [{"repo": "api", "owner": "acme", "number": 10}],
+            "blocking": [],
+        },
+    }
+    override.set(f"{cache_prefix}issues:open", json.dumps({"data": [blocker, blocked]}))
+    override.set(f"{cache_prefix}comments:open", json.dumps({"data": {}}))
+    override.set(dependencies_key, json.dumps({"data": dependency_links}))
+
+    monkeypatch.setattr(roadmap, "_GITHUB_CACHE", {})
+    monkeypatch.setattr(roadmap, "_DEPENDENCY_CACHE", {})
+    default_config = tmp_path / "fleet.json"
+    default_config.write_text(
+        json.dumps({"redis_host": "127.0.0.1", "redis_port": redis_port}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(machines, "DEFAULT_CONFIG_PATH", default_config)
+    monkeypatch.setattr(roadmap, "_gh_identity", lambda _path: ("acme", "api", None))
+    empty_dependencies = {
+        "data": {
+            "repository": {
+                "issues": {
+                    "nodes": [
+                        {"number": n, "blockedBy": {"nodes": []}, "blocking": {"nodes": []}}
+                        for n in (10, 20)
+                    ],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            }
+        }
+    }
+    monkeypatch.setattr(
+        roadmap, "_run_json", lambda *_args: (empty_dependencies, None)
+    )
+
+    checkout = make_checkout(tmp_path / "code" / "api")
+    subprocess.run(
+        ["git", "remote", "set-url", "origin", "https://github.com/acme/api.git"],
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    monkeypatch.setenv("LUPIN_LOOP_CODE_DIR", str(checkout.parent))
+
+    assert default.get(dependencies_key) is None
+    exit_code = cli.main([
+        "roadmap",
+        "--repo", "api",
+        "--json",
+        "--redis-host", "127.0.0.1",
+        "--redis-port", str(auth_redis_port),
+        "--redis-password", "test-pass",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert override.get(dependencies_key) is not None
+    repo = payload["repos"]["api"]
+    assert repo["ready"] == 1, payload
+    assert repo["blocked"] == 1
+    assert [issue["number"] for issue in repo["issues"]] == [10]
+
+def test_cli_ownerless_dependency_is_warned_but_does_not_block_local_target(
+    redis_port, flush_redis, tmp_path, monkeypatch, capsys
+):
+    redis = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    api_issue = _issue(20, "Use core prerequisite")
+    core_issue = _issue(10, "Core prerequisite")
+    cache_data = {
+        "api": (
+            [api_issue],
+            {"20": {"blockedBy": [{"repo": "core", "number": 10}], "blocking": []}},
+        ),
+        "core": ([core_issue], {"10": {"blockedBy": [], "blocking": []}}),
+    }
+    for repo, (issues, dependencies) in cache_data.items():
+        (tmp_path / repo).mkdir()
+        prefix = f"{gh_cache.PREFIX}gh-cache:acme/{repo}:"
+        redis.set(f"{prefix}issues:open", json.dumps({"data": issues}))
+        redis.set(f"{prefix}comments:open", json.dumps({"data": {}}))
+        redis.set(f"{prefix}dependencies:v2", json.dumps({"data": dependencies}))
+
+    default_config = tmp_path / "fleet.json"
+    default_config.write_text(
+        json.dumps({"redis_host": "127.0.0.1", "redis_port": redis_port}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(machines, "DEFAULT_CONFIG_PATH", default_config)
+
+    monkeypatch.setattr(roadmap, "_GITHUB_CACHE", {})
+    monkeypatch.setattr(roadmap, "_DEPENDENCY_CACHE", {})
+    monkeypatch.setattr(
+        roadmap, "_gh_identity",
+        lambda path: ("acme", os.path.basename(path), None),
+    )
+    monkeypatch.setenv("LUPIN_LOOP_CODE_DIR", str(tmp_path))
+
+    with mock.patch("lupin.serve.enabled_repos", return_value=["api", "core"]):
+        exit_code = cli.main([
+            "roadmap",
+            "--json",
+            "--redis-host", "127.0.0.1",
+            "--redis-port", str(redis_port),
+        ])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["repos"]["api"]["ready"] == 1
+    assert payload["repos"]["api"]["blocked"] == 0
+    assert any("linked repository has no owner" in warning for warning in payload["warnings"])
+
+
+def test_cli_same_name_repo_under_other_owner_does_not_block_local_target(
+    redis_port, flush_redis, tmp_path, monkeypatch, capsys
+):
+    redis = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    api_links = {
+        "20": {
+            "blockedBy": [{"repo": "core", "owner": "evil", "number": 10}],
+            "blocking": [],
+        }
+    }
+    cache_data = {
+        "api": ([_issue(20, "Use core prerequisite")], api_links),
+        "core": (
+            [_issue(10, "Core prerequisite")],
+            {"10": {"blockedBy": [], "blocking": []}},
+        ),
+    }
+    for repo, (issues, dependencies) in cache_data.items():
+        (tmp_path / repo).mkdir()
+        prefix = f"{gh_cache.PREFIX}gh-cache:acme/{repo}:"
+        redis.set(f"{prefix}issues:open", json.dumps({"data": issues}))
+        redis.set(f"{prefix}comments:open", json.dumps({"data": {}}))
+        redis.set(f"{prefix}dependencies:v2", json.dumps({"data": dependencies}))
+
+    default_config = tmp_path / "fleet.json"
+    default_config.write_text(
+        json.dumps({"redis_host": "127.0.0.1", "redis_port": redis_port}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(machines, "DEFAULT_CONFIG_PATH", default_config)
+    monkeypatch.setattr(roadmap, "_GITHUB_CACHE", {})
+    monkeypatch.setattr(roadmap, "_DEPENDENCY_CACHE", {})
+    monkeypatch.setattr(
+        roadmap, "_gh_identity",
+        lambda path: ("acme", os.path.basename(path), None),
+    )
+    monkeypatch.setenv("LUPIN_LOOP_CODE_DIR", str(tmp_path))
+
+    with mock.patch("lupin.serve.enabled_repos", return_value=["api", "core"]):
+        exit_code = cli.main([
+            "roadmap",
+            "--json",
+            "--redis-host", "127.0.0.1",
+            "--redis-port", str(redis_port),
+        ])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["repos"]["api"]["ready"] == 1, payload
+    assert payload["repos"]["api"]["blocked"] == 0
+    assert payload["repos"]["core"]["ready"] == 1
