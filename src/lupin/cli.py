@@ -2048,7 +2048,12 @@ def _cmd_loops(args: argparse.Namespace) -> int:
     else:
         for row in rows:
             repo = "unmanaged" if row.get("managed") is False else row.get("repo", "?")
-            print(f"{repo}: {row.get('state', 'unknown')} ({row.get('backend', 'unknown')})")
+            line = f"{repo}: {row.get('state', 'unknown')} ({row.get('backend', 'unknown')})"
+            if row.get("reason"):
+                line += f": {row['reason']}"
+            if row.get("handoff"):
+                line += f" (handoff: {row['handoff']})"
+            print(line)
     return 0
 
 
