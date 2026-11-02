@@ -16,6 +16,9 @@ Read the root `AGENTS.md`, `docs/delegation-loop.md` (if any), and latest issue
 comments. Manage the queue, claims, and dispatch. Delegate implementation to
 `/ship` and PR review to `/code-review`; workers follow the repo's rules.
 
+For routine PRs, do not add or edit `CHANGELOG.md`. Add release notes only
+when the owner explicitly asks.
+
 Every GitHub comment from the loop or its workers starts with `Loop:`.
 
 Workers follow `/ship` to push to the existing `fork` and open the PR on
