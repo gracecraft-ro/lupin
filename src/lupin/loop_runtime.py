@@ -2778,10 +2778,7 @@ def loop_state(repo: str) -> dict:
 def read_run_logs(repo: str, run_id: str | None = None, *, tail: int = 50) -> list[dict]:
     repo = validate_repo(repo)
     if run_id is None:
-        metadata = _read_metadata(repo)
-        run_id = metadata.get("run_id") if metadata else None
-        if not run_log.valid_run_id(run_id):
-            run_id = run_log.latest_run_id(STATE_DIR, repo)
+        run_id = run_log.latest_run_id(STATE_DIR, repo)
     if not run_id:
         raise LoopError(f"no run logs for {repo}")
     try:

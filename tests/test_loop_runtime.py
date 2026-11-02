@@ -1362,14 +1362,18 @@ def test_start_loop_refuses_null_claude_model_and_logs_skipped_profile(
 
 @pytest.mark.parametrize("resume", [False, True])
 def test_refused_claude_run_keeps_the_previous_worktree(
-    monkeypatch, tmp_path: Path, make_checkout, resume
+    monkeypatch, tmp_path: Path, make_checkout, resume, capsys
 ):
+    from lupin import cli
+
     _, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
     assert loop_runtime.start_loop("widgets", platform="omp")[0]
     metadata = loop_runtime._read_metadata("widgets")
     metadata["state"] = "stopped"
     loop_runtime._write_metadata("widgets", metadata)
     launches.clear()
+    profile = ["openai-codex/gpt-6.1-sol"]
+    monkeypatch.setattr(loop_runtime, "orchestrator_profiles", lambda: {"widgets": profile})
 
     started, message = loop_runtime.start_loop("widgets", platform="claude", resume=resume)
 
@@ -1378,6 +1382,12 @@ def test_refused_claude_run_keeps_the_previous_worktree(
     assert launches == []
     assert loop_runtime._read_metadata("widgets") == metadata
     assert Path(metadata["worktree"]).is_dir()
+    assert cli.main(["logs", "widgets", "--json"]) == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    skipped = next(event for event in events if event["event"] == "profile_skipped")
+    assert skipped["profile"] == profile
+    assert skipped["run_id"] != metadata["run_id"]
+    assert any(event["event"] == "error" for event in events)
 
 
 @pytest.mark.parametrize("resume", [False, True])

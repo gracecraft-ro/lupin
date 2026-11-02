@@ -405,6 +405,9 @@ Each run has a unique ID in `herdr-loops/<repo>.json`. Lupin writes events as
 one JSON object per line, to `logs/<repo>/<run-id>.jsonl`. `lupin logs <repo>`
 shows the latest 50 events of the latest run, in time order. `--run ID` selects
 a run, `--tail N` sets the count, and `--json` prints one JSON object per line.
+A refused Claude start has its own log. The default command shows this log
+when it is the newest one. The refusal does not change the saved run metadata
+or worktree.
 Events cover route choices, quota headroom, slot waits, acquisitions, and
 releases. They also cover Herdr server changes, state changes, agent exits,
 handoff results, CodeGraph index results, errors, and stop results. Lupin keeps
