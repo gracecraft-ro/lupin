@@ -3591,7 +3591,9 @@ def render_repos(
 TIMER_WINDOW_S = 4 * 3600  # the mockup's 4-hour timeline strip
 
 
-def render_schedule(data: dict, *, sent: str | None = None) -> bytes:
+def render_schedule(
+    data: dict, *, sent: str | None = None, warn: str | None = None
+) -> bytes:
     """The Schedule page (issue #22): the `delegation-loop.timer` status
     card, a table of every timer (recurring + one-off), and a "Run now"
     form that dispatches `loop.run` on demand.
@@ -3610,6 +3612,13 @@ def render_schedule(data: dict, *, sent: str | None = None) -> bytes:
 
     if sent:
         body.append(f"<div class=card><span class='pill on'>{esc(sent)}</span></div>")
+    if warn:
+        # Failed or unknown work. Not the success style. The badge stays
+        # short. The detail is plain card text, not inside the pill.
+        body.append(
+            "<div class=card><span class='pill off'>Needs attention</span>"
+            f"<p style='margin:.5rem 0 0'>{esc(warn)}</p></div>"
+        )
 
     # ---- recurring timer card ---------------------------------------------
     active = data["timer_active"]
@@ -4353,7 +4362,7 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/schedule":
             status_data = gather_schedule(self.fleet_connection)
             self.dashboard_status_data = status_data
-            self.reply(render_schedule(status_data, sent=query.get("sent")))
+            self.reply(render_schedule(status_data, sent=query.get("sent"), warn=query.get("warn")))
         elif url.path == "/peek":
             self.do_peek(query)
         elif url.path == "/image":
@@ -5002,16 +5011,34 @@ class Handler(BaseHTTPRequestHandler):
 
 
         local_host = machines.hostname()
+        # Every check below runs before the first enqueue. A refusal here
+        # means nothing was queued or started.
+        safe_retry = "Nothing was queued or started. It is safe to try again."
+        registry_down = False
         try:
             # strict: do not place runs on a partial machine list.
             records = machines.machines(self.fleet_connection, strict=True)
+        except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
+            self.reply(
+                render_error(
+                    f"{slots_redis.refusal_message(exc, 'run now', fleet=True)} {safe_retry}"
+                ),
+                502,
+            )
+            return
         except CoordinatorUnreachable:
             records = []
+            registry_down = True
 
         if place_choice in ("spread", "any"):
             ranked = _rank_candidates(records, local_host)
             if not ranked:
-                self.reply(render_error("no machine is available to place a run on"), 400)
+                why = (
+                    "cannot read the fleet registry"
+                    if registry_down
+                    else "no machine is available to place a run on"
+                )
+                self.reply(render_error(f"{why}. {safe_retry}"), 400)
                 return
             if place_choice == "spread":
                 assigned = [ranked[i % len(ranked)]["name"] for i in range(len(targets_repos))]
@@ -5020,7 +5047,12 @@ class Handler(BaseHTTPRequestHandler):
         elif _machine_available(place_choice, records, local_host):
             assigned = [place_choice] * len(targets_repos)
         else:
-            self.reply(render_error("bad placement"), 400)
+            why = (
+                f"cannot read the fleet registry, so {place_choice!r} cannot be checked"
+                if registry_down
+                else f"bad placement: {place_choice!r} is not an online machine"
+            )
+            self.reply(render_error(f"{why}. {safe_retry}"), 400)
             return
 
         missing_key = next(
@@ -5028,11 +5060,21 @@ class Handler(BaseHTTPRequestHandler):
             None,
         )
         if missing_key:
-            self.reply(render_error(f"no signing key is configured for {missing_key!r}"), 400)
+            self.reply(
+                render_error(f"no signing key is configured for {missing_key!r}. {safe_retry}"),
+                400,
+            )
             return
 
-        errors = []
-        for repo, machine in zip(targets_repos, assigned):
+        # One click gives one outcome. Stop at the first failure so that
+        # no later repo is queued. `started` ran here. `queued` is in the
+        # queue, and a worker has not confirmed it. `unknown` may have
+        # started locally or been queued before the Redis reply was lost.
+        started, queued, errors, unknown = [], [], [], []
+        unknown_detail = ""
+        pairs = list(zip(targets_repos, assigned))
+        for index, (repo, machine) in enumerate(pairs):
+            label = f"{repo}@{machine}"
             local_argv = ["lupin", "run", repo]
             queue_params = {"repo": repo}
             if note:
@@ -5050,18 +5092,75 @@ class Handler(BaseHTTPRequestHandler):
                     actor="lupin-dashboard", issuer=local_host,
                     run_local=lambda argv: run(argv, timeout=20.0),
                 )
+            except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
+                errors.append(f"{label}: {slots_redis.refusal_message(exc, 'run now', fleet=True)}")
             except CoordinatorUnreachable:
-                errors.append(f"{repo}@{machine}: cannot reach the redis coordinator")
-                continue
-            if result["mode"] == "local" and result["returncode"] != 0:
-                errors.append(f"{repo}@{machine}: {result['output'].strip()}")
-        if errors:
-            self.reply(render_error("run now failed:\n" + "\n".join(errors)), 502)
-            return
+                # Redis may have committed enqueue's EVAL before the reply was lost.
+                unknown.append(label)
+                unknown_detail = "the queue did not confirm receipt. The command may have been queued."
+            else:
+                if result["mode"] != "local":
+                    queued.append(label)
+                elif result["returncode"] == 0:
+                    started.append(label)
+                elif result["returncode"] == 124:
+                    # `loops.run_subprocess` returns 124 when the child
+                    # timed out. The run may be live, so a retry is not
+                    # known to be safe.
+                    unknown.append(label)
+                    unknown_detail = "no answer before the time limit. The loop may have started."
+                else:
+                    errors.append(f"{label}: {result['output'].strip()}")
+            if errors or unknown:
+                break
 
-        summary = ", ".join(f"{r}@{m}" for r, m in zip(targets_repos, assigned))
-        sent = f"Started {len(targets_repos)} loop(s): {summary}"
-        self.redirect(f"/schedule?sent={quote(sent, safe='')}")
+        accepted = []
+        if started:
+            accepted.append(f"Started {len(started)} loop(s): {', '.join(started)}.")
+        if queued:
+            accepted.append(
+                f"Queued {len(queued)} loop(s): {', '.join(queued)}. "
+                "A worker starts each one when it picks it up. "
+                "Check Loops for the result."
+            )
+        if not errors and not unknown:
+            accepted.append("Do not submit again.")
+            self.redirect(f"/schedule?sent={quote(' '.join(accepted), safe='')}")
+            return
+        if not accepted and not unknown:
+            self.reply(
+                render_error(
+                    "run now failed. Nothing was queued or started. "
+                    "It is safe to try again.\n" + "\n".join(errors)
+                ),
+                502,
+            )
+            return
+        # Some work was accepted, or a run has an unknown outcome. Show
+        # that, not a rejection. `sent` holds only what is confirmed
+        # (shown as success). `warn` holds failures and unknown results.
+        not_tried = [f"{r}@{m}" for r, m in pairs[index + 1:]]
+        warn = ["Partly done."] if accepted else []
+        if errors:
+            warn.append("Failed: " + "; ".join(error.rstrip(".") for error in errors) + ".")
+        if unknown:
+            warn.append(
+                f"Result unknown for {', '.join(unknown)}: {unknown_detail} "
+                "Check Loops for a later result, but pending commands may not appear there. "
+                "Do not submit unknown work again until you confirm it was not queued or started."
+            )
+        if not_tried:
+            warn.append(
+                f"Not tried: {', '.join(not_tried)}. Only these repos are safe to submit."
+            )
+        if accepted:
+            warn.append(
+                f"Do not submit {', '.join(r.split('@')[0] for r in [*started, *queued])} again."
+            )
+        query = f"warn={quote(' '.join(warn), safe='')}"
+        if accepted:
+            query = f"sent={quote(' '.join(accepted), safe='')}&{query}"
+        self.redirect(f"/schedule?{query}")
 
     def do_peek(self, query: dict) -> None:
         repo = query.get("repo", "").strip()

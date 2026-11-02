@@ -4087,6 +4087,38 @@ class ScheduleHelperTests(unittest.TestCase):
         self.assertFalse(available)
 
 
+class _BannerParser(HTMLParser):
+    """Collect the text inside each `pill` span and inside each paragraph."""
+
+    def __init__(self):
+        super().__init__()
+        self.pills = []
+        self.paragraphs = []
+        self._pill = None
+        self._paragraph = None
+
+    def handle_starttag(self, tag, attrs):
+        classes = dict(attrs).get("class") or ""
+        if tag == "span" and "pill" in classes.split():
+            self._pill = [classes, ""]
+        elif tag == "p":
+            self._paragraph = ""
+
+    def handle_endtag(self, tag):
+        if tag == "span" and self._pill is not None:
+            self.pills.append(tuple(self._pill))
+            self._pill = None
+        elif tag == "p" and self._paragraph is not None:
+            self.paragraphs.append(self._paragraph)
+            self._paragraph = None
+
+    def handle_data(self, data):
+        if self._pill is not None:
+            self._pill[1] += data
+        elif self._paragraph is not None:
+            self._paragraph += data
+
+
 class ScheduleRenderTests(unittest.TestCase):
     def _data(self, **overrides):
         data = {
@@ -4140,6 +4172,50 @@ class ScheduleRenderTests(unittest.TestCase):
     def test_success_banner_shown_when_sent(self):
         page = serve.render_schedule(self._data(), sent="Started 1 loop(s): widgets@pihome").decode()
         self.assertIn("Started 1 loop(s)", page)
+
+    WARN = (
+        "Result unknown for widgets@pihome: no answer before the time limit. "
+        "The loop may have started. Check Loops for a later result, but pending "
+        "commands may not appear there. Do not submit unknown work again until "
+        "you confirm it was not queued or started."
+    )
+
+    def _banners(self, **kwargs):
+        """The (classes, text) of every pill and the text of every paragraph."""
+        parser = _BannerParser()
+        parser.feed(serve.render_schedule(self._data(), **kwargs).decode())
+        return parser.pills, parser.paragraphs
+
+    def test_warning_badge_is_short_and_the_detail_is_outside_the_pill(self):
+        pills, paragraphs = self._banners(warn=self.WARN)
+        self.assertIn(("pill off", "Needs attention"), pills)
+        badge = next(text for classes, text in pills if classes == "pill off")
+        self.assertLessEqual(len(badge), 20)
+        # The detail is card text. No pill holds any part of it.
+        self.assertIn(self.WARN, paragraphs)
+        self.assertFalse(any("Result unknown" in text or "Check Loops" in text for _, text in pills))
+        self.assertNotIn(("pill on", self.WARN), pills)
+
+    def test_confirmed_and_warning_banners_stay_separate(self):
+        sent = "Queued 1 loop(s): a-repo@a-worker."
+        pills, paragraphs = self._banners(sent=sent, warn=self.WARN)
+        # Confirmed work stays in the success pill.
+        self.assertIn(("pill on", sent), pills)
+        self.assertNotIn(("pill off", sent), pills)
+        self.assertNotIn(sent, paragraphs)
+        # The warning is a short badge. Its detail is outside every pill.
+        self.assertIn(("pill off", "Needs attention"), pills)
+        self.assertIn(self.WARN, paragraphs)
+        self.assertFalse(any(self.WARN in text for _, text in pills))
+
+    def test_get_route_passes_warn_to_the_page(self):
+        handler = _get_handler("/schedule?warn=Result+unknown", {})
+        with mock.patch.object(serve, "gather_schedule", return_value=self._data()):
+            handler.do_GET()
+        parser = _BannerParser()
+        parser.feed(handler.reply.call_args.args[0].decode())
+        self.assertIn(("pill off", "Needs attention"), parser.pills)
+        self.assertIn("Result unknown", parser.paragraphs)
 
     def test_nav_has_a_schedule_link(self):
         self.assertIn("href='/schedule'", serve.render_nav("schedule"))
@@ -4313,6 +4389,312 @@ class ScheduleRunRouteUnitTests(unittest.TestCase):
         enqueue.assert_not_called()
 
 
+class ScheduleRunOutcomeTests(unittest.TestCase):
+    """One click, one outcome. What the page says must match what the queue
+    accepted. Mocked registry and queue: no Redis, no worker."""
+
+    ONLINE = [{"name": "jesus", "state": "online", "slots": {}}]
+
+    def _post(self, form, *, records, enqueue, repos=("a-repo", "b-repo", "c-repo")):
+        handler = _schedule_handler()
+        handler.cmd_signing_key = "secret"
+        _post_body(handler, "/schedule/run", form)
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=list(repos)),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", **records),
+            mock.patch.object(serve.commands, "enqueue", **enqueue) as fake_enqueue,
+        ):
+            handler.do_POST()
+        return handler, fake_enqueue
+
+    @staticmethod
+    def _sent(handler):
+        return unquote(handler.redirect.call_args.args[0])
+
+    @staticmethod
+    def _params(handler):
+        return parse_qs(urlsplit(handler.redirect.call_args.args[0]).query)
+
+    @staticmethod
+    def _error(handler):
+        body = handler.reply.call_args.args[0].decode()
+        return html.unescape(body.split("<p class=err>", 1)[1].split("</p>", 1)[0])
+
+    def test_available_machine_shows_queued_not_started(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_called_once()
+        handler.reply.assert_not_called()
+        sent = self._sent(handler)
+        self.assertTrue(sent.startswith("/schedule?sent="))
+        self.assertIn("Queued 1 loop(s): a-repo@jesus", sent)
+        self.assertNotIn("Started", sent)
+        self.assertIn("Do not submit again", sent)
+
+    def test_unavailable_machine_is_not_enqueued(self):
+        for state in ("draining", "offline"):
+            with self.subTest(state=state):
+                handler, enqueue = self._post(
+                    {"repo": "a-repo", "place": "jesus"},
+                    records={"return_value": [{"name": "jesus", "state": state, "slots": {}}]},
+                    enqueue={"return_value": "cmd-1"},
+                )
+                enqueue.assert_not_called()
+                handler.redirect.assert_not_called()
+                self.assertEqual(handler.reply.call_args.args[1], 400)
+                self.assertIn("Nothing was queued", self._error(handler))
+
+    def test_bad_placement_is_not_enqueued(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "no-such-machine"},
+            records={"return_value": self.ONLINE},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        handler.redirect.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+        error = self._error(handler)
+        self.assertIn("bad placement", error)
+        self.assertIn("Nothing was queued", error)
+
+    def test_unreadable_registry_is_named_and_nothing_is_enqueued(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "jesus"},
+            records={"side_effect": serve.machines.CoordinatorUnreachable("down")},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+        error = self._error(handler)
+        self.assertIn("fleet registry", error)
+        self.assertNotIn("bad placement", error)
+
+    def test_auth_failure_from_enqueue_shows_password_refusal(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": serve.slots_redis.CoordinatorAuthFailed("redis refused the login")},
+        )
+        enqueue.assert_called_once()
+        error = self._error(handler)
+        self.assertIn("LUPIN_REDIS_PASSWORD", error)
+        self.assertNotIn("cannot reach", error)
+
+    def test_acl_failure_from_enqueue_shows_permission_refusal(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": redis_lib.exceptions.NoPermissionError("ACL denied")},
+        )
+        enqueue.assert_called_once()
+        error = self._error(handler)
+        self.assertIn("ACL does not allow it", error)
+        self.assertNotIn("cannot reach", error)
+
+    def test_auth_failure_reading_registry_is_not_reported_as_outage(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "any"},
+            records={"side_effect": serve.slots_redis.CoordinatorAuthFailed("redis refused the login")},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[1], 502)
+        error = self._error(handler)
+        self.assertIn("LUPIN_REDIS_PASSWORD", error)
+        self.assertIn("Nothing was queued or started", error)
+        self.assertIn("safe to try again", error)
+        self.assertNotIn("cannot read the fleet registry", error)
+
+    def test_any_placement_with_registry_down_does_not_enqueue(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "any"},
+            records={"side_effect": serve.machines.CoordinatorUnreachable("down")},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        error = self._error(handler)
+        self.assertIn("Nothing was queued or started", error)
+
+    def test_acl_failure_reading_registry_keeps_refusal_message(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "spread"},
+            records={"side_effect": redis_lib.exceptions.NoPermissionError("ACL denied")},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        error = self._error(handler)
+        self.assertIn("ACL does not allow it", error)
+        self.assertIn("Nothing was queued or started", error)
+        self.assertNotIn("cannot reach", error)
+
+
+    def test_lost_enqueue_reply_is_unknown_not_safe_to_retry(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": serve.machines.CoordinatorUnreachable("reply lost")},
+        )
+        enqueue.assert_called_once()
+        handler.reply.assert_not_called()
+        params = self._params(handler)
+        self.assertNotIn("sent", params)
+        warning = params["warn"][0]
+        self.assertIn("Result unknown for a-repo@jesus", warning)
+        self.assertIn("may have been queued", warning)
+        self.assertIn("pending commands may not appear there", warning)
+        self.assertIn("Do not submit unknown work again until you confirm", warning)
+        self.assertNotIn("safe to try again", warning)
+        self.assertNotIn("Nothing was queued", warning)
+        page = _get_handler(handler.redirect.call_args.args[0], {})
+        with mock.patch.object(serve, "gather_schedule", return_value={
+            "now": 1_800_000_000.0,
+            "enabled": ["a-repo"],
+            "timers": [],
+            "timer_active": False,
+            "machines": [],
+            "fleet_error": None,
+            "local_host": "h",
+        }):
+            page.do_GET()
+        banners = _BannerParser()
+        banners.feed(page.reply.call_args.args[0].decode())
+        self.assertIn(("pill off", "Needs attention"), banners.pills)
+        self.assertTrue(any("Result unknown for a-repo@jesus" in p for p in banners.paragraphs))
+
+    def test_lost_enqueue_reply_after_accepted_repo_keeps_both_outcomes(self):
+        handler, enqueue = self._post(
+            {"repo": "all", "cnt": "3", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": ["cmd-1", serve.machines.CoordinatorUnreachable("reply lost")]},
+        )
+        self.assertEqual(enqueue.call_count, 2)
+        handler.reply.assert_not_called()
+        params = self._params(handler)
+        self.assertIn("Queued 1 loop(s): a-repo@jesus", params["sent"][0])
+        warning = params["warn"][0]
+        self.assertIn("Partly done", warning)
+        self.assertIn("Result unknown for b-repo@jesus", warning)
+        self.assertIn("may have been queued", warning)
+        self.assertIn("Not tried: c-repo@jesus", warning)
+        self.assertIn("Only these repos are safe to submit", warning)
+        self.assertIn("Do not submit a-repo again", warning)
+        self.assertIn("Do not submit unknown work again until you confirm", warning)
+        self.assertNotIn("did not start", warning)
+        self.assertNotIn("Submit only the failed", warning)
+        self.assertNotIn("safe to try again", warning)
+        self.assertNotIn("Failed:", warning)
+
+    def test_partial_refusal_has_one_period_and_only_not_tried_is_safe(self):
+        handler, enqueue = self._post(
+            {"repo": "all", "cnt": "3", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": [
+                "cmd-1", serve.slots_redis.CoordinatorAuthFailed("redis refused the login"),
+            ]},
+        )
+        self.assertEqual(enqueue.call_count, 2)
+        warning = self._params(handler)["warn"][0]
+        self.assertIn("For run now.", warning)
+        self.assertNotIn("For run now..", warning)
+        self.assertIn("Not tried: c-repo@jesus. Only these repos are safe to submit.", warning)
+        self.assertNotIn("Submit only the failed", warning)
+        self.assertIn("Do not submit a-repo again", warning)
+
+    def test_local_run_is_shown_as_started(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "a-repo", "place": "h"})
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", return_value=[]),
+            mock.patch.object(serve, "run", return_value=(0, "")),
+            mock.patch.object(serve.commands, "enqueue") as enqueue,
+        ):
+            handler.do_POST()
+        enqueue.assert_not_called()
+        sent = self._sent(handler)
+        self.assertIn("Started 1 loop(s): a-repo@h", sent)
+        self.assertNotIn("Queued", sent)
+
+    # `loops.run_subprocess` returns this pair when the local child times out.
+    TIMED_OUT = (124, "timed out after 20.0s: lupin run a-repo")
+
+    def test_local_timeout_says_unknown_and_not_safe_to_retry(self):
+        with (
+            mock.patch.dict("os.environ", {"LUPIN_LOOP_COORDINATOR_ONLY": "0"}),
+            mock.patch.object(serve, "run", return_value=self.TIMED_OUT),
+        ):
+            handler, enqueue = self._post(
+                {"repo": "a-repo", "place": "h"},
+                records={"return_value": []},
+                enqueue={"return_value": "cmd-1"},
+            )
+        enqueue.assert_not_called()
+        # Not the Rejected page: the run may be live.
+        handler.reply.assert_not_called()
+        sent = self._sent(handler)
+        self.assertIn("Result unknown for a-repo@h", sent)
+        self.assertIn("Do not submit unknown work again until you confirm", sent)
+        self.assertNotIn("safe to try again", sent)
+        self.assertNotIn("Nothing was queued", sent)
+        self.assertNotIn("Started", sent)
+        self.assertNotIn("Queued", sent)
+        # Only a warning goes to the page. There is nothing confirmed.
+        params = self._params(handler)
+        self.assertNotIn("sent", params)
+        self.assertIn("Result unknown for a-repo@h", params["warn"][0])
+
+    def test_local_timeout_keeps_earlier_queued_repo_and_marks_local_unknown(self):
+        # spread order: a-repo -> a-worker (queued), b-repo -> h (times out),
+        # c-repo -> a-worker (never tried).
+        with (
+            mock.patch.dict("os.environ", {"LUPIN_LOOP_COORDINATOR_ONLY": "0"}),
+            mock.patch.object(serve, "run", return_value=self.TIMED_OUT) as local_run,
+        ):
+            handler, enqueue = self._post(
+                {"repo": "all", "cnt": "3", "place": "spread"},
+                records={"return_value": [{"name": "a-worker", "state": "online", "slots": {}}]},
+                enqueue={"return_value": "cmd-1"},
+            )
+        enqueue.assert_called_once()
+        local_run.assert_called_once()
+        handler.reply.assert_not_called()
+        sent = self._sent(handler)
+        self.assertIn("Queued 1 loop(s): a-repo@a-worker", sent)
+        self.assertIn("Result unknown for b-repo@h", sent)
+        self.assertIn("Not tried: c-repo@a-worker", sent)
+        self.assertIn("Do not submit a-repo again", sent)
+        self.assertIn("Check Loops", sent)
+        self.assertNotIn("safe to try again", sent)
+        self.assertNotIn("Failed:", sent)
+        # The queued repo is confirmed. The local repo is only a warning.
+        params = self._params(handler)
+        self.assertIn("Queued 1 loop(s): a-repo@a-worker", params["sent"][0])
+        self.assertNotIn("unknown", params["sent"][0])
+        self.assertIn("Result unknown for b-repo@h", params["warn"][0])
+        self.assertNotIn("Queued 1 loop(s)", params["warn"][0])
+
+    def test_local_definite_failure_keeps_the_safe_retry_text(self):
+        with (
+            mock.patch.dict("os.environ", {"LUPIN_LOOP_COORDINATOR_ONLY": "0"}),
+            mock.patch.object(serve, "run", return_value=(1, "boom")),
+        ):
+            handler, enqueue = self._post(
+                {"repo": "a-repo", "place": "h"},
+                records={"return_value": []},
+                enqueue={"return_value": "cmd-1"},
+            )
+        enqueue.assert_not_called()
+        handler.redirect.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[1], 502)
+        error = self._error(handler)
+        self.assertIn("It is safe to try again", error)
+        self.assertNotIn("Result unknown", error)
+
 
 class TestSchedulePageIntegration:
     """Real `redis-server` fixtures, same rule as TestLoopsPageIntegration
@@ -4357,6 +4739,53 @@ class TestSchedulePageIntegration:
         assert stored["issuer"] == "pihome"
         assert commands.verify(stored, "secret") is True
         handler.send_response.assert_called_once_with(303)
+
+    def test_run_now_keeps_queued_and_unknown_separate_when_reply_is_lost(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        _write_machine_record(redis_port, "jesus", state="online")
+        handler = _post_handler("/schedule/run", b"repo=all&cnt=3&place=jesus", kw)
+        handler.cmd_signing_key = "secret"
+        client = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+        actual_eval = client.eval
+        attempts = 0
+
+        def lost_reply(*args):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return actual_eval(*args)
+            if attempts == 2:
+                actual_eval(*args)
+                raise redis_lib.exceptions.TimeoutError("reply lost after commit")
+            raise redis_lib.exceptions.ConnectionError("retry could not connect")
+
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo", "b-repo", "c-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+            mock.patch.object(commands, "_client", return_value=client),
+            mock.patch.object(client, "eval", side_effect=lost_reply),
+        ):
+            handler.do_POST()
+
+        assert attempts == 3
+        handler.send_response.assert_called_once_with(303)
+        headers = {call.args[0]: call.args[1] for call in handler.send_header.call_args_list}
+        params = parse_qs(urlsplit(headers["Location"]).query)
+        assert "Queued 1 loop(s): a-repo@jesus" in params["sent"][0]
+        warning = params["warn"][0]
+        assert "Result unknown for b-repo@jesus" in warning
+        assert "pending commands may not appear there" in warning
+        assert "Do not submit unknown work again until you confirm" in warning
+        assert "Not tried: c-repo@jesus. Only these repos are safe to submit." in warning
+        assert "did not start" not in warning
+        assert "safe to try again" not in warning
+        queued = client.zrange("lupin:v1:cmdq:jesus", 0, -1)
+        assert len(queued) == 2
+        # Neither queued command has started, so Loops cannot show it yet.
+        assert all(client.get(f"lupin:v1:cmdres:{cmd_id}") is None for cmd_id in queued)
+        stored = [json.loads(client.get(f"lupin:v1:cmd:{cmd_id}")) for cmd_id in queued]
+        assert {cmd["params"]["repo"] for cmd in stored} == {"a-repo", "b-repo"}
+        assert all(commands.verify(cmd, "secret") for cmd in stored)
 
     def test_run_now_passes_the_note_to_a_remote_loop(self, redis_port, flush_redis):
         kw = _kw(redis_port)

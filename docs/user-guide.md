@@ -194,6 +194,11 @@ repo's checkout. Run-now actions from `fleet-run` and the dashboard use the
 target worker's local platform and profile. Configure the profile on each worker
 that can start the repo.
 
+On the Schedule page, Run now shows "Result unknown" if Redis does not confirm
+a command. Redis may have queued it before the reply was lost. Pending commands
+do not appear on Loops. Do not submit an unknown repo again because it is absent
+from Loops. Confirm that the command was not queued or started first. Only repos
+listed as "Not tried" are safe to submit after a partial result.
 
 `supervise` checks this machine's Lupin loops. It uses fixed rules and no
 model. For each loop, it reads the Herdr state of its pane, the systemd unit,
