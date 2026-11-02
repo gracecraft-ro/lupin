@@ -19,7 +19,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from importlib import resources
 from unittest import mock
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 from xml.etree import ElementTree
 
 import pytest
@@ -4197,6 +4197,130 @@ class ScheduleRunRouteUnitTests(unittest.TestCase):
         run_local.assert_not_called()
         enqueue.assert_not_called()
 
+
+class ScheduleRunOutcomeTests(unittest.TestCase):
+    """One click, one outcome. What the page says must match what the queue
+    accepted. Mocked registry and queue: no Redis, no worker."""
+
+    ONLINE = [{"name": "jesus", "state": "online", "slots": {}}]
+
+    def _post(self, form, *, records, enqueue, repos=("a-repo", "b-repo", "c-repo")):
+        handler = _schedule_handler()
+        handler.cmd_signing_key = "secret"
+        _post_body(handler, "/schedule/run", form)
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=list(repos)),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", **records),
+            mock.patch.object(serve.commands, "enqueue", **enqueue) as fake_enqueue,
+        ):
+            handler.do_POST()
+        return handler, fake_enqueue
+
+    @staticmethod
+    def _sent(handler):
+        return unquote(handler.redirect.call_args.args[0])
+
+    @staticmethod
+    def _error(handler):
+        body = handler.reply.call_args.args[0].decode()
+        return html.unescape(body.split("<p class=err>", 1)[1].split("</p>", 1)[0])
+
+    def test_available_machine_shows_queued_not_started(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_called_once()
+        handler.reply.assert_not_called()
+        sent = self._sent(handler)
+        self.assertTrue(sent.startswith("/schedule?sent="))
+        self.assertIn("Queued 1 loop(s): a-repo@jesus", sent)
+        self.assertNotIn("Started", sent)
+        self.assertIn("Do not submit again", sent)
+
+    def test_unavailable_machine_is_not_enqueued(self):
+        for state in ("draining", "offline"):
+            with self.subTest(state=state):
+                handler, enqueue = self._post(
+                    {"repo": "a-repo", "place": "jesus"},
+                    records={"return_value": [{"name": "jesus", "state": state, "slots": {}}]},
+                    enqueue={"return_value": "cmd-1"},
+                )
+                enqueue.assert_not_called()
+                handler.redirect.assert_not_called()
+                self.assertEqual(handler.reply.call_args.args[1], 400)
+                self.assertIn("Nothing was queued", self._error(handler))
+
+    def test_bad_placement_is_not_enqueued(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "no-such-machine"},
+            records={"return_value": self.ONLINE},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        handler.redirect.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+        error = self._error(handler)
+        self.assertIn("bad placement", error)
+        self.assertIn("Nothing was queued", error)
+
+    def test_unreadable_registry_is_named_and_nothing_is_enqueued(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "jesus"},
+            records={"side_effect": serve.machines.CoordinatorUnreachable("down")},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+        error = self._error(handler)
+        self.assertIn("fleet registry", error)
+        self.assertNotIn("bad placement", error)
+
+    def test_first_enqueue_failure_is_a_clean_rejection(self):
+        handler, enqueue = self._post(
+            {"repo": "all", "cnt": "3", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": serve.machines.CoordinatorUnreachable("down")},
+        )
+        # Stop at the first failure: later repos are not tried.
+        enqueue.assert_called_once()
+        handler.redirect.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[1], 502)
+        self.assertIn("Nothing was queued", self._error(handler))
+
+    def test_late_failure_reports_what_the_queue_accepted(self):
+        handler, enqueue = self._post(
+            {"repo": "all", "cnt": "3", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": ["cmd-1", serve.machines.CoordinatorUnreachable("down")]},
+        )
+        # a-repo was accepted, b-repo failed, c-repo was never tried.
+        self.assertEqual(enqueue.call_count, 2)
+        # The accepted command must not appear on a "Rejected" page.
+        handler.reply.assert_not_called()
+        sent = self._sent(handler)
+        self.assertIn("Queued 1 loop(s): a-repo@jesus", sent)
+        self.assertIn("b-repo@jesus: cannot reach the redis coordinator", sent)
+        self.assertIn("Not tried: c-repo@jesus", sent)
+        self.assertIn("Do not submit a-repo again", sent)
+
+    def test_local_run_is_shown_as_started(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "a-repo", "place": "h"})
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", return_value=[]),
+            mock.patch.object(serve, "run", return_value=(0, "")),
+            mock.patch.object(serve.commands, "enqueue") as enqueue,
+        ):
+            handler.do_POST()
+        enqueue.assert_not_called()
+        sent = self._sent(handler)
+        self.assertIn("Started 1 loop(s): a-repo@h", sent)
+        self.assertNotIn("Queued", sent)
 
 
 class TestSchedulePageIntegration:

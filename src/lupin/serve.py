@@ -4988,16 +4988,26 @@ class Handler(BaseHTTPRequestHandler):
 
 
         local_host = machines.hostname()
+        registry_down = False
         try:
             # strict: do not place runs on a partial machine list.
             records = machines.machines(self.fleet_connection, strict=True)
         except CoordinatorUnreachable:
             records = []
+            registry_down = True
+        # Every check below runs before the first enqueue. A refusal here
+        # means nothing was queued or started.
+        safe_retry = "Nothing was queued or started. It is safe to try again."
 
         if place_choice in ("spread", "any"):
             ranked = _rank_candidates(records, local_host)
             if not ranked:
-                self.reply(render_error("no machine is available to place a run on"), 400)
+                why = (
+                    "cannot read the fleet registry"
+                    if registry_down
+                    else "no machine is available to place a run on"
+                )
+                self.reply(render_error(f"{why}. {safe_retry}"), 400)
                 return
             if place_choice == "spread":
                 assigned = [ranked[i % len(ranked)]["name"] for i in range(len(targets_repos))]
@@ -5006,7 +5016,12 @@ class Handler(BaseHTTPRequestHandler):
         elif _machine_available(place_choice, records, local_host):
             assigned = [place_choice] * len(targets_repos)
         else:
-            self.reply(render_error("bad placement"), 400)
+            why = (
+                f"cannot read the fleet registry, so {place_choice!r} cannot be checked"
+                if registry_down
+                else f"bad placement: {place_choice!r} is not an online machine"
+            )
+            self.reply(render_error(f"{why}. {safe_retry}"), 400)
             return
 
         missing_key = next(
@@ -5014,11 +5029,19 @@ class Handler(BaseHTTPRequestHandler):
             None,
         )
         if missing_key:
-            self.reply(render_error(f"no signing key is configured for {missing_key!r}"), 400)
+            self.reply(
+                render_error(f"no signing key is configured for {missing_key!r}. {safe_retry}"),
+                400,
+            )
             return
 
-        errors = []
-        for repo, machine in zip(targets_repos, assigned):
+        # One click gives one outcome. Stop at the first failure so that
+        # no later repo is queued. `started` ran here. `queued` is in the
+        # queue, and a worker has not confirmed it.
+        started, queued, errors = [], [], []
+        pairs = list(zip(targets_repos, assigned))
+        for index, (repo, machine) in enumerate(pairs):
+            label = f"{repo}@{machine}"
             local_argv = ["lupin", "run", repo]
             queue_params = {"repo": repo}
             if note:
@@ -5037,17 +5060,55 @@ class Handler(BaseHTTPRequestHandler):
                     run_local=lambda argv: run(argv, timeout=20.0),
                 )
             except CoordinatorUnreachable:
-                errors.append(f"{repo}@{machine}: cannot reach the redis coordinator")
-                continue
-            if result["mode"] == "local" and result["returncode"] != 0:
-                errors.append(f"{repo}@{machine}: {result['output'].strip()}")
-        if errors:
-            self.reply(render_error("run now failed:\n" + "\n".join(errors)), 502)
-            return
+                errors.append(f"{label}: cannot reach the redis coordinator")
+            except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
+                errors.append(f"{label}: {slots_redis.refusal_message(exc, 'run now', fleet=True)}")
+            else:
+                if result["mode"] != "local":
+                    queued.append(label)
+                elif result["returncode"] == 0:
+                    started.append(label)
+                else:
+                    errors.append(f"{label}: {result['output'].strip()}")
+            if errors:
+                break
 
-        summary = ", ".join(f"{r}@{m}" for r, m in zip(targets_repos, assigned))
-        sent = f"Started {len(targets_repos)} loop(s): {summary}"
-        self.redirect(f"/schedule?sent={quote(sent, safe='')}")
+        accepted = []
+        if started:
+            accepted.append(f"Started {len(started)} loop(s): {', '.join(started)}.")
+        if queued:
+            accepted.append(
+                f"Queued {len(queued)} loop(s): {', '.join(queued)}. "
+                "A worker starts each one when it picks it up. "
+                "Check Loops for the result."
+            )
+        if not errors:
+            accepted.append("Do not submit again.")
+            self.redirect(f"/schedule?sent={quote(' '.join(accepted), safe='')}")
+            return
+        if not accepted:
+            self.reply(
+                render_error(
+                    "run now failed. Nothing was queued or started. "
+                    "It is safe to try again.\n" + "\n".join(errors)
+                ),
+                502,
+            )
+            return
+        # Some work was accepted. Show it as accepted, not as a rejection.
+        not_tried = [f"{r}@{m}" for r, m in pairs[index + 1:]]
+        parts = [
+            "Partly done.",
+            *accepted,
+            "Failed: " + "; ".join(errors) + ".",
+        ]
+        if not_tried:
+            parts.append(f"Not tried: {', '.join(not_tried)}.")
+        parts.append(
+            f"Do not submit {', '.join(r.split('@')[0] for r in [*started, *queued])} again. "
+            "Submit only the failed and not tried repos."
+        )
+        self.redirect(f"/schedule?sent={quote(' '.join(parts), safe='')}")
 
     def do_peek(self, query: dict) -> None:
         repo = query.get("repo", "").strip()
