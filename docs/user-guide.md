@@ -475,4 +475,3 @@ The Repos and Roadmap pages read the checkouts in `LUPIN_LOOP_CODE_DIR` (default
 does not appear. The serving user must be able to read each checkout. If another
 user owns a checkout, Git reports "dubious ownership", and the page shows no
 issues. Add the checkout to Git's `safe.directory` list.
-
