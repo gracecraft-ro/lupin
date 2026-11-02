@@ -4988,16 +4988,24 @@ class Handler(BaseHTTPRequestHandler):
 
 
         local_host = machines.hostname()
+        # Every check below runs before the first enqueue. A refusal here
+        # means nothing was queued or started.
+        safe_retry = "Nothing was queued or started. It is safe to try again."
         registry_down = False
         try:
             # strict: do not place runs on a partial machine list.
             records = machines.machines(self.fleet_connection, strict=True)
+        except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
+            self.reply(
+                render_error(
+                    f"{slots_redis.refusal_message(exc, 'run now', fleet=True)} {safe_retry}"
+                ),
+                502,
+            )
+            return
         except CoordinatorUnreachable:
             records = []
             registry_down = True
-        # Every check below runs before the first enqueue. A refusal here
-        # means nothing was queued or started.
-        safe_retry = "Nothing was queued or started. It is safe to try again."
 
         if place_choice in ("spread", "any"):
             ranked = _rank_candidates(records, local_host)
@@ -5059,10 +5067,10 @@ class Handler(BaseHTTPRequestHandler):
                     actor="lupin-dashboard", issuer=local_host,
                     run_local=lambda argv: run(argv, timeout=20.0),
                 )
-            except CoordinatorUnreachable:
-                errors.append(f"{label}: cannot reach the redis coordinator")
             except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
                 errors.append(f"{label}: {slots_redis.refusal_message(exc, 'run now', fleet=True)}")
+            except CoordinatorUnreachable:
+                errors.append(f"{label}: cannot reach the redis coordinator")
             else:
                 if result["mode"] != "local":
                     queued.append(label)

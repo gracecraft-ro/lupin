@@ -4278,6 +4278,65 @@ class ScheduleRunOutcomeTests(unittest.TestCase):
         self.assertIn("fleet registry", error)
         self.assertNotIn("bad placement", error)
 
+    def test_auth_failure_from_enqueue_shows_password_refusal(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": serve.slots_redis.CoordinatorAuthFailed("redis refused the login")},
+        )
+        enqueue.assert_called_once()
+        error = self._error(handler)
+        self.assertIn("LUPIN_REDIS_PASSWORD", error)
+        self.assertNotIn("cannot reach", error)
+
+    def test_acl_failure_from_enqueue_shows_permission_refusal(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": redis_lib.exceptions.NoPermissionError("ACL denied")},
+        )
+        enqueue.assert_called_once()
+        error = self._error(handler)
+        self.assertIn("ACL does not allow it", error)
+        self.assertNotIn("cannot reach", error)
+
+    def test_auth_failure_reading_registry_is_not_reported_as_outage(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "any"},
+            records={"side_effect": serve.slots_redis.CoordinatorAuthFailed("redis refused the login")},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[1], 502)
+        error = self._error(handler)
+        self.assertIn("LUPIN_REDIS_PASSWORD", error)
+        self.assertIn("Nothing was queued or started", error)
+        self.assertIn("safe to try again", error)
+        self.assertNotIn("cannot read the fleet registry", error)
+
+    def test_any_placement_with_registry_down_does_not_enqueue(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "any"},
+            records={"side_effect": serve.machines.CoordinatorUnreachable("down")},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        error = self._error(handler)
+        self.assertIn("Nothing was queued or started", error)
+
+    def test_acl_failure_reading_registry_keeps_refusal_message(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "spread"},
+            records={"side_effect": redis_lib.exceptions.NoPermissionError("ACL denied")},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        error = self._error(handler)
+        self.assertIn("ACL does not allow it", error)
+        self.assertIn("Nothing was queued or started", error)
+        self.assertNotIn("cannot reach", error)
+
+
     def test_first_enqueue_failure_is_a_clean_rejection(self):
         handler, enqueue = self._post(
             {"repo": "all", "cnt": "3", "place": "jesus"},
