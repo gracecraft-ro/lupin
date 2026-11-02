@@ -23,6 +23,7 @@ import redis
 from . import agent as agent_mod
 from . import benchmark_fetch
 from . import claims
+from . import claim_labels
 from . import classify as classify_mod
 from . import commands
 from . import dispatch as dispatch_mod
@@ -36,6 +37,7 @@ from . import pr_status
 from . import quest as quest_mod
 from . import quota
 from . import quota_cache
+from . import pace as pace_mod
 from . import usage_cache
 from . import reconcile as reconcile_mod
 from . import review_dispatch
@@ -1051,7 +1053,12 @@ def _claim_kwargs(args: argparse.Namespace) -> dict:
 
 def _cmd_claim(args: argparse.Namespace) -> int:
     try:
-        claims.claim(args.target, args.holder, ttl=args.ttl, **_claim_kwargs(args))
+        claim_labels.claim(
+            args.target, args.holder, ttl=args.ttl, **_claim_kwargs(args)
+        )
+    except claim_labels.ClaimLabelSyncError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -1069,7 +1076,12 @@ def _cmd_claim(args: argparse.Namespace) -> int:
 
 def _cmd_renew_claim(args: argparse.Namespace) -> int:
     try:
-        renewed = claims.renew_claim(args.target, args.holder, ttl=args.ttl, **_claim_kwargs(args))
+        renewed = claim_labels.renew_claim(
+            args.target, args.holder, ttl=args.ttl, **_claim_kwargs(args)
+        )
+    except claim_labels.ClaimLabelSyncError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -1087,7 +1099,10 @@ def _cmd_renew_claim(args: argparse.Namespace) -> int:
 
 def _cmd_release_claim(args: argparse.Namespace) -> int:
     try:
-        released = claims.release_claim(args.target, args.holder, **_claim_kwargs(args))
+        released = claim_labels.release_claim(args.target, args.holder, **_claim_kwargs(args))
+    except claim_labels.ClaimLabelSyncError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -1114,6 +1129,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     except dispatch_mod.DispatchError as exc:
         print(exc, file=sys.stderr)
         return exc.code
+    except claim_labels.ClaimLabelSyncError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     except claims.ClaimHeld as exc:
         print(exc, file=sys.stderr)
         return 2
@@ -1437,6 +1455,9 @@ def _cmd_quest(args: argparse.Namespace) -> int:
         except quest_mod.QuestError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return exc.exit_code
+        except claim_labels.ClaimLabelSyncError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         except _REDIS_REFUSED as exc:
             _print_auth_failed(exc, "quest start")
             return 3
@@ -1458,6 +1479,9 @@ def _cmd_quest(args: argparse.Namespace) -> int:
         except quest_mod.QuestError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return exc.exit_code
+        except claim_labels.ClaimLabelSyncError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
         except _REDIS_REFUSED as exc:
             _print_auth_failed(exc, "quest stop")
             return 3
@@ -1515,6 +1539,7 @@ def _cmd_quest(args: argparse.Namespace) -> int:
 
 def _cmd_reconcile(args: argparse.Namespace) -> int:
     repos = serve.enabled_repos()
+    label_repos = [record["repo"] for record in serve.code_repos()]
     redis_kwargs = {
         "redis_host": args.redis_host,
         "redis_port": args.redis_port,
@@ -1534,7 +1559,9 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
         return 3
 
     try:
-        lines, warnings = reconcile_mod.reconcile(repos, redis_kwargs)
+        lines, warnings = reconcile_mod.reconcile(
+            repos, redis_kwargs, label_repos=label_repos
+        )
     except _REDIS_REFUSED as exc:
         _print_auth_failed(exc, "the reconcile run")
         return 3
@@ -1551,15 +1578,18 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
 
     for warning in warnings:
         print(f"lupin: {warning}", file=sys.stderr)
+    label_errors = any(
+        warning.startswith("GitHub claim label sync failed") for warning in warnings
+    )
     if args.json:
-        print(json.dumps({"released": lines}))
-        return 0
+        print(json.dumps({"released": lines, "warnings": warnings}))
+        return 1 if label_errors else 0
     if not lines:
         print("Nothing to release.")
-        return 0
+        return 1 if label_errors else 0
     for line in lines:
         print(line)
-    return 0
+    return 1 if label_errors else 0
 
 
 def _cmd_roadmap(args: argparse.Namespace) -> int:
@@ -2035,7 +2065,12 @@ def _cmd_loops(args: argparse.Namespace) -> int:
     else:
         for row in rows:
             repo = "unmanaged" if row.get("managed") is False else row.get("repo", "?")
-            print(f"{repo}: {row.get('state', 'unknown')} ({row.get('backend', 'unknown')})")
+            line = f"{repo}: {row.get('state', 'unknown')} ({row.get('backend', 'unknown')})"
+            if row.get("reason"):
+                line += f": {row['reason']}"
+            if row.get("handoff"):
+                line += f" (handoff: {row['handoff']})"
+            print(line)
     return 0
 
 
@@ -2344,7 +2379,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run `_main`; report Redis and tier-routing errors without tracebacks."""
+    """Run `_main`; report command and quota-setting errors without tracebacks."""
     try:
         return _main(argv)
     except _REDIS_REFUSED as exc:
@@ -2354,6 +2389,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"lupin: {exc}", file=sys.stderr)
         return 2
     except route_mod.RouteInputError as exc:
+        print(f"lupin: {exc}", file=sys.stderr)
+        return 2
+    except pace_mod.PacingConfigError as exc:
         print(f"lupin: {exc}", file=sys.stderr)
         return 2
 
@@ -2370,6 +2408,7 @@ def _main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(lupin_argv)
 
     if args.cmd == "serve":
+        pace_mod.weekly_daily_targets()
         return serve.main(lupin_argv[1:])
 
     if args.cmd == "review-route":

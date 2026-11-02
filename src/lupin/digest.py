@@ -291,8 +291,8 @@ def is_quiet(raw: str) -> bool:
 def _error_chain() -> list[tuple[str, str]]:
     """The digest model order: tier0 entries in order, then tier1's first entry.
 
-    The order is the prose row in `model-tiers.json`. Tier2 (Opus) is not a
-    digest fallback. A custom tiers file that has no tier0 for prose still
+    The order is the prose row in `model-tiers.json`. Tier2 is not a digest
+    fallback. A custom tiers file that has no tier0 for prose still
     gets a chain, from tier1's first entry.
     """
     row = route._load_tiers()[CATEGORY]["tiers"]
