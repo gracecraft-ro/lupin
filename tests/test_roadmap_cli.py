@@ -1188,3 +1188,56 @@ def test_cli_ownerless_dependency_is_warned_but_does_not_block_local_target(
     assert payload["repos"]["api"]["ready"] == 1
     assert payload["repos"]["api"]["blocked"] == 0
     assert any("linked repository has no owner" in warning for warning in payload["warnings"])
+
+
+def test_cli_same_name_repo_under_other_owner_does_not_block_local_target(
+    redis_port, flush_redis, tmp_path, monkeypatch, capsys
+):
+    redis = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+    api_links = {
+        "20": {
+            "blockedBy": [{"repo": "core", "owner": "evil", "number": 10}],
+            "blocking": [],
+        }
+    }
+    cache_data = {
+        "api": ([_issue(20, "Use core prerequisite")], api_links),
+        "core": (
+            [_issue(10, "Core prerequisite")],
+            {"10": {"blockedBy": [], "blocking": []}},
+        ),
+    }
+    for repo, (issues, dependencies) in cache_data.items():
+        (tmp_path / repo).mkdir()
+        prefix = f"{gh_cache.PREFIX}gh-cache:acme/{repo}:"
+        redis.set(f"{prefix}issues:open", json.dumps({"data": issues}))
+        redis.set(f"{prefix}comments:open", json.dumps({"data": {}}))
+        redis.set(f"{prefix}dependencies:v2", json.dumps({"data": dependencies}))
+
+    default_config = tmp_path / "fleet.json"
+    default_config.write_text(
+        json.dumps({"redis_host": "127.0.0.1", "redis_port": redis_port}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(machines, "DEFAULT_CONFIG_PATH", default_config)
+    monkeypatch.setattr(roadmap, "_GITHUB_CACHE", {})
+    monkeypatch.setattr(roadmap, "_DEPENDENCY_CACHE", {})
+    monkeypatch.setattr(
+        roadmap, "_gh_identity",
+        lambda path: ("acme", os.path.basename(path), None),
+    )
+    monkeypatch.setenv("LUPIN_LOOP_CODE_DIR", str(tmp_path))
+
+    with mock.patch("lupin.serve.enabled_repos", return_value=["api", "core"]):
+        exit_code = cli.main([
+            "roadmap",
+            "--json",
+            "--redis-host", "127.0.0.1",
+            "--redis-port", str(redis_port),
+        ])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["repos"]["api"]["ready"] == 1, payload
+    assert payload["repos"]["api"]["blocked"] == 0
+    assert payload["repos"]["core"]["ready"] == 1

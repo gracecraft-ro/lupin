@@ -1230,6 +1230,15 @@ def _dependency_cycles(edges: list[tuple[tuple[str, int], tuple[str, int]]]) -> 
     return cycles
 
 
+def _dag_target(target: dict) -> dict:
+    """A link target for the DAG output. Keeps `owner` when the link has one,
+    so a caller can tell `acme/core` from `evil/core`."""
+    result = {"repo": target["repo"], "number": target["number"]}
+    if target.get("owner"):
+        result["owner"] = target["owner"]
+    return result
+
+
 def build_dependency_dag(repo_links: dict[str, dict[int, dict]]) -> dict:
     """Combine each repo's blockedBy/blocking links into one cross-repo DAG.
 
@@ -1239,6 +1248,7 @@ def build_dependency_dag(repo_links: dict[str, dict[int, dict]]) -> dict:
     Returns:
       {
         "repos": {repo: [{"number", "blockedBy", "blocking"}, ...]},
+                          # each target: {"repo", "number"} and "owner" if known
         "cycles": [[{"repo", "number"}, ...], ...],   # empty if acyclic
       }
 
@@ -1260,14 +1270,8 @@ def build_dependency_dag(repo_links: dict[str, dict[int, dict]]) -> dict:
         repo: [
             {
                 "number": number,
-                "blockedBy": [
-                    {"repo": target["repo"], "number": target["number"]}
-                    for target in links.get("blockedBy", [])
-                ],
-                "blocking": [
-                    {"repo": target["repo"], "number": target["number"]}
-                    for target in links.get("blocking", [])
-                ],
+                "blockedBy": [_dag_target(target) for target in links.get("blockedBy", [])],
+                "blocking": [_dag_target(target) for target in links.get("blocking", [])],
             }
             for number, links in sorted(issues.items())
         ]

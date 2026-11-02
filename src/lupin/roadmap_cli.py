@@ -11,9 +11,10 @@ Judgment calls, since the design doc (`docs/lupin-ctl-copy.md` section 5) gives
 one illustrative example, not a full algorithm:
 
 - An issue is "blocked" only by an *open* blocker in a repo this command
-  also fetched. A blocker in a repo we didn't fetch can't be checked, so
-  it's treated as not blocking (silently -- we have no evidence either
-  way, so we don't guess "blocked").
+  also fetched. The link must match the repo's owner and name. A blocker
+  in a repo we didn't fetch can't be checked, so it's treated as not
+  blocking (silently -- we have no evidence either way, so we don't guess
+  "blocked").
 - "Does not exist" (the broken-link warning) is checked with one `gh issue
   view <N> --json state` call per blocker that's missing from the open set
   -- only for blockers whose repo we did fetch. This is a small, targeted
@@ -65,11 +66,29 @@ def _are(count: int) -> str:
     return "is" if count == 1 else "are"
 
 
-def _blocked_by_targets(dag_repos: dict, repo: str, number: int) -> list[tuple[str, int]]:
+def _blocked_by_targets(
+    dag_repos: dict, repo: str, number: int
+) -> list[tuple[str | None, str, int]]:
     for entry in dag_repos.get(repo, []):
         if entry["number"] == number:
-            return [(t["repo"], t["number"]) for t in entry.get("blockedBy", [])]
+            return [
+                (t.get("owner"), t["repo"], t["number"]) for t in entry.get("blockedBy", [])
+            ]
     return []
+
+
+def _local_blocker_repo(
+    local_repos: dict[tuple[str, str], str], open_numbers: dict, owner: str | None, name: str
+) -> str | None:
+    """The fetched repo key a blocker link points at, or None.
+
+    A link with an owner must match a checkout's (owner, name). `acme/core`
+    and `evil/core` are different repos. A link with no owner (the DAG
+    always has one for real GitHub data) matches by repo name.
+    """
+    if owner:
+        return local_repos.get((owner.casefold(), name.casefold()))
+    return name if name in open_numbers else None
 
 
 def _issue_state(
@@ -158,6 +177,11 @@ def build_roadmap(
     for repo, messages in dag.get("warnings", {}).items():
         warnings.extend(f"{repo}: {m}" for m in messages)
 
+    local_repos = {
+        (owners[repo].casefold(), names[repo].casefold()): repo
+        for repo in repos
+        if owners.get(repo) and names.get(repo)
+    }
     full_names = {
         repo: f"{owners[repo]}/{names[repo]}"
         for repo in repos
@@ -190,8 +214,13 @@ def build_roadmap(
             if priority == "P4":
                 unprioritized.setdefault(repo, []).append(number)
             active_blockers = []
-            for blocker_repo, blocker_number in _blocked_by_targets(dag["repos"], repo, number):
-                if blocker_repo not in open_numbers:
+            for blocker_owner, blocker_name, blocker_number in _blocked_by_targets(
+                dag["repos"], repo, number
+            ):
+                blocker_repo = _local_blocker_repo(
+                    local_repos, open_numbers, blocker_owner, blocker_name
+                )
+                if blocker_repo is None:
                     continue  # not a repo we fetched -- can't verify, not treated as blocking
                 if blocker_number in open_numbers[blocker_repo]:
                     active_blockers.append((blocker_repo, blocker_number))
