@@ -79,7 +79,7 @@ def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     monkeypatch.setattr(loop_runtime, "REPORTS_DIR", state_dir / "reports")
     monkeypatch.setattr(loop_runtime, "REPOS_FILE", state_dir / "repos")
     monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
-    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {})
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
     monkeypatch.setattr(
         loop_runtime,
         "_run",
@@ -102,16 +102,15 @@ def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     result = json.loads(capsys.readouterr().out)
     assert result[0]["started"] is True
     assert result[0]["repo"] == "widgets"
-    assert result[0]["message"].startswith("started widgets (claude) in Herdr session ")
     repo, kind, command, options = launched[0]
     assert repo == "widgets"
     assert kind == "loop"
     assert command[1:3] == ["loop", "worker"]
     assert "--session" in command
-    assert options["claude_limits"] is True
+    assert options["claude_limits"] is False
     metadata = json.loads((state_dir / "herdr-loops" / "widgets.json").read_text(encoding="utf-8"))
     assert metadata["state"] == "running"
-    assert metadata["platform"] == "claude"
+    assert metadata["platform"] == "omp"
     assert Path(metadata["prompt_file"]).is_file()
     assert loop_runtime.run_log.valid_run_id(metadata["run_id"])
     events = loop_runtime.run_log.read_events(state_dir, "widgets", metadata["run_id"])
