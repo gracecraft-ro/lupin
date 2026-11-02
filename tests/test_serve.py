@@ -3972,6 +3972,38 @@ class ScheduleHelperTests(unittest.TestCase):
         self.assertFalse(available)
 
 
+class _BannerParser(HTMLParser):
+    """Collect the text inside each `pill` span and inside each paragraph."""
+
+    def __init__(self):
+        super().__init__()
+        self.pills = []
+        self.paragraphs = []
+        self._pill = None
+        self._paragraph = None
+
+    def handle_starttag(self, tag, attrs):
+        classes = dict(attrs).get("class") or ""
+        if tag == "span" and "pill" in classes.split():
+            self._pill = [classes, ""]
+        elif tag == "p":
+            self._paragraph = ""
+
+    def handle_endtag(self, tag):
+        if tag == "span" and self._pill is not None:
+            self.pills.append(tuple(self._pill))
+            self._pill = None
+        elif tag == "p" and self._paragraph is not None:
+            self.paragraphs.append(self._paragraph)
+            self._paragraph = None
+
+    def handle_data(self, data):
+        if self._pill is not None:
+            self._pill[1] += data
+        elif self._paragraph is not None:
+            self._paragraph += data
+
+
 class ScheduleRenderTests(unittest.TestCase):
     def _data(self, **overrides):
         data = {
@@ -4026,27 +4058,47 @@ class ScheduleRenderTests(unittest.TestCase):
         page = serve.render_schedule(self._data(), sent="Started 1 loop(s): widgets@pihome").decode()
         self.assertIn("Started 1 loop(s)", page)
 
-    def test_warning_banner_uses_the_warning_style_not_the_success_style(self):
-        warn = "Result unknown for widgets@pihome. Check Loops before you try again."
-        page = serve.render_schedule(self._data(), warn=warn).decode()
-        self.assertIn(f"<span class='pill off'>{serve.esc(warn)}</span>", page)
-        self.assertNotIn(f"<span class='pill on'>{serve.esc(warn)}</span>", page)
+    WARN = (
+        "Result unknown for widgets@pihome: no answer before the time limit. "
+        "The loop may have started. Check Loops before you try again."
+    )
+
+    def _banners(self, **kwargs):
+        """The (classes, text) of every pill and the text of every paragraph."""
+        parser = _BannerParser()
+        parser.feed(serve.render_schedule(self._data(), **kwargs).decode())
+        return parser.pills, parser.paragraphs
+
+    def test_warning_badge_is_short_and_the_detail_is_outside_the_pill(self):
+        pills, paragraphs = self._banners(warn=self.WARN)
+        self.assertIn(("pill off", "Needs attention"), pills)
+        badge = next(text for classes, text in pills if classes == "pill off")
+        self.assertLessEqual(len(badge), 20)
+        # The detail is card text. No pill holds any part of it.
+        self.assertIn(self.WARN, paragraphs)
+        self.assertFalse(any("Result unknown" in text or "Check Loops" in text for _, text in pills))
+        self.assertNotIn(("pill on", self.WARN), pills)
 
     def test_confirmed_and_warning_banners_stay_separate(self):
         sent = "Queued 1 loop(s): a-repo@a-worker."
-        warn = "Result unknown for b-repo@pihome. Check Loops before you try again."
-        page = serve.render_schedule(self._data(), sent=sent, warn=warn).decode()
-        self.assertIn(f"<span class='pill on'>{serve.esc(sent)}</span>", page)
-        self.assertIn(f"<span class='pill off'>{serve.esc(warn)}</span>", page)
-        self.assertNotIn(f"<span class='pill off'>{serve.esc(sent)}</span>", page)
-        self.assertNotIn(f"<span class='pill on'>{serve.esc(warn)}</span>", page)
+        pills, paragraphs = self._banners(sent=sent, warn=self.WARN)
+        # Confirmed work stays in the success pill.
+        self.assertIn(("pill on", sent), pills)
+        self.assertNotIn(("pill off", sent), pills)
+        self.assertNotIn(sent, paragraphs)
+        # The warning is a short badge. Its detail is outside every pill.
+        self.assertIn(("pill off", "Needs attention"), pills)
+        self.assertIn(self.WARN, paragraphs)
+        self.assertFalse(any(self.WARN in text for _, text in pills))
 
     def test_get_route_passes_warn_to_the_page(self):
         handler = _get_handler("/schedule?warn=Result+unknown", {})
         with mock.patch.object(serve, "gather_schedule", return_value=self._data()):
             handler.do_GET()
-        page = handler.reply.call_args.args[0].decode()
-        self.assertIn("<span class='pill off'>Result unknown</span>", page)
+        parser = _BannerParser()
+        parser.feed(handler.reply.call_args.args[0].decode())
+        self.assertIn(("pill off", "Needs attention"), parser.pills)
+        self.assertIn("Result unknown", parser.paragraphs)
 
     def test_nav_has_a_schedule_link(self):
         self.assertIn("href='/schedule'", serve.render_nav("schedule"))

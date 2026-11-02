@@ -3621,8 +3621,12 @@ def render_schedule(
     if sent:
         body.append(f"<div class=card><span class='pill on'>{esc(sent)}</span></div>")
     if warn:
-        # Failed or unknown work. Not the success style.
-        body.append(f"<div class=card><span class='pill off'>{esc(warn)}</span></div>")
+        # Failed or unknown work. Not the success style. The badge stays
+        # short. The detail is plain card text, not inside the pill.
+        body.append(
+            "<div class=card><span class='pill off'>Needs attention</span>"
+            f"<p style='margin:.5rem 0 0'>{esc(warn)}</p></div>"
+        )
 
     # ---- recurring timer card ---------------------------------------------
     active = data["timer_active"]
