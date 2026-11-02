@@ -20,16 +20,14 @@ installed package metadata, or `pyproject.toml` in a source checkout.
    nix flake check
    nix develop -c python3 -m pytest -v
    ```
-3. Move the `Unreleased` lines in `CHANGELOG.md` under the new version and
-   the date. Add a `###` heading only when it has lines.
 
 ## Cut the release
 
 1. Set the new version in `pyproject.toml`. For example `0.2.0`.
-2. Commit both files:
+2. Commit the version change:
 
    ```sh
-   git add pyproject.toml CHANGELOG.md
+   git add pyproject.toml
    git commit -m "release: v0.2.0"
    ```
 3. Push the release commit to `main`, or merge the release pull request.
@@ -46,15 +44,8 @@ installed package metadata, or `pyproject.toml` in a source checkout.
    nix run github:OWNER/REPO/v0.2.0 -- --version
    ```
 
-6. Start the next section in `CHANGELOG.md`:
-
-   ```markdown
-   ## Unreleased
-   ```
-
 ## Rules
 
 - A tag is `v` and the version from `pyproject.toml`.
 - Do not move or delete a tag.
-- A pull request adds one line under `Unreleased`.
 - A security fix gets a patch version.
