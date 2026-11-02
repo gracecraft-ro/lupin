@@ -1978,7 +1978,9 @@ class DependencyDagTests(unittest.TestCase):
         ):
             result, warnings = roadmap.load_dependencies("/repo")
 
-        self.assertEqual(result, links)
+        self.assertEqual(
+            result, {10: {"blockedBy": [], "blocking": []}}
+        )
         self.assertEqual(
             warnings,
             ["GitHub dependency links are unavailable: a linked repository has no owner"],

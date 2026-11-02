@@ -1145,6 +1145,21 @@ def load_dependencies(repo_path: str, *, connection: dict | None = None):
             warnings.append(
                 "GitHub dependency links are unavailable: a linked repository has no owner"
             )
+            links = {
+                number: {
+                    **issue_links,
+                    **{
+                        relation: [
+                            target for target in issue_links.get(relation, [])
+                            if not isinstance(target, dict) or target.get("owner")
+                        ]
+                        for relation in ("blockedBy", "blocking")
+                    },
+                }
+                if isinstance(issue_links, dict)
+                else issue_links
+                for number, issue_links in (links or {}).items()
+            }
     return links, warnings
 
 
