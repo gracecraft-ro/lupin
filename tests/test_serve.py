@@ -4415,33 +4415,58 @@ class ScheduleRunOutcomeTests(unittest.TestCase):
         self.assertNotIn("cannot reach", error)
 
 
-    def test_first_enqueue_failure_is_a_clean_rejection(self):
+    def test_lost_enqueue_reply_is_unknown_not_safe_to_retry(self):
         handler, enqueue = self._post(
-            {"repo": "all", "cnt": "3", "place": "jesus"},
+            {"repo": "a-repo", "place": "jesus"},
             records={"return_value": self.ONLINE},
-            enqueue={"side_effect": serve.machines.CoordinatorUnreachable("down")},
+            enqueue={"side_effect": serve.machines.CoordinatorUnreachable("reply lost")},
         )
-        # Stop at the first failure: later repos are not tried.
         enqueue.assert_called_once()
-        handler.redirect.assert_not_called()
-        self.assertEqual(handler.reply.call_args.args[1], 502)
-        self.assertIn("Nothing was queued", self._error(handler))
+        handler.reply.assert_not_called()
+        params = self._params(handler)
+        self.assertNotIn("sent", params)
+        warning = params["warn"][0]
+        self.assertIn("Result unknown for a-repo@jesus", warning)
+        self.assertIn("may have been queued", warning)
+        self.assertIn("Check Loops before you try again", warning)
+        self.assertNotIn("safe to try again", warning)
+        self.assertNotIn("Nothing was queued", warning)
+        page = _get_handler(handler.redirect.call_args.args[0], {})
+        with mock.patch.object(serve, "gather_schedule", return_value={
+            "now": 1_800_000_000.0,
+            "enabled": ["a-repo"],
+            "timers": [],
+            "timer_active": False,
+            "machines": [],
+            "fleet_error": None,
+            "local_host": "h",
+        }):
+            page.do_GET()
+        banners = _BannerParser()
+        banners.feed(page.reply.call_args.args[0].decode())
+        self.assertIn(("pill off", "Needs attention"), banners.pills)
+        self.assertTrue(any("Result unknown for a-repo@jesus" in p for p in banners.paragraphs))
 
-    def test_late_failure_reports_what_the_queue_accepted(self):
+    def test_lost_enqueue_reply_after_accepted_repo_keeps_both_outcomes(self):
         handler, enqueue = self._post(
             {"repo": "all", "cnt": "3", "place": "jesus"},
             records={"return_value": self.ONLINE},
-            enqueue={"side_effect": ["cmd-1", serve.machines.CoordinatorUnreachable("down")]},
+            enqueue={"side_effect": ["cmd-1", serve.machines.CoordinatorUnreachable("reply lost")]},
         )
-        # a-repo was accepted, b-repo failed, c-repo was never tried.
         self.assertEqual(enqueue.call_count, 2)
-        # The accepted command must not appear on a "Rejected" page.
         handler.reply.assert_not_called()
-        sent = self._sent(handler)
-        self.assertIn("Queued 1 loop(s): a-repo@jesus", sent)
-        self.assertIn("b-repo@jesus: cannot reach the redis coordinator", sent)
-        self.assertIn("Not tried: c-repo@jesus", sent)
-        self.assertIn("Do not submit a-repo again", sent)
+        params = self._params(handler)
+        self.assertIn("Queued 1 loop(s): a-repo@jesus", params["sent"][0])
+        warning = params["warn"][0]
+        self.assertIn("Partly done", warning)
+        self.assertIn("Result unknown for b-repo@jesus", warning)
+        self.assertIn("may have been queued", warning)
+        self.assertIn("Not tried: c-repo@jesus", warning)
+        self.assertIn("Do not submit a-repo again", warning)
+        self.assertIn("Check Loops before you try again", warning)
+        self.assertNotIn("Submit only the failed", warning)
+        self.assertNotIn("safe to try again", warning)
+        self.assertNotIn("Failed:", warning)
 
     def test_local_run_is_shown_as_started(self):
         handler = _schedule_handler()
@@ -4578,6 +4603,46 @@ class TestSchedulePageIntegration:
         assert stored["issuer"] == "pihome"
         assert commands.verify(stored, "secret") is True
         handler.send_response.assert_called_once_with(303)
+
+    def test_run_now_warns_when_redis_commits_but_enqueue_reply_is_lost(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        _write_machine_record(redis_port, "jesus", state="online")
+        handler = _post_handler("/schedule/run", b"repo=widgets&place=jesus", kw)
+        handler.cmd_signing_key = "secret"
+        client = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+        actual_eval = client.eval
+        attempts = 0
+
+        def lost_reply(*args):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                actual_eval(*args)
+                raise redis_lib.exceptions.TimeoutError("reply lost after commit")
+            raise redis_lib.exceptions.ConnectionError("retry could not connect")
+
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+            mock.patch.object(commands, "_client", return_value=client),
+            mock.patch.object(client, "eval", side_effect=lost_reply),
+        ):
+            handler.do_POST()
+
+        assert attempts == 2
+        handler.send_response.assert_called_once_with(303)
+        headers = {call.args[0]: call.args[1] for call in handler.send_header.call_args_list}
+        params = parse_qs(urlsplit(headers["Location"]).query)
+        assert "sent" not in params
+        assert "Result unknown for widgets@jesus" in params["warn"][0]
+        assert "may have been queued" in params["warn"][0]
+        assert "Check Loops before you try again" in params["warn"][0]
+        assert "safe to try again" not in params["warn"][0]
+        queued = client.zrange("lupin:v1:cmdq:jesus", 0, -1)
+        assert len(queued) == 1
+        stored = json.loads(client.get(f"lupin:v1:cmd:{queued[0]}"))
+        assert stored["params"] == {"repo": "widgets"}
+        assert commands.verify(stored, "secret") is True
 
     def test_run_now_passes_the_note_to_a_remote_loop(self, redis_port, flush_redis):
         kw = _kw(redis_port)

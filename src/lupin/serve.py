@@ -5054,9 +5054,10 @@ class Handler(BaseHTTPRequestHandler):
 
         # One click gives one outcome. Stop at the first failure so that
         # no later repo is queued. `started` ran here. `queued` is in the
-        # queue, and a worker has not confirmed it. `unknown` timed out
-        # here: the child may have started a Herdr workspace first.
+        # queue, and a worker has not confirmed it. `unknown` may have
+        # started locally or been queued before the Redis reply was lost.
         started, queued, errors, unknown = [], [], [], []
+        unknown_detail = ""
         pairs = list(zip(targets_repos, assigned))
         for index, (repo, machine) in enumerate(pairs):
             label = f"{repo}@{machine}"
@@ -5080,7 +5081,9 @@ class Handler(BaseHTTPRequestHandler):
             except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
                 errors.append(f"{label}: {slots_redis.refusal_message(exc, 'run now', fleet=True)}")
             except CoordinatorUnreachable:
-                errors.append(f"{label}: cannot reach the redis coordinator")
+                # Redis may have committed enqueue's EVAL before the reply was lost.
+                unknown.append(label)
+                unknown_detail = "the queue did not confirm receipt. The command may have been queued."
             else:
                 if result["mode"] != "local":
                     queued.append(label)
@@ -5091,6 +5094,7 @@ class Handler(BaseHTTPRequestHandler):
                     # timed out. The run may be live, so a retry is not
                     # known to be safe.
                     unknown.append(label)
+                    unknown_detail = "no answer before the time limit. The loop may have started."
                 else:
                     errors.append(f"{label}: {result['output'].strip()}")
             if errors or unknown:
@@ -5118,18 +5122,17 @@ class Handler(BaseHTTPRequestHandler):
                 502,
             )
             return
-        # Some work was accepted, or a local run is unknown. Show that, not
-        # a rejection. `sent` holds only what is confirmed (shown as
-        # success). `warn` holds what failed or is unknown (shown as a
-        # warning).
+        # Some work was accepted, or a run has an unknown outcome. Show
+        # that, not a rejection. `sent` holds only what is confirmed
+        # (shown as success). `warn` holds failures and unknown results.
         not_tried = [f"{r}@{m}" for r, m in pairs[index + 1:]]
         warn = ["Partly done."] if accepted else []
         if errors:
             warn.append("Failed: " + "; ".join(errors) + ".")
         if unknown:
             warn.append(
-                f"Result unknown for {', '.join(unknown)}: no answer before the time limit. "
-                "The loop may have started. Check Loops before you try again."
+                f"Result unknown for {', '.join(unknown)}: {unknown_detail} "
+                "Check Loops before you try again."
             )
         if not_tried:
             warn.append(f"Not tried: {', '.join(not_tried)}.")
