@@ -54,18 +54,23 @@ benchmark category covers both.
 
 ## Decide what is ready
 
-- Before dispatch, check every path in the issue with
-  `git cat-file -e origin/main:<path>`.
-- For each path absent from `origin/main`, inspect the changed-file lists of all
-  open PRs:
+- Run `git fetch origin main` first. If the fetch fails, do not check paths.
+  Report the error.
+- Check each path that the issue names as an existing file to read or change
+  in this repository. Use `git cat-file -e origin/main:<path>`. Do not check:
+  - a file that the issue asks you to create;
+  - a path in another repository, such as one tied to a different `OWNER/REPO`;
+  - a file that the issue says was removed.
+- For each checked path absent from `origin/main`, inspect the changed-file
+  lists of all open PRs:
   ```sh
   gh pr list --repo OWNER/REPO --state open --limit 1000 \
     --json number,files
   ```
   Name a PR only when its list includes the exact path. If no list includes it,
   report that it is absent from `origin/main` and all open PRs.
-- Comment on the issue and do not dispatch it while any cited path is absent
-  from `origin/main`, even if an open PR contains it.
+- Comment on the issue and do not dispatch it if a checked path is absent from
+  `origin/main`. Do this even if an open PR contains the path.
 - Dispatch the PR work first in each cycle. Then use the free worker slots for
   new issues. See "Pull requests come first" in the `delegation-loop` skill.
 - Check the dependency graph and the latest comments. Do not dispatch an issue
