@@ -197,8 +197,8 @@ def test_place_picks_the_machine_with_more_free_slots(redis_port, flush_redis):
     result = place.place("retry backoff", _kw(redis_port))
 
     # No labels on this synthetic issue -> classify() falls back to
-    # size-? -> tier2 -> "sonnet" (model-tiers.json's "coding" row).
-    assert result["model"] == "sonnet"
+    # size-? -> tier2 -> "opus" (model-tiers.json's "coding" row).
+    assert result["model"] == "opus"
     assert result["provider"] == "claude"
     assert result["pick"] == "mac-studio"
     by_name = {c["name"]: c for c in result["candidates"]}
