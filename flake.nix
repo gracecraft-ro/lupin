@@ -2,7 +2,7 @@
   description = "lupin -- model routing and slot leases for multi-machine delegation loops";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/8ce4ef6cb6f871616146b9fe26d2a5ae594e94fe";
+    nixpkgs.url = "github:NixOS/nixpkgs/1c89083e451e891152365b799595cf7790a43325";
     oh-my-pi = {
       url = "github:can1357/oh-my-pi/cde91bb38674d365e8c3916d05d2292273bb8554";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -17,16 +17,16 @@
       mkLupin =
         pkgs:
         withOmp:
-        pkgs.python3Packages.buildPythonApplication {
+        pkgs.python315Packages.buildPythonApplication {
           pname = "lupin";
           # `pyproject.toml` is the only place the version is set.
           version = (builtins.fromTOML (builtins.readFile ./pyproject.toml)).project.version;
           pyproject = true;
           src = self;
-          build-system = [ pkgs.python3Packages.setuptools ];
-          # python3Packages.redis is the `redis` backend's only runtime
+          build-system = [ pkgs.python315Packages.setuptools ];
+          # `python315Packages.redis` is the `redis` backend's only runtime
           # dependency (issue #210).
-          dependencies = [ pkgs.python3Packages.redis ];
+          dependencies = [ pkgs.python315Packages.redis ];
           doCheck = false;
           # `lupin serve` shells out to these fixed read-only probes and
           # runs them from PATH, so they belong on the wrapper's PATH.
@@ -81,7 +81,7 @@
         {
           default = pkgs.mkShell {
             packages = [
-              (pkgs.python3.withPackages (pythonPackages: [
+              (pkgs.python315.withPackages (pythonPackages: [
                 pythonPackages.pytest
                 pythonPackages.redis
               ]))
@@ -106,7 +106,7 @@
             src = self;
             package = self.packages.${system}.default;
             nativeBuildInputs = [
-              (pkgs.python3.withPackages (pythonPackages: [
+              (pkgs.python315.withPackages (pythonPackages: [
                 pythonPackages.pytest
                 pythonPackages.redis
               ]))
