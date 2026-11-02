@@ -366,6 +366,9 @@ uses an open login with the most quota left. A machine that publishes a
 provider replaces that provider's full entry. Each machine that publishes a
 provider needs all its logins.
 
+The `/usage` page keeps source labels. An unlabeled `Other` window with a known
+length shows that length in its heading, such as `Other · 2h`.
+
 Quota rows without account labels appear as stale on the `/usage` page. Loop
 starts do not use them. Update every machine that runs `lupin quota`.
 
@@ -472,4 +475,3 @@ The Repos and Roadmap pages read the checkouts in `LUPIN_LOOP_CODE_DIR` (default
 does not appear. The serving user must be able to read each checkout. If another
 user owns a checkout, Git reports "dubious ownership", and the page shows no
 issues. Add the checkout to Git's `safe.directory` list.
-

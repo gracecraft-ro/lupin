@@ -18,9 +18,9 @@ and applies three adjustments:
   effort, to ease pressure on shared quota (#179 §4).
 - Quota is fleet-wide, not per-machine (every provider is one account shared
   by the whole fleet, confirmed in issue #36) -- so this is also where quota
-  pacing happens, via `pace.py`. See `_apply_pacing` below for the three
-  rules (reserve, lean-in, exhaustion fallback). A lean-in moves one tier
-  up, to an entry on the *same* provider. A surplus is spent on that
+  pacing happens, via `pace.py`. `_apply_pacing` uses window reserves,
+  configured weekly targets, lean-in, and safe quota fallback. A lean-in moves
+  one tier up, to an entry on the *same* provider. A surplus is spent on that
   account, never on another account's quota.
 
 This module only decides; it never touches a lock, a scheduler, or a machine
@@ -270,12 +270,14 @@ def _apply_pacing(
     row: dict,
     tier: str,
     quota_rows: list[dict],
+    weekly_targets: dict[str, float] | None,
     excluded_providers: frozenset[str] = frozenset(),
     *,
     bmo_available: bool = True,
 ) -> dict:
     """Apply quota pacing and safe fallback rules.
 
+    Weekly targets use elapsed time since the quota window's reset.
     A fallback needs a live model snapshot that is no more than seven days
     old. Its input, output, and any listed cache rates must be no higher than
     the blocked pick. Missing or unclear prices do not permit a fallback.
@@ -301,9 +303,13 @@ def _apply_pacing(
 
     now_ms = time.time() * 1000
     provider = provider_for_model(choice["model"])
-    is_blocked = pace.blocked(quota_rows, provider, now_ms)
+    is_blocked = pace.blocked(
+        quota_rows, provider, now_ms, weekly_targets=weekly_targets
+    )
 
-    if not is_blocked and pace.lean_in(quota_rows, provider, now_ms):
+    if not is_blocked and pace.lean_in(
+        quota_rows, provider, now_ms, weekly_targets=weekly_targets
+    ):
         # `_lean_in_entry` only ever returns an entry on `provider` itself, so
         # the block check above already covers the rung it moves to; nothing
         # to re-check here.
@@ -329,7 +335,9 @@ def _apply_pacing(
         ):
             continue
         entry_provider = provider_for_model(entry["model"])
-        if pace.blocked(quota_rows, entry_provider, now_ms):
+        if pace.blocked(
+            quota_rows, entry_provider, now_ms, weekly_targets=weekly_targets
+        ):
             examined.append(entry_provider)
             continue
         return {
@@ -338,7 +346,9 @@ def _apply_pacing(
             "downgraded_from": blocked_choice,
         }
 
-    earliest = pace.earliest_reset(quota_rows, examined, now_ms)
+    earliest = pace.earliest_reset(
+        quota_rows, examined, now_ms, weekly_targets=weekly_targets
+    )
     wait_seconds = max(0.0, (earliest - now_ms) / 1000) if earliest is not None else None
     return {
         **blocked_choice,
@@ -423,6 +433,17 @@ def route(
         ) from error
 
     live_quota_rows = quota_mod.quota_usage() if quota_rows is None else quota_rows
+    weekly_targets = None
+    if live_quota_rows:
+        try:
+            weekly_targets = pace.weekly_daily_targets()
+        except pace.PacingConfigError as exc:
+            raise RouteInputError(str(exc)) from exc
     return _apply_pacing(
-        row, tier, live_quota_rows, frozenset(excluded), bmo_available=bmo_available
+        row,
+        tier,
+        live_quota_rows,
+        weekly_targets,
+        frozenset(excluded),
+        bmo_available=bmo_available,
     )

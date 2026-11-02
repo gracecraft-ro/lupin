@@ -383,6 +383,27 @@ def test_loops_unreadable_repos_file_exits_one_without_traceback(monkeypatch, tm
     assert "Traceback" not in err
 
 
+def test_loops_output_includes_quota_handoff_reason(monkeypatch, capsys):
+    monkeypatch.setattr(machines, "hostname", lambda: "local")
+    monkeypatch.setattr(
+        loop_runtime,
+        "loop_state",
+        lambda repo: {
+            "repo": repo,
+            "state": "needs_attention",
+            "backend": "herdr",
+            "reason": "no alternate usable quota",
+            "handoff": "/state/handoffs/widgets.HANDOFF.md",
+        },
+    )
+
+    assert cli.main(["loops", "widgets"]) == 0
+
+    assert capsys.readouterr().out.strip() == (
+        "widgets: needs_attention (herdr): no alternate usable quota "
+        "(handoff: /state/handoffs/widgets.HANDOFF.md)"
+    )
+
 def test_loops_json_shows_checkout_agent_as_unmanaged(monkeypatch, tmp_path: Path, capsys):
     monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "missing")
     monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"lupin": "claude"})
