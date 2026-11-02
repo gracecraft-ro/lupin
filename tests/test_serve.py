@@ -4060,7 +4060,9 @@ class ScheduleRenderTests(unittest.TestCase):
 
     WARN = (
         "Result unknown for widgets@pihome: no answer before the time limit. "
-        "The loop may have started. Check Loops before you try again."
+        "The loop may have started. Check Loops for a later result, but pending "
+        "commands may not appear there. Do not submit unknown work again until "
+        "you confirm it was not queued or started."
     )
 
     def _banners(self, **kwargs):
@@ -4428,7 +4430,8 @@ class ScheduleRunOutcomeTests(unittest.TestCase):
         warning = params["warn"][0]
         self.assertIn("Result unknown for a-repo@jesus", warning)
         self.assertIn("may have been queued", warning)
-        self.assertIn("Check Loops before you try again", warning)
+        self.assertIn("pending commands may not appear there", warning)
+        self.assertIn("Do not submit unknown work again until you confirm", warning)
         self.assertNotIn("safe to try again", warning)
         self.assertNotIn("Nothing was queued", warning)
         page = _get_handler(handler.redirect.call_args.args[0], {})
@@ -4462,11 +4465,29 @@ class ScheduleRunOutcomeTests(unittest.TestCase):
         self.assertIn("Result unknown for b-repo@jesus", warning)
         self.assertIn("may have been queued", warning)
         self.assertIn("Not tried: c-repo@jesus", warning)
+        self.assertIn("Only these repos are safe to submit", warning)
         self.assertIn("Do not submit a-repo again", warning)
-        self.assertIn("Check Loops before you try again", warning)
+        self.assertIn("Do not submit unknown work again until you confirm", warning)
+        self.assertNotIn("did not start", warning)
         self.assertNotIn("Submit only the failed", warning)
         self.assertNotIn("safe to try again", warning)
         self.assertNotIn("Failed:", warning)
+
+    def test_partial_refusal_has_one_period_and_only_not_tried_is_safe(self):
+        handler, enqueue = self._post(
+            {"repo": "all", "cnt": "3", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": [
+                "cmd-1", serve.slots_redis.CoordinatorAuthFailed("redis refused the login"),
+            ]},
+        )
+        self.assertEqual(enqueue.call_count, 2)
+        warning = self._params(handler)["warn"][0]
+        self.assertIn("For run now.", warning)
+        self.assertNotIn("For run now..", warning)
+        self.assertIn("Not tried: c-repo@jesus. Only these repos are safe to submit.", warning)
+        self.assertNotIn("Submit only the failed", warning)
+        self.assertIn("Do not submit a-repo again", warning)
 
     def test_local_run_is_shown_as_started(self):
         handler = _schedule_handler()
@@ -4502,7 +4523,7 @@ class ScheduleRunOutcomeTests(unittest.TestCase):
         handler.reply.assert_not_called()
         sent = self._sent(handler)
         self.assertIn("Result unknown for a-repo@h", sent)
-        self.assertIn("Check Loops before you try again", sent)
+        self.assertIn("Do not submit unknown work again until you confirm", sent)
         self.assertNotIn("safe to try again", sent)
         self.assertNotIn("Nothing was queued", sent)
         self.assertNotIn("Started", sent)
@@ -4604,10 +4625,10 @@ class TestSchedulePageIntegration:
         assert commands.verify(stored, "secret") is True
         handler.send_response.assert_called_once_with(303)
 
-    def test_run_now_warns_when_redis_commits_but_enqueue_reply_is_lost(self, redis_port, flush_redis):
+    def test_run_now_keeps_queued_and_unknown_separate_when_reply_is_lost(self, redis_port, flush_redis):
         kw = _kw(redis_port)
         _write_machine_record(redis_port, "jesus", state="online")
-        handler = _post_handler("/schedule/run", b"repo=widgets&place=jesus", kw)
+        handler = _post_handler("/schedule/run", b"repo=all&cnt=3&place=jesus", kw)
         handler.cmd_signing_key = "secret"
         client = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
         actual_eval = client.eval
@@ -4617,32 +4638,39 @@ class TestSchedulePageIntegration:
             nonlocal attempts
             attempts += 1
             if attempts == 1:
+                return actual_eval(*args)
+            if attempts == 2:
                 actual_eval(*args)
                 raise redis_lib.exceptions.TimeoutError("reply lost after commit")
             raise redis_lib.exceptions.ConnectionError("retry could not connect")
 
         with (
-            mock.patch.object(serve, "enabled_repos", return_value=["widgets"]),
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo", "b-repo", "c-repo"]),
             mock.patch.object(serve.machines, "hostname", return_value="pihome"),
             mock.patch.object(commands, "_client", return_value=client),
             mock.patch.object(client, "eval", side_effect=lost_reply),
         ):
             handler.do_POST()
 
-        assert attempts == 2
+        assert attempts == 3
         handler.send_response.assert_called_once_with(303)
         headers = {call.args[0]: call.args[1] for call in handler.send_header.call_args_list}
         params = parse_qs(urlsplit(headers["Location"]).query)
-        assert "sent" not in params
-        assert "Result unknown for widgets@jesus" in params["warn"][0]
-        assert "may have been queued" in params["warn"][0]
-        assert "Check Loops before you try again" in params["warn"][0]
-        assert "safe to try again" not in params["warn"][0]
+        assert "Queued 1 loop(s): a-repo@jesus" in params["sent"][0]
+        warning = params["warn"][0]
+        assert "Result unknown for b-repo@jesus" in warning
+        assert "pending commands may not appear there" in warning
+        assert "Do not submit unknown work again until you confirm" in warning
+        assert "Not tried: c-repo@jesus. Only these repos are safe to submit." in warning
+        assert "did not start" not in warning
+        assert "safe to try again" not in warning
         queued = client.zrange("lupin:v1:cmdq:jesus", 0, -1)
-        assert len(queued) == 1
-        stored = json.loads(client.get(f"lupin:v1:cmd:{queued[0]}"))
-        assert stored["params"] == {"repo": "widgets"}
-        assert commands.verify(stored, "secret") is True
+        assert len(queued) == 2
+        # Neither queued command has started, so Loops cannot show it yet.
+        assert all(client.get(f"lupin:v1:cmdres:{cmd_id}") is None for cmd_id in queued)
+        stored = [json.loads(client.get(f"lupin:v1:cmd:{cmd_id}")) for cmd_id in queued]
+        assert {cmd["params"]["repo"] for cmd in stored} == {"a-repo", "b-repo"}
+        assert all(commands.verify(cmd, "secret") for cmd in stored)
 
     def test_run_now_passes_the_note_to_a_remote_loop(self, redis_port, flush_redis):
         kw = _kw(redis_port)

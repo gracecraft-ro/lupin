@@ -5128,22 +5128,20 @@ class Handler(BaseHTTPRequestHandler):
         not_tried = [f"{r}@{m}" for r, m in pairs[index + 1:]]
         warn = ["Partly done."] if accepted else []
         if errors:
-            warn.append("Failed: " + "; ".join(errors) + ".")
+            warn.append("Failed: " + "; ".join(error.rstrip(".") for error in errors) + ".")
         if unknown:
             warn.append(
                 f"Result unknown for {', '.join(unknown)}: {unknown_detail} "
-                "Check Loops before you try again."
+                "Check Loops for a later result, but pending commands may not appear there. "
+                "Do not submit unknown work again until you confirm it was not queued or started."
             )
         if not_tried:
-            warn.append(f"Not tried: {', '.join(not_tried)}.")
+            warn.append(
+                f"Not tried: {', '.join(not_tried)}. Only these repos are safe to submit."
+            )
         if accepted:
             warn.append(
-                f"Do not submit {', '.join(r.split('@')[0] for r in [*started, *queued])} again. "
-                + (
-                    "Submit only the failed and not tried repos."
-                    if errors
-                    else "Check Loops, then submit only the repos that did not start."
-                )
+                f"Do not submit {', '.join(r.split('@')[0] for r in [*started, *queued])} again."
             )
         query = f"warn={quote(' '.join(warn), safe='')}"
         if accepted:
