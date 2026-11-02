@@ -18,9 +18,9 @@ and applies three adjustments:
   effort, to ease pressure on shared quota (#179 §4).
 - Quota is fleet-wide, not per-machine (every provider is one account shared
   by the whole fleet, confirmed in issue #36) -- so this is also where quota
-  pacing happens, via `pace.py`. See `_apply_pacing` below for the three
-  rules (reserve, lean-in, exhaustion fallback). A lean-in moves one tier
-  up, to an entry on the *same* provider. A surplus is spent on that
+  pacing happens, via `pace.py`. `_apply_pacing` uses window reserves,
+  configured weekly targets, lean-in, and safe quota fallback. A lean-in moves
+  one tier up, to an entry on the *same* provider. A surplus is spent on that
   account, never on another account's quota.
 
 This module only decides; it never touches a lock, a scheduler, or a machine
@@ -137,13 +137,19 @@ def _lean_in_entry(row: dict, tier: str, provider: str) -> dict | None:
     return None
 
 
-def _fallback_entries(row: dict, tier: str) -> list[dict]:
-    """Other entries route() can try once `tier`'s own pick is blocked.
+def _fallback_entries(
+    row: dict,
+    tier: str,
+    *,
+    start_index: int = 1,
+    excluded_providers: frozenset[str] | set[str] = frozenset(),
+) -> list[dict]:
+    """Other entries route() can try after `tier`'s selected entry.
 
-    Order: the rest of `tier`'s own list first, then lower tiers (nearest
-    first). A higher tier is not a fallback. If no allowed model is open,
-    route defers. Skip bmo:/local: entries so a blocked cloud provider waits
-    for its reset rather than quietly using a free local model.
+    Order: the rest of `tier`'s list first, then lower tiers (nearest
+    first). A higher tier is not a fallback. Skip bmo:/local: entries so a
+    blocked cloud provider waits for its reset rather than quietly using a
+    free local model.
     """
     tier_index = _TIER_ORDER.index(tier)
     tier_walk = (tier,) + tuple(reversed(_TIER_ORDER[:tier_index]))
@@ -151,12 +157,38 @@ def _fallback_entries(row: dict, tier: str) -> list[dict]:
     for candidate_tier in tier_walk:
         if candidate_tier not in row:
             continue
-        candidate_entries = row[candidate_tier][1:] if candidate_tier == tier else row[candidate_tier]
+        candidate_entries = (
+            row[candidate_tier][start_index:]
+            if candidate_tier == tier else row[candidate_tier]
+        )
         for entry in candidate_entries:
+            if provider_for_model(entry["model"]) in excluded_providers:
+                continue
             if entry["model"].startswith("bmo:") or entry["model"].startswith("local:"):
                 continue
             entries.append(entry)
     return entries
+
+
+def _initial_entry(
+    row: dict,
+    tier: str,
+    excluded_providers: frozenset[str],
+    *,
+    bmo_available: bool = True,
+) -> tuple[str, int, dict] | None:
+    """First allowed entry in `tier`, or the nearest lower tier."""
+    tier_index = _TIER_ORDER.index(tier)
+    tier_walk = (tier,) + tuple(reversed(_TIER_ORDER[:tier_index]))
+    for candidate_tier in tier_walk:
+        for index, entry in enumerate(row.get(candidate_tier, [])):
+            if provider_for_model(entry["model"]) in excluded_providers:
+                continue
+            if not bmo_available and entry["model"].startswith("bmo:"):
+                continue
+            return candidate_tier, index, entry
+    return None
+
 
 
 def _model_prices(model: str, snapshot: dict | None) -> list[dict] | None:
@@ -234,9 +266,18 @@ def _fallback_is_not_more_expensive(
     )
 
 
-def _apply_pacing(row: dict, tier: str, quota_rows: list[dict]) -> dict:
+def _apply_pacing(
+    row: dict,
+    tier: str,
+    quota_rows: list[dict],
+    weekly_targets: dict[str, float] | None,
+    excluded_providers: frozenset[str] = frozenset(),
+    *,
+    bmo_available: bool = True,
+) -> dict:
     """Apply quota pacing and safe fallback rules.
 
+    Weekly targets use elapsed time since the quota window's reset.
     A fallback needs a live model snapshot that is no more than seven days
     old. Its input, output, and any listed cache rates must be no higher than
     the blocked pick. Missing or unclear prices do not permit a fallback.
@@ -247,19 +288,32 @@ def _apply_pacing(row: dict, tier: str, quota_rows: list[dict]) -> dict:
     has quota. A deferral keeps the blocked model as context; callers must
     not run it.
     """
-    choice = row[tier][0]
+    selected = _initial_entry(
+        row, tier, excluded_providers, bmo_available=bmo_available
+    )
+    if selected is None:
+        providers = ", ".join(sorted(excluded_providers))
+        raise RouteInputError(
+            f"no model in {tier!r} or a lower tier remains after excluding "
+            f"provider(s): {providers}"
+        )
+    choice_tier, choice_index, choice = selected
     if not quota_rows:
         return {"model": choice["model"], "effort": choice["effort"]}
 
     now_ms = time.time() * 1000
     provider = provider_for_model(choice["model"])
-    is_blocked = pace.blocked(quota_rows, provider, now_ms)
+    is_blocked = pace.blocked(
+        quota_rows, provider, now_ms, weekly_targets=weekly_targets
+    )
 
-    if not is_blocked and pace.lean_in(quota_rows, provider, now_ms):
+    if not is_blocked and pace.lean_in(
+        quota_rows, provider, now_ms, weekly_targets=weekly_targets
+    ):
         # `_lean_in_entry` only ever returns an entry on `provider` itself, so
         # the block check above already covers the rung it moves to; nothing
         # to re-check here.
-        lean_choice = _lean_in_entry(row, tier, provider)
+        lean_choice = _lean_in_entry(row, choice_tier, provider)
         if lean_choice is not None:
             choice = lean_choice
 
@@ -267,7 +321,12 @@ def _apply_pacing(row: dict, tier: str, quota_rows: list[dict]) -> dict:
         return {"model": choice["model"], "effort": choice["effort"]}
 
     blocked_choice = {"model": choice["model"], "effort": choice["effort"]}
-    fallback_entries = _fallback_entries(row, tier)
+    fallback_entries = _fallback_entries(
+        row,
+        choice_tier,
+        start_index=choice_index + 1,
+        excluded_providers=excluded_providers,
+    )
     snapshot = model_fetch.latest_snapshot() if fallback_entries else None
     examined = [provider]
     for entry in fallback_entries:
@@ -276,7 +335,9 @@ def _apply_pacing(row: dict, tier: str, quota_rows: list[dict]) -> dict:
         ):
             continue
         entry_provider = provider_for_model(entry["model"])
-        if pace.blocked(quota_rows, entry_provider, now_ms):
+        if pace.blocked(
+            quota_rows, entry_provider, now_ms, weekly_targets=weekly_targets
+        ):
             examined.append(entry_provider)
             continue
         return {
@@ -285,7 +346,9 @@ def _apply_pacing(row: dict, tier: str, quota_rows: list[dict]) -> dict:
             "downgraded_from": blocked_choice,
         }
 
-    earliest = pace.earliest_reset(quota_rows, examined, now_ms)
+    earliest = pace.earliest_reset(
+        quota_rows, examined, now_ms, weekly_targets=weekly_targets
+    )
     wait_seconds = max(0.0, (earliest - now_ms) / 1000) if earliest is not None else None
     return {
         **blocked_choice,
@@ -302,6 +365,7 @@ def route(
     primary_effort: str | None = None,
     tiers: dict | None = None,
     quota_rows: list[dict] | None = None,
+    excluded_providers: list[str] | tuple[str, ...] | set[str] | frozenset[str] = (),
 ) -> dict:
     """Return a model and effort, or a quota deferral with its reason.
 
@@ -313,6 +377,8 @@ def route(
     high/xhigh primary. That de-escalation is the point (#179 §4), not an
     edge case.
 
+    `excluded_providers` removes providers from the selected tier and lower
+    tiers. It never upgrades to a higher tier. Unknown providers are rejected.
     `quota_rows` is `quota.quota_usage()`'s row shape. `None` (the default)
     reads live quota for real; pass `[]` for "no data, don't change
     anything" (every pre-#36 test does this, to keep testing this
@@ -332,6 +398,22 @@ def route(
         )
     if size not in _SIZE_TO_TIER:
         raise RouteInputError(f"unknown size {size!r}; valid: {', '.join(_SIZE_TO_TIER)}")
+    excluded = {provider.strip().lower() for provider in excluded_providers}
+    if "" in excluded:
+        raise RouteInputError("excluded provider cannot be empty")
+    if excluded:
+        known_providers = {
+            provider_for_model(entry["model"])
+            for name in valid
+            for entries in all_tiers[name]["tiers"].values()
+            for entry in entries
+        }
+        unknown = excluded - known_providers
+        if unknown:
+            raise RouteInputError(
+                f"unknown excluded provider(s) {', '.join(sorted(unknown))!r}; "
+                f"valid: {', '.join(sorted(known_providers))}"
+            )
     row = all_tiers[category]["tiers"]
 
     needed_tier = _SIZE_TO_TIER[size]
@@ -351,4 +433,17 @@ def route(
         ) from error
 
     live_quota_rows = quota_mod.quota_usage() if quota_rows is None else quota_rows
-    return _apply_pacing(row, tier, live_quota_rows)
+    weekly_targets = None
+    if live_quota_rows:
+        try:
+            weekly_targets = pace.weekly_daily_targets()
+        except pace.PacingConfigError as exc:
+            raise RouteInputError(str(exc)) from exc
+    return _apply_pacing(
+        row,
+        tier,
+        live_quota_rows,
+        weekly_targets,
+        frozenset(excluded),
+        bmo_available=bmo_available,
+    )

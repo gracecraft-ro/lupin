@@ -8,7 +8,8 @@ This is the data model `lupin` uses once the `redis` backend exists
 | Key | Type | Holds | Replaces |
 | --- | --- | --- | --- |
 | `slot:<name>` | sorted set (member = holder, score = expiry in ms) | `bmo`, the declared `repo:<repo>` UI cap, and enforced `loop-<repo>` fleet locks (one active worker per repo). | `omp.lock` |
-| `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since), with a TTL | one claim per GitHub issue; the loop monitor renews the claims of its run's holder (`LUPIN_CLAIM_HOLDER`) | nothing today |
+| `claim:<owner>/<repo>#<n>` | string (JSON: host, session, since, generation), with a TTL | one claim per issue or PR. Generation limits rollback to one attempt. Same-holder claims and renewals give it a new value when present. GitHub's `claimed` label mirrors active issue claims, not PR claims. | nothing today |
+| `claim-index:<owner>/<repo>#<n>` | string, no TTL | target whose `claimed` label needs reconciliation | nothing today |
 | `ledger:<owner>/<repo>` | stream (`XADD`/`XRANGE`) | `ts host event issue status branch summary highlights evidence decisions next children` | `.loop/loop-state.json` is ignored; no local fallback |
 | `machine:<name>` | string (JSON), with a TTL | one fleet machine's status — see Fleet keys below | nothing today |
 | `focus:<quest>` | string (JSON), no TTL | which machine a quest is pinned to — see Fleet keys below | nothing today |
@@ -34,6 +35,34 @@ These are new keys for the fleet CLI (issues #6–#14, split from #2) and the
 cross-machine command queue (issue #28, split from #27). They stay under
 `v1`: `v1` is the shape of each key, not the whole file, and adding a key
 doesn't change the shape of any key that already exists.
+
+## GitHub claim labels
+
+Lupin adds the `claimed` label after a successful Redis claim on an issue. It
+creates the repository label when needed. Lupin does not label pull requests.
+If label sync fails for a new claim, Lupin reports the error. It releases the
+claim only if its generation has not changed. A same-holder claim or renewal
+changes it when present, so an earlier failed sync cannot release that claim.
+If the same holder repeats a claim, Lupin reports the error and keeps the
+existing claim active. A renewal adds the label again when needed. If label sync
+fails during renewal or release, Lupin reports the error; the Redis renewal or
+release stays in effect.
+
+The claim index has no TTL. After a successful GitHub add, Lupin writes the
+index again and checks Redis. If no claim remains, it removes the label, then
+clears the index only if Redis still has no claim. If a new claim appears while
+Lupin removes the label, it adds the label and checks again. A GitHub or Redis
+error does not trigger index cleanup. Reconcile can retry the sync.
+
+`lupin reconcile` adds missing labels for active claims and removes labels when
+Redis has no active claim. It checks indexed targets and all local repository
+checkouts, including disabled ones. GitHub API failures appear as warnings and
+make `lupin reconcile` exit with code 1. Each run is one pass. A scheduler must
+call it. If successful passes run at least once every `T` seconds, cleanup
+takes at most `T` seconds plus one pass after the Redis claim expires. A failed
+pass or one that cannot get the reconcile slot does not count. This repository
+sets no reconcile schedule. Without a scheduler, there is no fixed maximum
+delay.
 
 ## Acquire and release
 
@@ -105,7 +134,15 @@ online/offline.
   "slots": {"bmo": {"used": 1, "max": 1}},
   "providers": ["claude", "openai"],
   "quota": {
-    "claude": {"pct_left": 42, "resets_at": "2026-10-05T18:00:00Z"}
+    "claude": {
+      "pct_left": 42,
+      "resets_at": 1791223200000,
+      "source": "Anthropic OAuth usage API",
+      "windows": [
+        {"label": "5 Hour limit", "pct_left": 42, "resets_at": 1791223200000},
+        {"label": "Weekly limit", "pct_left": 9, "resets_at": null}
+      ]
+    }
   },
   "loops": [{
     "repo": "lupin",
@@ -122,6 +159,11 @@ online/offline.
   "actions": ["loop.peek", "loop.run", "loop.run-all", "loop.state", "loop.stop", "schedule.pause", "schedule.resume", "schedule.set", "schedule.show"]
 }
 ```
+
+`quota` keeps the 5-hour-first `pct_left` summary. Each provider entry also
+has `windows`, one row per quota window. Each row has a label, percent left,
+and reset time in Unix milliseconds. `place --explain` shows each row;
+`place --json` returns them under `quota.windows`.
 
 Each `loops` entry reports Herdr's agent state and workspace IDs. `since`
 is an ISO 8601 UTC time. The heartbeat does not infer state from pane text.
@@ -301,7 +343,8 @@ quest decision isn't made against issue data that's badly stale.
 `<cache-key>` names which lookup, since the same repo backs several
 different queries that must not share one cache entry: `issues:<state>`
 (issue list), `comments:<state>` (per-issue comment pagination),
-`dependencies` (blockedBy/blocking links), `quests` (quest-labeled issues),
+`dependencies:v2` (roadmap blockedBy/blocking links with repository owners),
+`quests` (quest-labeled issues),
 `issue:<number>` (`place`'s single-issue lookup), `issue-state:<number>`
 (`roadmap_cli`'s blocker-exists check), `quest-locate-issue:<number>`
 (`quest`'s issue-to-repo lookup).
@@ -419,20 +462,28 @@ the machine, repo, file name, the debrief text, the digest, the model that wrote
 it, an error text, a try count, and the publish time. Screenshot links in the
 text are replaced with plain words. Redis holds no images.
 
-A quiet debrief gets no digest. A debrief is quiet when Shipped, Follow-up tasks,
-Risk and Evidence each hold only `- None.`. The debrief writer puts `- None.` only
-when it collected that data, so missing data never counts as quiet. The entry has
+A standard debrief is quiet when Shipped, Follow-up tasks, Risk and Evidence
+each hold only `- None.`. The owner-blocked report is quiet only when its
+Owner-blocked issues, Pull requests waiting for owner merge, and Data gaps
+sections each hold only `- None.`. A gap is never "None". A quiet entry has
 `quiet: true`, no model call is made, and the Debriefs page shows "no changes".
 
-A model call writes the digest. It is a short story with a title, a few themes and
-up to 3 pictures. It is not a list of pull requests. A picture must be a GitHub
-attachment that the debrief itself holds. The page shows it through `/image`. The model gets no tools and no MCP servers, because the
-text can hold PR titles that other people wrote. `lupin route prose size-s` picks a model. The digest tries bmo first, then `opencode-go/deepseek-v4.1-flash`, then Claude (`Haiku`). It reserves the fleet `bmo` slot and waits up to 300 s, because bmo can sleep. A failed model moves to the next one. A quota or rate-limit error does not use a try.
-The agent's digest thread runs this every 5 minutes. It makes at most 3 digests
-in one run, newest debrief first. A debrief past that limit is stored with no
-digest and gets one in a later run. A failed model call adds 1 to the try
-count. After 3 failed calls the agent stops. A quota or rate-limit error does
-not add to the count. The debrief text is stored in all cases.
+A standard model call writes a short story with a title, a few themes and up to
+3 pictures. It is not a list of pull requests. A picture must be a GitHub
+attachment that the debrief itself holds. The page shows it through `/image`.
+The model gets no tools and no MCP servers, because the text can hold PR titles
+that other people wrote. `lupin route prose size-s` picks a model. The digest
+tries bmo first, then `opencode-go/deepseek-v4.1-flash`, then Claude (`Haiku`).
+It reserves the fleet `bmo` slot and waits up to 300 s, because bmo can sleep.
+A failed model moves to the next one. A quota or rate-limit error does not use
+a try.
+
+The daily owner-blocked report runs for the `lupin` repo. It covers open issues
+with the `completely-blocked-on-human` label and open, non-draft PRs that are
+mergeable, approved at the current head, and have passing checks. Its detailed
+digest gives an executive summary, an action for every listed item, and an
+ordered strategy. It names data gaps, does not infer missing facts, and does
+not capture screenshots.
 
 The Debriefs page (`/debrief`) reads all keys with `SCAN` and `GET`. A machine
 without a loop, such as the dispatch host, shows the debriefs of every worker.
@@ -448,6 +499,10 @@ ends at 00:00, 06:00, 12:00 or 18:00. A 12h window ends at 00:00 or 12:00. A 24h
 00:00. A 7d window ends on Monday at 00:00. A day with a clock change is 23 or 25 hours long.
 Every machine computes the same window, and the file name is the window end (in UTC), so
 the same window has the same name on every machine.
+
+The daily owner-blocked report shares the 24h window end, but uses its own
+`owner-blocked` period in the Redis claim key and its own `-owner-blocked.md`
+file. It runs only for the `lupin` repo.
 
 One machine writes each window for the whole fleet. The agent sets this key with `SET NX`
 before it writes:
@@ -469,11 +524,14 @@ After a long downtime the agent writes only the newest window of each period. It
 
 ### `debrief-digest-claim:<repo>:<file>`
 
-Only a 12h window and a 7d window get a digest. Every other debrief (6h, 24h, a loop stop, a
-backfill day) is published as a record: `record_only: true`, no model call. Normally one machine
-has the file of a window, so one machine writes the digest. If two machines have it (Redis was
-down when it was written), the first to set this key with `SET NX` writes the digest. The value is
-the machine name, and the TTL is 30 days. The same machine can retry after a failed model call.
+Only the 12h, 7d, and daily owner-blocked reports are eligible for digests.
+Every other debrief (6h, 24h, a loop stop, a backfill day) is published as a record:
+`record_only: true`, no model call. The owner-blocked report has its own
+`owner-blocked` claim. Normally one machine has the file of a window, so one
+machine writes the digest. If two machines have it (Redis was down when it was
+written), the first to set this key with `SET NX` writes the digest. The value
+is the machine name, and the TTL is 30 days. The same machine can retry after
+a failed model call.
 
 ### `debrief-image:<attachment-id>` and `debrief-image-miss:<machine>:<attachment-id>`
 
@@ -607,12 +665,16 @@ to `localhost:6379` without auth. Issue #118 tracks this.
 Periodic debriefs run on a background thread of `lupin agent`, not in the stop
 subprocess. They do not block commands. They read the same Redis keys as stop
 debriefs. They add the keys `debrief-window:*` and `debrief-digest:*` (see
-Fleet keys). Their file names end in `-6h`, `-12h`, `-24h`, or `-7d`. They have no time budget entry. The "Budget result" section and the
-"Lock waits" section cover stop debriefs only. They connect to `localhost:6379`
-without auth, as stop debriefs do (issue #118).
-Each one also saves two screenshots in a folder named `<file name>-screenshots/`.
-A screenshot uses a headless browser and starts a dashboard on a free port. It
-has no time budget entry. A failed screenshot does not stop the debrief.
+Fleet keys). Their file names end in `-6h`, `-12h`, `-24h`, or `-7d`. The daily
+owner-blocked report for the `lupin` repo has its own `-owner-blocked` file and
+claim, and shares the 24h window end. They have no time budget entry. The
+"Budget result" section and "Lock waits" section cover stop debriefs only.
+They connect to `localhost:6379` without auth, as stop debriefs do (issue #118).
+Standard periodic debriefs also save two screenshots in a folder named
+`<file name>-screenshots/`. The owner-blocked report does not capture
+screenshots. A screenshot uses a headless browser and starts a dashboard on a
+free port. It has no time budget entry. A failed screenshot does not stop the
+debrief.
 
 ## Lock waits
 

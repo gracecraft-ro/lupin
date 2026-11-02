@@ -16,13 +16,16 @@ through protected secret management. Do not put them in command arguments or
 global environment settings.
 
 ```
-lupin route <category> <size> [--no-bmo] [--primary-effort E] [--json]
+lupin route <category> <size> [--no-bmo] [--primary-effort E] \
+  [--exclude-provider PROVIDER ...] [--json]
 lupin classify --issue-json FILE [--diff-stat FILE] [--json]
 lupin fetch-models [--snapshot-file FILE] [--no-write] [--json]
 lupin fetch-benchmarks [--force] [--json]
 lupin quota [--json]
-lupin review-route (--category C --size S | --issue-json FILE) [--mode M]
+lupin review-route (--category C --size S | --issue-json FILE) [--mode M] \
+  [--exclude-provider PROVIDER ...]
 lupin review-route --prefetch N[,N...] [--repo OWNER/REPO] [--json]
+lupin place <task> [--exclude-provider PROVIDER ...] [--explain] [--json]
 lupin pr-status [--repo OWNER/REPO] [--json] [--full]
 lupin acquire <slot> --holder H [--wait SECONDS] [--max N] [--ttl SECONDS]
 lupin hold (--lease ID | <slot> --holder H --wait S) [--ttl SECONDS] -- <command>
@@ -55,12 +58,17 @@ lupin resume [--machine M | --all] [--json]
 
 `route` and `classify` print a plain result by default (`model effort`, or
 `category size`). A blocked route tries the other models in its tier, then
-lower tiers. It does not use a higher tier to avoid a quota wait. If quota
-blocks every allowed model, `route` prints a deferral reason and wait time
-instead of a model. Add `--json` for a JSON object; a deferred route includes
-`reason` and `wait_seconds`. If the category or size is not known, `route`
-and `review-route` print one line to stderr. The line lists valid values.
-The exit code is 2.
+lower tiers. It does not use a higher tier to avoid a quota wait. Repeat
+`--exclude-provider PROVIDER` on `route`, `review-route`, or `place` to skip
+those providers from the selected tier and lower tiers. The route never
+upgrades to a higher tier to find an allowed provider. An unknown provider
+prints one line to stderr and exits 2. If quota blocks every allowed model,
+`route` prints a deferral reason and wait time instead of a model. Add `--json`
+for a JSON object; a deferred route includes `reason` and `wait_seconds`.
+`place --explain` shows each quota window. `place --json` includes those rows
+in `quota.windows`; each has a label, the percent left, and its reset time.
+If the category or size is not known, `route` and `review-route` print one line
+to stderr. The line lists valid values. The exit code is 2.
 
 `ledger append` stores an event in Redis, with the time and host. Repeat
 `--child` for each split issue. Repeat a digest option to add more items.
@@ -149,12 +157,31 @@ lupin enable my-repo --platform omp \
 Profiles are local to each worker. Set them on each worker that can start the
 repo. At loop start, Lupin uses quota data from the shared cache. The data
 must be less than five minutes old and include usable quota for a candidate.
-Claude's weekly quota is blocked above 90%. This limit has no reset grace.
+Weekly targets use `LUPIN_WEEKLY_QUOTA_DAILY_TARGETS` and grow from each
+reset at the configured rate. Claude defaults to 90% over seven days, leaving
+10% unused. Routes and profiles share the 90% ceiling. Exact target usage is
+allowed; usage above it is blocked. A configured provider account is blocked
+if it has other usable quota rows but no usable weekly row, or if its weekly
+row has no reset. Providers without a weekly target do not need a weekly row.
 Lupin skips blocked providers, then picks the candidate with the most quota
 headroom across its known windows. For a provider with more than one login,
 headroom is that of the best login that is not blocked. Profile order breaks
 ties. If no candidate
 has fresh, usable quota, Lupin refuses to start the loop.
+
+While a loop runs, its monitor checks the active provider's shared quota every
+30 seconds and when the agent returns to the monitor. At 10% or less quota
+remaining, Lupin asks the agent to stop new work and save progress, active work,
+blockers, and one next action in `HANDOFF.md`. It keeps the workspace and claim.
+If quota data is not fresh, Lupin stops the agent without a provider request and
+writes a handoff with the reason.
+
+If usage ends first, Lupin records an interrupted state and reason. With a
+fresh, usable alternate provider in the repo's profile, Lupin starts it in the
+same workspace and worktree with the handoff file. Otherwise, the loop needs
+attention, and the monitor keeps renewing its claim while it waits.
+`lupin loops REPO` shows the reason and handoff path. The monitor resumes when
+a configured alternate provider has fresh, usable quota.
 
 Explicit `--platform`, `--provider`, or `--model` selects one fixed orchestrator
 for the run, and skips profile routing. For OMP, use `--platform omp`, and
@@ -193,8 +220,8 @@ lines, and the newest handoff from this run. If Herdr does not list the loop's
 own pane, the Herdr state is `unknown`. The first rule that matches gives the
 verdict:
 
-1. `stopped`, reason "waiting for the owner". Herdr says `blocked`, or the Lupin
-   state is `needs_attention`. The loop is flagged. No nudge.
+1. `stopped`. Herdr says `blocked`, or the Lupin state is `needs_attention`.
+   The loop is flagged. No nudge. The reason is `blocked, research needed`.
 2. `stopped`. Work is left, and the unit is `inactive` or `failed`. The loop is
    flagged. A nudge is sent only when Herdr says `idle` or `done`.
 3. `busywork`. Herdr says `working`, and the pane text matches the last pass.
@@ -252,10 +279,12 @@ dashboard can start or stop that timer. The dispatch host has no Herdr and runs
 no loops. Use the dashboard for all machines, and Herdr on a worker for its
 loops.
 
-`loops` reads Herdr's agent list and Lupin's saved loop state. Saved state stays
-visible without Herdr. `idle` and `working` mean `running`. `blocked` means
-`needs_attention`. `peek` reads a found agent pane, and reports the backend,
-session, workspace, and pane IDs. It does not infer state from pane text.
+`loops` matches Herdr agents to saved Lupin loops by pane or workspace ID.
+Other agents show as unmanaged in local and remote listings and on the Machines
+page. Saved state stays visible without Herdr. `idle` and `working` mean
+`running`. `blocked` means `needs_attention`. If any matched pane is blocked,
+the loop is `needs_attention`. `peek` reads a found agent pane and reports the
+backend, session, workspace, and pane IDs. It does not infer state from pane text.
 
 Each machine has one Herdr session, `lupin-loops`, and one Herdr server. Each
 run has one workspace in that session. Each workspace gets its repo's GitHub
@@ -306,10 +335,16 @@ says when data is missing. It never calls missing data an empty result. A period
 with no change gets no digest, and the page says "no changes". A digest is a
 short story with up to 3 pictures, not a PR list. Periodic debriefs use fixed
 windows on the Los Angeles clock. The first machine to claim a window in Redis
-writes it. Only the 12-hour and 7-day windows get a digest. The other debriefs
-(6h, 24h, loop stops) are records only. The Debriefs page (`/debrief`) shows the
-debriefs of all workers. Redis holds text only. A screenshot file stays on its
-worker. A GitHub attachment image is shown through the dashboard.
+writes it. Only the 12-hour, 7-day, and daily owner-blocked reports are
+eligible for a digest.
+The owner-blocked report runs for Lupin's own repo. It lists open issues with
+the `completely-blocked-on-human` label and open, non-draft PRs that are
+mergeable, approved at the current head, and have passing checks. Other 6-hour,
+24-hour, and loop-stop debriefs are records only. The owner-blocked report uses
+the 24-hour window, but has its own claim and file. The Debriefs page (`/debrief`)
+shows debriefs from all workers and links each issue and PR. Redis holds text
+only. Screenshot files stay on their worker. The owner-blocked report does not
+capture screenshots. A GitHub attachment image is shown through the dashboard.
 
 The digest uses these models in order: bmo (`bmo:qwen3.8-flash-next`, tier0 in
 `model-tiers.json`), then `opencode-go/deepseek-v4.1-flash`, then Claude
@@ -509,6 +544,7 @@ not add controls that the current code cannot support.
 - `src/lupin/claims.py`: `claim`, `renew-claim`, `release-claim`.
 - `src/lupin/dispatch.py`: `dispatch`.
 - `src/lupin/digest.py`: writes a digest for each debrief.
+- `src/lupin/owner_blocked.py`: builds Lupin's daily owner-blocked report.
 - `src/lupin/ledger.py`: appends and reads shared repo events.
 - `src/lupin/machines.py`: `join`, `heartbeat`, `drain`, `undrain`, `machines`.
 - `src/lupin/loops.py`: signed local or remote dispatch for loop controls.

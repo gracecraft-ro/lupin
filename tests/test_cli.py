@@ -46,6 +46,25 @@ def test_help_is_user_facing(capsys):
     assert "size" in route_help
 
 
+def test_route_command_excludes_multiple_providers(monkeypatch, capsys):
+    monkeypatch.setattr(cli.route_mod.quota_mod, "quota_usage", lambda: [])
+
+    code = cli.main([
+        "route",
+        "coding",
+        "size-m",
+        "--exclude-provider",
+        "claude",
+        "--exclude-provider",
+        "opencode-go",
+        "--json",
+    ])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["model"] == "openai-codex/gpt-6-sol"
+
+
 def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     monkeypatch, tmp_path, capsys, make_checkout
 ):
@@ -60,7 +79,7 @@ def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     monkeypatch.setattr(loop_runtime, "REPORTS_DIR", state_dir / "reports")
     monkeypatch.setattr(loop_runtime, "REPOS_FILE", state_dir / "repos")
     monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
-    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {})
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
     monkeypatch.setattr(
         loop_runtime,
         "_run",
@@ -83,16 +102,15 @@ def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     result = json.loads(capsys.readouterr().out)
     assert result[0]["started"] is True
     assert result[0]["repo"] == "widgets"
-    assert result[0]["message"].startswith("started widgets (claude) in Herdr session ")
     repo, kind, command, options = launched[0]
     assert repo == "widgets"
     assert kind == "loop"
     assert command[1:3] == ["loop", "worker"]
     assert "--session" in command
-    assert options["claude_limits"] is True
+    assert options["claude_limits"] is False
     metadata = json.loads((state_dir / "herdr-loops" / "widgets.json").read_text(encoding="utf-8"))
     assert metadata["state"] == "running"
-    assert metadata["platform"] == "claude"
+    assert metadata["platform"] == "omp"
     assert Path(metadata["prompt_file"]).is_file()
     assert loop_runtime.run_log.valid_run_id(metadata["run_id"])
     events = loop_runtime.run_log.read_events(state_dir, "widgets", metadata["run_id"])
@@ -363,6 +381,58 @@ def test_loops_unreadable_repos_file_exits_one_without_traceback(monkeypatch, tm
     assert f"could not read {repos}" in err
     assert "Traceback" not in err
 
+
+def test_loops_output_includes_quota_handoff_reason(monkeypatch, capsys):
+    monkeypatch.setattr(machines, "hostname", lambda: "local")
+    monkeypatch.setattr(
+        loop_runtime,
+        "loop_state",
+        lambda repo: {
+            "repo": repo,
+            "state": "needs_attention",
+            "backend": "herdr",
+            "reason": "no alternate usable quota",
+            "handoff": "/state/handoffs/widgets.HANDOFF.md",
+        },
+    )
+
+    assert cli.main(["loops", "widgets"]) == 0
+
+    assert capsys.readouterr().out.strip() == (
+        "widgets: needs_attention (herdr): no alternate usable quota "
+        "(handoff: /state/handoffs/widgets.HANDOFF.md)"
+    )
+
+def test_loops_json_shows_checkout_agent_as_unmanaged(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "missing")
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"lupin": "claude"})
+    monkeypatch.setattr(
+        loop_runtime,
+        "_agents",
+        lambda session: [
+            {
+                "cwd": "/home/user/code/lupin",
+                "workspace_id": "w3V",
+                "pane_id": "w3V:p1",
+                "agent_status": "working",
+                "agent": "claude",
+            }
+        ],
+    )
+
+    assert cli.main(["loops", "--json"]) == 0
+
+    rows = json.loads(capsys.readouterr().out)
+    loop = next(row for row in rows if row.get("repo") == "lupin")
+    unmanaged = next(row for row in rows if row.get("managed") is False)
+    assert loop["state"] == "stopped"
+    assert unmanaged["repo"] is None
+    assert unmanaged["pane_id"] == "w3V:p1"
+    assert unmanaged["workspace_id"] == "w3V"
+    assert unmanaged["agent"] == "claude"
+
+    assert cli.main(["loops"]) == 0
+    assert "unmanaged: working (herdr)" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

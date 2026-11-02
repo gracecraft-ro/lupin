@@ -7,14 +7,21 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from lupin import claims, loop_runtime
+from lupin import claim_labels, claims, loop_runtime
 from lupin.quota import QuotaDuration
+
+
+@pytest.fixture(autouse=True)
+def _disable_github_claim_labels(monkeypatch):
+    monkeypatch.setattr(claim_labels, "add_claimed_label", lambda target: None)
+    monkeypatch.setattr(claim_labels, "remove_claimed_label", lambda target: None)
 
 
 def test_systemd_run_uses_nixos_sudo_wrapper_when_not_on_path(monkeypatch, tmp_path):
@@ -130,7 +137,7 @@ def test_local_loops_marks_a_missing_running_workspace_for_attention(monkeypatch
     assert json.loads(path.read_text(encoding="utf-8"))["state"] == "needs_attention"
 
 
-def test_local_loops_groups_herdr_agents_without_metadata(monkeypatch, tmp_path: Path):
+def test_local_loops_does_not_map_agents_by_checkout_path(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "missing")
     monkeypatch.setattr(loop_runtime, "CODE_DIR", Path("/code"))
     monkeypatch.setattr(
@@ -138,37 +145,16 @@ def test_local_loops_groups_herdr_agents_without_metadata(monkeypatch, tmp_path:
         "_agents",
         lambda session: [
             {
-                "cwd": "/code/bodysmith",
-                "workspace_id": "workspace-1",
-                "pane_id": "w1:p1",
-                "agent_status": "working",
-                "agent": "omp",
-            },
-            {
-                "cwd": "/code/bodysmith",
-                "workspace_id": "workspace-2",
-                "pane_id": "w2:p1",
-                "agent_status": "blocked",
-                "agent": "claude",
-            },
-            {
                 "cwd": "/code/lupin",
-                "workspace_id": "workspace-3",
-                "pane_id": "w3:p1",
-                "agent_status": "idle",
-                "agent": "omp",
+                "workspace_id": "w3V",
+                "pane_id": "w3V:p1",
+                "agent_status": "working",
+                "agent": "claude",
             },
         ],
     )
 
-    loops = loop_runtime.local_loops()
-
-    assert [row["repo"] for row in loops] == ["bodysmith", "lupin"]
-    assert loops[0]["state"] == "needs_attention"
-    assert loops[0]["platform"] == "omp"
-    assert [pane["pane_id"] for pane in loops[0]["panes"]] == ["w1:p1", "w2:p1"]
-    assert loops[0]["panes"][0]["agent"] == "omp"
-    assert loops[1]["state"] == "running"
+    assert loop_runtime.local_loops() == []
 
 
 
@@ -185,7 +171,17 @@ def test_agent_repo_uses_origin_for_worktree_paths(tmp_path: Path):
     assert loop_runtime._agent_repo({"cwd": str(checkout)}) == "widgets"
 
 
-def test_local_loops_adds_external_panes_to_saved_loop(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize(
+    ("statuses", "initial_state"),
+    [
+        (("idle", "blocked"), "working"),
+        (("blocked", "idle"), "working"),
+        (("idle", "working"), "blocked"),
+    ],
+)
+def test_local_loops_matches_agents_by_saved_workspace_or_pane_id(
+    monkeypatch, tmp_path: Path, statuses: tuple[str, str], initial_state: str
+):
     loops_dir = tmp_path / "herdr-loops"
     loops_dir.mkdir()
     (loops_dir / "widgets.json").write_text(
@@ -198,23 +194,42 @@ def test_local_loops_adds_external_panes_to_saved_loop(monkeypatch, tmp_path: Pa
     monkeypatch.setattr(
         loop_runtime,
         "loop_state",
-        lambda repo: {"repo": repo, "state": "working", "workspace_id": "saved", "pane_id": "saved:p1"},
+        lambda repo: {
+            "repo": repo,
+            "state": initial_state,
+            "workspace_id": "saved",
+            "pane_id": "saved:p1",
+        },
     )
     monkeypatch.setattr(loop_runtime, "_agents", lambda session: [
+        {
+            "cwd": "/tmp/not-the-repo",
+            "workspace_id": "saved",
+            "pane_id": "w3:p1",
+            "agent_status": statuses[0],
+            "agent": "omp",
+        },
+        {
+            "cwd": "/tmp/not-the-repo",
+            "workspace_id": "other",
+            "pane_id": "saved:p1",
+            "agent_status": statuses[1],
+            "agent": "claude",
+        },
         {
             "cwd": "/code/widgets",
             "workspace_id": "external",
             "pane_id": "external:p1",
-            "agent_status": "idle",
+            "agent_status": "working",
             "agent": "omp",
-        }
+        },
     ])
 
     loops = loop_runtime.local_loops()
 
     assert len(loops) == 1
-    assert loops[0]["state"] == "running"
-    assert loops[0]["panes"][0]["pane_id"] == "external:p1"
+    assert loops[0]["state"] == "needs_attention"
+    assert [pane["pane_id"] for pane in loops[0]["panes"]] == ["w3:p1", "saved:p1"]
 
 
 def test_peek_finds_an_external_herdr_agent(monkeypatch):
@@ -552,6 +567,7 @@ def test_start_loop_starts_without_delegation_doc_and_skips_duplicate(
     assert metadata["platform"] == "omp"
     assert metadata["provider"] == "openai-codex"
     assert metadata["model"] == "openai-codex/gpt-5.2"
+    assert metadata["routing_decision"] == "explicit"
     prompt = Path(metadata["prompt_file"]).read_text(encoding="utf-8")
     assert prompt.endswith("review\n")
     assert command[1:] == [
@@ -595,7 +611,7 @@ def test_launch_agent_finds_the_pane_when_workspace_list_has_no_root_pane(monkey
     monkeypatch.setattr(loop_runtime, "_wait_agent", lambda got_session, workspace_id: 0)
 
     assert loop_runtime.launch_agent(
-        "widgets", session, "w1", "claude", str(prompt_file), resume=False
+        "widgets", session, "w1", "omp", str(prompt_file), resume=False
     ) == 0
 
     assert calls[0][calls[0].index("--pane") + 1] == "w1:p1"
@@ -610,7 +626,7 @@ def test_launch_agent_sends_the_prompt_without_newlines(monkeypatch, tmp_path: P
     monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: calls.append(argv) or (0, ""))
     monkeypatch.setattr(loop_runtime, "_wait_agent", lambda got_session, workspace_id: 0)
 
-    loop_runtime._launch_agent("lupin-widgets-abc123", "claude", workspace, str(prompt_file), resume=False)
+    loop_runtime._launch_agent("lupin-widgets-abc123", "omp", workspace, str(prompt_file), resume=False)
 
     assert calls[0][-1] == "first line second line"
 
@@ -638,7 +654,7 @@ def test_launch_agent_uses_herdr_start_api(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(loop_runtime, "_wait_agent", wait_agent)
 
     assert loop_runtime._launch_agent(
-        session, "claude", workspace, str(prompt_file), resume=True
+        session, "claude", workspace, str(prompt_file), resume=True, model="sonnet"
     ) == 0
 
     argv, options = calls[0]
@@ -658,6 +674,8 @@ def test_launch_agent_uses_herdr_start_api(monkeypatch, tmp_path: Path):
         "--",
         "--dangerously-skip-permissions",
         "--continue",
+        "--model",
+        "sonnet",
         "finish the handoff",
     ]
     assert options["timeout"] == 310.0
@@ -697,11 +715,12 @@ def test_launch_agent_starts_claude_with_skip_permissions(monkeypatch, tmp_path:
     monkeypatch.setattr(loop_runtime, "_wait_agent", lambda got_session, workspace_id: 0)
 
     loop_runtime._launch_agent(
-        "lupin-widgets-abc123", "claude", workspace, str(prompt_file), resume=resume
+        "lupin-widgets-abc123", "claude", workspace, str(prompt_file), resume=resume, model="sonnet"
     )
 
     argv = calls[0]
     assert argv[argv.index("--") + 1] == "--dangerously-skip-permissions"
+    assert argv[argv.index("--model") + 1] == "sonnet"
     assert ("--continue" in argv) == resume
     assert argv[-1] == "finish the handoff"
 
@@ -737,7 +756,7 @@ def _launch_after_start_failure(monkeypatch, tmp_path: Path, output: str, agents
 
     def launch():
         return loop_runtime._launch_agent(
-            "lupin-loops", "claude", workspace, str(prompt_file), resume=False, name="lupin-widgets-abc12345",
+            "lupin-loops", "omp", workspace, str(prompt_file), resume=False, name="lupin-widgets-abc12345",
         )
 
     return launch, herdr_calls, waited
@@ -1245,6 +1264,7 @@ def test_start_loop_selects_profile_candidate_and_persists_it_for_recovery(
     assert metadata["platform"] == "omp"
     assert metadata["provider"] == "opencode-go"
     assert metadata["model"] == "opencode-go/deepseek-v4.1-flash:xhigh"
+    assert metadata["routing_decision"] == "profile"
 
 
 def test_disable_repo_removes_its_orchestrator_profile(monkeypatch, tmp_path):
@@ -1300,6 +1320,95 @@ def _start_harness(monkeypatch, tmp_path: Path, make_checkout):
     return checkout, launches
 
 
+@pytest.mark.parametrize("selection", ["configured", "explicit", "profile"])
+def test_start_loop_refuses_null_claude_model_and_logs_skipped_profile(
+    monkeypatch, tmp_path: Path, make_checkout, selection
+):
+    _, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
+    profile = ["claude"] if selection == "profile" else ["openai-codex/gpt-6.1-sol"]
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "claude"})
+    monkeypatch.setattr(
+        loop_runtime, "orchestrator_profiles",
+        lambda: {} if selection == "configured" else {"widgets": profile},
+    )
+    monkeypatch.setattr(loop_runtime, "_redis_kwargs", lambda: {})
+    monkeypatch.setattr(
+        "lupin.quota_cache.read_snapshot",
+        lambda **kwargs: {"claude": _quota_entry([
+            _quota_row("claude", 10, 3 * 24 * _HOUR_MS, QuotaDuration.WEEKLY, time.time()),
+        ])},
+    )
+
+    platform = "claude" if selection == "explicit" else None
+    started, message = loop_runtime.start_loop("widgets", platform=platform)
+
+    assert not started
+    assert "Claude requires an explicit model" in message
+    assert launches == []
+    assert loop_runtime._read_metadata("widgets") is None
+    assert not (tmp_path / "state" / "worktrees").exists()
+    run_id = loop_runtime.run_log.latest_run_id(loop_runtime.STATE_DIR, "widgets")
+    events = loop_runtime.run_log.read_events(
+        loop_runtime.STATE_DIR, "widgets", run_id
+    )
+    skipped = [event for event in events if event["event"] == "profile_skipped"]
+    if selection == "explicit":
+        assert skipped[0]["profile"] == profile
+        assert skipped[0]["platform"] == "claude"
+        assert skipped[0]["reason"] == "explicit_options"
+    else:
+        assert skipped == []
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_refused_claude_run_keeps_the_previous_worktree(
+    monkeypatch, tmp_path: Path, make_checkout, resume, capsys
+):
+    from lupin import cli
+
+    _, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
+    assert loop_runtime.start_loop("widgets", platform="omp")[0]
+    metadata = loop_runtime._read_metadata("widgets")
+    metadata["state"] = "stopped"
+    loop_runtime._write_metadata("widgets", metadata)
+    launches.clear()
+    profile = ["openai-codex/gpt-6.1-sol"]
+    monkeypatch.setattr(loop_runtime, "orchestrator_profiles", lambda: {"widgets": profile})
+
+    started, message = loop_runtime.start_loop("widgets", platform="claude", resume=resume)
+
+    assert not started
+    assert "Claude requires an explicit model" in message
+    assert launches == []
+    assert loop_runtime._read_metadata("widgets") == metadata
+    assert Path(metadata["worktree"]).is_dir()
+    assert cli.main(["logs", "widgets", "--json"]) == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    skipped = next(event for event in events if event["event"] == "profile_skipped")
+    assert skipped["profile"] == profile
+    assert skipped["run_id"] != metadata["run_id"]
+    assert any(event["event"] == "error" for event in events)
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_launch_agent_refuses_null_claude_model(monkeypatch, tmp_path: Path, resume):
+    prompt = tmp_path / "prompt"
+    prompt.write_text("work", encoding="utf-8")
+    workspace = {"id": "w1", "root_pane": {"pane_id": "w1:p1", "workspace_id": "w1"}}
+    monkeypatch.setattr(loop_runtime, "_workspace_by_id", lambda *args: workspace)
+    monkeypatch.setattr(loop_runtime, "_agent_name_for", lambda *args: "lupin-widgets")
+    calls = []
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: calls.append(argv) or (0, ""))
+    monkeypatch.setattr(loop_runtime, "_wait_agent", lambda *args: 0)
+
+    with pytest.raises(loop_runtime.LoopError, match="Claude requires an explicit model"):
+        loop_runtime.launch_agent(
+            "widgets", loop_runtime.SESSION_NAME, "w1", "claude", str(prompt), resume
+        )
+
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     "name, is_dir, label",
     [
@@ -1321,7 +1430,7 @@ def test_start_loop_refuses_a_checkout_with_an_unfinished_git_operation(
         marker.write_text(_git_out(checkout, "rev-parse", "HEAD") + "\n", encoding="utf-8")
 
     with pytest.raises(loop_runtime.LoopError) as error:
-        loop_runtime.start_loop("widgets", platform="claude")
+        loop_runtime.start_loop("widgets", platform="omp")
 
     assert f"{label} in progress" in str(error.value)
     assert str(marker.resolve()) in str(error.value)
@@ -1343,7 +1452,7 @@ def test_start_loop_refuses_a_checkout_with_unmerged_files(monkeypatch, tmp_path
     assert _git_out(checkout, "ls-files", "-u")  # The index has unmerged entries.
 
     with pytest.raises(loop_runtime.LoopError, match=r"unmerged files: README\.md"):
-        loop_runtime.start_loop("widgets", platform="claude")
+        loop_runtime.start_loop("widgets", platform="omp")
 
     assert launches == []
     assert loop_runtime._read_metadata("widgets") is None
@@ -1369,7 +1478,7 @@ def test_start_loop_refuses_a_directory_that_is_not_a_git_checkout(monkeypatch, 
     )
 
     with pytest.raises(loop_runtime.LoopError, match="git rev-parse failed"):
-        loop_runtime.start_loop("widgets", platform="claude")
+        loop_runtime.start_loop("widgets", platform="omp")
 
 
 def test_start_loop_gives_each_run_a_new_branch_in_its_own_worktree(
@@ -1377,7 +1486,7 @@ def test_start_loop_gives_each_run_a_new_branch_in_its_own_worktree(
 ):
     checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started, message
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
@@ -1447,7 +1556,7 @@ def _codegraph_events() -> list[dict]:
 def test_start_loop_builds_a_codegraph_index_in_the_new_worktree(monkeypatch, tmp_path: Path, make_checkout):
     checkout, launches, calls = _codegraph_harness(monkeypatch, tmp_path, make_checkout)
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started, message
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
@@ -1471,7 +1580,7 @@ def test_start_loop_skips_the_codegraph_index_when_it_cannot_be_built(
 ):
     checkout, launches, calls = _codegraph_harness(monkeypatch, tmp_path, make_checkout, **options)
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started, message
     assert len(launches) == 1
@@ -1500,7 +1609,7 @@ def test_start_loop_still_starts_when_the_codegraph_index_fails(
         monkeypatch, tmp_path, make_checkout, script=script
     )
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started, message
     assert len(launches) == 1
@@ -1511,10 +1620,10 @@ def test_start_loop_still_starts_when_the_codegraph_index_fails(
 
 def test_resume_does_not_build_the_codegraph_index_again(monkeypatch, tmp_path: Path, make_checkout):
     checkout, launches, calls = _codegraph_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     _set_state("widgets", "stopped")
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude", resume=True)
+    started, message = loop_runtime.start_loop("widgets", platform="omp", resume=True)
 
     assert started, message
     assert len(calls.read_text(encoding="utf-8").splitlines()) == 1  # Only the first run.
@@ -1525,7 +1634,7 @@ def test_agent_workspace_directory_is_the_run_worktree_not_the_checkout(
     monkeypatch, tmp_path: Path, make_checkout
 ):
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     metadata = loop_runtime._read_metadata("widgets")
     loop_runtime._set_loop_state("widgets", metadata, "starting")
     worktree = loop_runtime._read_metadata("widgets")["worktree"]
@@ -1541,6 +1650,17 @@ def test_agent_workspace_directory_is_the_run_worktree_not_the_checkout(
     monkeypatch.setattr(loop_runtime, "_workspace_by_id", lambda session, workspace_id: None)
     monkeypatch.setattr(loop_runtime, "_runtime_paths", lambda repo: {})
     monkeypatch.setattr(loop_runtime, "_herdr_json", herdr_json)
+    now = time.time()
+    monkeypatch.setattr(
+        "lupin.quota_cache.read_snapshot",
+        lambda **_kwargs: {
+            "claude": _quota_entry([
+                _quota_row("claude", 20, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+                # 3.5 of 7 days passed: target is 45%. 20% used leaves 80%.
+                _quota_row("claude", 20, 3.5 * 24 * _HOUR_MS, QuotaDuration.WEEKLY, now),
+            ]),
+        },
+    )
     monkeypatch.setattr(loop_runtime.slots, "hold", lambda *args, **kwargs: 0)
 
     rc = loop_runtime._monitor_loop(
@@ -1559,6 +1679,7 @@ def test_monitor_logs_herdr_server_loss_with_reason(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "herdr-loops")
     loop_runtime._write_metadata("widgets", {
         "run_id": run_id, "repo": "widgets", "platform": "omp",
+        "provider": "openai-codex", "model": "openai-codex/gpt-6-luna:xhigh",
         "session": loop_runtime.SESSION_NAME, "state": "running",
     })
     server_states = iter((True, False))
@@ -1569,6 +1690,15 @@ def test_monitor_logs_herdr_server_loss_with_reason(monkeypatch, tmp_path: Path)
     monkeypatch.setattr(loop_runtime, "_agent_for_workspace", lambda session, workspace_id: {"name": "lupin-loop"})
     monkeypatch.setattr(loop_runtime, "_agent_command", lambda *args, **kwargs: ["agent"])
     monkeypatch.setattr(loop_runtime.slots, "hold", lambda *args, **kwargs: 1)
+    now = time.time()
+    monkeypatch.setattr(
+        "lupin.quota_cache.read_snapshot",
+        lambda **_kwargs: {
+            "openai": _quota_entry([
+                _quota_row("openai", 20, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+            ]),
+        },
+    )
 
     with pytest.raises(loop_runtime.LoopError, match="stopped with status 1"):
         loop_runtime._monitor_loop(
@@ -1614,7 +1744,7 @@ def test_start_loop_removes_its_new_worktree_when_the_service_does_not_start(
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
     monkeypatch.setattr(loop_runtime, "_systemd_run", lambda *args, **kwargs: (1, "boom"))
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert (started, message) == (False, "boom")
     assert list((tmp_path / "state" / "worktrees" / "widgets").iterdir()) == []
@@ -1672,7 +1802,7 @@ def test_run_reports_immediate_failure_and_cleans_only_when_safe(
 
     monkeypatch.setattr(loop_runtime, "_systemd_run", worker_fails)
 
-    assert cli.main(["run", "widgets", "--platform", "claude"]) == 1
+    assert cli.main(["run", "widgets", "--platform", "omp"]) == 1
     output = capsys.readouterr().out
     assert "worker" in output
     assert bool(stopped) is expect_stop
@@ -1715,7 +1845,7 @@ def test_start_loop_reports_a_worktree_git_keeps_when_the_service_does_not_start
 
     monkeypatch.setattr(loop_runtime, "_systemd_run", fail_and_lock)
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started is False
     assert message.startswith(f"boom; worktree kept at {locked[0]}")
@@ -1746,7 +1876,7 @@ def _run_with_worktree(monkeypatch, tmp_path: Path, make_checkout):
     Return the checkout, the worktree, and the list of saved loop states.
     """
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     metadata = loop_runtime._read_metadata("widgets")
     _stop_harness(monkeypatch, tmp_path, agent=None)
     writes = []
@@ -1900,11 +2030,11 @@ def test_next_prompt_names_the_kept_handoff_file_only_when_it_exists(monkeypatch
 
 def test_resume_reuses_the_recorded_worktree(monkeypatch, tmp_path: Path, make_checkout):
     checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
     _set_state("widgets", "stopped")
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude", resume=True)
+    started, message = loop_runtime.start_loop("widgets", platform="omp", resume=True)
 
     assert started, message
     assert Path(loop_runtime._read_metadata("widgets")["worktree"]) == worktree
@@ -1914,7 +2044,7 @@ def test_resume_reuses_the_recorded_worktree(monkeypatch, tmp_path: Path, make_c
 
 def test_resume_refuses_a_missing_worktree_and_names_it(monkeypatch, tmp_path: Path, make_checkout):
     checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
     _set_state("widgets", "stopped")
     shutil.rmtree(worktree)
@@ -1922,7 +2052,7 @@ def test_resume_refuses_a_missing_worktree_and_names_it(monkeypatch, tmp_path: P
     launched = len(launches)
 
     with pytest.raises(loop_runtime.LoopError, match=re.escape(str(worktree))):
-        loop_runtime.start_loop("widgets", platform="claude", resume=True)
+        loop_runtime.start_loop("widgets", platform="omp", resume=True)
 
     assert len(launches) == launched
     assert _worktree_count(checkout) == 1  # No new worktree.
@@ -1930,7 +2060,7 @@ def test_resume_refuses_a_missing_worktree_and_names_it(monkeypatch, tmp_path: P
 
 def test_resume_refuses_a_worktree_on_another_branch(monkeypatch, tmp_path: Path, make_checkout):
     checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     value = loop_runtime._read_metadata("widgets")
     worktree = Path(value["worktree"])
     value["branch"] = "lupin-loop/other"
@@ -1939,7 +2069,7 @@ def test_resume_refuses_a_worktree_on_another_branch(monkeypatch, tmp_path: Path
     launched = len(launches)
 
     with pytest.raises(loop_runtime.LoopError, match=re.escape(str(worktree))):
-        loop_runtime.start_loop("widgets", platform="claude", resume=True)
+        loop_runtime.start_loop("widgets", platform="omp", resume=True)
 
     assert len(launches) == launched
 
@@ -1948,11 +2078,11 @@ def test_start_loop_removes_the_previous_clean_worktree_first(
     monkeypatch, tmp_path: Path, make_checkout
 ):
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     first = Path(loop_runtime._read_metadata("widgets")["worktree"])
     _set_state("widgets", "stopped")
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started, message
     second = Path(loop_runtime._read_metadata("widgets")["worktree"])
@@ -1965,14 +2095,14 @@ def test_start_loop_refuses_when_the_previous_worktree_has_changes(
     monkeypatch, tmp_path: Path, make_checkout
 ):
     checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     first = Path(loop_runtime._read_metadata("widgets")["worktree"])
     (first / "README.md").write_text("unsaved work\n", encoding="utf-8")
     _set_state("widgets", "stopped")
     launched = len(launches)
 
     with pytest.raises(loop_runtime.LoopError, match=re.escape(str(first))):
-        loop_runtime.start_loop("widgets", platform="claude")
+        loop_runtime.start_loop("widgets", platform="omp")
 
     assert len(launches) == launched
     assert first.is_dir()
@@ -2014,7 +2144,7 @@ def test_start_failure_cleans_up_and_records_the_run_as_failed(
     else:
         monkeypatch.setattr(loop_runtime, step, lambda *args, **kwargs: fail())
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started is False
     metadata = loop_runtime._read_metadata("widgets")
@@ -2027,7 +2157,7 @@ def test_start_failure_cleans_up_and_records_the_run_as_failed(
         assert _git_out(checkout, "branch", "--list", "lupin-loop/*") == ""
         assert _worktree_count(checkout) == 1
         monkeypatch.setattr(loop_runtime, step, real)
-        assert loop_runtime.start_loop("widgets", platform="claude")[0] is True
+        assert loop_runtime.start_loop("widgets", platform="omp")[0] is True
         return
     (run_dir,) = worktrees.iterdir()
     assert f"worktree kept at {run_dir}" in message
@@ -2037,14 +2167,14 @@ def test_start_failure_cleans_up_and_records_the_run_as_failed(
     assert (run_dir / "unsaved.txt").read_text(encoding="utf-8") == "work\n"
     assert metadata["worktree"] == str(run_dir)
     with pytest.raises(loop_runtime.LoopError, match=re.escape(str(run_dir))):
-        loop_runtime.start_loop("widgets", platform="claude")
+        loop_runtime.start_loop("widgets", platform="omp")
 
 
 def test_resume_failure_keeps_the_recorded_worktree_and_records_it_as_failed(
     monkeypatch, tmp_path: Path, make_checkout
 ):
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
     _set_state("widgets", "stopped")
 
@@ -2053,7 +2183,7 @@ def test_resume_failure_keeps_the_recorded_worktree_and_records_it_as_failed(
 
     monkeypatch.setattr(loop_runtime, "_systemd_run", fail)
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude", resume=True)
+    started, message = loop_runtime.start_loop("widgets", platform="omp", resume=True)
 
     assert (started, message) == (False, "forced _systemd_run")
     assert worktree.is_dir()
@@ -2075,14 +2205,14 @@ def test_start_failure_records_failed_when_the_handoff_copy_raises(
 
     # Follow-up: an OSError is not a LoopError, so it still escapes start_loop.
     with pytest.raises(OSError, match="disk full"):
-        loop_runtime.start_loop("widgets", platform="claude")
+        loop_runtime.start_loop("widgets", platform="omp")
 
     assert loop_runtime._read_metadata("widgets")["state"] == "failed"
 
 
 def test_full_claude_slot_removes_the_new_worktree(monkeypatch, tmp_path: Path, make_checkout):
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     metadata = loop_runtime._read_metadata("widgets")
     loop_runtime._set_loop_state("widgets", metadata, "starting")
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
@@ -2125,7 +2255,7 @@ def test_start_loop_branches_from_the_fetched_remote_default_branch(
     _git_as(clone, "push", "-q", "origin", "main")
     remote_main = _git_out(origin, "rev-parse", "main")
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started, message
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
@@ -2137,7 +2267,7 @@ def test_start_loop_refuses_when_fetch_fails(monkeypatch, tmp_path: Path, make_c
     _git_out(checkout, "remote", "set-url", "origin", str(tmp_path / "missing.git"))
 
     with pytest.raises(loop_runtime.LoopError, match="git fetch failed"):
-        loop_runtime.start_loop("widgets", platform="claude")
+        loop_runtime.start_loop("widgets", platform="omp")
 
     assert launches == []
     assert loop_runtime._read_metadata("widgets") is None
@@ -2549,11 +2679,12 @@ def test_select_orchestrator_uses_the_account_with_quota_left():
     }
 
 
-def test_select_orchestrator_blocks_claude_when_weekly_usage_exceeds_90_percent():
+def test_select_orchestrator_blocks_claude_above_the_midweek_target(monkeypatch):
+    monkeypatch.delenv("LUPIN_WEEKLY_QUOTA_DAILY_TARGETS", raising=False)
     now = time.time()
     snapshot = {
         "claude": _quota_entry([
-            _quota_row("claude", 91, 6 * 24 * _HOUR_MS, QuotaDuration.WEEKLY, now),
+            _quota_row("claude", 13, 6 * 24 * _HOUR_MS, QuotaDuration.WEEKLY, now),
         ]),
         "openai": _quota_entry([
             _quota_row("openai", 91, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
@@ -2571,6 +2702,78 @@ def test_select_orchestrator_blocks_claude_when_weekly_usage_exceeds_90_percent(
         "quota_headroom": 9,
     }
 
+def test_select_orchestrator_blocks_claude_when_weekly_row_is_missing(monkeypatch):
+    monkeypatch.delenv("LUPIN_WEEKLY_QUOTA_DAILY_TARGETS", raising=False)
+    now = time.time()
+    snapshot = {
+        "claude": _quota_entry([
+            _quota_row("claude", 1, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 50, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+
+    choice = loop_runtime.select_orchestrator(
+        ["claude", "openai-codex/gpt-6-luna"], snapshot, now=now
+    )
+
+    assert choice == {
+        "platform": "omp",
+        "provider": "openai-codex",
+        "model": "openai-codex/gpt-6-luna",
+        "quota_headroom": 50,
+    }
+
+
+def test_select_orchestrator_allows_claude_at_the_exact_midweek_target(monkeypatch):
+    monkeypatch.delenv("LUPIN_WEEKLY_QUOTA_DAILY_TARGETS", raising=False)
+    now = time.time()
+    snapshot = {
+        "claude": _quota_entry([
+            _quota_row("claude", 45, 3.5 * 24 * _HOUR_MS, QuotaDuration.WEEKLY, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 100, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+
+    choice = loop_runtime.select_orchestrator(
+        ["claude", "openai-codex/gpt-6-luna"], snapshot, now=now
+    )
+
+    assert choice["platform"] == "claude"
+    assert choice["quota_headroom"] == 55
+
+
+def test_select_orchestrator_allows_exact_90_percent_at_week_end(monkeypatch):
+    monkeypatch.delenv("LUPIN_WEEKLY_QUOTA_DAILY_TARGETS", raising=False)
+    now = time.time()
+    snapshot = {
+        "claude": _quota_entry([
+            _quota_row("claude", 90, 0, QuotaDuration.WEEKLY, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 100, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+
+    choice = loop_runtime.select_orchestrator(
+        ["claude", "openai-codex/gpt-6-luna"], snapshot, now=now
+    )
+
+    assert choice["platform"] == "claude"
+    assert choice["quota_headroom"] == 10
+
+
+def test_select_orchestrator_reports_invalid_weekly_target(monkeypatch):
+    monkeypatch.setenv("LUPIN_WEEKLY_QUOTA_DAILY_TARGETS", "[]")
+
+    with pytest.raises(
+        loop_runtime.EnvValueError, match="LUPIN_WEEKLY_QUOTA_DAILY_TARGETS"
+    ):
+        loop_runtime.select_orchestrator([], {}, now=time.time())
+
 
 def test_select_orchestrator_skips_a_provider_when_every_account_is_blocked():
     now = time.time()
@@ -2579,7 +2782,10 @@ def test_select_orchestrator_skips_a_provider_when_every_account_is_blocked():
             _quota_row("openai", 100, 20 * 24 * _HOUR_MS, QuotaDuration.MONTHLY, now, "free"),
             _quota_row("openai", 100, 4 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now, "plus"),
         ]),
-        "claude": _quota_entry([_quota_row("claude", 90, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now)]),
+        "claude": _quota_entry([
+            _quota_row("claude", 45, 3.5 * 24 * _HOUR_MS, QuotaDuration.WEEKLY, now),
+            _quota_row("claude", 90, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
     }
 
     choice = loop_runtime.select_orchestrator(["openai/gpt-5", "claude"], snapshot, now=now)
@@ -2806,3 +3012,497 @@ def test_monitor_reports_an_acl_denial_once_without_the_password(
     assert len(lines) == 1, err
     assert "ACL" in lines[0]
     assert no_eval_kw["redis_password"] not in err
+
+
+def _quota_handoff_harness(
+    monkeypatch,
+    tmp_path: Path,
+    quota_snapshot: dict,
+    profile: list[str],
+    *,
+    first_exit: int = 0,
+    redis_port: int | None = None,
+    stop_after_hold: int = 1,
+    pane_output: str = "",
+    routing_decision: str = "profile",
+    quota_poll_interval: float = 3600,
+    hold_delay: float = 0,
+) -> dict:
+    state_dir = tmp_path / "state"
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", state_dir)
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", state_dir / "herdr-loops")
+    monkeypatch.setattr(loop_runtime, "ORCHESTRATORS_FILE", state_dir / "orchestrators.json")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", tmp_path / "code")
+    monkeypatch.setattr(loop_runtime, "QUOTA_POLL_INTERVAL", quota_poll_interval)
+    loop_runtime._write_metadata("widgets", {
+        "version": 1,
+        "repo": "widgets",
+        "session": loop_runtime.SESSION_NAME,
+        "platform": "omp",
+        "provider": "opencode-go",
+        "model": "opencode-go/deepseek-v4.1-flash",
+        "routing_decision": routing_decision,
+        "state": "starting",
+        "worktree": str(worktree),
+        "branch": "lupin-loop/20261026-000001",
+    })
+    if redis_port is None:
+        monkeypatch.setattr(loop_runtime, "_redis_kwargs", lambda: {})
+        monkeypatch.setattr(
+            loop_runtime, "_renew_claims", lambda _repo, _holder, stop: stop.wait(),
+        )
+    else:
+        monkeypatch.setenv("LUPIN_REDIS_HOST", "127.0.0.1")
+        monkeypatch.setenv("LUPIN_REDIS_PORT", str(redis_port))
+        monkeypatch.setattr(claims, "DEFAULT_TTL", 60)
+        monkeypatch.setattr(loop_runtime, "CLAIM_RENEW_INTERVAL", 0.05)
+    monkeypatch.setattr(loop_runtime, "orchestrator_profiles", lambda: {"widgets": profile})
+    monkeypatch.setattr(
+        "lupin.quota_cache.read_snapshot", lambda **_kwargs: quota_snapshot,
+    )
+
+    workspace = {
+        "id": "w1",
+        "root_pane": {"workspace_id": "w1", "pane_id": "p1"},
+    }
+    state = {
+        "agent_active": False,
+        "hold_running": False,
+        "handoff_while_hold_running": False,
+        "commands": [],
+        "herdr_calls": [],
+        "hold_count": 0,
+        "handoff_prompts": 0,
+        "workspace_creates": 0,
+    }
+
+    def server_running(_session):
+        metadata = loop_runtime._read_metadata("widgets") or {}
+        if metadata.get("state") == "needs_attention":
+            return False
+        return stop_after_hold <= 1 or state["hold_count"] < stop_after_hold
+
+    def herdr_json(_session, *args, **_kwargs):
+        state["herdr_calls"].append(args)
+        if args[:2] == ("workspace", "create"):
+            state["workspace_creates"] += 1
+        return {
+            "workspace": {"id": "w1"},
+            "root_pane": {"workspace_id": "w1", "pane_id": "p1"},
+        }
+
+    def herdr(_session, *args, **_kwargs):
+        state["herdr_calls"].append(args)
+        if args[:2] == ("agent", "prompt"):
+            state["handoff_prompts"] += 1
+            state["handoff_while_hold_running"] = state["hold_running"]
+            (worktree / "HANDOFF.md").write_text(
+                "## Progress\n\nIssue #60 is under way.\n\n"
+                "## Active work\n\nThe quota handoff is being saved.\n\n"
+                "## Blockers\n\nQuota is low.\n\n"
+                "## Next action\n\nContinue the same branch.\n",
+                encoding="utf-8",
+            )
+        elif args[:2] == ("agent", "send-keys"):
+            state["agent_active"] = False
+        elif args[:2] == ("pane", "read"):
+            return pane_output
+        return ""
+
+    def hold(command, **_kwargs):
+        state["hold_count"] += 1
+        state["commands"].append(command)
+        state["agent_active"] = True
+        state["hold_running"] = True
+        if hold_delay:
+            time.sleep(hold_delay)
+        state["hold_running"] = False
+        if state["hold_count"] == 1 and redis_port is not None:
+            holder = _agent_holder(state["herdr_calls"])
+            assert holder
+            claims.claim(
+                "acme/repo#60", holder, ttl=60,
+                redis_host="127.0.0.1", redis_port=redis_port,
+            )
+            state["claim_holder"] = holder
+        return first_exit if state["hold_count"] == 1 else 0
+
+    monkeypatch.setattr(loop_runtime, "_ensure_server", lambda *_args: None)
+    monkeypatch.setattr(loop_runtime, "_server_running", server_running)
+    monkeypatch.setattr(loop_runtime, "_find_workspace", lambda *_args: None)
+    monkeypatch.setattr(
+        loop_runtime, "_workspace_by_id",
+        lambda _session, workspace_id: workspace if workspace_id == "w1" else None,
+    )
+    monkeypatch.setattr(
+        loop_runtime, "_agents",
+        lambda _session: [{
+            "name": "lupin-omp",
+            "workspace_id": "w1",
+            "agent_status": "working" if state["hold_running"] else "done",
+        }] if state["agent_active"] else [],
+    )
+    monkeypatch.setattr(loop_runtime, "_runtime_paths", lambda _repo: {})
+    monkeypatch.setattr(loop_runtime, "_herdr_json", herdr_json)
+    monkeypatch.setattr(loop_runtime, "_herdr", herdr)
+    monkeypatch.setattr(loop_runtime.slots, "hold", hold)
+    return state
+
+
+def test_monitor_cancels_low_quota_slot_wait_and_resumes_alternate(
+    monkeypatch, tmp_path: Path, redis_port, flush_redis
+):
+    now = time.time()
+    snapshot = {
+        "opencode-go": _quota_entry([
+            _quota_row("opencode-go", 85, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 15, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+    real_hold = loop_runtime.slots.hold
+    state = _quota_handoff_harness(
+        monkeypatch, tmp_path, snapshot,
+        ["opencode-go/deepseek-v4.1-flash", "openai-codex/gpt-6-luna:xhigh"],
+        redis_port=redis_port,
+    )
+    simulated_agent_run = loop_runtime.slots.hold
+    slot_waiting = threading.Event()
+    watch_finished = threading.Event()
+    leases = []
+    released = []
+
+    def watch(repo, session, workspace, watch_state):
+        assert slot_waiting.wait(5)
+        loop_runtime._quota_watch_tick(repo, session, workspace, watch_state)
+        watch_finished.set()
+
+    def acquire(slot, _holder, *, cancel_wait, **_kwargs):
+        if "original_wait_cancelled" not in state:
+            snapshot["opencode-go"]["rows"][0]["used_pct"] = 92
+            slot_waiting.set()
+            assert watch_finished.wait(5)
+            state["original_wait_cancelled"] = cancel_wait()
+            assert state["original_wait_cancelled"]
+            return None
+        lease = f"{slot}:lease-{len(leases) + 1}"
+        leases.append(lease)
+        return lease
+
+    def release(lease, **_kwargs):
+        released.append(lease)
+        return True
+
+    def run_with_lease(command, lease, **kwargs):
+        try:
+            return simulated_agent_run(command)
+        finally:
+            kwargs["release"](lease)
+
+    monkeypatch.setattr(loop_runtime, "_quota_watch", watch)
+    monkeypatch.setattr(loop_runtime, "_server_running", lambda _session: state["hold_count"] == 0)
+    monkeypatch.setattr(loop_runtime.slots, "hold", real_hold)
+    monkeypatch.setattr(loop_runtime.slots, "acquire", acquire)
+    monkeypatch.setattr(loop_runtime.slots, "release", release)
+    monkeypatch.setattr(loop_runtime.slots._lease_runtime, "run_with_lease", run_with_lease)
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    metadata = loop_runtime._read_metadata("widgets")
+    launch = state["commands"][0]
+    prompt = Path(metadata["prompt_file"]).read_text(encoding="utf-8")
+    held = claims.claims_for(
+        ["acme/repo"], redis_host="127.0.0.1", redis_port=redis_port,
+    )
+    assert slot_waiting.is_set() and watch_finished.is_set()
+    assert state["original_wait_cancelled"]
+    assert len(state["commands"]) == 1
+    assert launch[launch.index("--provider") + 1] == "openai-codex"
+    assert state["workspace_creates"] == 1
+    assert metadata["workspace_id"] == "w1"
+    assert metadata["provider"] == "openai-codex"
+    assert metadata["quota_handoff"]["state"] == "interrupted"
+    assert metadata["quota_handoff"]["resumed_by"] == "openai-codex/gpt-6-luna:xhigh"
+    assert "agent_missing" in metadata["quota_handoff"]["reason"]
+    assert state["claim_holder"] in prompt
+    assert held["acme/repo#60"]["session"] == state["claim_holder"]
+    assert released == ["omp:lease-1"]
+
+def test_monitor_releases_acquired_lease_when_quota_handoff_arrives_before_launch(
+    monkeypatch, tmp_path: Path
+):
+    now = time.time()
+    snapshot = {
+        "opencode-go": _quota_entry([
+            _quota_row("opencode-go", 92, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+    real_hold = loop_runtime.slots.hold
+    real_acquire = loop_runtime.slots.acquire
+    _quota_handoff_harness(
+        monkeypatch, tmp_path, snapshot, ["opencode-go/deepseek-v4.1-flash"],
+    )
+
+    slot_root = tmp_path / "slots"
+    monkeypatch.setenv("LUPIN_STATE_ROOT", str(slot_root))
+    child_started = tmp_path / "child-started"
+    monkeypatch.setattr(
+        loop_runtime,
+        "_agent_command",
+        lambda *_args, **_kwargs: [
+            sys.executable,
+            "-c",
+            f"from pathlib import Path; Path({str(child_started)!r}).touch()",
+        ],
+    )
+
+    watch_context = {}
+    watch_ready = threading.Event()
+    acquired = []
+    pending_after_acquire = []
+
+    def watch(_repo, session, workspace, watch_state):
+        watch_context.update(session=session, workspace=workspace, state=watch_state)
+        watch_ready.set()
+
+    def acquire(slot, holder, **kwargs):
+        lease = real_acquire(slot, holder, **kwargs)
+        assert lease is not None
+        acquired.append(lease)
+        assert watch_ready.wait(5)
+        loop_runtime._quota_watch_tick(
+            "widgets", watch_context["session"], watch_context["workspace"],
+            watch_context["state"],
+        )
+        with watch_context["state"]["lock"]:
+            pending_after_acquire.append(watch_context["state"]["pending"] is not None)
+        return lease
+
+    server_checks = 0
+
+    def server_running(_session):
+        nonlocal server_checks
+        server_checks += 1
+        return server_checks == 1
+
+    monkeypatch.setattr(loop_runtime, "_quota_watch", watch)
+    monkeypatch.setattr(loop_runtime, "_server_running", server_running)
+    monkeypatch.setattr(loop_runtime.slots, "hold", real_hold)
+    monkeypatch.setattr(loop_runtime.slots, "acquire", acquire)
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    assert len(acquired) == 1 and acquired[0].startswith("omp:")
+    assert pending_after_acquire == [True]
+    assert not child_started.exists()
+    assert loop_runtime.slots.status(state_root=slot_root)["omp"]["holders"] == 0
+
+
+
+
+def test_monitor_requests_quota_handoff_before_limit_and_saves_all_sections(
+    monkeypatch, tmp_path: Path
+):
+    now = time.time()
+    snapshot = {
+        "opencode-go": _quota_entry([
+            _quota_row("opencode-go", 92, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+    state = _quota_handoff_harness(
+        monkeypatch, tmp_path, snapshot, ["opencode-go/deepseek-v4.1-flash"],
+        quota_poll_interval=0.01, hold_delay=0.1,
+    )
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    metadata = loop_runtime._read_metadata("widgets")
+    saved = Path(metadata["quota_handoff"]["path"]).read_text(encoding="utf-8")
+    assert state["handoff_prompts"] == 1
+    assert state["handoff_while_hold_running"]
+    assert metadata["quota_handoff"]["state"] == "resumable"
+    assert metadata["quota_handoff"]["headroom"] == 8
+    assert all(f"## {heading}" in saved for heading in (
+        "Progress", "Active work", "Blockers", "Next action",
+    ))
+    assert metadata["workspace_id"] == "w1"
+    assert "no alternate configured" in metadata["reason"]
+
+
+def test_monitor_records_interrupted_handoff_and_resumes_on_alternate(
+    monkeypatch, tmp_path: Path
+):
+    now = time.time()
+    snapshot = {
+        "opencode-go": _quota_entry([
+            _quota_row("opencode-go", 100, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 15, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+    profile = [
+        "opencode-go/deepseek-v4.1-flash",
+        "openai-codex/gpt-6-luna:xhigh",
+    ]
+    state = _quota_handoff_harness(
+        monkeypatch, tmp_path, snapshot, profile,
+        first_exit=1, stop_after_hold=2,
+    )
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    metadata = loop_runtime._read_metadata("widgets")
+    saved = Path(metadata["quota_handoff"]["path"]).read_text(encoding="utf-8")
+    alternate = state["commands"][1]
+    assert state["handoff_prompts"] == 0
+    assert state["hold_count"] == 2
+    assert metadata["quota_handoff"]["state"] == "interrupted"
+    assert "usage ended before the handoff completed" in metadata["quota_handoff"]["reason"]
+    assert metadata["quota_handoff"]["resumed_by"] == "openai-codex/gpt-6-luna:xhigh"
+    assert "- State: interrupted" in saved
+    assert "Next action" in saved
+    assert "--workspace" in alternate
+    assert alternate[alternate.index("--workspace") + 1] == "w1"
+    assert metadata["workspace_id"] == "w1"
+
+
+def test_monitor_resumes_completed_handoff_on_fresh_alternate_quota_and_keeps_claim(
+    monkeypatch, tmp_path: Path, redis_port, flush_redis
+):
+    now = time.time()
+    snapshot = {
+        "opencode-go": _quota_entry([
+            _quota_row("opencode-go", 92, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 15, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+    profile = [
+        "opencode-go/deepseek-v4.1-flash",
+        "openai-codex/gpt-6-luna:xhigh",
+    ]
+    state = _quota_handoff_harness(
+        monkeypatch, tmp_path, snapshot, profile,
+        redis_port=redis_port, stop_after_hold=2,
+    )
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    metadata = loop_runtime._read_metadata("widgets")
+    launch = state["commands"][1]
+    prompt_path = Path(launch[launch.index("--prompt-file") + 1])
+    resumed_prompt = prompt_path.read_text(encoding="utf-8")
+    held = claims.claims_for(
+        ["acme/repo"], redis_host="127.0.0.1", redis_port=redis_port,
+    )
+    assert len(state["commands"]) == 2
+    assert state["workspace_creates"] == 1
+    assert "--workspace" in launch and launch[launch.index("--workspace") + 1] == "w1"
+    assert launch[launch.index("--provider") + 1] == "openai-codex"
+    assert launch[launch.index("--model") + 1] == "openai-codex/gpt-6-luna:xhigh"
+    assert str(loop_runtime.STATE_DIR / "handoffs" / "widgets.HANDOFF.md") in resumed_prompt
+    assert state["claim_holder"] in resumed_prompt
+    assert "do not claim or start duplicate work" in resumed_prompt
+    assert metadata["quota_handoff"]["state"] == "resumed"
+    assert metadata["quota_handoff"]["resumed_by"] == "openai-codex/gpt-6-luna:xhigh"
+    assert metadata["workspace_id"] == "w1"
+    assert held["acme/repo#60"]["session"] == state["claim_holder"]
+    assert not any(call[:2] == ("agent", "send-keys") for call in state["herdr_calls"])
+
+def test_monitor_keeps_explicit_orchestrator_fixed_despite_profile_alternate(
+    monkeypatch, tmp_path: Path
+):
+    now = time.time()
+    snapshot = {
+        "opencode-go": _quota_entry([
+            _quota_row("opencode-go", 92, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+        "openai": _quota_entry([
+            _quota_row("openai", 15, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+        ]),
+    }
+    state = _quota_handoff_harness(
+        monkeypatch, tmp_path, snapshot,
+        [
+            "opencode-go/deepseek-v4.1-flash",
+            "openai-codex/gpt-6-luna:xhigh",
+        ],
+        routing_decision="explicit",
+    )
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    metadata = loop_runtime._read_metadata("widgets")
+    assert state["hold_count"] == 1
+    assert metadata["provider"] == "opencode-go"
+    assert metadata["quota_handoff"]["state"] == "resumable"
+    assert "no alternate configured" in metadata["reason"]
+    assert "resumed_by" not in metadata["quota_handoff"]
+
+
+def test_monitor_keeps_resumable_handoff_when_alternate_quota_is_unknown(
+    monkeypatch, tmp_path: Path
+):
+    state = _quota_handoff_harness(
+        monkeypatch, tmp_path, {},
+        [
+            "opencode-go/deepseek-v4.1-flash",
+            "openai-codex/gpt-6-luna:xhigh",
+        ],
+    )
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    metadata = loop_runtime._read_metadata("widgets")
+    assert state["hold_count"] == 1
+    assert state["handoff_prompts"] == 0
+    assert metadata["quota_handoff"]["state"] == "resumable"
+    assert "active provider quota is unknown" in metadata["quota_handoff"]["reason"]
+    saved = Path(metadata["quota_handoff"]["path"]).read_text(encoding="utf-8")
+    assert "- State: resumable" in saved
+    assert "no alternate usable quota" in metadata["reason"]
+    status = loop_runtime.loop_state("widgets")
+    assert status["state"] == "needs_attention"
+    assert status["reason"] == metadata["reason"]
+    assert Path(status["handoff"]).is_file()
+
+
+def test_monitor_marks_an_unknown_quota_as_interrupted_when_usage_error_ends_first(
+    monkeypatch, tmp_path: Path
+):
+    state = _quota_handoff_harness(
+        monkeypatch, tmp_path, {},
+        ["opencode-go/deepseek-v4.1-flash"],
+        first_exit=1,
+        pane_output="429 quota exceeded",
+    )
+
+    assert loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False,
+    ) == 1
+
+    metadata = loop_runtime._read_metadata("widgets")
+    saved = Path(metadata["quota_handoff"]["path"]).read_text(encoding="utf-8")
+    assert state["handoff_prompts"] == 0
+    assert metadata["quota_handoff"]["state"] == "interrupted"
+    assert "usage ended before the handoff completed" in metadata["quota_handoff"]["reason"]
+    assert "- State: interrupted" in saved

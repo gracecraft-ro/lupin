@@ -54,6 +54,23 @@ benchmark category covers both.
 
 ## Decide what is ready
 
+- Run `git fetch origin main` first. If the fetch fails, do not check paths.
+  Report the error.
+- Check each path that the issue names as an existing file to read or change
+  in this repository. Use `git cat-file -e origin/main:<path>`. Do not check:
+  - a file that the issue asks you to create;
+  - a path in another repository, such as one tied to a different `OWNER/REPO`;
+  - a file that the issue says was removed.
+- For each checked path absent from `origin/main`, inspect the changed-file
+  lists of all open PRs:
+  ```sh
+  gh pr list --repo OWNER/REPO --state open --limit 1000 \
+    --json number,files
+  ```
+  Name a PR only when its list includes the exact path. If no list includes it,
+  report that it is absent from `origin/main` and all open PRs.
+- Comment on the issue and do not dispatch it if a checked path is absent from
+  `origin/main`. Do this even if an open PR contains the path.
 - Dispatch the PR work first in each cycle. Then use the free worker slots for
   new issues. See "Pull requests come first" in the `delegation-loop` skill.
 - Check the dependency graph and the latest comments. Do not dispatch an issue
@@ -63,6 +80,13 @@ benchmark category covers both.
 - Check likely files before running issues in parallel. Treat Lupin's batch
   display as an estimate: it uses file paths written in issue text and does
   not confirm that a worker is running.
+- Look for trivial or small issues (for example, `size-xs` or `size-s`) that
+  touch the same likely files or one feature. Recommend one dispatch only when
+  one worker can meet each issue's acceptance checks in one branch. Keep
+  claimed, blocked, or already-in-PR issues separate.
+- Report each recommendation under `Bundles:` as `#N + #M — reason`. Use
+  `Bundles: none.` when no safe bundle fits. A bundle is one dispatch, not a
+  duplicate; the orchestrator decides whether to use it.
 - Treat priority, size, and status labels as repository data. Common names are
   `P0` to `P3`, `size-xs` to `size-xl`, `bug`, `needs-expert-decision`,
   `completely-blocked-on-human`, and `epic`. A repository may use other names.
