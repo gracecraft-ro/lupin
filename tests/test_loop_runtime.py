@@ -611,7 +611,7 @@ def test_launch_agent_finds_the_pane_when_workspace_list_has_no_root_pane(monkey
     monkeypatch.setattr(loop_runtime, "_wait_agent", lambda got_session, workspace_id: 0)
 
     assert loop_runtime.launch_agent(
-        "widgets", session, "w1", "claude", str(prompt_file), resume=False
+        "widgets", session, "w1", "omp", str(prompt_file), resume=False
     ) == 0
 
     assert calls[0][calls[0].index("--pane") + 1] == "w1:p1"
@@ -626,7 +626,7 @@ def test_launch_agent_sends_the_prompt_without_newlines(monkeypatch, tmp_path: P
     monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: calls.append(argv) or (0, ""))
     monkeypatch.setattr(loop_runtime, "_wait_agent", lambda got_session, workspace_id: 0)
 
-    loop_runtime._launch_agent("lupin-widgets-abc123", "claude", workspace, str(prompt_file), resume=False)
+    loop_runtime._launch_agent("lupin-widgets-abc123", "omp", workspace, str(prompt_file), resume=False)
 
     assert calls[0][-1] == "first line second line"
 
@@ -654,7 +654,7 @@ def test_launch_agent_uses_herdr_start_api(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(loop_runtime, "_wait_agent", wait_agent)
 
     assert loop_runtime._launch_agent(
-        session, "claude", workspace, str(prompt_file), resume=True
+        session, "claude", workspace, str(prompt_file), resume=True, model="sonnet"
     ) == 0
 
     argv, options = calls[0]
@@ -674,6 +674,8 @@ def test_launch_agent_uses_herdr_start_api(monkeypatch, tmp_path: Path):
         "--",
         "--dangerously-skip-permissions",
         "--continue",
+        "--model",
+        "sonnet",
         "finish the handoff",
     ]
     assert options["timeout"] == 310.0
@@ -713,11 +715,12 @@ def test_launch_agent_starts_claude_with_skip_permissions(monkeypatch, tmp_path:
     monkeypatch.setattr(loop_runtime, "_wait_agent", lambda got_session, workspace_id: 0)
 
     loop_runtime._launch_agent(
-        "lupin-widgets-abc123", "claude", workspace, str(prompt_file), resume=resume
+        "lupin-widgets-abc123", "claude", workspace, str(prompt_file), resume=resume, model="sonnet"
     )
 
     argv = calls[0]
     assert argv[argv.index("--") + 1] == "--dangerously-skip-permissions"
+    assert argv[argv.index("--model") + 1] == "sonnet"
     assert ("--continue" in argv) == resume
     assert argv[-1] == "finish the handoff"
 
@@ -753,7 +756,7 @@ def _launch_after_start_failure(monkeypatch, tmp_path: Path, output: str, agents
 
     def launch():
         return loop_runtime._launch_agent(
-            "lupin-loops", "claude", workspace, str(prompt_file), resume=False, name="lupin-widgets-abc12345",
+            "lupin-loops", "omp", workspace, str(prompt_file), resume=False, name="lupin-widgets-abc12345",
         )
 
     return launch, herdr_calls, waited
@@ -1317,6 +1320,85 @@ def _start_harness(monkeypatch, tmp_path: Path, make_checkout):
     return checkout, launches
 
 
+@pytest.mark.parametrize("selection", ["configured", "explicit", "profile"])
+def test_start_loop_refuses_null_claude_model_and_logs_skipped_profile(
+    monkeypatch, tmp_path: Path, make_checkout, selection
+):
+    _, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
+    profile = ["claude"] if selection == "profile" else ["openai-codex/gpt-6.1-sol"]
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "claude"})
+    monkeypatch.setattr(
+        loop_runtime, "orchestrator_profiles",
+        lambda: {} if selection == "configured" else {"widgets": profile},
+    )
+    monkeypatch.setattr(loop_runtime, "_redis_kwargs", lambda: {})
+    monkeypatch.setattr(
+        "lupin.quota_cache.read_snapshot",
+        lambda **kwargs: {"claude": _quota_entry([
+            _quota_row("claude", 10, 3 * 24 * _HOUR_MS, QuotaDuration.WEEKLY, time.time()),
+        ])},
+    )
+
+    platform = "claude" if selection == "explicit" else None
+    started, message = loop_runtime.start_loop("widgets", platform=platform)
+
+    assert not started
+    assert "Claude requires an explicit model" in message
+    assert launches == []
+    assert loop_runtime._read_metadata("widgets") is None
+    assert not (tmp_path / "state" / "worktrees").exists()
+    run_id = loop_runtime.run_log.latest_run_id(loop_runtime.STATE_DIR, "widgets")
+    events = loop_runtime.run_log.read_events(
+        loop_runtime.STATE_DIR, "widgets", run_id
+    )
+    skipped = [event for event in events if event["event"] == "profile_skipped"]
+    if selection == "explicit":
+        assert skipped[0]["profile"] == profile
+        assert skipped[0]["platform"] == "claude"
+        assert skipped[0]["reason"] == "explicit_options"
+    else:
+        assert skipped == []
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_refused_claude_run_keeps_the_previous_worktree(
+    monkeypatch, tmp_path: Path, make_checkout, resume
+):
+    _, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
+    assert loop_runtime.start_loop("widgets", platform="omp")[0]
+    metadata = loop_runtime._read_metadata("widgets")
+    metadata["state"] = "stopped"
+    loop_runtime._write_metadata("widgets", metadata)
+    launches.clear()
+
+    started, message = loop_runtime.start_loop("widgets", platform="claude", resume=resume)
+
+    assert not started
+    assert "Claude requires an explicit model" in message
+    assert launches == []
+    assert loop_runtime._read_metadata("widgets") == metadata
+    assert Path(metadata["worktree"]).is_dir()
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_launch_agent_refuses_null_claude_model(monkeypatch, tmp_path: Path, resume):
+    prompt = tmp_path / "prompt"
+    prompt.write_text("work", encoding="utf-8")
+    workspace = {"id": "w1", "root_pane": {"pane_id": "w1:p1", "workspace_id": "w1"}}
+    monkeypatch.setattr(loop_runtime, "_workspace_by_id", lambda *args: workspace)
+    monkeypatch.setattr(loop_runtime, "_agent_name_for", lambda *args: "lupin-widgets")
+    calls = []
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: calls.append(argv) or (0, ""))
+    monkeypatch.setattr(loop_runtime, "_wait_agent", lambda *args: 0)
+
+    with pytest.raises(loop_runtime.LoopError, match="Claude requires an explicit model"):
+        loop_runtime.launch_agent(
+            "widgets", loop_runtime.SESSION_NAME, "w1", "claude", str(prompt), resume
+        )
+
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     "name, is_dir, label",
     [
@@ -1338,7 +1420,7 @@ def test_start_loop_refuses_a_checkout_with_an_unfinished_git_operation(
         marker.write_text(_git_out(checkout, "rev-parse", "HEAD") + "\n", encoding="utf-8")
 
     with pytest.raises(loop_runtime.LoopError) as error:
-        loop_runtime.start_loop("widgets", platform="claude")
+        loop_runtime.start_loop("widgets", platform="omp")
 
     assert f"{label} in progress" in str(error.value)
     assert str(marker.resolve()) in str(error.value)
@@ -1360,7 +1442,7 @@ def test_start_loop_refuses_a_checkout_with_unmerged_files(monkeypatch, tmp_path
     assert _git_out(checkout, "ls-files", "-u")  # The index has unmerged entries.
 
     with pytest.raises(loop_runtime.LoopError, match=r"unmerged files: README\.md"):
-        loop_runtime.start_loop("widgets", platform="claude")
+        loop_runtime.start_loop("widgets", platform="omp")
 
     assert launches == []
     assert loop_runtime._read_metadata("widgets") is None
@@ -1386,7 +1468,7 @@ def test_start_loop_refuses_a_directory_that_is_not_a_git_checkout(monkeypatch, 
     )
 
     with pytest.raises(loop_runtime.LoopError, match="git rev-parse failed"):
-        loop_runtime.start_loop("widgets", platform="claude")
+        loop_runtime.start_loop("widgets", platform="omp")
 
 
 def test_start_loop_gives_each_run_a_new_branch_in_its_own_worktree(
@@ -1394,7 +1476,7 @@ def test_start_loop_gives_each_run_a_new_branch_in_its_own_worktree(
 ):
     checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started, message
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
@@ -1464,7 +1546,7 @@ def _codegraph_events() -> list[dict]:
 def test_start_loop_builds_a_codegraph_index_in_the_new_worktree(monkeypatch, tmp_path: Path, make_checkout):
     checkout, launches, calls = _codegraph_harness(monkeypatch, tmp_path, make_checkout)
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started, message
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
@@ -1488,7 +1570,7 @@ def test_start_loop_skips_the_codegraph_index_when_it_cannot_be_built(
 ):
     checkout, launches, calls = _codegraph_harness(monkeypatch, tmp_path, make_checkout, **options)
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started, message
     assert len(launches) == 1
@@ -1517,7 +1599,7 @@ def test_start_loop_still_starts_when_the_codegraph_index_fails(
         monkeypatch, tmp_path, make_checkout, script=script
     )
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started, message
     assert len(launches) == 1
@@ -1528,10 +1610,10 @@ def test_start_loop_still_starts_when_the_codegraph_index_fails(
 
 def test_resume_does_not_build_the_codegraph_index_again(monkeypatch, tmp_path: Path, make_checkout):
     checkout, launches, calls = _codegraph_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     _set_state("widgets", "stopped")
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude", resume=True)
+    started, message = loop_runtime.start_loop("widgets", platform="omp", resume=True)
 
     assert started, message
     assert len(calls.read_text(encoding="utf-8").splitlines()) == 1  # Only the first run.
@@ -1542,7 +1624,7 @@ def test_agent_workspace_directory_is_the_run_worktree_not_the_checkout(
     monkeypatch, tmp_path: Path, make_checkout
 ):
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     metadata = loop_runtime._read_metadata("widgets")
     loop_runtime._set_loop_state("widgets", metadata, "starting")
     worktree = loop_runtime._read_metadata("widgets")["worktree"]
@@ -1650,7 +1732,7 @@ def test_start_loop_removes_its_new_worktree_when_the_service_does_not_start(
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
     monkeypatch.setattr(loop_runtime, "_systemd_run", lambda *args, **kwargs: (1, "boom"))
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert (started, message) == (False, "boom")
     assert list((tmp_path / "state" / "worktrees" / "widgets").iterdir()) == []
@@ -1708,7 +1790,7 @@ def test_run_reports_immediate_failure_and_cleans_only_when_safe(
 
     monkeypatch.setattr(loop_runtime, "_systemd_run", worker_fails)
 
-    assert cli.main(["run", "widgets", "--platform", "claude"]) == 1
+    assert cli.main(["run", "widgets", "--platform", "omp"]) == 1
     output = capsys.readouterr().out
     assert "worker" in output
     assert bool(stopped) is expect_stop
@@ -1751,7 +1833,7 @@ def test_start_loop_reports_a_worktree_git_keeps_when_the_service_does_not_start
 
     monkeypatch.setattr(loop_runtime, "_systemd_run", fail_and_lock)
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started is False
     assert message.startswith(f"boom; worktree kept at {locked[0]}")
@@ -1782,7 +1864,7 @@ def _run_with_worktree(monkeypatch, tmp_path: Path, make_checkout):
     Return the checkout, the worktree, and the list of saved loop states.
     """
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     metadata = loop_runtime._read_metadata("widgets")
     _stop_harness(monkeypatch, tmp_path, agent=None)
     writes = []
@@ -1936,11 +2018,11 @@ def test_next_prompt_names_the_kept_handoff_file_only_when_it_exists(monkeypatch
 
 def test_resume_reuses_the_recorded_worktree(monkeypatch, tmp_path: Path, make_checkout):
     checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
     _set_state("widgets", "stopped")
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude", resume=True)
+    started, message = loop_runtime.start_loop("widgets", platform="omp", resume=True)
 
     assert started, message
     assert Path(loop_runtime._read_metadata("widgets")["worktree"]) == worktree
@@ -1950,7 +2032,7 @@ def test_resume_reuses_the_recorded_worktree(monkeypatch, tmp_path: Path, make_c
 
 def test_resume_refuses_a_missing_worktree_and_names_it(monkeypatch, tmp_path: Path, make_checkout):
     checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
     _set_state("widgets", "stopped")
     shutil.rmtree(worktree)
@@ -1958,7 +2040,7 @@ def test_resume_refuses_a_missing_worktree_and_names_it(monkeypatch, tmp_path: P
     launched = len(launches)
 
     with pytest.raises(loop_runtime.LoopError, match=re.escape(str(worktree))):
-        loop_runtime.start_loop("widgets", platform="claude", resume=True)
+        loop_runtime.start_loop("widgets", platform="omp", resume=True)
 
     assert len(launches) == launched
     assert _worktree_count(checkout) == 1  # No new worktree.
@@ -1966,7 +2048,7 @@ def test_resume_refuses_a_missing_worktree_and_names_it(monkeypatch, tmp_path: P
 
 def test_resume_refuses_a_worktree_on_another_branch(monkeypatch, tmp_path: Path, make_checkout):
     checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     value = loop_runtime._read_metadata("widgets")
     worktree = Path(value["worktree"])
     value["branch"] = "lupin-loop/other"
@@ -1975,7 +2057,7 @@ def test_resume_refuses_a_worktree_on_another_branch(monkeypatch, tmp_path: Path
     launched = len(launches)
 
     with pytest.raises(loop_runtime.LoopError, match=re.escape(str(worktree))):
-        loop_runtime.start_loop("widgets", platform="claude", resume=True)
+        loop_runtime.start_loop("widgets", platform="omp", resume=True)
 
     assert len(launches) == launched
 
@@ -1984,11 +2066,11 @@ def test_start_loop_removes_the_previous_clean_worktree_first(
     monkeypatch, tmp_path: Path, make_checkout
 ):
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     first = Path(loop_runtime._read_metadata("widgets")["worktree"])
     _set_state("widgets", "stopped")
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started, message
     second = Path(loop_runtime._read_metadata("widgets")["worktree"])
@@ -2001,14 +2083,14 @@ def test_start_loop_refuses_when_the_previous_worktree_has_changes(
     monkeypatch, tmp_path: Path, make_checkout
 ):
     checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     first = Path(loop_runtime._read_metadata("widgets")["worktree"])
     (first / "README.md").write_text("unsaved work\n", encoding="utf-8")
     _set_state("widgets", "stopped")
     launched = len(launches)
 
     with pytest.raises(loop_runtime.LoopError, match=re.escape(str(first))):
-        loop_runtime.start_loop("widgets", platform="claude")
+        loop_runtime.start_loop("widgets", platform="omp")
 
     assert len(launches) == launched
     assert first.is_dir()
@@ -2050,7 +2132,7 @@ def test_start_failure_cleans_up_and_records_the_run_as_failed(
     else:
         monkeypatch.setattr(loop_runtime, step, lambda *args, **kwargs: fail())
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started is False
     metadata = loop_runtime._read_metadata("widgets")
@@ -2063,7 +2145,7 @@ def test_start_failure_cleans_up_and_records_the_run_as_failed(
         assert _git_out(checkout, "branch", "--list", "lupin-loop/*") == ""
         assert _worktree_count(checkout) == 1
         monkeypatch.setattr(loop_runtime, step, real)
-        assert loop_runtime.start_loop("widgets", platform="claude")[0] is True
+        assert loop_runtime.start_loop("widgets", platform="omp")[0] is True
         return
     (run_dir,) = worktrees.iterdir()
     assert f"worktree kept at {run_dir}" in message
@@ -2073,14 +2155,14 @@ def test_start_failure_cleans_up_and_records_the_run_as_failed(
     assert (run_dir / "unsaved.txt").read_text(encoding="utf-8") == "work\n"
     assert metadata["worktree"] == str(run_dir)
     with pytest.raises(loop_runtime.LoopError, match=re.escape(str(run_dir))):
-        loop_runtime.start_loop("widgets", platform="claude")
+        loop_runtime.start_loop("widgets", platform="omp")
 
 
 def test_resume_failure_keeps_the_recorded_worktree_and_records_it_as_failed(
     monkeypatch, tmp_path: Path, make_checkout
 ):
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
     _set_state("widgets", "stopped")
 
@@ -2089,7 +2171,7 @@ def test_resume_failure_keeps_the_recorded_worktree_and_records_it_as_failed(
 
     monkeypatch.setattr(loop_runtime, "_systemd_run", fail)
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude", resume=True)
+    started, message = loop_runtime.start_loop("widgets", platform="omp", resume=True)
 
     assert (started, message) == (False, "forced _systemd_run")
     assert worktree.is_dir()
@@ -2111,14 +2193,14 @@ def test_start_failure_records_failed_when_the_handoff_copy_raises(
 
     # Follow-up: an OSError is not a LoopError, so it still escapes start_loop.
     with pytest.raises(OSError, match="disk full"):
-        loop_runtime.start_loop("widgets", platform="claude")
+        loop_runtime.start_loop("widgets", platform="omp")
 
     assert loop_runtime._read_metadata("widgets")["state"] == "failed"
 
 
 def test_full_claude_slot_removes_the_new_worktree(monkeypatch, tmp_path: Path, make_checkout):
     checkout, _ = _start_harness(monkeypatch, tmp_path, make_checkout)
-    loop_runtime.start_loop("widgets", platform="claude")
+    loop_runtime.start_loop("widgets", platform="omp")
     metadata = loop_runtime._read_metadata("widgets")
     loop_runtime._set_loop_state("widgets", metadata, "starting")
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
@@ -2161,7 +2243,7 @@ def test_start_loop_branches_from_the_fetched_remote_default_branch(
     _git_as(clone, "push", "-q", "origin", "main")
     remote_main = _git_out(origin, "rev-parse", "main")
 
-    started, message = loop_runtime.start_loop("widgets", platform="claude")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
     assert started, message
     worktree = Path(loop_runtime._read_metadata("widgets")["worktree"])
@@ -2173,7 +2255,7 @@ def test_start_loop_refuses_when_fetch_fails(monkeypatch, tmp_path: Path, make_c
     _git_out(checkout, "remote", "set-url", "origin", str(tmp_path / "missing.git"))
 
     with pytest.raises(loop_runtime.LoopError, match="git fetch failed"):
-        loop_runtime.start_loop("widgets", platform="claude")
+        loop_runtime.start_loop("widgets", platform="omp")
 
     assert launches == []
     assert loop_runtime._read_metadata("widgets") is None

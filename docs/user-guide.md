@@ -150,9 +150,7 @@ choose among orchestrators, add a profile when you enable the repo. Repeat
 
 ```
 lupin enable my-repo --platform omp \
-  --orchestrator openai/gpt-5 \
-  --orchestrator opencode-go/deepseek-v4.1-flash:xhigh \
-  --orchestrator claude
+  --orchestrator openai-codex/gpt-6.1-sol
 ```
 
 Profiles are local to each worker. Set them on each worker that can start the
@@ -166,14 +164,22 @@ ties. If no candidate
 has fresh, usable quota, Lupin refuses to start the loop.
 
 Explicit `--platform`, `--provider`, or `--model` selects one fixed orchestrator
-for the run, and skips profile routing. For OMP, use `--platform omp`, and
-optionally `--provider openai-codex|opencode-go` or `--model MODEL`. `openai`
+for the run. It does not use profile routing. If a profile is present, the
+`profile_skipped` log event lists it. The event has `reason: explicit_options`.
+For OMP, use `--platform omp`, and optionally
+`--provider openai-codex|opencode-go` or `--model MODEL`. `openai`
 and `openai/MODEL` still work as aliases for `openai-codex` and
 `openai-codex/MODEL`. Examples: `--model openai-codex/gpt-5.6-luna`, `--model
 opencode-go/deepseek-v4.1-flash:xhigh`. Set auto-compaction for the selected
 model in OMP, near 200k tokens. Lupin passes the model to OMP. It does not set
 or check OMP's compaction. These options work with `run` and `once`, and future
 one-off runs keep them. `run --all` applies them to each repo.
+
+A Claude agent must have an explicit model. Lupin refuses a Claude run with
+no model. It never uses the Claude default. This check also applies when an
+agent starts from saved state or after a quota handoff. The current CLI accepts
+`--model` only for OMP. Use an OMP profile with a model, or
+`--platform omp --model MODEL`. A bare `claude` profile cannot start an agent.
 
 `once now` starts the listed repos, or every enabled repo when none is listed. A
 future `once` run uses the same default. It fails if no repo is enabled.
