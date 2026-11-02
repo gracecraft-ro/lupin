@@ -1502,6 +1502,7 @@ def start_loop(
             return False, f"skip {repo}: an old Herdr session is still running; use lupin stop first"
         routing_decision = "configured_platform"
         quota_headroom = None
+        skipped_profile = None
         if platform is None and provider is None and model is None:
             candidates = orchestrator_profiles().get(source)
             if candidates:
@@ -1515,9 +1516,26 @@ def start_loop(
                 model = choice["model"]
         else:
             routing_decision = "explicit"
+            skipped_profile = orchestrator_profiles().get(source)
         provider, model = validate_omp_options(selected, provider, model)
-        _refuse_unfinished_git_work(checkout)
         run_id = run_log.new_run_id()
+        if skipped_profile:
+            _log_event(
+                repo, {"run_id": run_id}, "profile_skipped",
+                profile=skipped_profile, reason="explicit_options",
+                platform=selected, provider=provider, model=model,
+            )
+        if selected == "claude" and model is None:
+            message = (
+                "Claude requires an explicit model; use --platform omp "
+                "with --model or an OMP orchestrator profile"
+            )
+            _log_event(
+                repo, {"run_id": run_id}, "error",
+                error_type="LoopError", message=message,
+            )
+            return False, message
+        _refuse_unfinished_git_work(checkout)
         previous_state = metadata.get("state") if metadata else None
         if resume:
             worktree, branch = _resumed_worktree(repo, metadata)
@@ -1790,6 +1808,8 @@ def _launch_agent(
     session: str, platform: str, workspace: dict, prompt_file: str, resume: bool,
     name: str = AGENT_NAME, provider: str | None = None, model: str | None = None,
 ) -> int:
+    if platform == "claude" and not model:
+        raise LoopError("Claude requires an explicit model; the Claude default is not allowed")
     pane = _pane_id(workspace)
     workspace_id = _workspace_id(workspace)
     if not pane or not workspace_id:
@@ -1808,8 +1828,8 @@ def _launch_agent(
     if platform == "omp":
         if provider:
             argv.extend(["--provider", provider])
-        if model:
-            argv.extend(["--model", model])
+    if model:
+        argv.extend(["--model", model])
     argv.append(prompt)
     rc, output = _run(argv, timeout=310.0, env=_herdr_env())
     if rc:
@@ -2758,10 +2778,7 @@ def loop_state(repo: str) -> dict:
 def read_run_logs(repo: str, run_id: str | None = None, *, tail: int = 50) -> list[dict]:
     repo = validate_repo(repo)
     if run_id is None:
-        metadata = _read_metadata(repo)
-        run_id = metadata.get("run_id") if metadata else None
-        if not run_log.valid_run_id(run_id):
-            run_id = run_log.latest_run_id(STATE_DIR, repo)
+        run_id = run_log.latest_run_id(STATE_DIR, repo)
     if not run_id:
         raise LoopError(f"no run logs for {repo}")
     try:
