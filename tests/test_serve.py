@@ -4026,6 +4026,28 @@ class ScheduleRenderTests(unittest.TestCase):
         page = serve.render_schedule(self._data(), sent="Started 1 loop(s): widgets@pihome").decode()
         self.assertIn("Started 1 loop(s)", page)
 
+    def test_warning_banner_uses_the_warning_style_not_the_success_style(self):
+        warn = "Result unknown for widgets@pihome. Check Loops before you try again."
+        page = serve.render_schedule(self._data(), warn=warn).decode()
+        self.assertIn(f"<span class='pill off'>{serve.esc(warn)}</span>", page)
+        self.assertNotIn(f"<span class='pill on'>{serve.esc(warn)}</span>", page)
+
+    def test_confirmed_and_warning_banners_stay_separate(self):
+        sent = "Queued 1 loop(s): a-repo@a-worker."
+        warn = "Result unknown for b-repo@pihome. Check Loops before you try again."
+        page = serve.render_schedule(self._data(), sent=sent, warn=warn).decode()
+        self.assertIn(f"<span class='pill on'>{serve.esc(sent)}</span>", page)
+        self.assertIn(f"<span class='pill off'>{serve.esc(warn)}</span>", page)
+        self.assertNotIn(f"<span class='pill off'>{serve.esc(sent)}</span>", page)
+        self.assertNotIn(f"<span class='pill on'>{serve.esc(warn)}</span>", page)
+
+    def test_get_route_passes_warn_to_the_page(self):
+        handler = _get_handler("/schedule?warn=Result+unknown", {})
+        with mock.patch.object(serve, "gather_schedule", return_value=self._data()):
+            handler.do_GET()
+        page = handler.reply.call_args.args[0].decode()
+        self.assertIn("<span class='pill off'>Result unknown</span>", page)
+
     def test_nav_has_a_schedule_link(self):
         self.assertIn("href='/schedule'", serve.render_nav("schedule"))
 
@@ -4222,6 +4244,10 @@ class ScheduleRunOutcomeTests(unittest.TestCase):
         return unquote(handler.redirect.call_args.args[0])
 
     @staticmethod
+    def _params(handler):
+        return parse_qs(urlsplit(handler.redirect.call_args.args[0]).query)
+
+    @staticmethod
     def _error(handler):
         body = handler.reply.call_args.args[0].decode()
         return html.unescape(body.split("<p class=err>", 1)[1].split("</p>", 1)[0])
@@ -4380,6 +4406,81 @@ class ScheduleRunOutcomeTests(unittest.TestCase):
         sent = self._sent(handler)
         self.assertIn("Started 1 loop(s): a-repo@h", sent)
         self.assertNotIn("Queued", sent)
+
+    # `loops.run_subprocess` returns this pair when the local child times out.
+    TIMED_OUT = (124, "timed out after 20.0s: lupin run a-repo")
+
+    def test_local_timeout_says_unknown_and_not_safe_to_retry(self):
+        with (
+            mock.patch.dict("os.environ", {"LUPIN_LOOP_COORDINATOR_ONLY": "0"}),
+            mock.patch.object(serve, "run", return_value=self.TIMED_OUT),
+        ):
+            handler, enqueue = self._post(
+                {"repo": "a-repo", "place": "h"},
+                records={"return_value": []},
+                enqueue={"return_value": "cmd-1"},
+            )
+        enqueue.assert_not_called()
+        # Not the Rejected page: the run may be live.
+        handler.reply.assert_not_called()
+        sent = self._sent(handler)
+        self.assertIn("Result unknown for a-repo@h", sent)
+        self.assertIn("Check Loops before you try again", sent)
+        self.assertNotIn("safe to try again", sent)
+        self.assertNotIn("Nothing was queued", sent)
+        self.assertNotIn("Started", sent)
+        self.assertNotIn("Queued", sent)
+        # Only a warning goes to the page. There is nothing confirmed.
+        params = self._params(handler)
+        self.assertNotIn("sent", params)
+        self.assertIn("Result unknown for a-repo@h", params["warn"][0])
+
+    def test_local_timeout_keeps_earlier_queued_repo_and_marks_local_unknown(self):
+        # spread order: a-repo -> a-worker (queued), b-repo -> h (times out),
+        # c-repo -> a-worker (never tried).
+        with (
+            mock.patch.dict("os.environ", {"LUPIN_LOOP_COORDINATOR_ONLY": "0"}),
+            mock.patch.object(serve, "run", return_value=self.TIMED_OUT) as local_run,
+        ):
+            handler, enqueue = self._post(
+                {"repo": "all", "cnt": "3", "place": "spread"},
+                records={"return_value": [{"name": "a-worker", "state": "online", "slots": {}}]},
+                enqueue={"return_value": "cmd-1"},
+            )
+        enqueue.assert_called_once()
+        local_run.assert_called_once()
+        handler.reply.assert_not_called()
+        sent = self._sent(handler)
+        self.assertIn("Queued 1 loop(s): a-repo@a-worker", sent)
+        self.assertIn("Result unknown for b-repo@h", sent)
+        self.assertIn("Not tried: c-repo@a-worker", sent)
+        self.assertIn("Do not submit a-repo again", sent)
+        self.assertIn("Check Loops", sent)
+        self.assertNotIn("safe to try again", sent)
+        self.assertNotIn("Failed:", sent)
+        # The queued repo is confirmed. The local repo is only a warning.
+        params = self._params(handler)
+        self.assertIn("Queued 1 loop(s): a-repo@a-worker", params["sent"][0])
+        self.assertNotIn("unknown", params["sent"][0])
+        self.assertIn("Result unknown for b-repo@h", params["warn"][0])
+        self.assertNotIn("Queued 1 loop(s)", params["warn"][0])
+
+    def test_local_definite_failure_keeps_the_safe_retry_text(self):
+        with (
+            mock.patch.dict("os.environ", {"LUPIN_LOOP_COORDINATOR_ONLY": "0"}),
+            mock.patch.object(serve, "run", return_value=(1, "boom")),
+        ):
+            handler, enqueue = self._post(
+                {"repo": "a-repo", "place": "h"},
+                records={"return_value": []},
+                enqueue={"return_value": "cmd-1"},
+            )
+        enqueue.assert_not_called()
+        handler.redirect.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[1], 502)
+        error = self._error(handler)
+        self.assertIn("It is safe to try again", error)
+        self.assertNotIn("Result unknown", error)
 
 
 class TestSchedulePageIntegration:

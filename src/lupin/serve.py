@@ -3599,7 +3599,9 @@ def render_repos(
 TIMER_WINDOW_S = 4 * 3600  # the mockup's 4-hour timeline strip
 
 
-def render_schedule(data: dict, *, sent: str | None = None) -> bytes:
+def render_schedule(
+    data: dict, *, sent: str | None = None, warn: str | None = None
+) -> bytes:
     """The Schedule page (issue #22): the `delegation-loop.timer` status
     card, a table of every timer (recurring + one-off), and a "Run now"
     form that dispatches `loop.run` on demand.
@@ -3618,6 +3620,9 @@ def render_schedule(data: dict, *, sent: str | None = None) -> bytes:
 
     if sent:
         body.append(f"<div class=card><span class='pill on'>{esc(sent)}</span></div>")
+    if warn:
+        # Failed or unknown work. Not the success style.
+        body.append(f"<div class=card><span class='pill off'>{esc(warn)}</span></div>")
 
     # ---- recurring timer card ---------------------------------------------
     active = data["timer_active"]
@@ -4361,7 +4366,7 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/schedule":
             status_data = gather_schedule(self.fleet_connection)
             self.dashboard_status_data = status_data
-            self.reply(render_schedule(status_data, sent=query.get("sent")))
+            self.reply(render_schedule(status_data, sent=query.get("sent"), warn=query.get("warn")))
         elif url.path == "/peek":
             self.do_peek(query)
         elif url.path == "/image":
@@ -5045,8 +5050,9 @@ class Handler(BaseHTTPRequestHandler):
 
         # One click gives one outcome. Stop at the first failure so that
         # no later repo is queued. `started` ran here. `queued` is in the
-        # queue, and a worker has not confirmed it.
-        started, queued, errors = [], [], []
+        # queue, and a worker has not confirmed it. `unknown` timed out
+        # here: the child may have started a Herdr workspace first.
+        started, queued, errors, unknown = [], [], [], []
         pairs = list(zip(targets_repos, assigned))
         for index, (repo, machine) in enumerate(pairs):
             label = f"{repo}@{machine}"
@@ -5076,9 +5082,14 @@ class Handler(BaseHTTPRequestHandler):
                     queued.append(label)
                 elif result["returncode"] == 0:
                     started.append(label)
+                elif result["returncode"] == 124:
+                    # `loops.run_subprocess` returns 124 when the child
+                    # timed out. The run may be live, so a retry is not
+                    # known to be safe.
+                    unknown.append(label)
                 else:
                     errors.append(f"{label}: {result['output'].strip()}")
-            if errors:
+            if errors or unknown:
                 break
 
         accepted = []
@@ -5090,11 +5101,11 @@ class Handler(BaseHTTPRequestHandler):
                 "A worker starts each one when it picks it up. "
                 "Check Loops for the result."
             )
-        if not errors:
+        if not errors and not unknown:
             accepted.append("Do not submit again.")
             self.redirect(f"/schedule?sent={quote(' '.join(accepted), safe='')}")
             return
-        if not accepted:
+        if not accepted and not unknown:
             self.reply(
                 render_error(
                     "run now failed. Nothing was queued or started. "
@@ -5103,20 +5114,34 @@ class Handler(BaseHTTPRequestHandler):
                 502,
             )
             return
-        # Some work was accepted. Show it as accepted, not as a rejection.
+        # Some work was accepted, or a local run is unknown. Show that, not
+        # a rejection. `sent` holds only what is confirmed (shown as
+        # success). `warn` holds what failed or is unknown (shown as a
+        # warning).
         not_tried = [f"{r}@{m}" for r, m in pairs[index + 1:]]
-        parts = [
-            "Partly done.",
-            *accepted,
-            "Failed: " + "; ".join(errors) + ".",
-        ]
+        warn = ["Partly done."] if accepted else []
+        if errors:
+            warn.append("Failed: " + "; ".join(errors) + ".")
+        if unknown:
+            warn.append(
+                f"Result unknown for {', '.join(unknown)}: no answer before the time limit. "
+                "The loop may have started. Check Loops before you try again."
+            )
         if not_tried:
-            parts.append(f"Not tried: {', '.join(not_tried)}.")
-        parts.append(
-            f"Do not submit {', '.join(r.split('@')[0] for r in [*started, *queued])} again. "
-            "Submit only the failed and not tried repos."
-        )
-        self.redirect(f"/schedule?sent={quote(' '.join(parts), safe='')}")
+            warn.append(f"Not tried: {', '.join(not_tried)}.")
+        if accepted:
+            warn.append(
+                f"Do not submit {', '.join(r.split('@')[0] for r in [*started, *queued])} again. "
+                + (
+                    "Submit only the failed and not tried repos."
+                    if errors
+                    else "Check Loops, then submit only the repos that did not start."
+                )
+            )
+        query = f"warn={quote(' '.join(warn), safe='')}"
+        if accepted:
+            query = f"sent={quote(' '.join(accepted), safe='')}&{query}"
+        self.redirect(f"/schedule?{query}")
 
     def do_peek(self, query: dict) -> None:
         repo = query.get("repo", "").strip()
