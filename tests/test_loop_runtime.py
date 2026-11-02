@@ -1564,6 +1564,8 @@ def test_agent_workspace_directory_is_the_run_worktree_not_the_checkout(
         lambda **_kwargs: {
             "claude": _quota_entry([
                 _quota_row("claude", 20, 2 * _HOUR_MS, QuotaDuration.FIVE_HOURS, now),
+                # 3.5 of 7 days passed: target is 45%. 20% used leaves 80%.
+                _quota_row("claude", 20, 3.5 * 24 * _HOUR_MS, QuotaDuration.WEEKLY, now),
             ]),
         },
     )
