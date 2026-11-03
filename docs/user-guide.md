@@ -116,6 +116,12 @@ local slot backend does not exit 3.
 renews the lease while the command runs. It releases the lease when the command
 ends, by normal exit, non-zero exit, or signal.
 
+A loop whose model is bmo (`bmo:MODEL` in the tiers file, `bmo/MODEL` on the
+command line) holds the same fleet `bmo` slot for the whole run, and waits up
+to 300 seconds for it. bmo serves one request at a time, so this is what stops
+two runs, or a run and a digest, from using it together. The slot is released
+when the run ends. `run` fails with "bmo is in use" when the wait runs out.
+
 `fetch-models` checks which model IDs each subscription can call and their
 prices. It saves the result to
 `~/.local/state/lupin/model-snapshot.json`, unless `--no-write` is set. It

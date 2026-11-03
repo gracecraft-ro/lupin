@@ -64,6 +64,14 @@ PANE_READ_TIMEOUT = 60.0
 SYSTEMCTL_CHECK_TIMEOUT = 3.0
 SYSTEMCTL_STOP_TIMEOUT = 30.0
 LEASE_TTL = 60.0
+# bmo serves one request at a time, so a run on a `bmo:`/`bmo/` model takes
+# this fleet-wide slot for its whole life. `digest` already uses the same slot
+# for its own calls, so a manual run and a digest cannot overlap either.
+BMO_SLOT = "bmo"
+# Wait this long for bmo before failing the run. bmo can sleep for about five
+# minutes before it answers, so 0 would fail a loop for a machine that is only
+# still waking.
+BMO_WAIT_S = 300.0
 # The monitor renews the run's claims this often. A claim lasts 10 minutes.
 CLAIM_RENEW_INTERVAL = 120.0
 HANDOFF_GRACE_S = 600.0
@@ -1922,6 +1930,37 @@ def _renew_claims(repo: str, holder: str, stop: threading.Event) -> None:
             reported = line
 
 
+def _bmo_model(model: object) -> bool:
+    """True when `model` names bmo.
+
+    `model-tiers.json` spells the pick `bmo:MODEL`; omp, and therefore the
+    `--model` a loop carries, spells the same model `bmo/MODEL`.
+    """
+    return isinstance(model, str) and model.startswith(("bmo:", "bmo/"))
+
+
+def _renew_slot(repo: str, slot: str, lease: str, stop: threading.Event) -> None:
+    """Renew `lease` each LEASE_TTL/3 until `stop` is set.
+
+    A failed renewal does not stop the thread. A dropped renewal loses the
+    lease and lets a second run take bmo while the first is still using it,
+    which is worse than retrying, so it keeps trying and reports once per
+    new error.
+    """
+    reported = None
+    while not stop.wait(LEASE_TTL / 3):
+        try:
+            slots_redis.renew(lease, ttl=LEASE_TTL, **_redis_kwargs())
+        except Exception as exc:  # noqa: BLE001 -- retried; never fatal here
+            line = f"cannot renew the {slot} slot: {exc}"
+            if line != reported:
+                _log_current_event(repo, "slot_renew_error", slot=slot, message=line)
+                print(f"lupin: {line}", file=sys.stderr, flush=True)
+            reported = line
+        else:
+            reported = None
+
+
 def _monitor_loop(
     repo: str, platform: str, session: str, prompt_file: str, resume: bool
 ) -> int:
@@ -1988,15 +2027,53 @@ def _monitor_loop(
             repo, metadata, "slot_wait", slot=agent_platform, scope="agent",
             wait_seconds=wait_s,
         )
-        try:
-            rc = slots.hold(
-                command, slot=agent_platform, holder=unit_name(repo), wait=wait_s,
-                ttl=LEASE_TTL, max_holders=max_holders, before_run=can_start_agent,
+        bmo_lease = None
+        bmo_stop = threading.Event()
+        if _bmo_model(metadata.get("model")):
+            _log_event(
+                repo, metadata, "slot_wait", slot=BMO_SLOT, scope="agent",
+                wait_seconds=BMO_WAIT_S,
             )
-        except slots.SlotFull:
-            if not can_start_agent():
-                return 0
-            raise
+            try:
+                bmo_lease = slots_redis.acquire(
+                    BMO_SLOT, unit_name(repo), wait=BMO_WAIT_S, ttl=LEASE_TTL,
+                    max_holders=1, **_redis_kwargs(),
+                )
+            except slots.SlotFull:
+                _log_event(
+                    repo, metadata, "slot_wait_failed", slot=BMO_SLOT,
+                    scope="agent", reason="full",
+                )
+                raise LoopError(
+                    f"bmo is in use: Lupin's fleet {BMO_SLOT} slot is held. "
+                    "bmo serves one request at a time, so wait for it to free "
+                    "or use a different model"
+                )
+            threading.Thread(
+                target=_renew_slot, args=(repo, BMO_SLOT, bmo_lease, bmo_stop),
+                daemon=True,
+            ).start()
+            _log_event(repo, metadata, "slot_acquired", slot=BMO_SLOT, scope="agent")
+        try:
+            try:
+                rc = slots.hold(
+                    command, slot=agent_platform, holder=unit_name(repo), wait=wait_s,
+                    ttl=LEASE_TTL, max_holders=max_holders, before_run=can_start_agent,
+                )
+            except slots.SlotFull:
+                if not can_start_agent():
+                    return 0
+                raise
+        finally:
+            if bmo_lease is not None:
+                bmo_stop.set()
+                try:
+                    slots_redis.release(bmo_lease, **_redis_kwargs())
+                except Exception as exc:  # noqa: BLE001 -- expiry frees it anyway
+                    _log_current_event(
+                        repo, "slot_release_error", slot=BMO_SLOT, message=str(exc),
+                    )
+                _log_event(repo, metadata, "slot_released", slot=BMO_SLOT, scope="agent")
         if rc is None:
             return 0
         metadata["agent_exit_code"] = rc
