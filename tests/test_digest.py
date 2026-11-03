@@ -70,7 +70,7 @@ def test_digest_model_order_matches_the_prose_row():
     chain = [(model, effort) for model, effort in digest._error_chain()]
 
     assert [model for model, _effort in chain] == [
-        "bmo:qwen3.8-flash-next",
+        "bmo:swift-1.5-iq3_xxs",
         "opencode-go/deepseek-v4.1-flash",
         "haiku",
     ]

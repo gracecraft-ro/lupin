@@ -316,7 +316,7 @@ debriefs are records only. The Debriefs page (`/debrief`) shows all workers'
 debriefs. Redis can also hold copies of up to three GitHub attachment images
 for seven days. Screenshot files stay on their worker.
 
-The digest tries these models in order: bmo (`bmo:qwen3.8-flash-next`), then
+The digest tries these models in order: bmo (`bmo:swift-1.5-iq3_xxs`), then
 `opencode-go/deepseek-v4.1-flash`, then Claude (`haiku`). It reserves the
 fleet `bmo` slot and waits up to 300 seconds. A failed or out-of-quota model
 moves to the next one. Quota and rate-limit errors do not count as tries.
