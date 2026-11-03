@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -1058,6 +1059,28 @@ def test_quota_plain_output_gives_each_accounts_status(monkeypatch, capsys):
     assert any(line.startswith("openai/plus") and " open " in line and "100% left" in line for line in lines)
     assert any(line.startswith("openai/team") and " unknown " in line for line in lines)
     assert any(line.startswith("claude ") and "BLOCKED" in line and "5% left" in line for line in lines)
+
+
+def test_quota_plain_output_shows_open_claude_window_when_its_weekly_row_is_open(monkeypatch, capsys):
+    now_ms = time.time() * 1000
+    claude = [
+        {"provider": "claude", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 20,
+         "resets_at": now_ms + 3.5 * 24 * 3_600_000},
+        {"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 20,
+         "resets_at": now_ms + 2 * 3_600_000},
+    ]
+    merged = {"claude": {"rows": claude, "fetched_at": None, "fetched_by": "jesus"}}
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: {})
+    monkeypatch.setattr(cli.quota_cache, "refresh_snapshot", lambda **connection: merged)
+    monkeypatch.setattr(cli.usage_cache, "refresh_snapshot", lambda **connection: {})
+
+    assert cli.main(["quota"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "claude accounts: 1 open, 0 blocked, 0 unknown -- provider usable" in lines
+    assert any(line.startswith("claude ") and " open " in line and "5 hours" in line for line in lines)
+    assert any(line.startswith("claude ") and " open " in line and "7 days" in line for line in lines)
+    assert not any("BLOCKED" in line for line in lines)
 
 
 def test_quota_plain_output_counts_account_note_as_unknown(monkeypatch, capsys):

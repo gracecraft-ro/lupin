@@ -919,7 +919,7 @@ def _cmd_quota(args: argparse.Namespace) -> int:
             left = max(0.0, 100 - row["used_pct"])
             resets = serve.time_until_reset(row.get("resets_at"))
             name = f"{provider}/{row['account']}" if row.get("account") else provider
-            status = {"open": "open", "blocked": "BLOCKED", "unknown": "unknown"}[pace.account_state([row], provider, now_ms)]
+            status = {"open": "open", "blocked": "BLOCKED", "unknown": "unknown"}[pace.account_state(accounts[row.get("account")], provider, now_ms)]
             print(f"{name:<12} {status:<8} {label:<9} {left:.0f}% left   resets in {resets:<8} (fetched {age} via {fetched_by})")
         for row in note_rows:
             name = f"{provider}/{row['account']}" if row.get("account") else provider
