@@ -6,7 +6,7 @@
     "tiers": {
       "tier0": [
         {
-          "model": "bmo:qwen3.8-flash-next",
+          "model": "bmo:swift-1.5-iq3_xxs",
           "effort": "low"
         }
       ],
@@ -51,7 +51,7 @@
     "tiers": {
       "tier0": [
         {
-          "model": "bmo:qwen3.8-flash-next",
+          "model": "bmo:swift-1.5-iq3_xxs",
           "effort": "low"
         }
       ],
@@ -154,7 +154,7 @@
     "tiers": {
       "tier0": [
         {
-          "model": "bmo:qwen3.8-flash-next",
+          "model": "bmo:swift-1.5-iq3_xxs",
           "effort": "low"
         },
         {
@@ -191,7 +191,7 @@
     "tiers": {
       "tier0": [
         {
-          "model": "bmo:qwen3.8-flash-next",
+          "model": "bmo:swift-1.5-iq3_xxs",
           "effort": "medium"
         }
       ],
