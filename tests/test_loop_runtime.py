@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from lupin import claim_labels, claims, loop_runtime
+from lupin import claim_labels, claims, loop_runtime, slots_redis
 from lupin.quota import QuotaDuration
 
 
@@ -2864,6 +2864,52 @@ def test_monitor_renews_only_its_own_claims_while_the_agent_runs(
     assert rc == 0
     assert seen["held"] == ["acme/repo#1"], "the loop's claim is held past one TTL; the other expired"
     assert _agent_holder(herdr_calls), "the agent's workspace gets LUPIN_CLAIM_HOLDER"
+
+
+def test_monitor_holds_the_bmo_slot_only_for_a_bmo_model_run(
+    monkeypatch, tmp_path: Path, redis_port, flush_redis
+):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    seen: dict = {}
+
+    def agent(*args, **kwargs):
+        seen["during"] = slots_redis.status(**kw)["bmo"]["holders"]
+        return 0
+
+    _renew_harness(monkeypatch, tmp_path, redis_port, agent)
+    metadata = loop_runtime._read_metadata("widgets")
+    metadata["model"] = "bmo/swift-1.5-iq3_xxs"
+    loop_runtime._write_metadata("widgets", metadata)
+
+    rc = loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False
+    )
+
+    assert rc == 0
+    assert seen["during"] == 1, "bmo's fleet slot is held while the agent runs"
+    assert slots_redis.status(**kw)["bmo"]["holders"] == 0, "and released when it ends"
+
+
+def test_monitor_leaves_the_bmo_slot_free_for_a_non_bmo_model(
+    monkeypatch, tmp_path: Path, redis_port, flush_redis
+):
+    kw = {"redis_host": "127.0.0.1", "redis_port": redis_port}
+    seen: dict = {}
+
+    def agent(*args, **kwargs):
+        seen["during"] = slots_redis.status(**kw).get("bmo", {"holders": 0})["holders"]
+        return 0
+
+    _renew_harness(monkeypatch, tmp_path, redis_port, agent)
+    metadata = loop_runtime._read_metadata("widgets")
+    metadata["model"] = "opencode-go/glm-5.3"
+    loop_runtime._write_metadata("widgets", metadata)
+
+    loop_runtime._monitor_loop(
+        "widgets", "omp", loop_runtime.SESSION_NAME, "prompt.md", False
+    )
+
+    assert seen["during"] == 0, "a non-bmo model never touches bmo's slot"
 
 
 def _done_agent_harness(monkeypatch, tmp_path: Path, redis_port: int, open_polls: int, end: str) -> dict:
