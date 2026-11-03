@@ -444,7 +444,6 @@ class CliQuotaTests(unittest.TestCase):
             },
         }
 
-
     def test_cli_json_output_shows_the_note_of_a_provider_with_no_usage_rows(self):
         merged = json.loads(self._run_cli(self._merged_with_a_note(), "--json"))
         self.assertEqual(
