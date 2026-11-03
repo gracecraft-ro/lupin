@@ -197,8 +197,8 @@ def test_place_picks_the_machine_with_more_free_slots(redis_port, flush_redis):
     result = place.place("retry backoff", _kw(redis_port))
 
     # No labels on this synthetic issue -> classify() falls back to
-    # size-? -> tier2 -> "opus" (model-tiers.json's "coding" row).
-    assert result["model"] == "opus"
+    # size-? -> tier2 -> "haiku" (model-tiers.json's "coding" row).
+    assert result["model"] == "haiku"
     assert result["provider"] == "claude"
     assert result["pick"] == "mac-studio"
     by_name = {c["name"]: c for c in result["candidates"]}
@@ -528,12 +528,12 @@ def test_place_picks_a_machine_for_bmo_without_a_quota_row(redis_port, flush_red
     assert result["skipped"] == {"offline": 0, "other_provider": 0, "no_key": 0, "read_failed": 0}
 
 
-def test_place_size_m_coding_with_readable_quota_picks_glm_on_that_machine(
+def test_place_size_m_coding_with_readable_quota_picks_haiku_on_that_machine(
     redis_port, flush_redis, monkeypatch
 ):
     # Issue #99 check 1, offline substitute for the live `place` run.
-    # Real route(). Live quota is patched to two accounts with low use.
-    # Expects glm-5.3 high, placed on the machine that reads opencode-go quota.
+    # Real route(). Live quota is patched to claude windows with low use.
+    # Expects haiku high, placed on the machine that reads claude quota.
     reset_ms = time.time() * 1000 + 2 * 24 * 60 * 60 * 1000
     monkeypatch.setattr(place.classify_mod, "classify", lambda *a, **kw: ("coding", "size-m"))
     monkeypatch.setattr(
@@ -541,21 +541,18 @@ def test_place_size_m_coding_with_readable_quota_picks_glm_on_that_machine(
         lambda: [
             {"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS,
              "used_pct": 10, "resets_at": reset_ms},
-            {"provider": "opencode-go", "duration": quota.QuotaDuration.FIVE_HOURS,
+            {"provider": "claude", "duration": quota.QuotaDuration.WEEKLY,
              "used_pct": 10, "resets_at": reset_ms},
         ],
     )
-    _write_machine(
-        redis_port, "opencode-box",
-        quota={"opencode-go": {"pct_left": 90.0, "resets_at": None, "source": "test"}},
-    )
+    _write_machine(redis_port, "claude-box", quota=_CLAUDE_QUOTA)
 
     result = place.place("fix the retry backoff", _kw(redis_port))
 
-    assert result["model"] == "opencode-go/glm-5.3"
+    assert result["model"] == "haiku"
     assert result["effort"] == "high"
-    assert result["provider"] == "opencode-go"
-    assert result["pick"] == "opencode-box"
+    assert result["provider"] == "claude"
+    assert result["pick"] == "claude-box"
 
 
 def test_place_raises_coordinator_unreachable(closed_port):
