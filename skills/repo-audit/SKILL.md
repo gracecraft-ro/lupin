@@ -9,7 +9,7 @@ compatibility: Requires read access to the repository.
 
 # Audit a repository
 
-Use this skill when the user asks for a review of a whole repo, a folder, or a
+Use this skill to comprehensively audit a whole repo, a folder, or a
 package. This skill reports only. It changes no code.
 
 ## Map first

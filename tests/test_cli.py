@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -46,6 +47,25 @@ def test_help_is_user_facing(capsys):
     assert "size" in route_help
 
 
+def test_route_command_excludes_multiple_providers(monkeypatch, capsys):
+    monkeypatch.setattr(cli.route_mod.quota_mod, "quota_usage", lambda: [])
+
+    code = cli.main([
+        "route",
+        "coding",
+        "size-m",
+        "--exclude-provider",
+        "claude",
+        "--exclude-provider",
+        "opencode-go",
+        "--json",
+    ])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["model"] == "openai-codex/gpt-6-sol"
+
+
 def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     monkeypatch, tmp_path, capsys, make_checkout
 ):
@@ -60,7 +80,7 @@ def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     monkeypatch.setattr(loop_runtime, "REPORTS_DIR", state_dir / "reports")
     monkeypatch.setattr(loop_runtime, "REPOS_FILE", state_dir / "repos")
     monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
-    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {})
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "omp"})
     monkeypatch.setattr(
         loop_runtime,
         "_run",
@@ -69,27 +89,29 @@ def test_run_creates_herdr_worker_metadata_and_systemd_unit(
         ),
     )
     launched = []
-    monkeypatch.setattr(
-        loop_runtime,
-        "_systemd_run",
-        lambda repo, kind, command, **kwargs: launched.append((repo, kind, command, kwargs)) or (0, ""),
-    )
+
+    def systemd_run(repo, kind, command, **kwargs):
+        launched.append((repo, kind, command, kwargs))
+        metadata = loop_runtime._read_metadata(repo)
+        loop_runtime._set_loop_state(repo, metadata, "running")
+        return 0, ""
+
+    monkeypatch.setattr(loop_runtime, "_systemd_run", systemd_run)
 
     assert cli.main(["run", "widgets", "--json"]) == 0
 
     result = json.loads(capsys.readouterr().out)
     assert result[0]["started"] is True
     assert result[0]["repo"] == "widgets"
-    assert result[0]["message"].startswith("started widgets (claude) in Herdr session ")
     repo, kind, command, options = launched[0]
     assert repo == "widgets"
     assert kind == "loop"
     assert command[1:3] == ["loop", "worker"]
     assert "--session" in command
-    assert options["claude_limits"] is True
+    assert options["claude_limits"] is False
     metadata = json.loads((state_dir / "herdr-loops" / "widgets.json").read_text(encoding="utf-8"))
-    assert metadata["state"] == "starting"
-    assert metadata["platform"] == "claude"
+    assert metadata["state"] == "running"
+    assert metadata["platform"] == "omp"
     assert Path(metadata["prompt_file"]).is_file()
     assert loop_runtime.run_log.valid_run_id(metadata["run_id"])
     events = loop_runtime.run_log.read_events(state_dir, "widgets", metadata["run_id"])
@@ -360,6 +382,58 @@ def test_loops_unreadable_repos_file_exits_one_without_traceback(monkeypatch, tm
     assert f"could not read {repos}" in err
     assert "Traceback" not in err
 
+
+def test_loops_output_includes_quota_handoff_reason(monkeypatch, capsys):
+    monkeypatch.setattr(machines, "hostname", lambda: "local")
+    monkeypatch.setattr(
+        loop_runtime,
+        "loop_state",
+        lambda repo: {
+            "repo": repo,
+            "state": "needs_attention",
+            "backend": "herdr",
+            "reason": "no alternate usable quota",
+            "handoff": "/state/handoffs/widgets.HANDOFF.md",
+        },
+    )
+
+    assert cli.main(["loops", "widgets"]) == 0
+
+    assert capsys.readouterr().out.strip() == (
+        "widgets: needs_attention (herdr): no alternate usable quota "
+        "(handoff: /state/handoffs/widgets.HANDOFF.md)"
+    )
+
+def test_loops_json_shows_checkout_agent_as_unmanaged(monkeypatch, tmp_path: Path, capsys):
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "missing")
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"lupin": "claude"})
+    monkeypatch.setattr(
+        loop_runtime,
+        "_agents",
+        lambda session: [
+            {
+                "cwd": "/home/user/code/lupin",
+                "workspace_id": "w3V",
+                "pane_id": "w3V:p1",
+                "agent_status": "working",
+                "agent": "claude",
+            }
+        ],
+    )
+
+    assert cli.main(["loops", "--json"]) == 0
+
+    rows = json.loads(capsys.readouterr().out)
+    loop = next(row for row in rows if row.get("repo") == "lupin")
+    unmanaged = next(row for row in rows if row.get("managed") is False)
+    assert loop["state"] == "stopped"
+    assert unmanaged["repo"] is None
+    assert unmanaged["pane_id"] == "w3V:p1"
+    assert unmanaged["workspace_id"] == "w3V"
+    assert unmanaged["agent"] == "claude"
+
+    assert cli.main(["loops"]) == 0
+    assert "unmanaged: working (herdr)" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -956,6 +1030,98 @@ def test_quota_prints_the_account_beside_the_provider(monkeypatch, capsys):
     assert any(line.startswith("claude ") and "60% left" in line for line in lines)
 
 
+def test_quota_plain_output_gives_each_accounts_status(monkeypatch, capsys):
+    openai = [
+        {"provider": "openai", "account": "free", "duration": quota.QuotaDuration.MONTHLY,
+         "used_pct": 100, "resets_at": 4102444800000},
+        {"provider": "openai", "account": "plus", "duration": quota.QuotaDuration.FIVE_HOURS,
+         "used_pct": 0, "resets_at": 4102444800000},
+        {"provider": "openai", "account": "team", "duration": quota.QuotaDuration.FIVE_HOURS,
+         "used_pct": 10, "resets_at": None},
+    ]
+    claude = [
+        {"provider": "claude", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 95, "resets_at": None},
+    ]
+    merged = {
+        "openai": {"rows": openai, "fetched_at": None, "fetched_by": "ralpha"},
+        "claude": {"rows": claude, "fetched_at": None, "fetched_by": "jesus"},
+    }
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: {})
+    monkeypatch.setattr(cli.quota_cache, "refresh_snapshot", lambda **connection: merged)
+    monkeypatch.setattr(cli.usage_cache, "refresh_snapshot", lambda **connection: {})
+
+    assert cli.main(["quota"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "openai accounts: 1 open, 1 blocked, 1 unknown -- provider usable" in lines
+    assert "claude accounts: 0 open, 1 blocked, 0 unknown -- provider BLOCKED" in lines
+    assert any(line.startswith("openai/free") and "BLOCKED" in line and "0% left" in line for line in lines)
+    assert any(line.startswith("openai/plus") and " open " in line and "100% left" in line for line in lines)
+    assert any(line.startswith("openai/team") and " unknown " in line for line in lines)
+    assert any(line.startswith("claude ") and "BLOCKED" in line and "5% left" in line for line in lines)
+
+
+def test_quota_plain_output_shows_open_claude_window_when_its_weekly_row_is_open(monkeypatch, capsys):
+    now_ms = time.time() * 1000
+    claude = [
+        {"provider": "claude", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 20,
+         "resets_at": now_ms + 3.5 * 24 * 3_600_000},
+        {"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 20,
+         "resets_at": now_ms + 2 * 3_600_000},
+    ]
+    merged = {"claude": {"rows": claude, "fetched_at": None, "fetched_by": "jesus"}}
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: {})
+    monkeypatch.setattr(cli.quota_cache, "refresh_snapshot", lambda **connection: merged)
+    monkeypatch.setattr(cli.usage_cache, "refresh_snapshot", lambda **connection: {})
+
+    assert cli.main(["quota"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "claude accounts: 1 open, 0 blocked, 0 unknown -- provider usable" in lines
+    assert any(line.startswith("claude ") and " open " in line and "5 hours" in line for line in lines)
+    assert any(line.startswith("claude ") and " open " in line and "7 days" in line for line in lines)
+    assert not any("BLOCKED" in line for line in lines)
+
+
+def test_quota_plain_output_counts_account_note_as_unknown(monkeypatch, capsys):
+    rows = [
+        {"provider": "openai", "account": "plus", "duration": quota.QuotaDuration.MONTHLY,
+         "used_pct": 100, "resets_at": 4102444800000},
+        {"provider": "openai", "account": "free", "note": "free login has no quota data"},
+    ]
+    merged = {
+        "openai": {"rows": rows, "fetched_at": None, "fetched_by": "ralpha"},
+    }
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: {})
+    monkeypatch.setattr(cli.quota_cache, "refresh_snapshot", lambda **connection: merged)
+    monkeypatch.setattr(cli.usage_cache, "refresh_snapshot", lambda **connection: {})
+
+    assert cli.main(["quota"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "openai accounts: 0 open, 1 blocked, 1 unknown -- provider BLOCKED" in lines
+    assert any(
+        line.startswith("openai/free") and "unknown" in line and "free login has no quota data" in line
+        for line in lines
+    )
+
+
+def test_quota_plain_output_reports_note_only_provider_as_unknown(monkeypatch, capsys):
+    rows = [{"provider": "opencode-go", "note": "key expired"}]
+    merged = {
+        "opencode-go": {"rows": rows, "fetched_at": None, "fetched_by": "ralpha"},
+    }
+    monkeypatch.setattr(cli, "_fleet_connection", lambda args: {})
+    monkeypatch.setattr(cli.quota_cache, "refresh_snapshot", lambda **connection: merged)
+    monkeypatch.setattr(cli.usage_cache, "refresh_snapshot", lambda **connection: {})
+
+    assert cli.main(["quota"]) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    assert "opencode-go accounts: 0 open, 0 blocked, 1 unknown -- provider unknown" in lines
+    assert any(line.startswith("opencode-go ") and "unknown" in line and "key expired" in line for line in lines)
+
+
 def test_route_unknown_category_or_size_is_a_usage_error_not_a_traceback(capsys):
     assert cli.main(["route", "code", "size-m"]) == 2
     err = capsys.readouterr().err
@@ -968,6 +1134,22 @@ def test_route_unknown_category_or_size_is_a_usage_error_not_a_traceback(capsys)
     assert len(err.splitlines()) == 1
     assert "unknown size 'm'" in err
     assert "size-m" in err
+
+
+def test_route_prints_a_reason_when_quota_defers(monkeypatch, capsys):
+    result = {
+        "model": "sonnet",
+        "effort": "high",
+        "wait_seconds": 3600,
+        "reason": "all allowed models are blocked by quota",
+    }
+    monkeypatch.setattr(cli.route_mod, "route", lambda *args, **kwargs: result)
+
+    assert cli.main(["route", "coding", "size-m"]) == 0
+
+    output = capsys.readouterr().out
+    assert "deferred: all allowed models are blocked by quota" in output
+    assert "; wait " in output
 
 
 def test_route_reports_a_bad_model_tier_file(monkeypatch, tmp_path, capsys):

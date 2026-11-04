@@ -11,9 +11,10 @@ Judgment calls, since the design doc (`docs/lupin-ctl-copy.md` section 5) gives
 one illustrative example, not a full algorithm:
 
 - An issue is "blocked" only by an *open* blocker in a repo this command
-  also fetched. A blocker in a repo we didn't fetch can't be checked, so
-  it's treated as not blocking (silently -- we have no evidence either
-  way, so we don't guess "blocked").
+  also fetched. The link must match the repo's owner and name. A blocker
+  in a repo we didn't fetch can't be checked, so it's treated as not
+  blocking (silently -- we have no evidence either way, so we don't guess
+  "blocked").
 - "Does not exist" (the broken-link warning) is checked with one `gh issue
   view <N> --json state` call per blocker that's missing from the open set
   -- only for blockers whose repo we did fetch. This is a small, targeted
@@ -65,11 +66,29 @@ def _are(count: int) -> str:
     return "is" if count == 1 else "are"
 
 
-def _blocked_by_targets(dag_repos: dict, repo: str, number: int) -> list[tuple[str, int]]:
+def _blocked_by_targets(
+    dag_repos: dict, repo: str, number: int
+) -> list[tuple[str | None, str, int]]:
     for entry in dag_repos.get(repo, []):
         if entry["number"] == number:
-            return [(t["repo"], t["number"]) for t in entry.get("blockedBy", [])]
+            return [
+                (t.get("owner"), t["repo"], t["number"]) for t in entry.get("blockedBy", [])
+            ]
     return []
+
+
+def _local_blocker_repo(
+    local_repos: dict[tuple[str, str], str], open_numbers: dict, owner: str | None, name: str
+) -> str | None:
+    """The fetched repo key a blocker link points at, or None.
+
+    A link with an owner must match a checkout's (owner, name). `acme/core`
+    and `evil/core` are different repos. A link with no owner (the DAG
+    always has one for real GitHub data) matches by repo name.
+    """
+    if owner:
+        return local_repos.get((owner.casefold(), name.casefold()))
+    return name if name in open_numbers else None
 
 
 def _issue_state(
@@ -114,16 +133,17 @@ def build_roadmap(
     issues, and compute each issue's status.
 
     Returns {"repos": {repo: [node, ...]}, "cycles": [...], "warnings": [...],
-    "claims": [...]}.
+    "unprioritized": {repo: [number, ...]}, "claims": [...]}.
     Each node: number, title, priority, status (ready/blocked/claimed),
     claimedBy (session string or None), blockedBy (resolved open blockers).
     Each claim: target, host, holder, age_seconds, ttl_seconds. It lists
     every active claim in `repos`, also for an issue that is no longer open.
 
-    `connection` reaches the shared `gh` cache, which owns the fleet Redis
-    location itself when it is None (see `gh_cache._resolve`).
+    `connection` reaches the shared issue and dependency caches. When it is
+    None, each cache uses its configured Redis location.
     """
     warnings: list[str] = []
+    unprioritized: dict[str, list[int]] = {}
     issues_by_repo: dict[str, dict[int, dict]] = {}
     open_numbers: dict[str, set[int]] = {}
     owners: dict[str, str | None] = {}
@@ -153,10 +173,15 @@ def build_roadmap(
         issues_by_repo[repo] = by_number
         open_numbers[repo] = set(by_number)
 
-    dag = roadmap.cached_dependency_dag(repos, code_dir)
+    dag = roadmap.cached_dependency_dag(repos, code_dir, connection=connection)
     for repo, messages in dag.get("warnings", {}).items():
         warnings.extend(f"{repo}: {m}" for m in messages)
 
+    local_repos = {
+        (owners[repo].casefold(), names[repo].casefold()): repo
+        for repo in repos
+        if owners.get(repo) and names.get(repo)
+    }
     full_names = {
         repo: f"{owners[repo]}/{names[repo]}"
         for repo in repos
@@ -187,10 +212,15 @@ def build_roadmap(
             labels = roadmap._label_names(issue)
             priority = roadmap._priority(labels)
             if priority == "P4":
-                warnings.append(f"#{number} has no priority label. Sorted last.")
+                unprioritized.setdefault(repo, []).append(number)
             active_blockers = []
-            for blocker_repo, blocker_number in _blocked_by_targets(dag["repos"], repo, number):
-                if blocker_repo not in open_numbers:
+            for blocker_owner, blocker_name, blocker_number in _blocked_by_targets(
+                dag["repos"], repo, number
+            ):
+                blocker_repo = _local_blocker_repo(
+                    local_repos, open_numbers, blocker_owner, blocker_name
+                )
+                if blocker_repo is None:
                     continue  # not a repo we fetched -- can't verify, not treated as blocking
                 if blocker_number in open_numbers[blocker_repo]:
                     active_blockers.append((blocker_repo, blocker_number))
@@ -231,6 +261,7 @@ def build_roadmap(
         "repos": nodes_by_repo,
         "cycles": dag.get("cycles", []),
         "warnings": warnings,
+        "unprioritized": unprioritized,
         "claims": sorted(claim_rows, key=_claim_sort_key),
     }
 
@@ -351,7 +382,7 @@ def _cycles_json(cycles: list[list[dict]]) -> list[list[dict]]:
 
 def to_json(model: dict, limit: int, stage: str) -> dict:
     out = {
-        "warnings": model["warnings"],
+        "warnings": _json_warnings(model),
         "cycles": _cycles_json(model["cycles"]),
         "repos": {},
         "claims": model["claims"],
@@ -497,7 +528,7 @@ def render_dag(model: dict, multi_repo: bool) -> tuple[str, int]:
 
 def dag_to_json(model: dict, multi_repo: bool) -> dict:
     if model["cycles"]:
-        return {"cycles": _cycles_json(model["cycles"]), "warnings": model["warnings"]}
+        return {"cycles": _cycles_json(model["cycles"]), "warnings": _json_warnings(model)}
     lookup = _node_lookup(model)
     nodes_json = [
         {
@@ -515,7 +546,12 @@ def dag_to_json(model: dict, multi_repo: bool) -> dict:
         {"from": {"repo": s[0], "number": s[1]}, "to": {"repo": d[0], "number": d[1]}}
         for s, d in _edges_for_scope(model)
     ]
-    return {"nodes": nodes_json, "edges": edges_json, "cycles": [], "warnings": model["warnings"]}
+    return {
+        "nodes": nodes_json,
+        "edges": edges_json,
+        "cycles": [],
+        "warnings": _json_warnings(model),
+    }
 
 
 def _append_warnings(text: str, warnings: list[str]) -> str:
@@ -523,6 +559,26 @@ def _append_warnings(text: str, warnings: list[str]) -> str:
         return text
     lines = "\n".join(f"warning: {w}" for w in warnings)
     return f"{text}\n\n{lines}" if text else lines
+
+
+def _json_warnings(model: dict) -> list[str]:
+    """Every warning, with one line per issue that has no priority label."""
+    per_issue = [
+        f"#{number} has no priority label. Sorted last."
+        for numbers in model.get("unprioritized", {}).values()
+        for number in numbers
+    ]
+    return [*model["warnings"], *per_issue]
+
+
+def _text_warnings(model: dict) -> list[str]:
+    """Every warning, with one line per repo for issues with no priority label."""
+    lines = [*model["warnings"]]
+    for repo, numbers in model.get("unprioritized", {}).items():
+        count = len(numbers)
+        noun, verb = ("issue", "has") if count == 1 else ("issues", "have")
+        lines.append(f"{repo}: {count} open {noun} {verb} no priority label (sorted last)")
+    return lines
 
 
 def fleet_repos(
@@ -650,8 +706,9 @@ def run(
         text, exit_code = render_dag(model, multi_repo)
         if as_json:
             return json.dumps(dag_to_json(model, multi_repo)), exit_code
-        return _append_warnings(text, model["warnings"]), exit_code
+        return _append_warnings(text, _text_warnings(model)), exit_code
 
     if as_json:
         return json.dumps(to_json(model, limit, stage)), 0
-    return _append_warnings(render_list(model, limit, stage, explicit_repo), model["warnings"]), 0
+    text = render_list(model, limit, stage, explicit_repo)
+    return _append_warnings(text, _text_warnings(model)), 0

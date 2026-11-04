@@ -335,8 +335,8 @@ exit code 2 on the commands that use it. `--help` still works.
 - **Default**: `1`.
 - **Effect**: the loop monitor holds the `local` slot `claude` with this
   limit. A slot keeps the limit from its first `acquire`. A changed value
-  has no effect on a slot that already exists (see "How a slot's limit
-  (`max`) works" in `AGENTS.md`).
+  has no effect on a slot that already exists (see [How a slot's limit
+  (`max`) works](user-guide.md#how-a-slots-limit-max-works)).
 - **Read by**: `src/lupin/loop_runtime.py` (`_monitor_loop`).
 - **Set by**: the host config. `lupin run` copies it into loop units.
 
@@ -479,9 +479,30 @@ key wins over the directory.
 - **Effect**: `route`, `review-route`, the Models page, and the benchmark
   fallback read this file. An empty value is an error:
   `LUPIN_MODEL_TIERS must name a file`. The file format is in `README.md`.
+  On quota fallback, `route` needs a live price snapshot no more than seven
+  days old. It uses only a model whose known input, output, and cache prices
+  are no higher than the blocked model. If prices are missing or unclear,
+  `route` waits for quota. Run `lupin fetch-models` to refresh the snapshot.
 - **Read by**: `src/lupin/model_tiers.py` (`path`, `load`),
   `src/lupin/serve.py` (`_model_tiers_path`).
 - **Set by**: the user.
+
+### `LUPIN_WEEKLY_QUOTA_DAILY_TARGETS`
+
+- **Purpose**: set daily usage targets for weekly quota windows.
+- **Default**: Claude gets `90/7` percentage points per elapsed day. Other
+  providers use the existing 95% reserve.
+- **Effect**: use a JSON object to map quota provider names to daily
+  percentage points. Values must be finite numbers from 0 to 100. Entries
+  override defaults. Lupin multiplies each rate by elapsed days since the
+  weekly reset. It caps Claude at 90% and other providers at 95%. Usage at
+  the exact target is allowed. Lupin blocks an account with other usable quota
+  rows if its configured weekly row is missing, unusable, or has no reset.
+  Providers without a weekly target do not need a weekly row. For example,
+  `{"claude": 15, "openai": 12}` sets both rates.
+- **Read by**: `src/lupin/pace.py`, used by route, profile selection, and
+  quota account choice.
+- **Set by**: the user or host config. Loop units get this variable when set.
 
 ### `OPENCODE_API_KEY`
 
@@ -514,6 +535,7 @@ each loop unit when they are set (`loop_runtime._service_environment`):
 `LUPIN_HERDR_BIN`, `LUPIN_GH_CANONICAL_FETCHER`, `LUPIN_LOOP_STATE_DIR`,
 `LUPIN_LOOP_CODE_DIR`, `LUPIN_LOOP_USER`, `LUPIN_LOOP_GROUP`,
 `LUPIN_LOOP_DEFAULT_REPOS`, `LUPIN_LOOP_CLAUDE_MAX_CONCURRENT`,
+`LUPIN_WEEKLY_QUOTA_DAILY_TARGETS`,
 `LUPIN_LOOP_CREDENTIALS_FILE`, `LUPIN_LOOP_REDIS_PASSWORD_FILE`,
 `LUPIN_LOOP_PROMPT_FILE`, `LUPIN_LOOP_PATH`, `ANTHROPIC_BASE_URL`,
 `HEADROOM_TELEMETRY_DISABLED`, `RTK_TELEMETRY_DISABLED`,

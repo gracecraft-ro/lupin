@@ -6,7 +6,7 @@
     "tiers": {
       "tier0": [
         {
-          "model": "bmo:qwen3.8-flash-next",
+          "model": "bmo:swift-1.5-iq3_xxs",
           "effort": "low"
         }
       ],
@@ -30,12 +30,8 @@
       ],
       "tier2": [
         {
-          "model": "opus",
+          "model": "sonnet",
           "effort": "high"
-        },
-        {
-          "model": "opus",
-          "effort": "xhigh"
         },
         {
           "model": "opencode-go/qwen3.8-max",
@@ -55,7 +51,7 @@
     "tiers": {
       "tier0": [
         {
-          "model": "bmo:qwen3.8-flash-next",
+          "model": "bmo:swift-1.5-iq3_xxs",
           "effort": "low"
         }
       ],
@@ -79,12 +75,8 @@
       ],
       "tier2": [
         {
-          "model": "opus",
+          "model": "sonnet",
           "effort": "high"
-        },
-        {
-          "model": "opus",
-          "effort": "xhigh"
         },
         {
           "model": "opencode-go/qwen3.8-max",
@@ -118,12 +110,8 @@
       ],
       "tier2": [
         {
-          "model": "opus",
+          "model": "sonnet",
           "effort": "high"
-        },
-        {
-          "model": "opus",
-          "effort": "xhigh"
         },
         {
           "model": "openai-codex/gpt-6.1-sol",
@@ -149,7 +137,7 @@
       ],
       "tier2": [
         {
-          "model": "opus",
+          "model": "sonnet",
           "effort": "high"
         },
         {
@@ -166,7 +154,7 @@
     "tiers": {
       "tier0": [
         {
-          "model": "bmo:qwen3.8-flash-next",
+          "model": "bmo:swift-1.5-iq3_xxs",
           "effort": "low"
         },
         {
@@ -186,7 +174,7 @@
       ],
       "tier2": [
         {
-          "model": "opus",
+          "model": "sonnet",
           "effort": "high"
         },
         {
@@ -203,7 +191,7 @@
     "tiers": {
       "tier0": [
         {
-          "model": "bmo:qwen3.8-flash-next",
+          "model": "bmo:swift-1.5-iq3_xxs",
           "effort": "medium"
         }
       ],
@@ -223,12 +211,8 @@
       ],
       "tier2": [
         {
-          "model": "opus",
+          "model": "sonnet",
           "effort": "high"
-        },
-        {
-          "model": "opus",
-          "effort": "xhigh"
         },
         {
           "model": "openai-codex/gpt-6.1-sol",

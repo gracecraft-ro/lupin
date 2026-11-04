@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import html
 import ipaddress
+import logging
 import json
 import os
 import concurrent.futures
@@ -26,7 +27,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse, urlsplit
@@ -34,6 +35,7 @@ from urllib.parse import parse_qs, quote, urlparse, urlsplit
 import redis
 
 from . import benchmark_catalog, benchmark_fetch, claims, commands, debrief, digest, loop_runtime, loops, machines, model_fetch, quest, quota_cache, roadmap, slots_redis
+from . import ledger
 from . import model_tiers as tiers_config
 from . import usage_cache
 from .slots import CoordinatorUnreachable
@@ -44,6 +46,8 @@ from .quota import (
     quota_source_label,
 )
 
+logger = logging.getLogger(__name__)
+
 ATTACHMENT_ID = roadmap.ATTACHMENT_ID
 ATTACHMENT_REDIRECT_HOST = re.compile(
     r"github-production-user-asset-[a-z0-9-]+\.s3\.amazonaws\.com"
@@ -51,7 +55,84 @@ ATTACHMENT_REDIRECT_HOST = re.compile(
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_FORM_BYTES = 8 * 1024
 IMAGE_TYPES = {"image/gif", "image/jpeg", "image/png", "image/webp"}
-FAVICON = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><path fill="#e11d48" d="M16 28S3 20.4 3 11.5A7.5 7.5 0 0 1 16 7.4a7.5 7.5 0 0 1 13 4.1C29 20.4 16 28 16 28Z"/></svg>"""
+FAVICON = b'''<svg xmlns="http://www.w3.org/2000/svg" width="130" height="180" viewBox="0 0 13 18" shape-rendering="crispEdges">
+    <rect x="6" y="0" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="5" y="1" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="6" y="1" width="1" height="1" fill="#8a63d9"/>
+    <rect x="7" y="1" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="5" y="2" width="1" height="1" fill="#8a63d9"/>
+    <rect x="6" y="2" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="7" y="2" width="1" height="1" fill="#8a63d9"/>
+    <rect x="4" y="3" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="5" y="3" width="1" height="1" fill="#8a63d9"/>
+    <rect x="6" y="3" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="7" y="3" width="1" height="1" fill="#8a63d9"/>
+    <rect x="8" y="3" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="4" y="4" width="1" height="1" fill="#8a63d9"/>
+    <rect x="5" y="4" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="6" y="4" width="1" height="1" fill="#8a63d9"/>
+    <rect x="7" y="4" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="8" y="4" width="1" height="1" fill="#8a63d9"/>
+    <rect x="3" y="5" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="4" y="5" width="1" height="1" fill="#8a63d9"/>
+    <rect x="5" y="5" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="6" y="5" width="1" height="1" fill="#8a63d9"/>
+    <rect x="7" y="5" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="8" y="5" width="1" height="1" fill="#8a63d9"/>
+    <rect x="9" y="5" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="2" y="6" width="1" height="1" fill="#8a63d9"/>
+    <rect x="3" y="6" width="7" height="1" fill="#d4c3f7"/>
+    <rect x="10" y="6" width="1" height="1" fill="#8a63d9"/>
+    <rect x="2" y="7" width="1" height="1" fill="#8a63d9"/>
+    <rect x="3" y="7" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="4" y="7" width="1" height="1" fill="#2a2340"/>
+    <rect x="5" y="7" width="3" height="1" fill="#d4c3f7"/>
+    <rect x="8" y="7" width="1" height="1" fill="#2a2340"/>
+    <rect x="9" y="7" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="10" y="7" width="1" height="1" fill="#8a63d9"/>
+    <rect x="2" y="8" width="1" height="1" fill="#8a63d9"/>
+    <rect x="3" y="8" width="1" height="1" fill="#f4a6c4"/>
+    <rect x="4" y="8" width="2" height="1" fill="#d4c3f7"/>
+    <rect x="6" y="8" width="1" height="1" fill="#2a2340"/>
+    <rect x="7" y="8" width="2" height="1" fill="#d4c3f7"/>
+    <rect x="9" y="8" width="1" height="1" fill="#f4a6c4"/>
+    <rect x="10" y="8" width="1" height="1" fill="#8a63d9"/>
+    <rect x="2" y="9" width="1" height="1" fill="#8a63d9"/>
+    <rect x="3" y="9" width="7" height="1" fill="#d4c3f7"/>
+    <rect x="10" y="9" width="1" height="1" fill="#8a63d9"/>
+    <rect x="2" y="10" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="3" y="10" width="1" height="1" fill="#8a63d9"/>
+    <rect x="4" y="10" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="5" y="10" width="1" height="1" fill="#8a63d9"/>
+    <rect x="6" y="10" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="7" y="10" width="1" height="1" fill="#8a63d9"/>
+    <rect x="8" y="10" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="9" y="10" width="1" height="1" fill="#8a63d9"/>
+    <rect x="10" y="10" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="3" y="11" width="1" height="1" fill="#8a63d9"/>
+    <rect x="4" y="11" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="5" y="11" width="1" height="1" fill="#8a63d9"/>
+    <rect x="6" y="11" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="7" y="11" width="1" height="1" fill="#8a63d9"/>
+    <rect x="8" y="11" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="9" y="11" width="1" height="1" fill="#8a63d9"/>
+    <rect x="4" y="12" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="5" y="12" width="1" height="1" fill="#8a63d9"/>
+    <rect x="6" y="12" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="7" y="12" width="1" height="1" fill="#8a63d9"/>
+    <rect x="8" y="12" width="1" height="1" fill="#d4c3f7"/>
+    <rect x="6" y="13" width="1" height="1" fill="#3f8a5a"/>
+    <rect x="2" y="14" width="2" height="1" fill="#93d1a0"/>
+    <rect x="6" y="14" width="1" height="1" fill="#3f8a5a"/>
+    <rect x="9" y="14" width="2" height="1" fill="#93d1a0"/>
+    <rect x="2" y="15" width="3" height="1" fill="#93d1a0"/>
+    <rect x="6" y="15" width="1" height="1" fill="#3f8a5a"/>
+    <rect x="8" y="15" width="3" height="1" fill="#93d1a0"/>
+    <rect x="3" y="16" width="3" height="1" fill="#93d1a0"/>
+    <rect x="6" y="16" width="1" height="1" fill="#3f8a5a"/>
+    <rect x="7" y="16" width="3" height="1" fill="#93d1a0"/>
+    <rect x="6" y="17" width="1" height="1" fill="#3f8a5a"/>
+</svg>'''
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -146,6 +227,9 @@ MODEL_TIER_ORDER = tiers_config.TIER_ORDER
 def _model_tiers_path() -> str:
     return tiers_config.path(MODEL_TIERS_PATH)
 
+def _model_tiers_source_label() -> str:
+    return _model_tiers_path()
+
 # --------------------------------------------------------------------------
 # running read-only probes
 # --------------------------------------------------------------------------
@@ -214,21 +298,42 @@ def _repo_slot_name(repo: str) -> str:
 
 
 def _delegation_doc_template(repo: str) -> str:
-    """A minimal starting doc for a repo that has none yet ("Generate docs
-    and add", issue #23). No existing doc generator was found in this repo
-    (grepped for "generate"/"scaffold"/LOOP_DOC outside serve.py and
-    docs/) -- this is a plain fill-in-the-blanks skeleton, not a smart
-    generator.
-    """
+    """A safe draft guide for a repo that has no delegation doc."""
     return (
+        "> **Draft: Not ready for loop runs.**\n"
+        "> The repo owner must add the repo purpose,\n"
+        "> first-work scope, and protected paths\n"
+        "> before adding it to the schedule.\n\n"
         f"# {repo} -- the delegation loop\n\n"
-        "This file gives repo-specific guidance. Fill it in with useful details;\n"
-        "a loop can run without it.\n\n"
-        "## What this repo is for\n\n"
-        "TODO: say what this repo does, and what the first loops should build.\n\n"
-        "## Rules\n\n"
-        "TODO: anything a loop must know before it starts -- how to test,\n"
-        "what not to touch, where to push its work.\n"
+        "## Before starting\n\n"
+        "Read the root `AGENTS.md` and follow its\n"
+        "rules. Read the issue and any linked pull\n"
+        "requests before changing code. Do not add\n"
+        "work outside the issue's scope.\n\n"
+        "## Repo purpose\n\n"
+        "Use the project documentation to learn\n"
+        "what this repo does and what work it\n"
+        "supports. Ask the repo owner if this is\n"
+        "not clear.\n\n"
+        "## Test command\n\n"
+        "Find the test command in the root\n"
+        "`AGENTS.md` or test documentation. Run that\n"
+        "command. Do not guess. If no test command\n"
+        "is documented, report this and ask the repo\n"
+        "owner before changing code.\n\n"
+        "## Do not touch\n\n"
+        "Do not touch secrets, generated files, or\n"
+        "third-party code copied into the repo.\n"
+        "Do not edit paths the root `AGENTS.md`\n"
+        "marks as protected. Ask before changing a\n"
+        "protected path not listed here.\n\n"
+        "## Report\n\n"
+        "Follow documented branch, pull request,\n"
+        "and handoff rules. Report commands, their\n"
+        "results, and any blockers. Do not say this\n"
+        "repo is ready for loops until the owner\n"
+        "completes this draft and adds the repo to\n"
+        "the schedule.\n"
     )
 
 
@@ -413,6 +518,11 @@ def _roadmap_loader_script() -> str:
     holder.innerHTML=html;
     box.replaceWith(holder.content);
     if(window.lupinHideDismissedRoadmapWarnings)window.lupinHideDismissedRoadmapWarnings(document);
+    if(window.matchMedia("(max-width: 760px)").matches
+       && new URLSearchParams(window.location.search).has("issue")){
+      var detail=document.querySelector(".roadmap-detail:not(.roadmap-detail-empty)");
+      if(detail)detail.scrollIntoView({block:"start"});
+    }
   }).catch(function(){location.href=box.dataset.full;});
 })();
 """
@@ -468,14 +578,26 @@ def _repo_platforms() -> dict[str, str]:
 
 
 
-def timers() -> list[dict]:
+class ScheduleUnavailable(RuntimeError):
+    """The local schedule could not be read."""
+
+
+def timers(*, strict: bool = False) -> list[dict]:
     """Delegation timers, from systemd's own JSON. Times are epoch seconds."""
     rc, out = run(["systemctl", "list-timers", "--all", "--no-pager", "--output=json"])
     if rc != 0:
+        if strict:
+            raise ScheduleUnavailable("systemd timer list is unavailable")
         return []
     try:
         rows = json.loads(out)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        if strict:
+            raise ScheduleUnavailable("systemd returned invalid timer data") from exc
+        return []
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        if strict:
+            raise ScheduleUnavailable("systemd returned invalid timer data")
         return []
     result = []
     for row in rows:
@@ -486,6 +608,12 @@ def timers() -> list[dict]:
             continue
         nxt = row.get("next")
         last = row.get("last")
+        if strict and any(
+            value is not None
+            and (isinstance(value, bool) or not isinstance(value, (int, float)))
+            for value in (nxt, last)
+        ):
+            raise ScheduleUnavailable("systemd returned invalid timer data")
         result.append(
             {
                 "unit": unit,
@@ -495,6 +623,13 @@ def timers() -> list[dict]:
             }
         )
     return sorted(result, key=lambda t: (t["next"] is None, t["next"] or 0))
+
+
+def _read_timers() -> tuple[list[dict], str | None]:
+    try:
+        return timers(strict=True), None
+    except ScheduleUnavailable as exc:
+        return [], str(exc)
 
 
 def oneoff_repositories(unit: str) -> str:
@@ -583,7 +718,14 @@ def merge_repo_inventory(
     local_repos: list[dict], machine_records: list[dict], local_host: str
 ) -> list[dict]:
     """Add repo inventories from other machines to this machine's repo list."""
-    repos = {repo["repo"]: {**repo, "local": True} for repo in local_repos}
+    repos = {
+        repo["repo"]: {
+            **repo,
+            "local": True,
+            "configured_hosts": [{"name": local_host, "state": "online"}],
+        }
+        for repo in local_repos
+    }
     remote = {}
     for record in machine_records:
         host = record.get("name")
@@ -617,14 +759,23 @@ def merge_repo_inventory(
                     "hosts": set(),
                     "running_hosts": set(),
                     "enabled_hosts": set(),
+                    "already_enabled_hosts": set(),
                     "enable_hosts": set(),
+                    "configured_hosts": {},
                 },
             )
             is_enabled = item.get("enabled") is True
+            if is_enabled:
+                entry["already_enabled_hosts"].add(host)
             entry["enabled"] |= is_enabled
             entry["loopable"] |= item.get("loopable") is True
             label = f"{host} (offline)" if record.get("state") == "offline" else host
             entry["hosts"].add(label)
+            entry["configured_hosts"][host] = (
+                record.get("state")
+                if record.get("state") in ("online", "draining", "offline")
+                else "unknown"
+            )
             if record.get("state") == "online":
                 actions = record.get("actions", [])
                 if is_enabled and "loop.run" in actions:
@@ -635,10 +786,17 @@ def merge_repo_inventory(
                 entry["running_hosts"].add(host)
 
     for repo, entry in remote.items():
+        remote_hosts = [
+            {"name": host, "state": state}
+            for host, state in sorted(entry["configured_hosts"].items())
+        ]
         if repo in repos:
             repos[repo]["fleet_enabled"] = entry["enabled"]
             repos[repo]["enabled_hosts"] = sorted(entry["enabled_hosts"])
+            repos[repo]["already_enabled_hosts"] = sorted(entry["already_enabled_hosts"])
             repos[repo]["enable_hosts"] = sorted(entry["enable_hosts"])
+            repos[repo]["configured_hosts"].extend(remote_hosts)
+            repos[repo]["configured_hosts"].sort(key=lambda host: host["name"])
             continue
         state = "enabled" if entry["enabled"] else "disabled"
         repos[repo] = {
@@ -650,7 +808,9 @@ def merge_repo_inventory(
             "running": bool(entry["running_hosts"]),
             "running_machines": ", ".join(sorted(entry["running_hosts"])),
             "machine": ", ".join(sorted(entry["hosts"])),
+            "configured_hosts": remote_hosts,
             "enabled_hosts": sorted(entry["enabled_hosts"]),
+            "already_enabled_hosts": sorted(entry["already_enabled_hosts"]),
             "enable_hosts": sorted(entry["enable_hosts"]),
         }
     return sorted(repos.values(), key=lambda repo: repo["repo"])
@@ -738,15 +898,18 @@ def _loop_hosts_from_heartbeat(machine_records: list[dict], local_host: str) -> 
 
 
 def gather_loops(connection: dict) -> dict:
-    """Return local Herdr state and remote Herdr heartbeat state."""
+    """Return loop state and configured repository inventory."""
     local_host = machines.hostname()
     local_states = _local_loop_states()
     enabled = set(enabled_repos())
     state = fleet_state(connection)
-    remote_states = _loop_hosts_from_heartbeat(state.get("machines", []), local_host)
+    machine_records = state.get("machines", [])
+    remote_states = _loop_hosts_from_heartbeat(machine_records, local_host)
+    local_repos = code_repos()
+    repo_inventory = merge_repo_inventory(local_repos, machine_records, local_host)
     entries = []
     # The server may have no /code. Loops that other machines report still count.
-    repo_names = {repo_info["repo"] for repo_info in code_repos()} | set(remote_states)
+    repo_names = {repo_info["repo"] for repo_info in local_repos} | set(remote_states)
     for repo in sorted(repo_names):
         entry = local_states.get(repo)
         machine = local_host
@@ -774,6 +937,7 @@ def gather_loops(connection: dict) -> dict:
     entries.sort(key=lambda entry: entry["repo"])
     return {
         "entries": entries,
+        "repos": repo_inventory,
         "machines": state.get("machines", []),
         "claims": state.get("claims", {}),
         "fleet_error": state.get("fleet_error"),
@@ -781,16 +945,160 @@ def gather_loops(connection: dict) -> dict:
     }
 
 
+def _recent_updates(
+    repositories: list[dict],
+    enabled: list[str],
+    connection: dict,
+) -> tuple[list[dict], bool]:
+    """Read recent Lupin ledger events from local GitHub checkouts."""
+    local = {repo["repo"]: repo for repo in repositories}
+    unavailable = any(repo not in local for repo in enabled)
+    updates: list[dict] = []
+    for repo in repositories:
+        name = repo["repo"]
+        identity = roadmap._github_repo_from_remote(
+            roadmap._git_remote_url(os.path.join(CODE_DIR, name))
+        )
+        if not identity:
+            unavailable |= name in enabled
+            continue
+        owner, full_name = identity
+        limit = 256
+        try:
+            events, has_more = ledger.read_events_page(
+                f"{owner}/{full_name}", limit=limit, **connection
+            )
+        except (CoordinatorUnreachable, redis.exceptions.RedisError):
+            unavailable = True
+            continue
+        visible_events = [
+            event for event in events if event.get("event") != "supervise"
+        ]
+        if len(visible_events) < 6 and has_more:
+            unavailable = True
+        updates.extend(
+            {**event, "repo": name} for event in visible_events[-6:]
+        )
+    updates.sort(
+        key=lambda event: str(event.get("timestamp") or ""), reverse=True
+    )
+    return updates[:6], unavailable
+
+
+def render_overview_quota(snapshot: dict | None) -> str:
+    now_ms = int(time.time() * 1000)
+    entries = snapshot or {}
+    lines = []
+    unavailable = not entries
+    stale = False
+    ahead = False
+    for provider, entry in sorted(entries.items()):
+        entry_fresh = isinstance(entry, dict) and quota_cache.is_fresh(entry)
+        if not entry_fresh:
+            stale = True
+        rows = entry.get("rows") if isinstance(entry, dict) else None
+        if not isinstance(rows, list) or not rows:
+            unavailable = True
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                unavailable = True
+                continue
+            used = quota_progress_pct(row)
+            name = quota_row_name({
+                **row, "provider": row.get("provider") or provider,
+            })
+            period = quota_duration_label(row)
+            if row.get("error") or row.get("note") or used is None:
+                unavailable = True
+                detail = NOT_AVAILABLE
+            else:
+                status, pace = quota_status(row, now_ms)
+                unavailable |= status == "Status unavailable"
+                ahead |= pace == "ahead"
+                detail = f"{used:g}% used · {status}"
+                reset = time_until_reset(row.get("resets_at"), now_ms)
+                if reset != "-":
+                    detail += f" · resets {reset}"
+            if not entry_fresh:
+                detail += " · stale"
+            lines.append(
+                f"<li><span>{esc(name)} · {esc(period)}</span>"
+                f"<span>{esc(detail)}</span></li>"
+            )
+
+    warnings = []
+    if stale:
+        warnings.append("Quota data stale")
+    if unavailable:
+        warnings.append("Quota status unavailable")
+    if ahead:
+        warnings.append("Quota needs attention")
+    summary = " · ".join(warnings) if warnings else "No quota warning"
+    status_class = "warn" if warnings else "ok"
+    if lines:
+        detail_html = "<ul class=overview-quota>" + "".join(lines[:4]) + "</ul>"
+        if len(lines) > 4:
+            detail_html += f"<div class=stat-note>And {len(lines) - 4} more in Usage.</div>"
+    else:
+        detail_html = "<div class=stat-note>No cached quota data.</div>"
+    return (
+        f"<div class='card stat {status_class}'>"
+        f"<div class=stat-label>{icon('M5 20V10M12 20V4M19 20v-7', 13)}Quota</div>"
+        f"<div class=stat-value>{esc(summary)}</div>{detail_html}"
+        "<div class=stat-note><a href='/usage'>Quota details</a></div></div>"
+    )
+
+
+def render_overview_updates(updates: list[dict], unavailable: bool = False) -> str:
+    rows = []
+    for update in updates:
+        timestamp = update.get("timestamp")
+        try:
+            epoch = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
+            when = f"<span data-since='{epoch:.0f}'></span>"
+        except (AttributeError, TypeError, ValueError):
+            when = "<span class=dim>time unavailable</span>"
+        title = f"{update.get('repo', 'repo')} · {update.get('event', 'update')}"
+        if update.get("issue"):
+            title += f" · #{update['issue']}"
+        detail = update.get("summary") or ", ".join(update.get("highlights") or [])
+        if not detail:
+            detail = update.get("status") or "Activity recorded."
+        rows.append(
+            "<div class=overview-feed-item>"
+            f"<span class=overview-feed-time>{when}</span>"
+            f"<div class=overview-feed-copy><b>{esc(title)}</b>"
+            f"<div class=dim>{esc(detail)}</div></div></div>"
+        )
+    if rows:
+        status = (
+            "<p class='dim stale'>Some recent updates are unavailable.</p>"
+            if unavailable else ""
+        )
+        content = status + "".join(rows)
+    elif unavailable:
+        content = "<p class='dim stale'>Recent updates are unavailable.</p>"
+    else:
+        content = "<p class=dim>No recent updates.</p>"
+    return (
+        "<div class=section-head><h2>Recent updates</h2></div>"
+        f"<div class='card overview-feed'>{content}</div>"
+    )
+
+
 def gather(peek_lines: int, connection: dict | None = None) -> dict:
     del peek_lines
     connection = connection or {}
     loop_state = gather_loops(connection)
+    timer_rows, timer_error = _read_timers()
     state = {
         "now": time.time(),
         "enabled": enabled_repos(),
         "repos": code_repos(),
         "loops": loop_state["entries"],
-        "timers": timers(),
+        "timers": timer_rows,
+        "timer_error": timer_error,
         "timer_active": timer_active(),
     }
     state.update({
@@ -798,6 +1106,7 @@ def gather(peek_lines: int, connection: dict | None = None) -> dict:
         "claims": loop_state["claims"],
         "fleet_error": loop_state["fleet_error"],
     })
+    local_repos = state["repos"]
     state["repos"] = merge_repo_inventory(
         state["repos"], state["machines"], machines.hostname()
     )
@@ -809,6 +1118,19 @@ def gather(peek_lines: int, connection: dict | None = None) -> dict:
             if repo.get("enabled") is True or repo.get("fleet_enabled") is True
         }
     )
+    if state["fleet_error"]:
+        state["quota_snapshot"] = None
+        state["recent_updates"] = []
+        state["recent_updates_unavailable"] = True
+    else:
+        try:
+            state["quota_snapshot"] = quota_cache.read_snapshot(**connection)
+        except (CoordinatorUnreachable, redis.exceptions.RedisError):
+            state["quota_snapshot"] = None
+        (
+            state["recent_updates"],
+            state["recent_updates_unavailable"],
+        ) = _recent_updates(local_repos, state["enabled"], connection)
     return state
 
 
@@ -852,10 +1174,12 @@ def gather_schedule(connection: dict) -> dict:
     for the "Run now" placement picker (same `fleet_state()` /machines and
     /loops already read -- one reading of the registry, not a new one)."""
     state = fleet_state(connection)
+    timer_rows, timer_error = _read_timers()
     return {
         "now": time.time(),
         "enabled": enabled_repos(),
-        "timers": timers(),
+        "timers": timer_rows,
+        "timer_error": timer_error,
         "timer_active": timer_active(),
         "machines": state.get("machines", []),
         "fleet_error": state.get("fleet_error"),
@@ -966,6 +1290,15 @@ font-size:14px;color:var(--ink)}
 .content{flex:1;min-width:0;display:flex;flex-direction:column}
 .topbar{display:flex;align-items:center;gap:14px;padding:12px 28px;
 border-bottom:1px solid var(--line);font-size:13px;color:var(--ink2)}
+.dashboard-status{display:flex;align-items:center;gap:.35rem 1rem;flex-wrap:wrap}
+.dashboard-status-item{display:flex;align-items:center;gap:.35rem;white-space:nowrap}
+.dashboard-status-label{color:var(--ink3)}
+.dashboard-status-value{font:500 12px var(--mono);color:var(--ink)}
+.dashboard-status-value.status-ok{color:var(--ok)}
+.dashboard-status-value.status-warn,.dashboard-status-warning{color:var(--warn)}
+.dashboard-status-warning{font-size:.75rem}
+@media(max-width:700px){.topbar{flex-wrap:wrap;gap:.5rem;padding:10px 14px}
+.dashboard-status{order:3;flex:1 0 100%;gap:.35rem .75rem}}
 .topbar .sp{flex:1}
 .autolabel{display:flex;align-items:center;gap:6px;cursor:pointer}
 .iconbtn{width:32px;height:32px;flex:none;padding:0;display:flex;align-items:center;
@@ -995,7 +1328,7 @@ box-shadow:0 3px 0 var(--line);padding:.9rem 1.1rem;margin-bottom:.7rem}
 .pill{font-size:.75rem;padding:.15rem .6rem;border-radius:99px;
 border:1px solid var(--line);color:var(--ink2)}
 .pill.on{color:var(--ok);border-color:var(--ok)}
-.pill.off{color:var(--warn);border-color:var(--warn)}
+.pill.off{color:var(--warnink);border-color:var(--warn)}
 .big{font-size:1.05rem;font-weight:600}
 pre{background:var(--term);color:var(--termink);border-radius:14px;
 padding:.6rem .7rem;overflow-x:auto;font:400 12px/1.5 var(--mono);margin:.6rem 0 0;
@@ -1028,12 +1361,24 @@ color:var(--ink2);flex-wrap:wrap}
 .dot.idle{background:var(--idle)}
 .loop-tail{margin:10px 0 0;max-height:4.6em}
 .loop-empty{display:flex;gap:14px;align-items:center}
+.overview-quota,.overview-feed{display:grid;gap:.6rem}
+.overview-quota{margin:.3rem 0 0;padding:0}
+.overview-quota li{display:flex;justify-content:space-between;gap:.5rem;
+font-size:.76rem}
+.overview-quota li span{min-width:0;overflow-wrap:anywhere}
+.overview-feed-item{display:grid;grid-template-columns:4.5rem minmax(0,1fr);
+gap:.75rem;padding:.65rem 0;border-top:1px solid var(--line2)}
+.overview-feed-time{font:400 .75rem var(--mono);color:var(--dim)}
+.overview-feed-copy{min-width:0;overflow-wrap:anywhere}
 @media(max-width:860px){
 .shell{flex-direction:column}
-.side{width:auto;height:auto;position:static;flex-direction:row;align-items:center;
-gap:14px;padding:12px 16px;overflow-x:auto}
-.navlinks{display:flex;flex-direction:row;gap:4px}
-.navlink span{display:none}
+.side{width:auto;height:auto;position:static;flex-direction:column;align-items:stretch;
+gap:8px;padding:12px 16px;overflow:visible}
+.brand{padding:0 8px}
+.navlinks{display:grid;grid-template-columns:repeat(auto-fit,minmax(6.5rem,1fr));gap:4px}
+.navlink{min-height:48px;flex-direction:column;justify-content:center;gap:4px;
+padding:6px 4px;text-align:center;font-size:12px}
+.navlink span{display:block}
 main{padding:1rem 1rem 3rem}
 .stat-row{grid-template-columns:1fr}
 }
@@ -1054,21 +1399,36 @@ font-size:.85rem;margin:1.25rem 0}
 .quota-legend-unknown{width:2px;height:14px;background:none;
 border-left:2px dashed var(--fg)}
 .quota-legend-ahead{width:28px;height:8px;border-radius:4px;background:var(--warn)}
-.quota-groups{display:grid;gap:.8rem}
-.quota-group{padding:1.2rem 1.4rem .4rem}
-.quota-group-heading{display:flex;justify-content:space-between;align-items:baseline;
-gap:.75rem;flex-wrap:wrap;margin-bottom:.4rem}
-.quota-group-heading h3{margin:0;font-size:1.1rem}
-.quota-row{display:grid;grid-template-columns:minmax(90px,120px) minmax(0,1fr)
-minmax(130px,170px);gap:1.5rem;align-items:center;padding:1rem 0;
-border-top:1px solid var(--line)}
-.quota-window{font-weight:500}
-.quota-status{font-size:.8rem;color:var(--dim);margin-top:.2rem}
-.quota-status.ahead{color:var(--warn)}
-.quota-status.under{color:var(--accent)}
-.quota-values{display:flex;justify-content:space-between;gap:1rem;
-font-size:.85rem;color:var(--dim);margin-bottom:.45rem}
-.quota-values strong{font-size:1.2rem;color:var(--fg)}
+.quota-matrix-scroll{max-width:100%;min-width:0;overflow-x:auto;
+border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+.quota-matrix{width:100%}
+.quota-matrix thead th{background:var(--surface);white-space:nowrap}
+.quota-matrix tbody th,.quota-matrix td{vertical-align:top}
+.quota-matrix tbody .quota-owner-cell{position:sticky;left:0;z-index:1;
+width:180px;min-width:160px;background:var(--surface);color:var(--fg);
+font-size:.85rem;letter-spacing:0;text-transform:none}
+.quota-matrix th:not(:first-child),.quota-matrix td:not(:first-child){
+min-width:220px}
+@media(max-width:480px){
+.quota-matrix thead th:first-child,.quota-matrix tbody .quota-owner-cell{
+width:min(136px,calc(100vw - 254px));min-width:min(136px,calc(100vw - 254px))}
+.quota-matrix thead th:first-child{white-space:normal}
+}
+@media(max-width:350px){
+.quota-matrix thead th:first-child,.quota-matrix tbody .quota-owner-cell{
+width:136px;min-width:136px}
+.quota-matrix tbody .quota-owner-cell{position:static}
+}
+.quota-owner{display:grid;gap:.15rem}
+.quota-owner-account{color:var(--dim);font-weight:400}
+.quota-provider-source{font-size:.75rem;color:var(--dim);margin-top:.4rem}
+.quota-provider-note{font-size:.8rem;color:var(--dim);margin-top:.4rem}
+.quota-matrix-empty{color:var(--dim);text-align:center;vertical-align:middle}
+.quota-cell+.quota-cell{border-top:1px solid var(--line);margin-top:.75rem;
+padding-top:.75rem}
+.quota-values{display:flex;justify-content:space-between;gap:.5rem;
+font-size:.8rem;color:var(--dim);margin-bottom:.4rem}
+.quota-values strong{font-size:1.05rem;color:var(--fg)}
 .quota-meter{position:relative;height:9px;border-radius:5px;background:var(--line)}
 .quota-meter-used{position:absolute;inset:0 auto 0 0;border-radius:5px;
 background:var(--accent)}
@@ -1077,11 +1437,16 @@ background:var(--accent)}
 border-radius:1px;background:var(--fg)}
 .quota-meter-elapsed-unknown{left:0;width:0;background:none;
 border-left:2px dashed var(--fg);opacity:.6}
-.quota-reset{text-align:right}
-.quota-reset-left{font:500 1rem ui-monospace,monospace}
-.quota-reset-at{font:400 .75rem ui-monospace,monospace;color:var(--dim);margin-top:.2rem}
-@media(max-width:700px){.quota-row{grid-template-columns:1fr;gap:.5rem}
-.quota-reset{text-align:left}}
+.quota-cell-footer{display:flex;justify-content:space-between;align-items:flex-start;
+gap:.5rem;flex-wrap:wrap;margin-top:.5rem}
+.quota-status{font-size:.8rem;color:var(--dim)}
+.quota-status.ahead{color:var(--warn)}
+.quota-status.under{color:var(--accent)}
+.quota-pace-note{font-size:.75rem;color:var(--dim);margin-top:.15rem}
+.quota-reset{text-align:right;flex:none}
+.quota-reset-left{font:500 .9rem ui-monospace,monospace}
+.quota-reset-at{font:400 .7rem ui-monospace,monospace;color:var(--dim);
+margin-top:.2rem;white-space:nowrap}
 .tier-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:.8rem}
 .tier-card{margin-bottom:0;display:flex;flex-direction:column;gap:.45rem}
 .tier-heading{display:flex;justify-content:space-between;align-items:baseline;gap:.75rem}
@@ -1094,6 +1459,7 @@ color:var(--dim)}
 .tier-pick{display:inline-flex;gap:.4rem;align-items:baseline;
 border:1px solid var(--line);border-radius:6px;padding:.1rem .45rem;
 background:var(--code)}
+.tier-pick.dim,.tier-pick .dim{color:var(--ink2)}
 .tier-model{font:500 .9rem ui-monospace,monospace}
 .tier-arrow{color:var(--dim)}
 .tier-note{margin:.15rem 0 0;font-size:.85rem}
@@ -1101,13 +1467,33 @@ background:var(--code)}
 .issue-details summary{cursor:pointer}
 .issue-body{white-space:pre-wrap;overflow-wrap:anywhere;margin:.35rem 0}
 .activity-comments{padding-left:1.5rem}
-.loops-shell{display:flex;gap:1rem;align-items:flex-start}
-.loops-side{width:260px;flex:none;padding:.6rem}
+.loops-shell{display:flex;gap:1rem;align-items:flex-start;min-width:0}
+.loops-side{width:260px;flex:none;min-width:0;padding:.6rem}
 .loops-main{flex:1;min-width:0}
+.loops-main>.card{min-width:0;overflow:hidden}
+.loops-main pre{max-width:100%}
+.loops-main form{min-width:0;max-width:100%}
+.loops-main form[action="/loops/send"]{display:flex!important;flex:1 1 100%;align-items:center}
+.loops-main form[action="/loops/send"] input[name="text"]{min-width:0;flex:1 1 12rem;width:auto}
 .loops-row{display:block;padding:.3rem .2rem;color:inherit}
 .loops-row.sel{font-weight:700}
 .loops-group{color:var(--ink3);margin-top:.6rem;font-size:.8rem}
+.loops-groupby{display:flex;align-items:center;justify-content:space-between;
+gap:.5rem;margin-bottom:.4rem}
+.loops-group-label{font-size:.72rem;letter-spacing:.06em;text-transform:uppercase}
+.loops-group-toggle{display:inline-flex;border:1px solid var(--line);
+border-radius:10px;overflow:hidden;background:var(--side);font-size:.82rem}
+.loops-group-option{display:block;padding:.3rem .6rem;color:var(--ink2)}
+.loops-group-option:hover{text-decoration:none}
+.loops-group-option[aria-current=page]{background:var(--surface);color:var(--ink);
+font-weight:600}
+.loops-group-option:focus-visible{outline:2px solid var(--ok);outline-offset:-2px}
+@media(max-width:860px){
+.loops-shell{flex-direction:column;align-items:stretch}
+.loops-side{width:100%}
+}
 .err{color:#9b2226}
+@media(max-width:700px){.loops-shell{flex-direction:column}.loops-side{width:100%}.loops-main{width:100%}}
 """
 
 JS = """
@@ -1135,15 +1521,19 @@ if(box){box.checked=localStorage.getItem("lupin-auto")==="1";
  setInterval(function(){if(box.checked&&!window.lupinUnsavedChanges())location.reload();},10000);}
 document.querySelectorAll("[data-once-repo]").forEach(function(row){
  var when=row.querySelector("input"),command=row.querySelector("code"),
-     status=row.querySelector("[data-copy-status]");
- function update(){command.textContent="lupin once "+when.value+" "+row.dataset.onceRepo;}
+     status=row.querySelector("[data-copy-status]"),interaction=0;
+ function update(){command.textContent="lupin once "+when.value+" "+row.dataset.onceRepo;row.title=command.textContent;status.textContent="";interaction++;}
  when.addEventListener("input",update);
  row.querySelector("button").addEventListener("click",function(){
+   status.textContent="";
+   var current=++interaction;
    Promise.resolve().then(function(){
      return navigator.clipboard.writeText(command.textContent);
-   }).then(function(){status.textContent="copied";},function(){
-     status.textContent="copy failed";
-   }).then(function(){setTimeout(function(){status.textContent="";},2000);});
+   }).then(function(){
+     if(current===interaction)status.textContent="copied";
+   },function(){
+     if(current===interaction)status.textContent="copy failed. Select the command and copy it manually.";
+   });
  });
 });
 var themeBtn=document.getElementById("theme-toggle");
@@ -1246,7 +1636,7 @@ def icon(d: str, size: int = 16) -> str:
 
 def render_nav(active: str) -> str:
     links = "".join(
-        f"<a class='navlink{' active' if key == active else ''}' href='{href}'>"
+        f"<a class='navlink{' active' if key == active else ''}' href='{href}' aria-label='{esc(label)}'>"
         f"{icon(path)}<span>{esc(label)}</span></a>"
         for key, href, label, path in NAV_ITEMS
     )
@@ -1254,6 +1644,10 @@ def render_nav(active: str) -> str:
         "<nav class=side><div class=brand>lupin</div>"
         f"<div class=navlinks>{links}</div><div style='flex:1'></div></nav>"
     )
+
+
+STATUS_PAGES = frozenset({"overview", "usage", "loops", "schedule", "repos", "roadmap", "models"})
+DASHBOARD_STATUS_SLOT = "<!-- dashboard-status -->"
 
 
 def render_topbar(extra_html: str = "") -> str:
@@ -1270,6 +1664,109 @@ def render_topbar(extra_html: str = "") -> str:
     )
 
 
+def render_dashboard_status(connection: dict, data: dict | None = None) -> str:
+    skipped = data.get("skipped_machines", []) if data is not None else []
+    if data is not None and "machines" in data:
+        records = data.get("machines")
+        fleet_error = data.get("fleet_error")
+        if fleet_error or not isinstance(records, list):
+            records = None
+    else:
+        try:
+            records = machines.machines(connection, skipped, strict=False)
+        except (machines.CoordinatorUnreachable, redis.exceptions.NoPermissionError):
+            records = None
+
+    warning = roadmap.skipped_warning(skipped) if skipped else ""
+    if records is None:
+        machine_value = "Unavailable"
+        machine_title = "Machine availability could not be read"
+        machine_state = "status-warn"
+    else:
+        available = sum(record.get("state") == "online" for record in records)
+        total = len(records) + len(skipped)
+        if skipped and not records:
+            machine_value = "Unavailable"
+            machine_title = "Machine records could not all be read"
+            machine_state = "status-warn"
+        elif skipped:
+            machine_value = f"{available} of {total} machines available · incomplete"
+            machine_title = "Some machine records could not be read"
+            machine_state = "status-warn"
+        elif records:
+            machine_value = f"{available} of {total} machines available"
+            machine_title = "Availability from live machine heartbeats"
+            machine_state = "status-ok" if available == total else "status-warn"
+        else:
+            machine_value = "No machines registered"
+            machine_title = "No machine records are registered"
+            machine_state = "status-warn"
+
+    machine_item = (
+        f"<a class='dashboard-status-item' href='/machines' title='{esc(machine_title)}'>"
+        "<span class=dashboard-status-label>Fleet</span>"
+        f"<span class='dashboard-status-value {machine_state}'>{esc(machine_value)}</span></a>"
+    )
+    warning_item = (
+        f"<span class=dashboard-status-warning>{esc(warning)}</span>" if warning else ""
+    )
+
+    schedule_error = None
+    if data is not None and "timers" in data:
+        schedule = data["timers"]
+        schedule_error = data.get("timer_error")
+        if not isinstance(schedule, list):
+            schedule_error = "invalid timer data"
+    else:
+        try:
+            schedule = timers(strict=True)
+        except ScheduleUnavailable as exc:
+            schedule = []
+            schedule_error = str(exc)
+
+    if schedule_error:
+        next_item = (
+            "<span class=dashboard-status-item><span class=dashboard-status-label>Next run</span>"
+            "<span class='dashboard-status-value status-warn'>Unavailable</span></span>"
+        )
+    else:
+        scheduled = [
+            row["next"]
+            for row in schedule
+            if isinstance(row.get("next"), (int, float)) and row["next"] > 0
+        ]
+        next_run = min(scheduled) if scheduled else None
+        if next_run is None:
+            next_value = (
+                "<span class='dashboard-status-value status-warn'>No next run scheduled</span>"
+            )
+        else:
+            next_text = time.strftime("%a %H:%M %Z", time.localtime(next_run))
+            next_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(next_run))
+            next_value = (
+                f"<time class='dashboard-status-value mono' datetime='{esc(next_iso)}' "
+                f"data-until='{next_run:.0f}' title='Next scheduled run: {esc(next_text)}'>"
+                f"at {esc(next_text)}</time>"
+            )
+        next_item = (
+            "<span class=dashboard-status-item><span class=dashboard-status-label>Next run</span>"
+            f"{next_value}</span>"
+        )
+
+    now = time.time()
+    updated_text = time.strftime("%H:%M:%S", time.localtime(now))
+    updated_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now))
+    updated_title = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(now))
+    return (
+        "<div class=dashboard-status role=group aria-label='Dashboard status'>"
+        f"{machine_item}{warning_item}{next_item}"
+        "<span class=dashboard-status-item><span class=dashboard-status-label>Updated</span>"
+        f"<time class='dashboard-status-value mono' datetime='{esc(updated_iso)}' "
+        f"title='Dashboard rendered at {esc(updated_title)}'>{esc(updated_text)}</time></span>"
+        "</div>"
+    )
+
+
 def page(
     title: str,
     body: str,
@@ -1278,6 +1775,7 @@ def page(
     active: str = "",
     topbar_extra: str = "",
 ) -> bytes:
+    status_slot = DASHBOARD_STATUS_SLOT if active in STATUS_PAGES else ""
     return (
         "<!doctype html><html lang=en><head><meta charset=utf-8>"
         f"{THEME_BOOTSTRAP}"
@@ -1285,22 +1783,23 @@ def page(
         "<link rel=icon href='/favicon.ico' type='image/svg+xml'>"
         f"<title>{esc(title)}</title><style>{CSS}{extra_css}</style></head>"
         f"<body><div class=shell>{render_nav(active)}<div class=content>"
-        f"{render_topbar(topbar_extra)}<main>{body}</main></div></div>"
+        f"{render_topbar(topbar_extra + status_slot)}<main>{body}</main></div></div>"
         f"<script>{JS}{extra_js}</script></body></html>"
     ).encode("utf-8")
 
 
 def render_dashboard(state: dict) -> bytes:
-    loops = [entry for entry in state.get("loops", []) if entry["status"] not in ("stopped", "unknown")]
+    all_loops = state.get("loops", [])
+    unknown_loops = [entry for entry in all_loops if entry["status"] == "unknown"]
+    live_loops = [
+        entry for entry in all_loops if entry["status"] not in ("stopped", "unknown")
+    ]
+    loops = [*live_loops, *unknown_loops]
     enabled = set(state["enabled"])
 
     recurring = [t for t in state["timers"] if t["unit"] == "delegation-loop.timer"]
     oneoffs = [t for t in state["timers"] if t["unit"] != "delegation-loop.timer"]
     nxt = recurring[0]["next"] if recurring and recurring[0]["next"] else None
-
-    attention = []
-    if not state["timer_active"]:
-        attention.append("timer paused")
 
     body = [f'<header><h1>{icon("M3 11l9-8 9 8M5 10v10h14V10")}Overview</h1></header>']
 
@@ -1309,43 +1808,50 @@ def render_dashboard(state: dict) -> bytes:
     body.append(
         '<div class="card stat">'
         f'<div class="stat-label">{icon("M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3", 13)}Live loops</div>'
-        f'<div class="stat-value">{esc(len(loops))}</div>'
-        f'<div class="stat-note">{esc(len(enabled))} repos enabled</div></div>'
+        f'<div class="stat-value">{esc(len(live_loops))}</div>'
+        f'<div class="stat-note">{esc(len(enabled))} repos enabled'
+        + (
+            ". <a href='/repos'>Enable a repo</a> to start loops."
+            if not enabled
+            else ""
+        )
+        + (
+            f" · {len(unknown_loops)} state unavailable" if unknown_loops else ""
+        )
+        + "</div></div>"
     )
     if nxt:
+        paused = " · timer paused" if not state["timer_active"] else ""
         body.append(
             '<div class="card stat">'
             f'<div class="stat-label">{icon("M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z", 13)}Next run</div>'
             f'<div class="stat-value mono" data-until="{nxt:.0f}"></div>'
-            f'<div class="stat-note">{esc(time.strftime("%a %H:%M:%S %Z", time.localtime(nxt)))}</div></div>'
+            f'<div class="stat-note">{esc(time.strftime("%a %H:%M:%S %Z", time.localtime(nxt)) + paused)}</div></div>'
         )
     else:
+        paused = "<div class=stat-note>Timer paused.</div>" if not state["timer_active"] else ""
         body.append(
             '<div class="card stat">'
             f'<div class="stat-label">{icon("M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z", 13)}Next run</div>'
-            '<div class="stat-value">None scheduled</div></div>'
+            f'<div class="stat-value">None scheduled</div>{paused}</div>'
         )
-    body.append(
-        f'<div class="card stat {"warn" if attention else "ok"}">'
-        f'<div class="stat-label">{icon("M12 3l10 18H2zM12 10v5M12 18h.01", 13)}Needs attention</div>'
-        f'<div class="stat-value">{esc("; ".join(attention)) if attention else "All clear"}</div></div>'
-    )
+    body.append(render_overview_quota(state.get("quota_snapshot")))
     body.append("</div>")
 
     # ---- live loops ----------------------------------------------------
     body.append(
         f'<div class="section-head">{icon("M17 2l4 4-4 4M3 11V9a3 3 0 013-3h15M7 22l-4-4 4-4M21 13v2a3 3 0 01-3 3H3", 15)}<h2>Live loops</h2></div>'
     )
-    if not loops:
-        body.append(
-            "<div class='card loop-empty dim'>No live loops."
-            + (
+    if not live_loops:
+        message = "No live loops."
+        if unknown_loops:
+            message += f" State unavailable for {len(unknown_loops)} repo(s)."
+        else:
+            message += (
                 f" Next run <span data-until='{nxt:.0f}'></span>."
-                if nxt
-                else " No next run scheduled."
+                if nxt else " No next run scheduled."
             )
-            + "</div>"
-        )
+        body.append(f"<div class='card loop-empty dim'>{message}</div>")
     body.append('<div class="loop-grid">')
     for entry in loops:
         body.append(
@@ -1365,21 +1871,33 @@ def render_dashboard(state: dict) -> bytes:
             body.append(f"<span class=dim>on {esc(entry['machine'])}</span>")
         body.append("</div></a>")
     body.append("</div>")
+    body.append(
+        render_overview_updates(
+            state.get("recent_updates", []),
+            state.get("recent_updates_unavailable", False),
+        )
+    )
     # ---- coming up --------------------------------------------------------
     body.append(
         f'<div class="section-head">{icon("M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z", 15)}<h2>Coming up</h2></div>'
     )
-    body.append("<div class='card scroll'><table>")
-    body.append("<tr><th>repository</th><th>next</th><th>at</th><th>last</th></tr>")
-    for t in recurring + oneoffs:
-        when = f"<span data-until='{t['next']:.0f}'></span>" if t["next"] else "<span class=dim>-</span>"
-        at = time.strftime("%a %H:%M:%S %Z", time.localtime(t["next"])) if t["next"] else "-"
-        last = f"<span data-since='{t['last']:.0f}'></span>" if t["last"] else "<span class=dim>never</span>"
+    if recurring or oneoffs:
+        body.append("<div class='card scroll'><table>")
+        body.append("<tr><th>repository</th><th>next</th><th>at</th><th>last</th></tr>")
+        for t in recurring + oneoffs:
+            when = f"<span data-until='{t['next']:.0f}'></span>" if t["next"] else "<span class=dim>-</span>"
+            at = time.strftime("%a %H:%M:%S %Z", time.localtime(t["next"])) if t["next"] else "-"
+            last = f"<span data-since='{t['last']:.0f}'></span>" if t["last"] else "<span class=dim>never</span>"
+            body.append(
+                f"<tr><td>{esc(timer_repository(t['unit']))}</td><td>{when}</td>"
+                f"<td class=dim>{esc(at)}</td><td class=dim>{last}</td></tr>"
+            )
+        body.append("</table></div>")
+    else:
         body.append(
-            f"<tr><td>{esc(timer_repository(t['unit']))}</td><td>{when}</td>"
-            f"<td class=dim>{esc(at)}</td><td class=dim>{last}</td></tr>"
+            "<div class='card dim'>No upcoming runs. "
+            "<a href='/schedule'>Schedule one</a>.</div>"
         )
-    body.append("</table></div>")
 
     # ---- fleet (issue #15) -------------------------------------------
     body.append(
@@ -1391,7 +1909,10 @@ def render_dashboard(state: dict) -> bytes:
     else:
         fleet_machines = state.get("machines", [])
         if not fleet_machines:
-            body.append("<div class='card dim'>No machines registered.</div>")
+            body.append(
+                "<div class='card dim'>No machines registered. "
+                "Run <code>lupin join &lt;redis-host&gt;[:port]</code>.</div>"
+            )
         else:
             body.append("<div class='card scroll'><table>")
             body.append("<tr><th>machine</th><th>state</th><th>version</th><th>heartbeat</th></tr>")
@@ -1444,8 +1965,8 @@ def render_dashboard(state: dict) -> bytes:
             if r["state"] == "enabled":
                 command = f"lupin once now {r['repo']}"
                 once = (
-                    f"<span data-once-repo='{esc(r['repo'])}'>"
-                    f"<code>{esc(command)}</code> "
+                    f"<span data-once-repo='{esc(r['repo'])}' title='{esc(command)}'>"
+                    f"<code style='user-select:text'>{esc(command)}</code> "
                     "<label>when <input value=now aria-label='one-off loop time'></label> "
                     "<button type=button>copy</button> "
                     "<span class=dim data-copy-status aria-live=polite></span></span>"
@@ -1525,7 +2046,7 @@ def quota_duration_label(row: dict) -> str:
     duration = row.get("duration", QuotaDuration.OTHER)
     if isinstance(duration, QuotaDuration) and duration is not QuotaDuration.OTHER:
         return duration.label
-    return row.get("label", "Other")
+    return str(row.get("label") or "Other")
 
 
 def quota_progress_pct(row: dict) -> float | None:
@@ -1580,18 +2101,18 @@ def render_quota_summary(rows: list[dict], now_ms: int) -> str:
     ]
     next_reset = min(resets, key=lambda row: row["resets_at"], default=None)
     attention = (
-        ", ".join(f"{quota_row_name(row)} {quota_duration_label(row)}" for row in ahead)
+        ", ".join(f"{quota_row_name(row)} {quota_window_heading(row)}" for row in ahead)
         if ahead else "None"
     )
     most_value = (
-        f"{quota_row_name(most_used)} · {quota_duration_label(most_used)}"
+        f"{quota_row_name(most_used)} · {quota_window_heading(most_used)}"
         if most_used else "Not available"
     )
     most_note = (
         f"{quota_progress_pct(most_used):.0f}% used" if most_used else "No quota data"
     )
     next_value = (
-        f"{quota_row_name(next_reset)} · {quota_duration_label(next_reset)}"
+        f"{quota_row_name(next_reset)} · {quota_window_heading(next_reset)}"
         if next_reset else "Not available"
     )
     next_note = (
@@ -1612,9 +2133,32 @@ def render_quota_summary(rows: list[dict], now_ms: int) -> str:
     ) + "</div>"
 
 
-def render_quota_row(row: dict, now_ms: int) -> str:
+def quota_window_key(row: dict) -> tuple[str, str, int | None]:
     duration = row.get("duration", QuotaDuration.OTHER)
     duration_value = duration.value if isinstance(duration, QuotaDuration) else str(duration)
+    return duration_value, quota_duration_label(row), quota_window_milliseconds(row)
+
+
+def quota_window_heading(row: dict) -> str:
+    label = quota_duration_label(row)
+    duration = row.get("duration", QuotaDuration.OTHER)
+    if row.get("label") or duration != QuotaDuration.OTHER:
+        return label
+    milliseconds = quota_window_milliseconds(row)
+    if milliseconds is None:
+        return label
+    parts = []
+    for unit, suffix in (
+        (86_400_000, "d"), (3_600_000, "h"), (60_000, "m"), (1_000, "s"), (1, "ms"),
+    ):
+        amount, milliseconds = divmod(milliseconds, unit)
+        if amount:
+            parts.append(f"{amount}{suffix}")
+    return f"{label} · {' '.join(parts)}"
+
+
+def render_quota_cell(row: dict, now_ms: int) -> str:
+    duration_value, _label, _milliseconds = quota_window_key(row)
     reset_at_ms = row.get("resets_at")
     reset_timestamp = "" if reset_at_ms is None else str(reset_at_ms)
     used = quota_progress_pct(row)
@@ -1630,41 +2174,105 @@ def render_quota_row(row: dict, now_ms: int) -> str:
             "title='time elapsed in window'></div>"
         )
     elif used is not None:
-        # The row keeps its marker. A dashed marker says the elapsed time
-        # cannot be placed, because the window length is unknown
-        # (issue #80).
+        # Keep a dashed marker when the source does not give a window length.
         elapsed_marker = (
             "<div class='quota-meter-elapsed quota-meter-elapsed-unknown' "
             "title='time elapsed in window: window length unknown'></div>"
         )
     else:
         elapsed_marker = ""
-    account_html = f"<div class=dim>{esc(row['account'])}</div>" if row.get("account") else ""
-    note_html = f"<div class='dim'>{esc(pace_note)}</div>" if pace_note else ""
+    note_html = f"<div class=quota-pace-note>{esc(pace_note)}</div>" if pace_note else ""
     aria_label = "quota usage unavailable"
     if used is not None and elapsed is not None:
         aria_label = f"{used:.0f}% used, {elapsed:.0f}% of window elapsed"
     elif used is not None:
         aria_label = f"{used:.0f}% used, pace not shown" if pace_note else f"{used:.0f}% used"
     return (
-        f"<div class=quota-row data-window-duration='{esc(duration_value)}' "
+        f"<div class=quota-cell data-window-duration='{esc(duration_value)}' "
         f"data-resets-at-ms='{esc(reset_timestamp)}'>"
-        "<div><div class=quota-window>"
-        f"{esc(quota_duration_label(row))}</div>"
-        f"{account_html}"
-        f"<div class='quota-status {status_class}'>{esc(status)}</div>"
-        f"{note_html}</div>"
-        "<div>"
         f"<div class=quota-values><span><strong>{available_text}</strong> available</span>"
         f"<span>{used_text} used</span></div>"
         f"<div class=quota-meter role=img aria-label='{esc(aria_label)}'>"
         f"<div class='quota-meter-used {status_class}' style='width:{used_width}'></div>"
-        f"{elapsed_marker}</div></div>"
+        f"{elapsed_marker}</div>"
+        f"<div class=quota-cell-footer><div>"
+        f"<div class='quota-status {status_class}'>{esc(status)}</div>{note_html}</div>"
         f"<div class=quota-reset><div class=quota-reset-left>"
         f"{esc(time_until_reset(reset_at_ms, now_ms))}</div>"
-        f"<div class=quota-reset-at>{esc(epoch_ms_to_local(reset_at_ms))}</div></div>"
-        "</div>"
+        f"<div class=quota-reset-at>{esc(epoch_ms_to_local(reset_at_ms))}</div>"
+        "</div></div></div>"
     )
+
+
+def render_quota_matrix(
+    rows: list[dict], entries_by_provider: dict[str, dict], now_ms: int
+) -> str:
+    groups = {}
+    window_labels = {}
+    for row in rows:
+        provider = row["provider"]
+        account = str(row.get("account") or "")
+        group = groups.setdefault(
+            (provider, account), {"windows": {}, "messages": []}
+        )
+        if "error" in row:
+            message = NOT_AVAILABLE
+        elif "note" in row:
+            message = plain_message(row.get("note", ""))
+        else:
+            window = quota_window_key(row)
+            window_labels[window] = quota_window_heading(row)
+            group["windows"].setdefault(window, []).append(row)
+            continue
+        if message:
+            group["messages"].append(message)
+
+    windows = sorted(
+        window_labels,
+        key=lambda key: (
+            key[2] is None, key[2] or 0, key[1].casefold(), key[0],
+        ),
+    )
+    parts = [
+        "<div class='scroll quota-matrix-scroll'><table class=quota-matrix>"
+        "<thead><tr><th scope=col>Provider / account</th>"
+    ]
+    parts.extend(f"<th scope=col>{esc(window_labels[key])}</th>" for key in windows)
+    parts.append("</tr></thead><tbody>")
+
+    for (provider, account), group in sorted(
+        groups.items(), key=lambda item: (item[0][0].casefold(), item[0][1].casefold())
+    ):
+        entry = entries_by_provider.get(provider) or {}
+        age = _snapshot_age(entry.get("fetched_at"))
+        fetched_by = esc(entry.get("fetched_by", "-"))
+        stale = "" if quota_cache.is_fresh(entry) else " &middot; <span class=stale>stale</span>"
+        account_html = (
+            f" <span class=quota-owner-account>{esc(account)}</span>" if account else ""
+        )
+        messages = "".join(
+            f"<div class=quota-provider-note>{esc(message)}</div>"
+            for message in group["messages"]
+        )
+        parts.append(
+            f"<tr><th scope=row class=quota-owner-cell><div class=quota-owner>"
+            f"<strong>{esc(provider)}</strong>{account_html}</div>"
+            f"<div class=quota-provider-source>{esc(quota_source_label(provider))}"
+            f" &middot; fetched {age} via {fetched_by}{stale}</div>{messages}</th>"
+        )
+        for window in windows:
+            matching = group["windows"].get(window, [])
+            if matching:
+                cells = "".join(render_quota_cell(row, now_ms) for row in matching)
+                parts.append(f"<td class=quota-matrix-cell>{cells}</td>")
+            else:
+                parts.append(
+                    "<td class=quota-matrix-empty "
+                    "aria-label='No cached quota for this provider and window'>—</td>"
+                )
+        parts.append("</tr>")
+    parts.append("</tbody></table></div>")
+    return "".join(parts)
 
 
 def render_quota_legend(rows: list[dict], now_ms: int) -> str:
@@ -1759,46 +2367,22 @@ def render_usage(*, connection: dict | None = None) -> bytes:
         f"<span class=dim>Data timestamp: {esc(fetched) if fetched else 'not available'}</span></div>",
         render_quota_summary(quota_rows, now_ms),
         render_quota_legend(quota_rows, now_ms),
-        "<div class=quota-groups>",
     ]
-    if not quota_rows:
+    if quota_rows:
+        body.append(render_quota_matrix(quota_rows, fetched_by_provider, now_ms))
+    else:
         body.append(
             "<p class=dim>No quota data cached yet -- run <code>lupin quota</code> "
             "on a machine with real provider credentials.</p>"
         )
-    groups: dict[str, list[dict]] = {}
-    for row in quota_rows:
-        groups.setdefault(row["provider"], []).append(row)
-    for provider, rows in groups.items():
-        entry = fetched_by_provider.get(provider) or {}
-        age = _snapshot_age(entry.get("fetched_at"))
-        fetched_by = entry.get("fetched_by", "-")
-        stale = "" if quota_cache.is_fresh(entry) else " &middot; <span class=stale>stale</span>"
-        body.append(
-            f"<section class='card quota-group'><div class=quota-group-heading>"
-            f"<h3>{esc(provider)}</h3><span class=dim>"
-            f"{esc(quota_source_label(provider))} &middot; fetched {age} via {esc(fetched_by)}{stale}"
-            "</span></div>"
-        )
-        for row in rows:
-            if "error" in row or "note" in row:
-                # A failed source shows a plain state. The detail stays in
-                # the log (issue #51).
-                if "error" in row:
-                    message = NOT_AVAILABLE
-                else:
-                    message = plain_message(row.get("note", ""))
-                body.append(f"<p class=dim>{esc(message)}</p>")
-            else:
-                body.append(render_quota_row(row, now_ms))
-        body.append("</section>")
     body.append(
-        "</div><p class=dim>Bars show quota used; the marker shows time elapsed "
-        "in the window. A dashed marker means the window length is unknown, so "
-        "the elapsed time cannot be placed. The reset time appears at the right. "
-        "OpenCode Go uses omp or Orca's usage API; Claude uses Anthropic's OAuth "
-        "usage API. OpenAI uses omp or Codex's latest local snapshot, which only "
-        "updates when Codex writes a session event.</p>"
+        "<p class=dim>A dash means no cached quota for that provider and window. "
+        "Bars show quota used; the marker shows time elapsed in the window. A "
+        "dashed marker means the window length is unknown, so the elapsed time "
+        "cannot be placed. The reset time appears at the right. OpenCode Go uses "
+        "omp or Orca's usage API; Claude uses Anthropic's OAuth usage API. "
+        "OpenAI uses omp or Codex's latest local snapshot, which only updates "
+        "when Codex writes a session event.</p>"
     )
     body.append("<h2>7-day totals</h2>")
     if usage_snapshots:
@@ -1877,16 +2461,8 @@ _ALIAS_PREFIX = re.compile(r"^(?:bmo|local):|^(?:opencode-go|openai-codex|openai
 
 
 def load_model_snapshot(connection: dict | None = None) -> dict | None:
-    """Read the fleet snapshot, then this host's file as a fallback."""
-    shared = model_fetch.read_shared_snapshot(**(connection or {}))
-    if shared is not None:
-        return shared
-    try:
-        with open(model_fetch.SNAPSHOT_FILE, encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
+    """Return the newer fleet or local model snapshot."""
+    return model_fetch.latest_snapshot(**(connection or {}))
 
 
 def snapshot_models(snapshot: dict | None) -> list[dict]:
@@ -2006,6 +2582,166 @@ def _snapshot_age(fetched_at: str | None) -> str:
     except ValueError:
         return "never pulled"
     return f"<span data-since='{epoch:.0f}'></span>"
+
+def _stale_tier_categories(rows: list[dict]) -> tuple[list[str], list[str]]:
+    today = date.today()
+    cutoff = today - timedelta(days=30)
+    stale = []
+    missing = []
+    for row in rows:
+        if "error" in row:
+            continue
+        category = str(row.get("category") or "unknown")
+        try:
+            verified = date.fromisoformat(row.get("last_verified"))
+        except (TypeError, ValueError):
+            missing.append(category)
+        else:
+            if verified < cutoff:
+                stale.append(category)
+    return stale, missing
+
+
+def _render_tier_verification_warning(rows: list[dict]) -> str:
+    stale, missing = _stale_tier_categories(rows)
+    messages = []
+    if stale:
+        names = ", ".join(esc(name) for name in stale)
+        count = len(stale)
+        noun = "category" if count == 1 else "categories"
+        verb = "has" if count == 1 else "have"
+        messages.append(
+            f"{count} model-tier {noun} {verb} not been verified in over 30 days: {names}."
+        )
+    if missing:
+        names = ", ".join(esc(name) for name in missing)
+        messages.append(f"Verification dates are missing for: {names}.")
+    if not messages:
+        return ""
+    return (
+        "<div class='card model-tier-warning' role='status'>"
+        f"{' '.join(messages)}</div>"
+    )
+
+
+def _render_tier_summary_benchmarks(category: dict | None) -> str:
+    if not category:
+        return "<span class=dim>No verified benchmark data.</span>"
+    benchmarks = category.get("benchmarks") or []
+    if not benchmarks:
+        note = category.get("note") or "No verified benchmark data."
+        return f"<span class=dim>{esc(note)}</span>"
+    rows = []
+    for benchmark in benchmarks:
+        name = esc(benchmark.get("name") or "Benchmark")
+        source = benchmark.get("source")
+        if isinstance(source, str) and source.startswith(("https://", "http://")):
+            name = (
+                f"<a href='{esc(source)}' target='_blank' rel='noopener'>{name}</a>"
+            )
+        rows.append(
+            f"<div>{name}<div class=dim>{esc(benchmark.get('metric') or '')}</div></div>"
+        )
+    return "".join(rows)
+
+
+def _render_tier_summary_scores(scores: list[dict]) -> str:
+    if not scores:
+        return "<span class=dim>No verified score</span>"
+    rows = []
+    for score in scores:
+        title = f"{score['benchmark']} · {score['metric']} · {score['source']}"
+        rows.append(
+            "<div class=tier-summary-score>"
+            f"<span class=mono title='{esc(title)}'>{score['score']:g}</span> "
+            f"<span class=dim>{esc(score['benchmark'])}</span></div>"
+        )
+    return "".join(rows)
+
+
+def _render_tier_summary_cell(
+    tier_row: dict,
+    tier: str,
+    category_id: str,
+    models: list[dict],
+    scores_by_model: dict,
+) -> str:
+    entries = tier_row.get("tiers", {}).get(tier)
+    picks = [
+        pick for pick in (entries if isinstance(entries, list) else [])
+        if isinstance(pick, dict) and pick.get("model")
+    ]
+    if not picks:
+        return "<span class=dim>none</span>"
+
+    pick = picks[0]
+    alias = pick["model"]
+    model = match_live_model(alias, models)
+    if model:
+        model_name = model.get("display_name") or model["id"]
+    else:
+        model_name = alias
+    cell = [
+        f"<div class=tier-summary-name>{esc(model_name)}</div>",
+        f"<div class=dim>effort {esc(pick.get('effort') or '-')}</div>",
+    ]
+    if model and model_name != model["id"]:
+        cell.append(f"<div class=dim><code>{esc(model['id'])}</code></div>")
+    if len(picks) > 1:
+        fallbacks = len(picks) - 1
+        suffix = "s" if fallbacks != 1 else ""
+        cell.append(f"<div class=dim>+{fallbacks} fallback{suffix}</div>")
+    if model:
+        scores = scores_by_model.get(model["id"], {}).get(category_id, [])
+        cell.append(_render_tier_summary_scores(scores))
+    else:
+        cell.append(
+            "<span class=dim>No live model match; no verified score</span>"
+        )
+    return "<div class=tier-summary-pick>" + "".join(cell) + "</div>"
+
+
+def render_tier_comparison(
+    rows: list[dict],
+    categories: list[dict],
+    models: list[dict],
+    scores_by_model: dict,
+) -> str:
+    benchmarks_by_category = {
+        category["id"]: category for category in categories
+    }
+    rendered = []
+    for row in rows:
+        if "error" in row:
+            continue
+        category_id = row["category"]
+        cells = "".join(
+            f"<td class='tier-summary-cell {tier}'>"
+            f"{_render_tier_summary_cell(row, tier, category_id, models, scores_by_model)}"
+            "</td>"
+            for tier in MODEL_TIER_ORDER
+        )
+        rendered.append(
+            "<tr>"
+            f"<th scope=row>{esc(category_id)}</th>"
+            f"<td>{_render_tier_summary_benchmarks(benchmarks_by_category.get(category_id))}</td>"
+            f"{cells}"
+            f"<td>{esc(row.get('source') or 'not recorded')}</td>"
+            f"<td>{esc(row.get('last_verified') or '-')}</td>"
+            "</tr>"
+        )
+    if not rendered:
+        return "<div class='card dim'>No category picks to compare.</div>"
+    headers = "".join(
+        f"<th scope=col>{esc(tier)}</th>" for tier in MODEL_TIER_ORDER
+    )
+    return (
+        "<div class='card scroll'><table class=model-tier-summary>"
+        "<caption class=dim>First pick in each tier. All fallbacks appear in the routing cards below.</caption>"
+        "<thead><tr><th scope=col>Category</th><th scope=col>Benchmark</th>"
+        f"{headers}<th scope=col>Routing source</th><th scope=col>Last verified</th>"
+        f"</tr></thead><tbody>{''.join(rendered)}</tbody></table></div>"
+    )
 
 
 def _format_score(scores: list[dict]) -> str:
@@ -2138,29 +2874,67 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
     benchmark_categories, scores_by_model, performance = benchmark_catalog.matrix(models, benchmark_snapshot)
     notes_by_model = benchmark_catalog.notes_by_model(benchmark_snapshot)
     benchmark_scores = (benchmark_snapshot or {}).get("scores") or []
-    scored_benchmarks = sum(
-        1 for score in benchmark_scores
-        if isinstance(score, dict) and score.get("score") is not None
+    scored_benchmarks = [
+        score for score in benchmark_scores
+        if isinstance(score, dict)
+        and isinstance(score.get("score"), (int, float))
+        and not isinstance(score.get("score"), bool)
+    ]
+    stale_benchmarks = [
+        score for score in scored_benchmarks
+        if not benchmark_fetch._is_fresh(score)
+    ]
+    subscriptions = (snapshot or {}).get("subscriptions")
+    if not isinstance(subscriptions, dict):
+        subscriptions = {}
+    stale_model_sources = sorted(
+        name for name, item in subscriptions.items()
+        if isinstance(item, dict) and item.get("live") is False
     )
+    model_status = (
+        f" <span class=stale>not live: {esc(', '.join(stale_model_sources))}</span>"
+        if stale_model_sources else ""
+    )
+    benchmark_status = (
+        "<span class=stale>latest refresh unavailable</span>"
+        if benchmark_snapshot and benchmark_snapshot.get("live") is False else ""
+    )
+    if stale_benchmarks:
+        count = len(stale_benchmarks)
+        noun = "score" if count == 1 else "scores"
+        score_freshness = f"<span class=stale>{count} stale source {noun}</span>"
+    elif scored_benchmarks:
+        score_freshness = "<span class=dim>all source scores fresh</span>"
+    else:
+        score_freshness = "<span class=dim>no verified scores</span>"
     body = [
         f'<header><h1>{icon("M7 7h10v10H7zM9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3")}Models</h1></header>',
     ]
     if sent:
         body.append(f"<p class=dim>{esc(sent)}</p>")
     body.append(
-        "<div class='card' style='display:flex;align-items:center;gap:1rem'>"
-        f"<span class=dim>Last pulled: {_snapshot_age(snapshot.get('fetched_at') if snapshot else None)}</span>"
-        f"<span class=dim>General scores: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)} ({scored_benchmarks}/{len(benchmark_scores)} scored)</span>"
-        "<span style='flex:1'></span>"
-        "<form method=post action='/model-tiers/refresh'>"
+        "<section class='card model-freshness model-status' aria-label='Data freshness'>"
+        f"<span class=dim>Model list: {_snapshot_age(snapshot.get('fetched_at') if snapshot else None)}{model_status}</span>"
+        f"<span class=dim>Benchmark scores: {_snapshot_age(benchmark_snapshot.get('fetched_at') if benchmark_snapshot else None)} "
+        f"({len(scored_benchmarks)}/{len(benchmark_scores)} scored)</span>"
+        f"{score_freshness}{benchmark_status}"
+        "<span class='model-status-spacer'></span>"
+        "<form class='model-status-action' method=post action='/model-tiers/refresh'>"
         "<button type=submit>Pull models</button></form>"
-        "<form method=post action='/model-tiers/refresh-benchmarks'>"
-        "<button type=submit>Pull benchmarks</button></form></div>"
+        "<form class='model-status-action' method=post action='/model-tiers/refresh-benchmarks'>"
+        "<button type=submit>Pull benchmarks</button></form></section>"
     )
+    body.extend([
+        _render_tier_verification_warning(rows),
+        "<h2>Category and tier comparison</h2>",
+        "<p class=dim>First pick in each tier. Scores use exact model IDs and verified sources. "
+        "See every fallback in the routing cards below.</p>",
+        render_tier_comparison(rows, benchmark_categories, models, scores_by_model),
+    ])
     body.extend([
         "<h2>Routing by task category</h2>",
         "<p class=dim>Read from <code>"
-        f"{esc(_model_tiers_path())}</code>. Each tier is an ordered fallback "
+        f"{esc(_model_tiers_source_label())}</code>. Each tier is an ordered fallback "
         "chain: the first entry is tried first, then the next. A category "
         "with no entry for a tier escalates to the next tier up. The "
         "&middot; note after each pick is today's live match (issue #16's "
@@ -2205,7 +2979,25 @@ def render_model_tiers(*, sent: str | None = None, connection: dict | None = Non
             models, benchmark_categories, scores_by_model, performance, notes_by_model
         ),
     ])
-    return page("Model tiers", "".join(body), active="models")
+    extra_css = """
+.model-freshness{display:flex;align-items:center;gap:1rem;flex-wrap:wrap}
+.model-tier-warning{background:var(--warnbg);border-color:var(--warnline);box-shadow:none}
+.model-tier-summary th,.model-tier-summary td{vertical-align:top}
+.model-tier-summary .tier-summary-cell{min-width:9rem}
+.model-tier-summary .tier-summary-name{font-weight:500}
+.model-tier-summary .tier-summary-score{white-space:nowrap}
+.model-tier-summary caption{text-align:left}
+.model-status-spacer{flex:1}
+@media(max-width:760px){
+.model-status{display:grid;gap:.75rem}
+.model-status-spacer{display:none}
+.model-status-action{margin:0}
+.model-status-action button{width:100%;white-space:nowrap}
+}
+"""
+    return page(
+        "Model tiers", "".join(body), extra_css=extra_css, active="models"
+    )
 
 
 def _heartbeat_epoch(stamp: str | None) -> float | None:
@@ -2218,20 +3010,23 @@ def _heartbeat_epoch(stamp: str | None) -> float | None:
         return None
 
 
-def _slot_controls(slot: str, current_max: int) -> str:
+def _slot_controls(slot: str, current_max: int | None) -> str:
     """Fleet-wide slot limit controls with race-free next values."""
-    fewer = max(1, current_max - 1)
-    more = current_max + 1
-    fewer_disabled = " disabled" if current_max <= 1 else ""
+    unknown = current_max is None
+    fewer = max(1, current_max - 1) if current_max is not None else 1
+    more = current_max + 1 if current_max is not None else 2
+    fewer_disabled = " disabled" if unknown or current_max <= 1 else ""
+    more_disabled = " disabled" if unknown else ""
+    reason = " title='Slot limit is unavailable'" if unknown else ""
     return (
         "<form method=post action='/machines/slot-max' style='display:inline'>"
         f"<input type=hidden name=slot value='{esc(slot)}'>"
         f"<input type=hidden name=max value='{fewer}'>"
-        f"<button type=submit aria-label='Fewer slots'{fewer_disabled}>−</button></form>"
+        f"<button type=submit aria-label='Fewer slots'{fewer_disabled}{reason}>−</button></form>"
         "<form method=post action='/machines/slot-max' style='display:inline'>"
         f"<input type=hidden name=slot value='{esc(slot)}'>"
         f"<input type=hidden name=max value='{more}'>"
-        "<button type=submit aria-label='More slots'>+</button></form>"
+        f"<button type=submit aria-label='More slots'{more_disabled}{reason}>+</button></form>"
     )
 
 
@@ -2267,17 +3062,34 @@ def render_machines(
     if slot_status:
         body.append("<section class=machine-slots><h2>Fleet-wide capacity</h2>")
         body.append(
-            "<p class=dim>Each slot has one shared limit across all machines.</p>"
+            "<p class=dim>A slot limits how many callers can use that resource "
+            "at the same time, across all machines.</p>"
             "<div class=machine-slot-list>"
         )
         for slot_name, info in sorted(slot_status.items()):
-            used = info.get("holders", 0)
+            used = info.get("holders")
             slot_max = info.get("max")
-            controls = _slot_controls(slot_name, slot_max if slot_max is not None else 1)
+            used_label = esc(used) if used is not None else "?"
+            max_label = esc(slot_max) if slot_max is not None else "?"
+            controls = _slot_controls(slot_name, slot_max)
+            holder_names = info.get("holder_names")
+            if isinstance(holder_names, list) and holder_names:
+                holder_details = (
+                    "<span class=machine-slot-holders>Current holder IDs: "
+                    + ", ".join(f"<code>{esc(name)}</code>" for name in holder_names)
+                    + "</span>"
+                )
+            elif used == 0:
+                holder_details = "<span class=machine-slot-holders>No current holders</span>"
+            elif used is None:
+                holder_details = "<span class=machine-slot-holders>Holder count unavailable</span>"
+            else:
+                holder_details = "<span class=machine-slot-holders>Holder IDs unavailable</span>"
             body.append(
                 f"<div class=machine-slot><b>{esc(slot_name)}</b>"
-                f"<span class=mono>{esc(used)} / {esc(slot_max) if slot_max is not None else '-'}</span>"
-                f"<span class=slot-controls>{controls}</span></div>"
+                f"<span class=mono>{used_label} / {max_label}</span>"
+                f"<span class=slot-controls>{controls}</span>"
+                f"{holder_details}</div>"
             )
         body.append("</div></section>")
 
@@ -2303,7 +3115,12 @@ def render_machines(
             body.append("<div class=machine-loops><b>Loops</b>")
             if loops:
                 for loop in loops:
-                    label = loop.get("repo") or "Unknown repo"
+                    if loop.get("managed") is False:
+                        label = "Unmanaged agent"
+                        if loop.get("agent"):
+                            label += f" · {loop['agent']}"
+                    else:
+                        label = loop.get("repo") or "Unknown repo"
                     if loop.get("platform"):
                         label += f" · {loop['platform']}"
                     body.append(
@@ -2348,7 +3165,7 @@ def render_machines(
 .machine-slots h2{margin:0 0 .25rem}
 .machine-slots>p{margin:.2rem 0 .65rem;font-size:13px}
 .machine-slot-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:.6rem}
-.machine-slot{display:flex;align-items:center;gap:.8rem;background:var(--surface);
+.machine-slot{display:flex;flex-wrap:wrap;align-items:center;gap:.55rem .8rem;background:var(--surface);
 border:1px solid var(--line);border-radius:12px;padding:.65rem .8rem}
 .slot-controls{display:flex;gap:4px}
 .slot-controls button{width:24px;height:24px;padding:0;border:1px solid var(--line);
@@ -2358,6 +3175,8 @@ border-radius:6px;background:var(--surface);color:var(--ink);cursor:pointer;font
 .machine-slot>b{flex:1;overflow-wrap:anywhere}
 .machine-slot .mono{font-size:13px;white-space:nowrap}
 .slot-controls{white-space:nowrap}
+.machine-slot-holders{flex:1 0 100%;min-width:0;overflow-wrap:anywhere;font-size:12px;color:var(--ink3)}
+.machine-slot-holders code{font:inherit;color:var(--ink2)}
 .machine-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}
 .machine-card{display:grid;gap:.7rem;align-content:start;background:var(--surface);
 border:1px solid var(--line);border-radius:18px;box-shadow:0 3px 0 var(--line);padding:1rem 1.1rem}
@@ -2365,7 +3184,8 @@ border:1px solid var(--line);border-radius:18px;box-shadow:0 3px 0 var(--line);p
 .machine-heading>b{font-size:16px;overflow-wrap:anywhere}
 .machine-dot{width:8px;height:8px;flex:none;border-radius:2px;background:var(--warn)}
 .machine-dot.online{background:var(--ok)}
-.machine-dot.draining{background:var(--warn)}
+.machine-dot.offline{background:var(--warn)}
+.machine-dot.draining{background:var(--lav);transform:rotate(45deg)}
 .machine-local,.machine-provider{font-size:12px;padding:1px 8px;border-radius:6px;
 background:var(--lavbg);color:var(--lav)}
 .machine-state{margin-left:auto;font-size:13px;color:var(--ink2)}
@@ -2390,33 +3210,31 @@ REPOS_ICON = "M6 3v12M18 9a3 3 0 100-6 3 3 0 000 6zM6 21a3 3 0 100-6 3 3 0 000 6
 
 
 def _repo_slot_controls(repo: str, current_max: int) -> str:
-    """Same fewer/more button-pair shape `_slot_controls` uses on the
-    Machines page, but the form only ever posts `repo` -- `do_repos_slot_max`
-    derives the actual slot name (`_repo_slot_name`) itself, so a request
-    can only ever change the one slot that belongs to the repo it named,
-    never an arbitrary slot string chosen by the browser.
-    """
+    """Render controls for changing this repo's concurrency limit."""
     fewer = max(1, current_max - 1)
     more = current_max + 1
     fewer_disabled = " disabled" if current_max <= 1 else ""
+    fewer_label = f"Decrease concurrency limit for {repo} to {fewer}"
+    more_label = f"Increase concurrency limit for {repo} to {more}"
     return (
         "<form method=post action=/repos/slot-max style='display:inline'>"
         f"<input type=hidden name=repo value='{esc(repo)}'>"
         f"<input type=hidden name=max value='{fewer}'>"
-        f"<button type=submit{fewer_disabled} aria-label='Lower max'>&minus;</button></form> "
+        f"<button type=submit{fewer_disabled} title='{esc(fewer_label)}' "
+        f"aria-label='{esc(fewer_label)}'>&minus;</button></form> "
         f"<span class=mono>{current_max}</span> "
         "<form method=post action=/repos/slot-max style='display:inline'>"
         f"<input type=hidden name=repo value='{esc(repo)}'>"
         f"<input type=hidden name=max value='{more}'>"
-        "<button type=submit aria-label='Raise max'>+</button></form>"
+        f"<button type=submit title='{esc(more_label)}' "
+        f"aria-label='{esc(more_label)}'>+</button></form>"
     )
 
 
 def _render_add_panel(tab: str, repos: list[dict]) -> str:
-    """The "Add repo" card. "Existing repo" (issue #23) is fully wired:
-    a repo with a doc gets an "add to schedule" button, one without gets
-    "generate docs and add". "Clone from Git" and "Create new" are shown
-    but inert -- see this issue's report for why: both are real
+    """The "Add repo" card. Existing repos have separate actions to add them
+    to the schedule or generate a draft guide. "Clone from Git" and "Create
+    new" are shown but inert -- see this issue's report for why: both are real
     filesystem/git-network operations (an arbitrary clone URL, process
     spawning, file generation) with a bigger security surface than
     anything else on this page, and landing them safely didn't fit this
@@ -2464,12 +3282,13 @@ def _render_add_panel(tab: str, repos: list[dict]) -> str:
         add_form = (
             "<form method=post action=/repos/add style='display:inline'>"
             f"<input type=hidden name=repo value='{esc(repo)}'>"
-            "<button type=submit>Add to schedule</button></form>"
+            f"<button type=submit title='Add {esc(repo)} to the recurring schedule'>"
+            "Add to schedule</button></form>"
         )
         generate_form = (
             "<form method=post action=/repos/generate-docs style='display:inline'>"
             f"<input type=hidden name=repo value='{esc(repo)}'>"
-            "<button type=submit>Generate docs and add</button></form>"
+            "<button type=submit>Generate draft doc</button></form>"
             if not r.get("has_doc")
             else ""
         )
@@ -2507,7 +3326,8 @@ def _render_doc_panel(repo: str, text: str, edit: bool) -> str:
             f"<textarea name=text spellcheck=false "
             "style='width:100%;height:230px;font-family:monospace;box-sizing:border-box'>"
             f"{esc(text)}</textarea>"
-            "<div class=row style='margin-top:.4rem'><button type=submit>Save</button>"
+            f"<div class=row style='margin-top:.4rem'><button type=submit "
+            f"title='Save changes to {esc(repo)}/{esc(LOOP_DOC)}'>Save</button>"
             f"<a href='{view_href}'>cancel</a></div></form>"
         )
     else:
@@ -2533,7 +3353,7 @@ def _render_schedule_panel(repo: str) -> str:
         f"<b>Schedule a one-off run for {esc(repo)}</b>"
         f"<input type=hidden name=repo value='{esc(repo)}'>"
         "<input type=text name=when placeholder='15:00, +2h, tomorrow 09:00' required>"
-        "<button type=submit>Schedule</button>"
+        "<button type=submit title='Schedule a one-off run'>Schedule one-off run</button>"
         "<a href='/repos'>Cancel</a>"
         "</form>"
         "<p class=dim>Runs once, in addition to the recurring schedule. Same as "
@@ -2551,7 +3371,7 @@ def _render_remove_panel(repo: str) -> str:
         f"running. Files in {esc(CODE_DIR)} are untouched. Type the repo name to confirm.</div></div>"
         f"<input type=hidden name=repo value='{esc(repo)}'>"
         f"<input type=text name=confirm placeholder='{esc(repo)}' required>"
-        "<button type=submit>Remove repo</button>"
+        "<button type=submit title='Remove this repo from the schedule'>Remove repo</button>"
         "<a href='/repos'>Cancel</a>"
         "</form></div>"
     )
@@ -2559,26 +3379,38 @@ def _render_remove_panel(repo: str) -> str:
 
 def _remote_repo_controls(repo: str, entry: dict) -> str:
     controls = []
+    for machine in entry.get("already_enabled_hosts", []):
+        controls.append(
+            "<button type=button disabled "
+            f"title='{esc(repo)} is already enabled on {esc(machine)}' "
+            f"aria-label='Enable {esc(repo)} on {esc(machine)} (already enabled)' "
+            "style='opacity:.45;cursor:not-allowed'>"
+            f"Enable on {esc(machine)}</button>"
+        )
     for machine in entry.get("enabled_hosts", []):
         controls.append(
             "<form method=post action=/loops/start style='display:inline'>"
             f"<input type=hidden name=repo value='{esc(repo)}'>"
             f"<input type=hidden name=machine value='{esc(machine)}'>"
-            f"<button type=submit>Start on {esc(machine)}</button></form>"
+            f"<button type=submit title='Start {esc(repo)} on {esc(machine)}' "
+            f"aria-label='Start {esc(repo)} on {esc(machine)}'>"
+            f"Start on {esc(machine)}</button></form>"
         )
     for machine in entry.get("enable_hosts", []):
         controls.append(
             "<form method=post action=/repos/enable style='display:inline'>"
             f"<input type=hidden name=repo value='{esc(repo)}'>"
             f"<input type=hidden name=machine value='{esc(machine)}'>"
-            f"<button type=submit>Enable on {esc(machine)}</button></form>"
+            f"<button type=submit title='Enable {esc(repo)} on {esc(machine)}' "
+            f"aria-label='Enable {esc(repo)} on {esc(machine)}'>"
+            f"Enable on {esc(machine)}</button></form>"
         )
     return " ".join(controls)
 
 
 def _render_repo_table(repos: list[dict], local_host: str) -> str:
     rows = [
-        "<tr><th>repo</th><th>state</th><th>loops &middot; max</th>"
+        "<tr><th>repo</th><th>state</th><th>loops &middot; concurrency</th>"
         "<th>machine</th><th>roadmap</th><th>actions</th></tr>"
     ]
     for r in repos:
@@ -2603,13 +3435,20 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
         sess_label = "running" if r["running"] else "stopped"
         current_max = r["max"] if r["max"] is not None else 1
         stepper = _repo_slot_controls(repo, current_max)
-        roadmap_link = f"<a href='/roadmap?repo={quote(repo, safe='')}'>Roadmap</a>"
+        roadmap_link = (
+            f"<a href='/roadmap?repo={quote(repo, safe='')}' "
+            f"title='Open the roadmap for {esc(repo)}'>Roadmap</a>"
+        )
         doc_action = (
-            f"<a href='/repos?doc={quote(repo, safe='')}'>doc</a>"
+            f"<a href='/repos?doc={quote(repo, safe='')}' "
+            f"title='View {esc(repo)}/{esc(LOOP_DOC)}'>doc</a>"
             if r.get("has_doc")
             else "<span class=dim>no doc (optional)</span>"
         )
-        schedule_link = f"<a href='/repos?schedule={quote(repo, safe='')}'>Schedule&hellip;</a>"
+        schedule_link = (
+            f"<a href='/repos?schedule={quote(repo, safe='')}' "
+            f"title='Schedule a one-off run for {esc(repo)}'>Schedule one-off&hellip;</a>"
+        )
         if r["state"] == "enabled":
             place_choice = "spread" if _coordinator_only() else local_host
             run_form = (
@@ -2617,15 +3456,21 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
                 f"<input type=hidden name=repo value='{esc(repo)}'>"
                 "<input type=hidden name=cnt value=1>"
                 f"<input type=hidden name=place value='{esc(place_choice)}'>"
-                "<button type=submit>Run now</button></form>"
+                f"<button type=submit title='Start one loop for {esc(repo)} now' "
+                f"aria-label='Start one loop for {esc(repo)} now'>Run now</button></form>"
             )
-            remove_link = f"<a href='/repos?remove={quote(repo, safe='')}'>Remove</a>"
+            remove_link = (
+                f"<a href='/repos?remove={quote(repo, safe='')}' "
+                f"title='Remove {esc(repo)} from recurring and one-off schedules'>Remove</a>"
+            )
             actions = f"{run_form} {schedule_link} &middot; {doc_action} &middot; {remove_link}"
         else:
             add_btn = (
                 "<form method=post action=/repos/add style='display:inline'>"
                 f"<input type=hidden name=repo value='{esc(repo)}'>"
-                "<button type=submit>Add to schedule</button></form>"
+                f"<button type=submit title='Add {esc(repo)} to the recurring schedule' "
+                f"aria-label='Add {esc(repo)} to the recurring schedule'>"
+                "Add to schedule</button></form>"
             )
             actions = f"{add_btn} {schedule_link} &middot; {doc_action}"
         remote_controls = _remote_repo_controls(repo, r)
@@ -2636,7 +3481,38 @@ def _render_repo_table(repos: list[dict], local_host: str) -> str:
             f"<td><span class='dot {dot}'></span> {esc(sess_label)} {stepper}</td>"
             f"<td>{esc(r['machine'])}</td><td>{roadmap_link}</td><td>{actions}</td></tr>"
         )
-    return "<div class=card><table>" + "".join(rows) + "</table></div>"
+    return "<div class='card scroll'><table>" + "".join(rows) + "</table></div>"
+
+
+_REPO_FILTERS = (
+    ("all", "All"),
+    ("enabled", "Enabled"),
+    ("disabled", "Disabled"),
+    ("no-docs", "No docs"),
+)
+
+
+def _repo_filter_rows(repos: list[dict], repo_filter: str) -> list[dict]:
+    if repo_filter == "enabled":
+        return [repo for repo in repos if repo["state"] == "enabled"]
+    if repo_filter == "disabled":
+        return [repo for repo in repos if repo["state"] == "disabled"]
+    if repo_filter == "no-docs":
+        return [repo for repo in repos if repo.get("has_doc") is False]
+    return repos
+
+
+def _render_repo_filters(active: str) -> str:
+    links = []
+    for value, label in _REPO_FILTERS:
+        href = "/repos" if value == "all" else f"/repos?filter={quote(value, safe='')}"
+        css = "pill on" if value == active else "pill"
+        current = " aria-current='page'" if value == active else ""
+        links.append(
+            f"<a class='{css}' href='{href}'{current} style='display:inline-block'>"
+            f"{label}</a>"
+        )
+    return "<nav class=row aria-label='Repository filters'>" + "".join(links) + "</nav>"
 
 
 def render_repos(
@@ -2649,6 +3525,7 @@ def render_repos(
     schedule_repo: str | None = None,
     remove_repo: str | None = None,
     sent: str | None = None,
+    repo_filter: str = "all",
 ) -> bytes:
     """Show local repos and repos reported by other machines.
 
@@ -2657,6 +3534,9 @@ def render_repos(
     `data` comes from `gather_repos()`. Query flags open a panel.
     """
     repos = data["repos"]
+    if repo_filter not in {"all", "enabled", "disabled", "no-docs"}:
+        repo_filter = "all"
+    visible_repos = _repo_filter_rows(repos, repo_filter)
     local_host = data["local_host"]
     body = [f'<header><h1>{icon(REPOS_ICON)}Repos</h1></header>']
 
@@ -2665,7 +3545,12 @@ def render_repos(
 
     add_href = "/repos" if add else "/repos?add=existing"
     add_label = "Close" if add else "Add repo"
-    body.append(f"<div class=row style='margin-bottom:.6rem'><span class=sp></span><a href='{add_href}'>{esc(add_label)}</a></div>")
+    body.append(
+        "<div class='row' style='margin-bottom:.6rem'>"
+        f"{_render_repo_filters(repo_filter)}"
+        "<span class=sp></span>"
+        f"<a href='{add_href}'>{esc(add_label)}</a></div>"
+    )
 
     if add:
         body.append(_render_add_panel(add, repos))
@@ -2681,8 +3566,12 @@ def render_repos(
             "<div class=card><p class=dim>No repos yet. Add one to start scheduling loops.</p>"
             "<a href='/repos?add=existing'>Add your first repo</a></div>"
         )
+    elif not visible_repos:
+        body.append(
+            "<div class=card><p class=dim>No repositories match this filter.</p></div>"
+        )
     else:
-        body.append(_render_repo_table(repos, local_host))
+        body.append(_render_repo_table(visible_repos, local_host))
 
     fleet_error = data.get("fleet_error")
     if fleet_error:
@@ -2691,13 +3580,23 @@ def render_repos(
             "(loop status and concurrency caps below are limited to this machine).</p>"
         )
 
-    return page("Repos", "".join(body), active="repos", extra_js=DOC_EDITOR_JS)
+    extra_js = DOC_EDITOR_JS
+    if sent is not None:
+        extra_js += (
+            ";{const url=new URL(location.href);"
+            "if(url.searchParams.has(\"sent\")){"
+            "url.searchParams.delete(\"sent\");"
+            "history.replaceState(null,\"\",url);}}"
+        )
+    return page("Repos", "".join(body), active="repos", extra_js=extra_js)
 
 
 TIMER_WINDOW_S = 4 * 3600  # the mockup's 4-hour timeline strip
 
 
-def render_schedule(data: dict, *, sent: str | None = None) -> bytes:
+def render_schedule(
+    data: dict, *, sent: str | None = None, warn: str | None = None
+) -> bytes:
     """The Schedule page (issue #22): the `delegation-loop.timer` status
     card, a table of every timer (recurring + one-off), and a "Run now"
     form that dispatches `loop.run` on demand.
@@ -2716,6 +3615,13 @@ def render_schedule(data: dict, *, sent: str | None = None) -> bytes:
 
     if sent:
         body.append(f"<div class=card><span class='pill on'>{esc(sent)}</span></div>")
+    if warn:
+        # Failed or unknown work. Not the success style. The badge stays
+        # short. The detail is plain card text, not inside the pill.
+        body.append(
+            "<div class=card><span class='pill off'>Needs attention</span>"
+            f"<p style='margin:.5rem 0 0'>{esc(warn)}</p></div>"
+        )
 
     # ---- recurring timer card ---------------------------------------------
     active = data["timer_active"]
@@ -2871,12 +3777,34 @@ def render_loops(
     entries = data["entries"]
     local_host = data["local_host"]
     fleet_machines = data.get("machines", [])
+    configured_repo_names = {repo["repo"] for repo in data.get("repos", [])}
+    entry_repo_names = {entry["repo"] for entry in entries}
+    configured_only = sorted(configured_repo_names - entry_repo_names)
+    repo_inventory = {repo["repo"]: repo for repo in data.get("repos", [])}
+
+    def unavailable_message(repo: str) -> str | None:
+        hosts = [
+            host
+            for host in repo_inventory.get(repo, {}).get("configured_hosts", [])
+            if host.get("state") not in ("online", "draining")
+        ]
+        if not hosts:
+            return None
+        details = ", ".join(
+            f"{host.get('name') or 'unknown'} ({host.get('state') or 'unknown'})"
+            for host in hosts
+        )
+        return f"Loop state unavailable: {details}."
+
     selected = next((e for e in entries if e["repo"] == selected_repo), None)
 
     def row(entry: dict) -> str:
         sel = " sel" if entry["repo"] == selected_repo else ""
         dot = LOOP_STATUS_DOT.get(entry["status"], "idle")
+        unavailable = unavailable_message(entry["repo"])
         label = LOOP_STATUS_LABEL.get(entry["status"], entry["status"])
+        if entry["status"] == "stopped":
+            label = "State unavailable" if unavailable else "No active loops"
         return (
             f"<a class='loops-row{sel}' href='{_loops_url(entry['repo'], group, lines)}'>"
             f"<span class='dot {dot}'></span> {esc(entry['repo'])} "
@@ -2884,34 +3812,62 @@ def render_loops(
         )
 
     side = [
-        "<div class=row style='margin-bottom:.4rem'>",
-        f"<a href='/loops?group=repo&repo={quote(selected_repo, safe='')}&lines={lines}'>by repo</a>",
-        " &middot; ",
-        f"<a href='/loops?group=machine&repo={quote(selected_repo, safe='')}&lines={lines}'>by machine</a>",
-        "</div>",
+        "<div class=loops-groupby>",
+        "<span class='dim loops-group-label'>Group by</span>",
+        "<nav class=loops-group-toggle aria-label='Group loops by'>",
+        (
+            f"<a class=loops-group-option href='/loops?group=repo&repo={quote(selected_repo, safe='')}&lines={lines}'"
+            f"{' aria-current=page' if group == 'repo' else ''}>Repo</a>"
+        ),
+        (
+            f"<a class=loops-group-option href='/loops?group=machine&repo={quote(selected_repo, safe='')}&lines={lines}'"
+            f"{' aria-current=page' if group == 'machine' else ''}>Machine</a>"
+        ),
+        "</nav></div>",
     ]
-    if not entries:
-        side.append("<p class=dim>No loopable repos found.</p>")
+    if not entries and not configured_only:
+        side.append("<p class=dim>No repositories found.</p>")
     elif group == "machine":
-        by_machine: dict[str, list[dict]] = {}
-        for entry in entries:
-            by_machine.setdefault(entry["machine"], []).append(entry)
-        # Include machines named by loop state, even when they are not in
-        # the registry.
-        known = sorted({m["name"] for m in fleet_machines} | {local_host} | {e["machine"] for e in entries})
-        for name in known:
-            label = "this machine" if name == local_host else name
-            side.append(f"<div class=loops-group>{esc(label)}</div>")
-            rows = by_machine.get(name, [])
-            if not rows:
-                side.append("<p class=dim style='margin:.2rem 0 0 .8rem'>no loop visible from here</p>")
-            side.extend(row(entry) for entry in rows)
+        if entries:
+            by_machine: dict[str, list[dict]] = {}
+            for entry in entries:
+                by_machine.setdefault(entry["machine"], []).append(entry)
+            # Include machines named by loop state, even when they are not in
+            # the registry.
+            known = sorted({m["name"] for m in fleet_machines} | {local_host} | {e["machine"] for e in entries})
+            for name in known:
+                label = "this machine" if name == local_host else name
+                side.append(f"<div class=loops-group>{esc(label)}</div>")
+                rows = by_machine.get(name, [])
+                if not rows:
+                    side.append("<p class=dim style='margin:.2rem 0 0 .8rem'>no loop visible from here</p>")
+                side.extend(row(entry) for entry in rows)
+        if configured_only:
+            side.append("<div class=loops-group>Configured repositories</div>")
+            side.extend(row({"repo": repo, "status": "stopped"}) for repo in configured_only)
     else:
         side.extend(row(entry) for entry in entries)
+        side.extend(row({"repo": repo, "status": "stopped"}) for repo in configured_only)
 
     main = ["<div class=card>"]
     if selected is None:
-        main.append("<p class=dim>Select a loop.</p>")
+        if selected_repo and selected_repo in configured_repo_names:
+            main.append(f"<div class=row><span class=big>{esc(selected_repo)}</span></div>")
+            unavailable = unavailable_message(selected_repo)
+            detail = esc(unavailable) if unavailable else "No active loops."
+            main.append(f"<p class=dim>{detail}</p>")
+        elif not entries and configured_repo_names:
+            unavailable = None
+            for repo in sorted(configured_repo_names):
+                unavailable = unavailable_message(repo)
+                if unavailable:
+                    break
+            detail = esc(unavailable) if unavailable else "No active loops."
+            main.append(f"<p class=dim>{detail}</p>")
+        elif not entries:
+            main.append("<p class=dim>No repositories found.</p>")
+        else:
+            main.append("<p class=dim>Select a loop.</p>")
     else:
         main.append(
             "<div class=row>"
@@ -2961,7 +3917,9 @@ def render_loops(
                 else:
                     main.append(f"<p class=dim>No SSH target is set for {esc(selected['machine'])}.</p>")
         elif selected["status"] == "stopped":
-            main.append("<p class=dim>Not running.</p>")
+            unavailable = unavailable_message(selected["repo"])
+            detail = esc(unavailable) if unavailable else "No active loops."
+            main.append(f"<p class=dim>{detail}</p>")
         else:
             main.append("<p class=dim>State cannot be verified; actions are disabled.</p>")
         main.append("<div class=row style='margin-top:1rem'>")
@@ -3100,7 +4058,12 @@ def render_debrief_index(items: list[dict]) -> bytes:
         f"{' &middot; no changes' if item['quiet'] else '' if item['has_digest'] or item['record_only'] else ' &middot; no digest'}</span></li>"
         for item in items
     )
-    listing = f"<ul>{rows}</ul>" if rows else "<p class=dim>No debriefs yet.</p>"
+    listing = f"<ul>{rows}</ul>" if rows else (
+        "<div class=dim><p>No debriefs yet.</p>"
+        "<p>Debriefs are written to the local <code>debriefs/</code> folder. "
+        "The fleet shares their digests here. Run <code>lupin agent</code> "
+        "to write periodic debriefs.</p></div>"
+    )
     return page(
         "Debriefs",
         f"<header><h1>Debriefs</h1></header><div class=card>{listing}</div>",
@@ -3200,6 +4163,15 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def reply(self, body: bytes, status: int = 200) -> None:
+        marker = DASHBOARD_STATUS_SLOT.encode("ascii")
+        if marker in body:
+            status_html = b""
+            if status < 400:
+                status_html = render_dashboard_status(
+                    self.fleet_connection,
+                    getattr(self, "dashboard_status_data", None),
+                ).encode("utf-8")
+            body = body.replace(marker, status_html)
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -3296,6 +4268,7 @@ class Handler(BaseHTTPRequestHandler):
         return roadmap.render_combined_page(repos, models, roadmap_page, query, quest_state)
 
     def do_GET(self):  # noqa: N802
+        self.dashboard_status_data = None
         if not self.host_ok():
             self.reply(render_error("bad Host header"), 421)
             return
@@ -3312,47 +4285,12 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(FAVICON)
         elif url.path == "/":
-            self.reply(render_dashboard(gather(self.peek_lines, self.fleet_connection)))
+            status_data = gather(self.peek_lines, self.fleet_connection)
+            self.dashboard_status_data = status_data
+            self.reply(render_dashboard(status_data))
         elif url.path == "/roadmap":
-            try:
-                machine_skipped: list[str] = []
-                machine_records = machines.machines(self.fleet_connection, machine_skipped, strict=False)
-                online = sum(record.get("state") == "online" for record in machine_records)
-                fleet_html = (
-                    "<a class='machine-count' href='/machines' style='display:flex;align-items:center;gap:6px'>"
-                    f"<span class='machine-dot {'online' if online == len(machine_records) else ''}'></span>"
-                    f"{online} of {len(machine_records)} machines</a>"
-                )
-                warning = roadmap.skipped_warning(machine_skipped)
-                if warning:
-                    fleet_html += f"<span class='machine-count'>{html.escape(warning)}</span>"
-            except machines.CoordinatorUnreachable:
-                fleet_html = "<span class='machine-count'>Machine status unavailable</span>"
-            recurring = next((row for row in timers() if row["unit"] == "delegation-loop.timer"), None)
-            next_run = recurring.get("next") if recurring else None
-            if next_run:
-                timer_html = (
-                    f"<span class=machine-timer>{icon('M12 7v5l3 2M12 3a9 9 0 100 18 9 9 0 000-18z', 14)}"
-                    f"Next run <b data-until='{next_run:.0f}'></b></span>"
-                )
-            elif not timer_active():
-                timer_html = "<span class=machine-timer>Timer paused</span>"
-            else:
-                timer_html = ""
-            roadmap_topbar = (
-                f"{fleet_html}{timer_html}<span class='updated-label'>Updated "
-                f"{time.strftime('%H:%M:%S', time.localtime())}</span>"
-            )
-
             def roadmap_page(title, body, extra_css="", extra_js=""):
-                return page(
-                    title,
-                    body,
-                    extra_css,
-                    extra_js,
-                    active="roadmap",
-                    topbar_extra=roadmap_topbar,
-                )
+                return page(title, body, extra_css, extra_js, active="roadmap")
 
             repos = roadmap.repository_names(code_repos())
             selected = query.get("repo", "").strip()
@@ -3400,7 +4338,7 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/machines":
             try:
                 records = machines.machines(self.fleet_connection, strict=True)
-                slot_status = slots_redis.status(**self.fleet_connection)
+                slot_status = slots_redis.status(include_holder_names=True, **self.fleet_connection)
                 timer_list = timers()
                 recurring_timer = next(
                     (timer for timer in timer_list if timer["unit"] == "delegation-loop.timer"),
@@ -3425,7 +4363,9 @@ class Handler(BaseHTTPRequestHandler):
         elif url.path == "/loops":
             self.do_loops(query)
         elif url.path == "/schedule":
-            self.reply(render_schedule(gather_schedule(self.fleet_connection), sent=query.get("sent")))
+            status_data = gather_schedule(self.fleet_connection)
+            self.dashboard_status_data = status_data
+            self.reply(render_schedule(status_data, sent=query.get("sent"), warn=query.get("warn")))
         elif url.path == "/peek":
             self.do_peek(query)
         elif url.path == "/image":
@@ -3498,7 +4438,7 @@ class Handler(BaseHTTPRequestHandler):
                 "The full debrief is below.</p><hr>"
             )
         elif entry and entry.get("record_only"):
-            summary = "<p class=dim>This is a record. Digests cover the 12-hour and 7-day windows.</p>"
+            summary = "<p class=dim>This debrief is a record without a digest.</p>"
         elif entry and entry.get("quiet"):
             summary = "<p class=dim>Nothing changed in this period, so no digest was written.</p>"
         elif entry and entry.get("error"):
@@ -3588,6 +4528,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
         data = gather_repos(self.fleet_connection)
+        self.dashboard_status_data = data
         self.reply(
             render_repos(
                 data,
@@ -3598,6 +4539,7 @@ class Handler(BaseHTTPRequestHandler):
                 schedule_repo=(query.get("schedule") or "").strip() or None,
                 remove_repo=(query.get("remove") or "").strip() or None,
                 sent=query.get("sent"),
+                repo_filter=query.get("filter") or "all",
             )
         )
 
@@ -3614,22 +4556,31 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(render_error("cannot reach the redis coordinator"), 502)
             return
         record = next((row for row in records if row.get("name") == machine), None)
+        if not record:
+            self.reply(render_error(f"remote machine {machine} is not registered"), 400)
+            return
+        if record.get("state") == "offline":
+            self.reply(render_error(f"machine {machine} is offline"), 400)
+            return
+        if record.get("state") != "online":
+            self.reply(render_error(f"machine {machine} is not online"), 400)
+            return
         known_repo = next(
             (
-                item for item in (record or {}).get("repos", [])
+                item for item in record.get("repos", [])
                 if isinstance(item, dict) and item.get("repo") == repo
             ),
             None,
         )
+        if known_repo and known_repo.get("enabled") is True:
+            self.reply(render_error(f"{repo} is already enabled on {machine}"), 400)
+            return
         if (
-            not record
-            or record.get("state") != "online"
-            or not known_repo
-            or known_repo.get("enabled") is True
+            not known_repo
             or known_repo.get("loopable") is not True
             or "repo.enable" not in record.get("actions", [])
         ):
-            self.reply(render_error("remote repository cannot be enabled on that machine"), 400)
+            self.reply(render_error(f"remote repository cannot be enabled on {machine}"), 400)
             return
         signing_key = self._signing_key_for(machine)
         if not signing_key:
@@ -3682,10 +4633,11 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             self.reply(render_error(f"could not write doc: {exc}"), 500)
             return
-        enabled = _repo_platforms()
-        enabled.setdefault(repo, "claude")
-        write_enabled_repos(enabled)
-        self.redirect(f"/repos?sent={quote(f'generated docs and added {repo}', safe='')}")
+        message = (
+            f"Draft created for {repo}. It is not scheduled. Review the file, "
+            "then use Add to schedule when ready."
+        )
+        self.redirect(f"/repos?sent={quote(message, safe='')}")
 
     def do_repos_remove(self, form: dict) -> None:
         repo = form.get("repo", [""])[0].strip()
@@ -3743,7 +4695,8 @@ class Handler(BaseHTTPRequestHandler):
         except CoordinatorUnreachable:
             self.reply(render_error("cannot reach the machine registry"), 502)
             return
-        self.redirect("/repos")
+        sent = f"Concurrency limit for {repo} changed to {max_value}"
+        self.redirect(f"/repos?sent={quote(sent, safe='')}")
 
     def do_repos_schedule(self, form: dict) -> None:
         """Schedule one local one-off run through Lupin."""
@@ -3768,7 +4721,29 @@ class Handler(BaseHTTPRequestHandler):
             snapshot = model_fetch.snapshot()
             model_fetch.save_snapshot(snapshot)
             shared = model_fetch.publish_snapshot(snapshot, **self.fleet_connection)
-            sent = "pulled today's model list and prices"
+            subscriptions = snapshot.get("subscriptions", {})
+            counts = {}
+            for model in snapshot_models(snapshot):
+                name = model["subscription"]
+                counts[name] = counts.get(name, 0) + 1
+            count_summary = ", ".join(
+                f"{name}: {counts.get(name, 0)}" for name in subscriptions
+            ) or "no subscriptions"
+            total = sum(counts.values())
+            if total:
+                sent = (
+                    "pulled today's model list and prices "
+                    f"({count_summary}; {total} models shown)"
+                )
+            else:
+                sent = f"no models returned ({count_summary}; 0 models shown)"
+            failures = [
+                f"{name}: {info.get('error') or info.get('stale_reason') or 'not refreshed'}"
+                for name, info in subscriptions.items()
+                if isinstance(info, dict) and not info.get("live")
+            ]
+            if failures:
+                sent += f"; subscriptions not refreshed: {', '.join(failures)}"
             if not shared:
                 sent += "; fleet cache unavailable, saved on this machine only"
         except Exception as exc:  # keep the dashboard usable if a pull or write fails
@@ -3784,19 +4759,24 @@ class Handler(BaseHTTPRequestHandler):
         reports whatever is cached instead of starting a second, paying
         dispatch. `refresh_snapshot` turns most failures (timed out, bad
         output, Redis unreachable) into a `live: False` result. A refused
-        login or an ACL denial raises instead, and the first except below
-        names it. The broad except is a last-resort guard.
+        login or an ACL denial raises instead. Failed pulls are logged, but
+        the page only gets a short status message. The broad except is a
+        last-resort guard.
         """
+        sent = "Benchmark pull did not complete. Check the server logs for details."
         try:
             data = benchmark_fetch.refresh_snapshot(force=True, **self.fleet_connection)
             if data.get("live"):
                 sent = f"pulled today's benchmark scores ({len(data.get('scores', []))} models)"
             else:
-                sent = f"benchmark pull did not complete: {data.get('stale_reason', 'unknown reason')}"
+                logger.warning(
+                    "benchmark refresh did not complete: %s",
+                    data.get("stale_reason", "unknown reason"),
+                )
         except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
-            sent = slots_redis.refusal_message(exc, "the benchmark refresh", fleet=True)
+            logger.warning("benchmark refresh was denied: %s", exc)
         except Exception as exc:  # best-effort by design, see docstring above
-            sent = f"pull failed: {exc}"
+            logger.warning("benchmark refresh failed: %s: %s", type(exc).__name__, exc)
         self.redirect(f"/model-tiers?sent={quote(sent, safe='')}")
 
     def do_loops(self, query: dict) -> None:
@@ -3808,12 +4788,16 @@ class Handler(BaseHTTPRequestHandler):
         lines = int(lines_raw)
 
         data = gather_loops(self.fleet_connection)
+        self.dashboard_status_data = data
         entries = data["entries"]
         selected_repo = (query.get("repo") or "").strip()
         selected = next((e for e in entries if e["repo"] == selected_repo), None)
-        if selected is None and entries and not selected_repo:
-            selected = entries[0]
-            selected_repo = selected["repo"]
+        if selected is None and not selected_repo:
+            if entries:
+                selected = entries[0]
+                selected_repo = selected["repo"]
+            elif data.get("repos"):
+                selected_repo = data["repos"][0]["repo"]
 
         tail = None
         if (
@@ -4035,16 +5019,34 @@ class Handler(BaseHTTPRequestHandler):
 
 
         local_host = machines.hostname()
+        # Every check below runs before the first enqueue. A refusal here
+        # means nothing was queued or started.
+        safe_retry = "Nothing was queued or started. It is safe to try again."
+        registry_down = False
         try:
             # strict: do not place runs on a partial machine list.
             records = machines.machines(self.fleet_connection, strict=True)
+        except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
+            self.reply(
+                render_error(
+                    f"{slots_redis.refusal_message(exc, 'run now', fleet=True)} {safe_retry}"
+                ),
+                502,
+            )
+            return
         except CoordinatorUnreachable:
             records = []
+            registry_down = True
 
         if place_choice in ("spread", "any"):
             ranked = _rank_candidates(records, local_host)
             if not ranked:
-                self.reply(render_error("no machine is available to place a run on"), 400)
+                why = (
+                    "cannot read the fleet registry"
+                    if registry_down
+                    else "no machine is available to place a run on"
+                )
+                self.reply(render_error(f"{why}. {safe_retry}"), 400)
                 return
             if place_choice == "spread":
                 assigned = [ranked[i % len(ranked)]["name"] for i in range(len(targets_repos))]
@@ -4053,7 +5055,12 @@ class Handler(BaseHTTPRequestHandler):
         elif _machine_available(place_choice, records, local_host):
             assigned = [place_choice] * len(targets_repos)
         else:
-            self.reply(render_error("bad placement"), 400)
+            why = (
+                f"cannot read the fleet registry, so {place_choice!r} cannot be checked"
+                if registry_down
+                else f"bad placement: {place_choice!r} is not an online machine"
+            )
+            self.reply(render_error(f"{why}. {safe_retry}"), 400)
             return
 
         missing_key = next(
@@ -4061,11 +5068,21 @@ class Handler(BaseHTTPRequestHandler):
             None,
         )
         if missing_key:
-            self.reply(render_error(f"no signing key is configured for {missing_key!r}"), 400)
+            self.reply(
+                render_error(f"no signing key is configured for {missing_key!r}. {safe_retry}"),
+                400,
+            )
             return
 
-        errors = []
-        for repo, machine in zip(targets_repos, assigned):
+        # One click gives one outcome. Stop at the first failure so that
+        # no later repo is queued. `started` ran here. `queued` is in the
+        # queue, and a worker has not confirmed it. `unknown` may have
+        # started locally or been queued before the Redis reply was lost.
+        started, queued, errors, unknown = [], [], [], []
+        unknown_detail = ""
+        pairs = list(zip(targets_repos, assigned))
+        for index, (repo, machine) in enumerate(pairs):
+            label = f"{repo}@{machine}"
             local_argv = ["lupin", "run", repo]
             queue_params = {"repo": repo}
             if note:
@@ -4083,18 +5100,75 @@ class Handler(BaseHTTPRequestHandler):
                     actor="lupin-dashboard", issuer=local_host,
                     run_local=lambda argv: run(argv, timeout=20.0),
                 )
+            except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
+                errors.append(f"{label}: {slots_redis.refusal_message(exc, 'run now', fleet=True)}")
             except CoordinatorUnreachable:
-                errors.append(f"{repo}@{machine}: cannot reach the redis coordinator")
-                continue
-            if result["mode"] == "local" and result["returncode"] != 0:
-                errors.append(f"{repo}@{machine}: {result['output'].strip()}")
-        if errors:
-            self.reply(render_error("run now failed:\n" + "\n".join(errors)), 502)
-            return
+                # Redis may have committed enqueue's EVAL before the reply was lost.
+                unknown.append(label)
+                unknown_detail = "the queue did not confirm receipt. The command may have been queued."
+            else:
+                if result["mode"] != "local":
+                    queued.append(label)
+                elif result["returncode"] == 0:
+                    started.append(label)
+                elif result["returncode"] == 124:
+                    # `loops.run_subprocess` returns 124 when the child
+                    # timed out. The run may be live, so a retry is not
+                    # known to be safe.
+                    unknown.append(label)
+                    unknown_detail = "no answer before the time limit. The loop may have started."
+                else:
+                    errors.append(f"{label}: {result['output'].strip()}")
+            if errors or unknown:
+                break
 
-        summary = ", ".join(f"{r}@{m}" for r, m in zip(targets_repos, assigned))
-        sent = f"Started {len(targets_repos)} loop(s): {summary}"
-        self.redirect(f"/schedule?sent={quote(sent, safe='')}")
+        accepted = []
+        if started:
+            accepted.append(f"Started {len(started)} loop(s): {', '.join(started)}.")
+        if queued:
+            accepted.append(
+                f"Queued {len(queued)} loop(s): {', '.join(queued)}. "
+                "A worker starts each one when it picks it up. "
+                "Check Loops for the result."
+            )
+        if not errors and not unknown:
+            accepted.append("Do not submit again.")
+            self.redirect(f"/schedule?sent={quote(' '.join(accepted), safe='')}")
+            return
+        if not accepted and not unknown:
+            self.reply(
+                render_error(
+                    "run now failed. Nothing was queued or started. "
+                    "It is safe to try again.\n" + "\n".join(errors)
+                ),
+                502,
+            )
+            return
+        # Some work was accepted, or a run has an unknown outcome. Show
+        # that, not a rejection. `sent` holds only what is confirmed
+        # (shown as success). `warn` holds failures and unknown results.
+        not_tried = [f"{r}@{m}" for r, m in pairs[index + 1:]]
+        warn = ["Partly done."] if accepted else []
+        if errors:
+            warn.append("Failed: " + "; ".join(error.rstrip(".") for error in errors) + ".")
+        if unknown:
+            warn.append(
+                f"Result unknown for {', '.join(unknown)}: {unknown_detail} "
+                "Check Loops for a later result, but pending commands may not appear there. "
+                "Do not submit unknown work again until you confirm it was not queued or started."
+            )
+        if not_tried:
+            warn.append(
+                f"Not tried: {', '.join(not_tried)}. Only these repos are safe to submit."
+            )
+        if accepted:
+            warn.append(
+                f"Do not submit {', '.join(r.split('@')[0] for r in [*started, *queued])} again."
+            )
+        query = f"warn={quote(' '.join(warn), safe='')}"
+        if accepted:
+            query = f"sent={quote(' '.join(accepted), safe='')}&{query}"
+        self.redirect(f"/schedule?{query}")
 
     def do_peek(self, query: dict) -> None:
         repo = query.get("repo", "").strip()

@@ -1,16 +1,26 @@
-"""Tests for `pace.py` (issue #36): fleet-wide quota pacing facts.
+"""Tests for fleet-wide quota pacing and weekly targets in `pace.py`."""
 
-Grace's three literal rules, not the abstract pacing-ratio design that
-preceded them in the issue thread -- see `pace.py`'s own docstring.
-"""
-
+import os
 import unittest
+from unittest.mock import patch
 
 from lupin import pace
 from lupin.quota import QuotaDuration
 
 HOUR_MS = 60 * 60 * 1000
 MIN_MS = 60 * 1000
+DAY_MS = 24 * HOUR_MS
+
+_TARGET_ENV = patch.dict("os.environ")
+
+
+def setUpModule():
+    _TARGET_ENV.start()
+    os.environ.pop(pace.WEEKLY_DAILY_TARGETS_SETTING, None)
+
+
+def tearDownModule():
+    _TARGET_ENV.stop()
 
 
 def _row(provider, used_pct, resets_in_ms, duration=QuotaDuration.FIVE_HOURS, now_ms=0):
@@ -23,35 +33,36 @@ def _row(provider, used_pct, resets_in_ms, duration=QuotaDuration.FIVE_HOURS, no
 
 
 class BlockedTests(unittest.TestCase):
-    """Reserve rule (decision 1): >=95% blocks unless <3h to reset; >=100%
-    always blocks, with no 3h exception."""
+    """Weekly targets grow with elapsed time; short windows use a 95% reserve.
+    Other windows keep their three-hour grace; missing weekly resets block.
+    """
 
     def test_under_95_percent_is_never_blocked(self):
-        rows = [_row("claude", 94, 10 * HOUR_MS)]
-        self.assertFalse(pace.blocked(rows, "claude", 0))
+        rows = [_row("openai", 94, 10 * HOUR_MS)]
+        self.assertFalse(pace.blocked(rows, "openai", 0))
 
     def test_95_percent_with_just_over_3h_left_is_blocked(self):
-        rows = [_row("claude", 95, 3 * HOUR_MS + MIN_MS)]
-        self.assertTrue(pace.blocked(rows, "claude", 0))
+        rows = [_row("openai", 95, 3 * HOUR_MS + MIN_MS)]
+        self.assertTrue(pace.blocked(rows, "openai", 0))
 
     def test_95_percent_with_just_under_3h_left_is_not_blocked(self):
-        rows = [_row("claude", 95, 3 * HOUR_MS - MIN_MS)]
-        self.assertFalse(pace.blocked(rows, "claude", 0))
+        rows = [_row("openai", 95, 3 * HOUR_MS - MIN_MS)]
+        self.assertFalse(pace.blocked(rows, "openai", 0))
 
     def test_95_percent_with_exactly_3h_left_is_blocked(self):
         # Exact boundary falls on the conservative (blocked) side.
-        rows = [_row("claude", 95, 3 * HOUR_MS)]
-        self.assertTrue(pace.blocked(rows, "claude", 0))
+        rows = [_row("openai", 95, 3 * HOUR_MS)]
+        self.assertTrue(pace.blocked(rows, "openai", 0))
 
     def test_100_percent_with_minutes_left_is_still_blocked(self):
         # The 3h exception only lifts the 95-100% reserve band -- it never
         # applies past 100%, which is always blocked.
-        rows = [_row("claude", 100, MIN_MS)]
-        self.assertTrue(pace.blocked(rows, "claude", 0))
+        rows = [_row("openai", 100, MIN_MS)]
+        self.assertTrue(pace.blocked(rows, "openai", 0))
 
     def test_100_percent_far_from_reset_is_blocked(self):
-        rows = [_row("claude", 100, 10 * HOUR_MS)]
-        self.assertTrue(pace.blocked(rows, "claude", 0))
+        rows = [_row("openai", 100, 10 * HOUR_MS)]
+        self.assertTrue(pace.blocked(rows, "openai", 0))
 
     def test_any_blocked_window_blocks_the_whole_provider(self):
         rows = [
@@ -68,6 +79,79 @@ class BlockedTests(unittest.TestCase):
         rows = [_row("openai", 100, MIN_MS)]
         self.assertFalse(pace.blocked(rows, "claude", 0))
 
+    def test_claude_weekly_usage_above_90_percent_is_blocked_at_week_end(self):
+        rows = [_row("claude", 91, 0, QuotaDuration.WEEKLY)]
+        self.assertTrue(pace.blocked(rows, "claude", 0))
+
+    def test_claude_weekly_usage_at_90_percent_is_allowed_at_week_end(self):
+        rows = [_row("claude", 90, 0, QuotaDuration.WEEKLY)]
+        self.assertFalse(pace.blocked(rows, "claude", 0))
+
+    def test_claude_weekly_usage_at_90_percent_is_blocked_before_week_end(self):
+        rows = [_row("claude", 90, 2 * HOUR_MS, QuotaDuration.WEEKLY)]
+        self.assertTrue(pace.blocked(rows, "claude", 0))
+
+    def test_weekly_target_tracks_elapsed_time_and_allows_exact_boundary(self):
+        cases = [
+            ("start", 7 * DAY_MS, 0),
+            ("middle", 3.5 * DAY_MS, 45),
+            ("end", 0, 90),
+        ]
+        for label, resets_in_ms, target in cases:
+            with self.subTest(label=label):
+                self.assertFalse(pace.blocked(
+                    [_row("claude", target, resets_in_ms, QuotaDuration.WEEKLY)],
+                    "claude",
+                    0,
+                ))
+                if target:
+                    self.assertFalse(pace.blocked(
+                        [_row("claude", target - 0.1, resets_in_ms, QuotaDuration.WEEKLY)],
+                        "claude",
+                        0,
+                    ))
+                self.assertTrue(pace.blocked(
+                    [_row("claude", target + 0.1, resets_in_ms, QuotaDuration.WEEKLY)],
+                    "claude",
+                    0,
+                ))
+
+    def test_provider_daily_target_overrides_default_rate(self):
+        setting = pace.WEEKLY_DAILY_TARGETS_SETTING
+        with patch.dict("os.environ", {setting: '{"claude": 12, "openai": 20}'}):
+            self.assertFalse(pace.blocked(
+                [_row("openai", 70, 3.5 * DAY_MS, QuotaDuration.WEEKLY)],
+                "openai",
+                0,
+            ))
+            self.assertTrue(pace.blocked(
+                [_row("openai", 71, 3.5 * DAY_MS, QuotaDuration.WEEKLY)],
+                "openai",
+                0,
+            ))
+            self.assertTrue(pace.blocked(
+                [_row("claude", 43, 3.5 * DAY_MS, QuotaDuration.WEEKLY)],
+                "claude",
+                0,
+            ))
+
+    def test_weekly_row_without_reset_fails_closed(self):
+        rows = [{
+            "provider": "claude",
+            "duration": QuotaDuration.WEEKLY,
+            "used_pct": 0,
+            "resets_at": None,
+        }]
+        self.assertTrue(pace.blocked(rows, "claude", 0))
+        self.assertIsNone(pace.headroom(rows, "claude", 0))
+
+    def test_invalid_daily_target_configuration_is_rejected(self):
+        setting = pace.WEEKLY_DAILY_TARGETS_SETTING
+        for value in ("[]", '{"claude": 101}', '{"claude": true}', "not-json"):
+            with self.subTest(value=value), patch.dict("os.environ", {setting: value}):
+                with self.assertRaises(pace.PacingConfigError):
+                    pace.weekly_daily_targets()
+
 
 class LeanInTests(unittest.TestCase):
     """Lean-in rule (decision 2), on the provider's longest window with real data.
@@ -78,13 +162,13 @@ class LeanInTests(unittest.TestCase):
 
     def test_under_30_minutes_to_reset_leans_in(self):
         # 80% used, 29m left on 5h: about 90% elapsed, so a surplus.
-        rows = [_row("claude", 80, 29 * MIN_MS)]
-        self.assertTrue(pace.lean_in(rows, "claude", 0))
+        rows = [_row("openai", 80, 29 * MIN_MS)]
+        self.assertTrue(pace.lean_in(rows, "openai", 0))
 
     def test_under_30_minutes_without_surplus_does_not_lean_in(self):
         # 93% used, 29m left on 5h: about 90% elapsed, so no surplus.
-        rows = [_row("claude", 93, 29 * MIN_MS)]
-        self.assertFalse(pace.lean_in(rows, "claude", 0))
+        rows = [_row("openai", 93, 29 * MIN_MS)]
+        self.assertFalse(pace.lean_in(rows, "openai", 0))
 
     def test_surplus_is_measured_on_the_longest_window(self):
         # 5h window has a surplus (10% used, about 90% elapsed). The 7-day
@@ -97,14 +181,14 @@ class LeanInTests(unittest.TestCase):
         self.assertFalse(pace.lean_in(rows, "claude", 0))
 
     def test_exactly_30_minutes_to_reset_does_not_lean_in(self):
-        rows = [_row("claude", 80, 30 * MIN_MS)]
-        self.assertFalse(pace.lean_in(rows, "claude", 0))
+        rows = [_row("openai", 80, 30 * MIN_MS)]
+        self.assertFalse(pace.lean_in(rows, "openai", 0))
 
     def test_exactly_30_minutes_with_surplus_does_not_lean_in(self):
         # 80% used, 30m left on 5h: about 90% elapsed, so a surplus.
         # The 30m check is strict. Exactly 30m does not qualify.
-        rows = [_row("claude", 80, 30 * MIN_MS)]
-        self.assertFalse(pace.lean_in(rows, "claude", 0))
+        rows = [_row("openai", 80, 30 * MIN_MS)]
+        self.assertFalse(pace.lean_in(rows, "openai", 0))
 
     def test_blocked_under_30_minutes_never_leans_in(self):
         # 5h window at 100% is blocked. The 7-day window (longest) has a
@@ -116,27 +200,27 @@ class LeanInTests(unittest.TestCase):
         self.assertFalse(pace.lean_in(rows, "claude", 0))
 
     def test_low_use_and_under_24h_leans_in(self):
-        rows = [_row("claude", 49, 23 * HOUR_MS)]
-        self.assertTrue(pace.lean_in(rows, "claude", 0))
+        rows = [_row("openai", 49, 23 * HOUR_MS)]
+        self.assertTrue(pace.lean_in(rows, "openai", 0))
 
     def test_exactly_50_percent_used_does_not_lean_in(self):
-        rows = [_row("claude", 50, 23 * HOUR_MS)]
-        self.assertFalse(pace.lean_in(rows, "claude", 0))
+        rows = [_row("openai", 50, 23 * HOUR_MS)]
+        self.assertFalse(pace.lean_in(rows, "openai", 0))
 
     def test_exactly_24h_remaining_does_not_lean_in(self):
-        rows = [_row("claude", 10, 24 * HOUR_MS)]
-        self.assertFalse(pace.lean_in(rows, "claude", 0))
+        rows = [_row("openai", 10, 24 * HOUR_MS)]
+        self.assertFalse(pace.lean_in(rows, "openai", 0))
 
     def test_high_use_and_far_from_reset_does_not_lean_in(self):
-        rows = [_row("claude", 80, 23 * HOUR_MS)]
-        self.assertFalse(pace.lean_in(rows, "claude", 0))
+        rows = [_row("openai", 80, 23 * HOUR_MS)]
+        self.assertFalse(pace.lean_in(rows, "openai", 0))
 
     def test_blocked_provider_never_leans_in(self):
         # 96% used, 5h left: not inside the lean-in window at all, but
         # also blocked -- confirms blocked wins even when lean-in's own
         # conditions would otherwise have been false anyway.
-        rows = [_row("claude", 96, 5 * HOUR_MS)]
-        self.assertFalse(pace.lean_in(rows, "claude", 0))
+        rows = [_row("openai", 96, 5 * HOUR_MS)]
+        self.assertFalse(pace.lean_in(rows, "openai", 0))
 
     def test_blocked_provider_never_leans_in_even_if_it_would_otherwise_qualify(self):
         # The 5-hour window is at 96% with 5h left (blocked). The 7-day
@@ -164,8 +248,8 @@ class LeanInTests(unittest.TestCase):
         self.assertFalse(pace.lean_in([], "claude", 0))
 
     def test_only_other_duration_window_does_not_lean_in(self):
-        rows = [_row("claude", 5, MIN_MS, duration=QuotaDuration.OTHER)]
-        self.assertFalse(pace.lean_in(rows, "claude", 0))
+        rows = [_row("openai", 5, MIN_MS, duration=QuotaDuration.OTHER)]
+        self.assertFalse(pace.lean_in(rows, "openai", 0))
 
 
 class EarliestResetTests(unittest.TestCase):

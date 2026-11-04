@@ -1,5 +1,6 @@
 import contextlib
 import html
+from html.parser import HTMLParser
 import io
 import socket
 import sys
@@ -13,19 +14,39 @@ import os
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from importlib import resources
 from unittest import mock
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, unquote, urlsplit
+from xml.etree import ElementTree
 
 import pytest
 import redis as redis_lib
 
 from lupin import (
-    agent, cli, claims, commands, ledger, machines, quest, quota_cache, roadmap, serve,
-    slots, slots_redis, usage_cache,
+    agent,
+    claim_labels,
+    cli,
+    claims,
+    commands,
+    ledger,
+    machines,
+    quest,
+    quota_cache,
+    roadmap,
+    serve,
+    slots,
+    slots_redis,
+    usage_cache,
 )
+
+
+@pytest.fixture(autouse=True)
+def _disable_github_claim_labels(monkeypatch):
+    monkeypatch.setattr(claim_labels, "add_claimed_label", lambda target: None)
+    monkeypatch.setattr(claim_labels, "remove_claimed_label", lambda target: None)
 
 
 def _kw(redis_port):
@@ -114,6 +135,8 @@ class TimerTests(unittest.TestCase):
             ):
                 page = serve.render_dashboard(state).decode()
 
+        self.assertIn("<th>repository</th>", page)
+        self.assertNotIn("No runs are scheduled.", page)
         self.assertIn("all enabled repos", page)
         self.assertIn("<td>repo-one, repo-two", page)
         run.assert_not_called()
@@ -175,11 +198,311 @@ class TimerTests(unittest.TestCase):
 
         self.assertIn("lupin once now repo-enabled", page)
         self.assertIn("data-once-repo='repo-enabled'", page)
+        self.assertIn(
+            "<span data-once-repo='repo-enabled' title='lupin once now repo-enabled'>",
+            page,
+        )
+        self.assertIn(
+            "<code style='user-select:text'>lupin once now repo-enabled</code>",
+            page,
+        )
         self.assertIn("<th>one-off command</th>", page)
         self.assertNotIn("data-once-repo='repo-disabled'", page)
         self.assertNotIn("data-once-repo='repo-no-doc'", page)
         self.assertNotIn("lupin once repo-disabled", page)
         self.assertNotIn("repo(s) missing docs/delegation-loop.md", page)
+
+
+class OverviewContextTests(unittest.TestCase):
+    @staticmethod
+    def _base_state(**overrides):
+        state = {
+            "loops": [],
+            "enabled": [],
+            "timers": [],
+            "timer_active": True,
+            "repos": [],
+            "quota_snapshot": {},
+            "recent_updates": [],
+            "recent_updates_unavailable": False,
+        }
+        state.update(overrides)
+        return state
+
+    @staticmethod
+    def _quota_row(used_pct, resets_at):
+        return {
+            "provider": "openai",
+            "account": "plus",
+            "duration": serve.QuotaDuration.FIVE_HOURS,
+            "used_pct": used_pct,
+            "resets_at": resets_at,
+        }
+
+    def test_overview_shows_current_run_quota_attention_and_recent_update(self):
+        now_ms = int(time.time() * 1000)
+        snapshot = {
+            "openai": {
+                "rows": [self._quota_row(90, now_ms + 9_000_000)],
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "fetched_by": "pihome",
+            }
+        }
+        state = self._base_state(
+            loops=[{"repo": "lupin", "status": "working", "machine": "pihome"}],
+            enabled=["lupin"],
+            quota_snapshot=snapshot,
+            recent_updates=[{
+                "repo": "lupin",
+                "event": "handoff",
+                "issue": 49,
+                "summary": "Overview context added.",
+                "timestamp": "2026-10-25T00:00:00Z",
+            }],
+        )
+
+        page = serve.render_dashboard(state).decode()
+
+        self.assertIn("<b>lupin</b>", page)
+        self.assertIn(">working<", page)
+        self.assertIn("Quota needs attention", page)
+        self.assertIn("openai (plus) · 5 hours", page)
+        self.assertIn("90% used · Ahead of pace", page)
+        self.assertIn("lupin · handoff · #49", page)
+        self.assertIn("Overview context added.", page)
+
+    def test_overview_has_clear_empty_states_with_fresh_quota(self):
+        now_ms = int(time.time() * 1000)
+        state = self._base_state(
+            quota_snapshot={
+                f"provider-{index}": {
+                    "rows": [{
+                        **self._quota_row(20, now_ms + 9_000_000),
+                        "provider": f"provider-{index}",
+                    }],
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                }
+                for index in range(5)
+            }
+        )
+
+        page = serve.render_dashboard(state).decode()
+
+        self.assertIn("No live loops.", page)
+        self.assertIn("No quota warning", page)
+        self.assertIn("No recent updates.", page)
+        self.assertNotIn("Quota status unavailable", page)
+        self.assertIn("And 1 more in Usage.", page)
+        self.assertNotIn("provider-4 ·", page)
+
+    def test_overview_marks_missing_quota_unavailable(self):
+        page = serve.render_dashboard(self._base_state()).decode()
+
+        self.assertIn("Quota status unavailable", page)
+        self.assertIn("No cached quota data.", page)
+        self.assertNotIn("No quota warning", page)
+
+    def test_overview_marks_stale_quota_and_unknown_loop_state(self):
+        state = self._base_state(
+            loops=[{"repo": "lupin", "status": "unknown", "machine": "pihome"}],
+            enabled=["lupin"],
+            quota_snapshot={
+                "openai": {
+                    "rows": [self._quota_row(20, int(time.time() * 1000) + 9_000_000)],
+                    "fetched_at": "2000-01-01T00:00:00+00:00",
+                }
+            },
+            recent_updates_unavailable=True,
+        )
+
+        page = serve.render_dashboard(state).decode()
+
+        self.assertIn("State unavailable for 1 repo(s).", page)
+        self.assertIn(">unknown<", page)
+        self.assertIn("Quota data stale", page)
+        self.assertNotIn("No quota warning", page)
+        self.assertIn("Recent updates are unavailable.", page)
+        self.assertNotIn("No recent updates.", page)
+
+    def test_recent_updates_show_newest_six_and_hide_supervisor_events(self):
+        events = [
+            {
+                "event": "handoff",
+                "summary": f"Update {index}.",
+                "timestamp": f"2026-10-25T00:00:{index:02d}Z",
+            }
+            for index in range(7)
+        ]
+        events.append({
+            "event": "supervise",
+            "summary": "Supervisor pass.",
+            "timestamp": "2026-10-25T00:01:00Z",
+        })
+        with (
+            mock.patch.object(
+                serve.roadmap, "_git_remote_url",
+                return_value="https://github.com/example/service-a.git",
+            ),
+            mock.patch.object(
+                serve.ledger,
+                "read_events_page",
+                return_value=(events, False),
+            ),
+        ):
+            updates, unavailable = serve._recent_updates(
+                [{"repo": "service-a"}], ["service-a"], {}
+            )
+
+        page = serve.render_dashboard(
+            self._base_state(
+                recent_updates=updates,
+                recent_updates_unavailable=unavailable,
+            )
+        ).decode()
+
+        self.assertFalse(unavailable)
+        self.assertLess(page.index("Update 6."), page.index("Update 5."))
+        self.assertNotIn("Update 0.", page)
+        self.assertNotIn("Supervisor pass.", page)
+        self.assertEqual(sum(page.count(f"Update {i}.") for i in range(7)), 6)
+
+    def test_recent_updates_read_past_eight_supervisor_events(self):
+        events = [{
+            "event": "handoff",
+            "summary": "Older handoff.",
+            "timestamp": "2026-10-25T00:00:00Z",
+        }]
+        events.extend({
+            "event": "supervise",
+            "summary": f"Supervisor pass {index}.",
+            "timestamp": f"2026-10-25T00:{index + 1:02d}:00Z",
+        } for index in range(8))
+
+        def read_events_page(_repository, limit, **_connection):
+            return events[-limit:], len(events) > limit
+
+        with (
+            mock.patch.object(
+                serve.roadmap, "_git_remote_url",
+                return_value="https://github.com/example/service-a.git",
+            ),
+            mock.patch.object(
+                serve.ledger, "read_events_page", side_effect=read_events_page
+            ),
+        ):
+            updates, unavailable = serve._recent_updates(
+                [{"repo": "service-a"}], ["service-a"], {}
+            )
+
+        page = serve.render_dashboard(
+            self._base_state(
+                recent_updates=updates,
+                recent_updates_unavailable=unavailable,
+            )
+        ).decode()
+
+        self.assertFalse(unavailable)
+        self.assertIn("Older handoff.", page)
+        self.assertNotIn("No recent updates.", page)
+        self.assertNotIn("Supervisor pass", page)
+
+    def test_recent_updates_stop_at_cap_and_mark_incomplete(self):
+        events = [{
+            "event": "handoff",
+            "summary": "Older handoff.",
+            "timestamp": "2026-10-25T00:00:00Z",
+        }]
+        events.extend({
+            "event": "supervise",
+            "summary": f"Supervisor pass {index}.",
+            "timestamp": "2026-10-26T00:00:00Z",
+        } for index in range(1000))
+        read_limits = []
+        read_sizes = []
+
+        def read_events_page(_repository, limit, **_connection):
+            page = events[-limit:]
+            read_limits.append(limit)
+            read_sizes.append(len(page))
+            return page, len(events) > limit
+
+        with (
+            mock.patch.object(
+                serve.roadmap, "_git_remote_url",
+                return_value="https://github.com/example/service-a.git",
+            ),
+            mock.patch.object(
+                serve.ledger, "read_events_page", side_effect=read_events_page
+            ),
+        ):
+            updates, unavailable = serve._recent_updates(
+                [{"repo": "service-a"}], ["service-a"], {}
+            )
+
+        page = serve.render_dashboard(
+            self._base_state(
+                recent_updates=updates,
+                recent_updates_unavailable=unavailable,
+            )
+        ).decode()
+
+        self.assertEqual(read_limits, [256])
+        self.assertEqual(sum(read_sizes), 256)
+        self.assertTrue(unavailable)
+        self.assertEqual(updates, [])
+        self.assertIn("Recent updates are unavailable.", page)
+        self.assertNotIn("No recent updates.", page)
+        self.assertNotIn("Older handoff.", page)
+
+
+def test_recent_updates_detects_truncation_after_skipped_raw_entry(
+    redis_port, flush_redis
+):
+    connection = _kw(redis_port)
+    client = ledger._client(**connection)
+    key = ledger._stream_key("example/service-a")
+    client.xadd(key, {
+        "ts": "2026-10-25T00:00:00Z",
+        "host": "worker-a",
+        "event": "handoff",
+        "summary": "Older handoff.",
+    })
+    pipeline = client.pipeline()
+    for index in range(255):
+        pipeline.xadd(key, {
+            "ts": f"2026-10-26T00:{index % 60:02d}:00Z",
+            "host": "worker-a",
+            "event": "supervise",
+        })
+    pipeline.xadd(key, {
+        "ts": "2026-10-26T00:00:00Z",
+        "host": "worker-a",
+        "event": "supervise",
+        "summary": b"\xff",
+    })
+    pipeline.execute()
+    assert client.xlen(key) == 257
+
+    with mock.patch.object(
+        serve.roadmap, "_git_remote_url",
+        return_value="https://github.com/example/service-a.git",
+    ):
+        updates, unavailable = serve._recent_updates(
+            [{"repo": "service-a"}], ["service-a"], connection
+        )
+
+    page = serve.render_dashboard(
+        OverviewContextTests._base_state(
+            recent_updates=updates,
+            recent_updates_unavailable=unavailable,
+        )
+    ).decode()
+
+    assert unavailable
+    assert updates == []
+    assert "Recent updates are unavailable." in page
+    assert "No recent updates." not in page
+    assert "Older handoff." not in page
 
 
 class TimeFormattingTests(unittest.TestCase):
@@ -188,6 +511,46 @@ class TimeFormattingTests(unittest.TestCase):
         self.assertEqual(serve.time_until_reset(30_000, now_ms=0), "<1m")
         self.assertEqual(serve.time_until_reset(0, now_ms=0), "now")
         self.assertEqual(serve.time_until_reset(None, now_ms=0), "-")
+
+
+class _QuotaMatrixParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.in_matrix = False
+        self.rows = []
+        self.row = None
+        self.cell = None
+        self.windows = []
+        self.age_markers = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "table" and "quota-matrix" in attributes.get("class", "").split():
+            self.in_matrix = True
+        elif self.in_matrix and tag == "tr":
+            self.row = []
+        elif self.in_matrix and tag in {"th", "td"} and self.row is not None:
+            self.cell = {"tag": tag, "attrs": attributes, "text": ""}
+        elif self.in_matrix and "data-window-duration" in attributes:
+            self.windows.append(attributes)
+        if self.in_matrix and "data-since" in attributes:
+            self.age_markers.append(attributes)
+
+    def handle_data(self, data):
+        if self.cell is not None:
+            self.cell["text"] += data
+
+    def handle_endtag(self, tag):
+        if not self.in_matrix:
+            return
+        if tag in {"td", "th"} and self.cell is not None:
+            self.row.append(self.cell)
+            self.cell = None
+        elif tag == "tr" and self.row is not None:
+            self.rows.append(self.row)
+            self.row = None
+        elif tag == "table":
+            self.in_matrix = False
 
 
 class QuotaRenderingTests(unittest.TestCase):
@@ -202,7 +565,7 @@ class QuotaRenderingTests(unittest.TestCase):
             "used_pct": 42,
             "resets_at": 302_400_000,
         }
-        rendered = serve.render_quota_row(row, now_ms=0)
+        rendered = serve.render_quota_cell(row, now_ms=0)
 
         self.assertEqual(serve.time_remaining_pct(row, now_ms=0), 50)
         self.assertEqual(serve.quota_elapsed_pct(row, now_ms=0), 50)
@@ -210,6 +573,39 @@ class QuotaRenderingTests(unittest.TestCase):
         self.assertIn("left:50.0%", rendered)
         self.assertIn("3d 12h", rendered)
         self.assertIn("42% used", rendered)
+
+    def test_quota_summary_distinguishes_other_windows_by_duration(self):
+        rows = [
+            {
+                "provider": "openai",
+                "account": "plus",
+                "duration": serve.QuotaDuration.OTHER,
+                "duration_ms": 7_200_000,
+                "label": None,
+                "used_pct": 90,
+                "resets_at": 1_800_000,
+            },
+            {
+                "provider": "openai",
+                "account": "plus",
+                "duration": serve.QuotaDuration.OTHER,
+                "duration_ms": 14_400_000,
+                "label": "",
+                "used_pct": 95,
+                "resets_at": 3_600_000,
+            },
+        ]
+        summary = serve.render_quota_summary(rows, now_ms=0)
+
+        self.assertIn(
+            "openai (plus) Other · 2h, openai (plus) Other · 4h", summary
+        )
+        self.assertIn(
+            "quota-summary-value>openai (plus) · Other · 4h</div>", summary
+        )
+        self.assertIn(
+            "quota-summary-value>openai (plus) · Other · 2h</div>", summary
+        )
 
     def test_unclassified_window_keeps_its_pace_marker(self):
         # Issue #80: the legend and the footer promise the marker, so a row
@@ -221,7 +617,7 @@ class QuotaRenderingTests(unittest.TestCase):
             "used_pct": 42,
             "resets_at": 302_400_000,
         }
-        rendered = serve.render_quota_row(row, now_ms=0)
+        rendered = serve.render_quota_cell(row, now_ms=0)
 
         self.assertIn("quota-meter-elapsed", rendered)
         self.assertIn("quota-meter-elapsed-unknown", rendered)
@@ -231,7 +627,7 @@ class QuotaRenderingTests(unittest.TestCase):
         # The same row with a known window length gets a real marker and a
         # real pace status, even though the window name is unknown.
         row["duration_ms"] = 604_800_000
-        rendered = serve.render_quota_row(row, now_ms=0)
+        rendered = serve.render_quota_cell(row, now_ms=0)
 
         self.assertEqual(serve.quota_elapsed_pct(row, now_ms=0), 50)
         self.assertIn("left:50.0%", rendered)
@@ -262,24 +658,50 @@ class QuotaRenderingTests(unittest.TestCase):
         self.assertNotIn("FileNotFoundError", page)
         self.assertNotIn("/var/lib/delegation-loop", page)
 
-    def test_quota_section_groups_by_provider_and_precedes_totals(self):
-        # Real-shaped row, as `quota.quota_usage()` would produce it --
-        # confirmed against that module's own tests.
-        reset_at_ms = 1_790_547_474_348
-        rows = [{
-            "provider": "opencode-go",
-            "duration": serve.QuotaDuration.MONTHLY,
-            "label": "Monthly limit",
-            "used_pct": 64.0,
-            "resets_at": reset_at_ms,
-            "generated_at": "2026-01-01 00:00:00",
-        }]
+    def test_usage_quota_matrix_compares_windows_and_live_metadata(self):
+        now_ms = int(time.time() * 1000)
+        generated_at = "2026-01-01 00:00:00"
+        five_hour_reset = now_ms + 2 * 60 * 60 * 1000 + 30 * 60 * 1000
+        rows = [
+            {
+                "provider": "openai",
+                "account": "plus",
+                "duration": serve.QuotaDuration.FIVE_HOURS,
+                "used_pct": 42,
+                "resets_at": five_hour_reset,
+                "generated_at": generated_at,
+            },
+            {
+                "provider": "openai",
+                "account": "plus",
+                "duration": serve.QuotaDuration.WEEKLY,
+                "used_pct": 55,
+                "resets_at": now_ms + 48 * 60 * 60 * 1000,
+                "generated_at": generated_at,
+            },
+            {
+                "provider": "openai",
+                "account": "free",
+                "duration": serve.QuotaDuration.MONTHLY,
+                "used_pct": 100,
+                "resets_at": now_ms + 120 * 60 * 60 * 1000,
+                "generated_at": generated_at,
+            },
+            {
+                "provider": "claude",
+                "duration": serve.QuotaDuration.WEEKLY,
+                "used_pct": 45,
+                "resets_at": now_ms + 72 * 60 * 60 * 1000,
+                "generated_at": generated_at,
+            },
+        ]
         snapshot = {
-            "opencode-go": {
-                "rows": rows,
+            provider: {
+                "rows": [row for row in rows if row["provider"] == provider],
                 "fetched_at": "2026-01-01T00:00:00+00:00",
                 "fetched_by": "jesus",
             }
+            for provider in ("openai", "claude")
         }
         with (
             mock.patch.object(quota_cache, "read_snapshot", return_value=snapshot),
@@ -287,23 +709,98 @@ class QuotaRenderingTests(unittest.TestCase):
         ):
             page = serve.render_usage().decode()
 
-        self.assertIn(
-            f"data-window-duration='P30D' data-resets-at-ms='{reset_at_ms}'",
-            page,
+        parser = _QuotaMatrixParser()
+        parser.feed(page)
+        self.assertEqual(len(parser.age_markers), 3)
+        self.assertEqual(
+            [cell["text"].strip() for cell in parser.rows[0]],
+            ["Provider / account", "5 hours", "7 days", "Monthly"],
         )
-        self.assertIn("<h3>opencode-go</h3>", page)
-        self.assertIn("<span><strong>36%</strong> available</span>", page)
-        self.assertIn("64% used", page)
-        self.assertIn("quota-meter-elapsed", page)
+        plus = next(row for row in parser.rows[1:] if "openai plus" in row[0]["text"])
+        self.assertIn("fetched", plus[0]["text"])
+        self.assertIn("via jesus", plus[0]["text"])
+        self.assertIn("stale", plus[0]["text"])
+        self.assertIn("58% available", plus[1]["text"])
+        self.assertIn("42% used", plus[1]["text"])
+        self.assertIn("On pace", plus[1]["text"])
+        self.assertIn(serve.epoch_ms_to_local(five_hour_reset), plus[1]["text"])
+        self.assertEqual(plus[3]["text"].strip(), "—")
+        self.assertEqual(
+            plus[3]["attrs"]["aria-label"],
+            "No cached quota for this provider and window",
+        )
+        five_hour_cell = next(
+            cell for cell in parser.windows
+            if cell["data-window-duration"] == "PT5H"
+        )
+        self.assertEqual(
+            five_hour_cell["data-resets-at-ms"], str(five_hour_reset)
+        )
+        free = next(row for row in parser.rows[1:] if "openai free" in row[0]["text"])
+        self.assertIn("100% used", free[3]["text"])
         self.assertIn("Needs attention", page)
-        self.assertIn("Most used", page)
-        self.assertIn("Next reset", page)
-        self.assertLess(page.index("<h2>Quota</h2>"), page.index("<h2>7-day totals</h2>"))
-        self.assertIn("Data timestamp: 2026-01-01 00:00:00", page)
-        # Staleness is visible, per provider -- fetched via this fake "jesus".
-        self.assertIn("fetched", page)
-        self.assertIn("via jesus", page)
-        self.assertIn("stale", page)
+        self.assertLess(
+            page.index("class=quota-matrix"), page.index("<h2>7-day totals</h2>")
+        )
+
+    def test_usage_matrix_distinguishes_other_windows_with_known_durations(self):
+        rows = [
+            {
+                "provider": "openai",
+                "duration": serve.QuotaDuration.OTHER,
+                "duration_ms": 7_200_000,
+                "label": None,
+                "used_pct": 42,
+                "resets_at": 3_600_000,
+            },
+            {
+                "provider": "claude",
+                "duration": serve.QuotaDuration.OTHER,
+                "duration_ms": 14_400_000,
+                "label": "",
+                "used_pct": 55,
+                "resets_at": 7_200_000,
+            },
+            {
+                "provider": "gemini",
+                "duration": serve.QuotaDuration.OTHER,
+                "duration_ms": 7_200_000,
+                "label": "Source window",
+                "used_pct": 70,
+                "resets_at": 3_600_000,
+            },
+        ]
+        snapshot = {
+            row["provider"]: {
+                "rows": [row],
+                "fetched_at": "2026-01-01T00:00:00+00:00",
+                "fetched_by": "synthetic",
+            }
+            for row in rows
+        }
+        with (
+            mock.patch.object(quota_cache, "read_snapshot", return_value=snapshot),
+            mock.patch.object(usage_cache, "read_snapshot", return_value={}),
+        ):
+            page = serve.render_usage().decode()
+
+        parser = _QuotaMatrixParser()
+        parser.feed(page)
+        self.assertEqual(
+            [cell["text"].strip() for cell in parser.rows[0]],
+            ["Provider / account", "Other · 2h", "Source window", "Other · 4h"],
+        )
+        claude = next(row for row in parser.rows[1:] if "claude" in row[0]["text"])
+        self.assertEqual(claude[1]["text"].strip(), "—")
+        self.assertIn("55% used", claude[3]["text"])
+        gemini = next(row for row in parser.rows[1:] if "gemini" in row[0]["text"])
+        self.assertEqual(gemini[1]["text"].strip(), "—")
+        self.assertIn("70% used", gemini[2]["text"])
+        self.assertEqual(gemini[3]["text"].strip(), "—")
+        openai = next(row for row in parser.rows[1:] if "openai" in row[0]["text"])
+        self.assertIn("42% used", openai[1]["text"])
+        self.assertEqual(openai[2]["text"].strip(), "—")
+        self.assertEqual(openai[3]["text"].strip(), "—")
 
     def test_usage_page_names_the_account_of_each_row(self):
         reset_at_ms = 1_790_547_474_348
@@ -322,15 +819,14 @@ class QuotaRenderingTests(unittest.TestCase):
         ):
             page = serve.render_usage().decode()
 
-        self.assertIn("<div class=dim>free</div>", page)
-        self.assertIn("<div class=dim>plus</div>", page)
+        parser = _QuotaMatrixParser()
+        parser.feed(page)
+        owners = [row[0]["text"] for row in parser.rows[1:]]
+        self.assertTrue(any("openai free" in owner for owner in owners))
+        self.assertTrue(any("openai plus" in owner for owner in owners))
         # The summary names the account too: free is the most used row.
         self.assertIn("openai (free)", page)
 
-    def test_usage_page_has_no_account_line_for_one_account(self):
-        row = {"provider": "claude", "duration": serve.QuotaDuration.FIVE_HOURS,
-               "used_pct": 40.0, "resets_at": 1_790_547_474_348}
-        self.assertNotIn("class=dim>", serve.render_quota_row(row, 0))
 
     def test_quota_note_and_error_rows_render_as_dim_text(self):
         omp_snapshot = {
@@ -345,8 +841,7 @@ class QuotaRenderingTests(unittest.TestCase):
             mock.patch.object(usage_cache, "read_snapshot", return_value={}),
         ):
             page = serve.render_usage().decode()
-        self.assertIn("<h3>omp</h3>", page)
-        self.assertIn("<p class=dim>Not available</p>", page)
+        self.assertIn("<div class=quota-provider-note>Not available</div>", page)
         self.assertNotIn("RuntimeError", page)
 
         claude_snapshot = {
@@ -361,8 +856,7 @@ class QuotaRenderingTests(unittest.TestCase):
             mock.patch.object(usage_cache, "read_snapshot", return_value={}),
         ):
             page = serve.render_usage().decode()
-        self.assertIn("<h3>claude</h3>", page)
-        self.assertIn("quota unavailable", page)
+        self.assertIn("<div class=quota-provider-note>quota unavailable</div>", page)
 
     def test_seven_day_totals_aggregate_machine_snapshots_and_show_staleness(self):
         now = serve.datetime.now(serve.timezone.utc).isoformat()
@@ -494,6 +988,43 @@ class DashboardRouteTests(unittest.TestCase):
         self.assertIn("href='/favicon.ico' type='image/svg+xml'", head)
         self.assertIn("name=viewport", head)
 
+    def test_favicon_matches_lupin_flower_pixels(self):
+        rows = [
+            "l", "lPl", "PlP", "lPlPl", "PlPlP", "lPlPlPl", "PlllllllP",
+            "PlelllelP", "PbllellbP", "PlllllllP", "lPlPlPlPl", "PlPlPlP",
+            "lPlPl", "g", "GG..g..GG", "GGG.g.GGG", ".GGGgGGG.", "g",
+        ]
+        palette = {
+            "l": "#d4c3f7",
+            "P": "#8a63d9",
+            "e": "#2a2340",
+            "b": "#f4a6c4",
+            "g": "#3f8a5a",
+            "G": "#93d1a0",
+        }
+        root = ElementTree.fromstring(serve.FAVICON)
+        self.assertEqual(root.tag, "{http://www.w3.org/2000/svg}svg")
+        self.assertEqual(root.attrib["viewBox"], "0 0 13 18")
+
+        actual = {}
+        for rect in root:
+            self.assertEqual(rect.tag, "{http://www.w3.org/2000/svg}rect")
+            x, y, width, height = (
+                int(rect.attrib[key]) for key in ("x", "y", "width", "height")
+            )
+            self.assertEqual(height, 1)
+            for col in range(x, x + width):
+                self.assertNotIn((col, y), actual)
+                actual[col, y] = rect.attrib["fill"]
+
+        expected = {}
+        for y, row in enumerate(rows):
+            row = ("." * ((13 - len(row)) // 2) + row).ljust(13, ".")
+            for x, char in enumerate(row):
+                if char != ".":
+                    expected[x, y] = palette[char]
+        self.assertEqual(actual, expected)
+
 
 class MachinesRouteUnitTests(unittest.TestCase):
     """Routing/dispatch logic only -- mocked machines/slots_redis calls, no
@@ -513,6 +1044,24 @@ class MachinesRouteUnitTests(unittest.TestCase):
             handler.do_GET()
         fake.assert_called_once_with({"redis_host": "127.0.0.1"}, strict=True)
         handler.reply.assert_called_once()
+
+    def test_render_machines_labels_unmanaged_agent_and_identity(self):
+        records = [{
+            "name": "worker",
+            "state": "online",
+            "loops": [{
+                "repo": None,
+                "managed": False,
+                "state": "working",
+                "agent": "omp",
+            }],
+        }]
+        with mock.patch.object(serve.machines, "hostname", return_value="reader"):
+            body = serve.render_machines(records, {}).decode()
+
+        self.assertIn("Unmanaged agent · omp", body)
+        self.assertIn("working", body)
+        self.assertNotIn("Unknown repo", body)
 
     def test_machines_route_unreachable_coordinator_is_502(self):
         handler = serve.Handler.__new__(serve.Handler)
@@ -700,7 +1249,11 @@ class ModelTierTests(unittest.TestCase):
 
     def test_shipped_model_tiers_file_renders_every_category(self):
         real_path = str(resources.files("lupin").joinpath("model-tiers.json"))
-        with mock.patch.object(serve, "MODEL_TIERS_PATH", real_path):
+        with (
+            mock.patch.object(serve, "MODEL_TIERS_PATH", real_path),
+            mock.patch.dict(os.environ) as environment,
+        ):
+            environment.pop(serve.tiers_config.SETTING, None)
             rows = serve.model_tiers()
             page = serve.render_model_tiers().decode()
 
@@ -711,6 +1264,9 @@ class ModelTierTests(unittest.TestCase):
         )
         for category in categories:
             self.assertIn(f"<h3>{category}</h3>", page)
+
+        self.assertIn(f"<code>{serve.esc(real_path)}</code>", page)
+        self.assertNotIn("modules/ai/model-tiers.json", page)
 
     def test_custom_model_tiers_path_is_used_and_shown(self):
         self.write_tiers({
@@ -724,7 +1280,8 @@ class ModelTierTests(unittest.TestCase):
         ):
             page = serve.render_model_tiers().decode()
 
-        self.assertIn(f"<code>{self.tiers_path}</code>", page)
+        self.assertIn(f"<code>{serve.esc(self.tiers_path)}</code>", page)
+        self.assertNotIn("modules/ai/model-tiers.json", page)
         self.assertIn("opencode-go/custom", page)
 
     def test_model_tiers_route_and_dashboard_link(self):
@@ -945,12 +1502,14 @@ class AllModelsTableTests(unittest.TestCase):
         with (
             mock.patch.object(serve, "MODEL_TIERS_PATH", self.tiers_path),
             mock.patch.object(serve.model_fetch, "read_shared_snapshot", return_value=shared),
+            mock.patch.object(serve.model_fetch, "_read_local_snapshot", return_value=None),
             mock.patch.object(serve.benchmark_fetch, "read_snapshot", return_value=None),
         ):
             page = serve.render_model_tiers(connection={"redis_host": "fleet"}).decode()
 
+        expected = serve.datetime.fromisoformat(shared["fetched_at"]).timestamp()
+        self.assertIn(f"data-since='{expected:.0f}'", page)
         self.assertIn("claude-opus-4-5", page)
-        self.assertNotIn("Last pulled: never pulled", page)
 
     def test_no_snapshot_file_shows_placeholder_not_a_crash(self):
         self.write_tiers({"coding": {"tiers": {"tier1": [{"model": "sonnet", "effort": "high"}]}}})
@@ -1034,6 +1593,73 @@ class AllModelsTableTests(unittest.TestCase):
         self.assertIn("href='https://example.org/glm-note'", page)
         self.assertIn("No private model tests were run", page)
 
+    def test_tier_comparison_uses_exact_model_scores_and_warns_on_stale_rows(self):
+        self.write_tiers({
+            "general": {
+                "source": "Artificial Analysis Intelligence Index",
+                "last_verified": "2000-01-01",
+                "tiers": {
+                    "tier1": [
+                        {"model": "openai-codex/gpt-9-1", "effort": "high"},
+                        {"model": "openai-codex/gpt-9-2", "effort": "low"},
+                    ],
+                    "tier2": [
+                        {"model": "openai-codex/gpt-9-2", "effort": "high"},
+                    ],
+                },
+            },
+        })
+        self.write_snapshot({
+            "fetched_at": "2000-01-01T00:00:00+00:00",
+            "subscriptions": {
+                "codex": {
+                    "live": True,
+                    "models": [
+                        {"id": "gpt-9-1", "display_name": "GPT 9.1"},
+                        {"id": "gpt-9-2", "display_name": "GPT 9.2"},
+                    ],
+                },
+            },
+        })
+        benchmark_snapshot = {
+            "fetched_at": "2000-01-01T00:00:00+00:00",
+            "live": True,
+            "scores": [{
+                "id": "gpt-9-2",
+                "score": 82,
+                "scale": "Artificial Analysis Intelligence Index (0-100)",
+                "source": "https://artificialanalysis.ai/leaderboards/models",
+                "fetched_at": "2000-01-01T00:00:00+00:00",
+            }],
+        }
+        with mock.patch.object(
+            serve.benchmark_fetch, "read_snapshot", return_value=benchmark_snapshot
+        ):
+            page = self.render()
+
+        warning = page.index("1 model-tier category has not been verified in over 30 days")
+        comparison = page.index("<h2>Category and tier comparison</h2>")
+        routing = page.index("<h2>Routing by task category</h2>")
+        self.assertLess(page.index("Model list:"), warning)
+        self.assertLess(warning, comparison)
+        self.assertLess(comparison, routing)
+        self.assertIn("1 stale source score", page)
+        row_start = page.index("<th scope=row>general</th>")
+        row_end = page.index("</tr>", row_start)
+        row = page[row_start:row_end]
+        tier1_start = row.index("class='tier-summary-cell tier1'>")
+        tier1 = row[tier1_start:row.index("</td>", tier1_start)]
+        tier2_start = row.index("class='tier-summary-cell tier2'>")
+        tier2 = row[tier2_start:row.index("</td>", tier2_start)]
+        self.assertIn("GPT 9.1", tier1)
+        self.assertIn("+1 fallback", tier1)
+        self.assertIn("No verified score", tier1)
+        self.assertNotIn("82", tier1)
+        self.assertIn("GPT 9.2", tier2)
+        self.assertIn("82", tier2)
+        self.assertIn("gpt-9-2", page[routing:])
+        self.assertIn("<h2>All models</h2>", page[routing:])
+
     def test_perf_uses_unavailable_benchmark_leader_as_denominator(self):
         model = {"id": "glm-5.3"}
         _categories, _scores, performance = serve.benchmark_catalog.matrix([model], None)
@@ -1061,18 +1687,25 @@ class AllModelsTableTests(unittest.TestCase):
     def test_benchmark_status_counts_only_numeric_scores(self):
         self.write_tiers({})
         benchmark_snapshot = {
-            "fetched_at": "2026-10-07T06:00:00+00:00",
+            "fetched_at": "2000-01-01T06:00:00+00:00",
             "live": True,
             "scores": [
                 {"id": "one", "score": None, "reason": "unable to verify"},
-                {"id": "two", "score": None, "reason": "unable to verify"},
+                {"id": "two", "score": "unknown"},
+                {"id": "three", "score": True},
+                {
+                    "id": "four",
+                    "score": 12.5,
+                    "fetched_at": "2000-01-01T00:00:00+00:00",
+                },
             ],
         }
         with mock.patch.object(
             serve.benchmark_fetch, "read_snapshot", return_value=benchmark_snapshot
         ):
             page = self.render()
-        self.assertIn("(0/2 scored)", page)
+        self.assertIn("(1/4 scored)", page)
+        self.assertIn("1 stale source score", page)
 
     def test_sent_message_is_shown_and_escaped(self):
         self.write_tiers({})
@@ -1103,7 +1736,19 @@ class ModelTiersRefreshRouteTests(unittest.TestCase):
         handler.send_header = mock.Mock()
         handler.end_headers = mock.Mock()
         handler.fleet_connection = {"redis_host": "fleet"}
-        fake_snapshot = {"fetched_at": "2026-10-07T00:00:00+00:00", "subscriptions": {}}
+        fake_snapshot = {
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [{"id": "claude-opus"}, {"id": "claude-sonnet"}],
+                },
+                "opencode-go": {
+                    "live": True,
+                    "models": [{"id": "opencode-model"}],
+                },
+            },
+        }
         with (
             mock.patch.object(serve.model_fetch, "snapshot", return_value=fake_snapshot) as fake_fetch,
             mock.patch.object(serve.model_fetch, "save_snapshot") as fake_save,
@@ -1117,8 +1762,110 @@ class ModelTiersRefreshRouteTests(unittest.TestCase):
         location = next(
             call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
         )
-        self.assertIn("pulled%20today%27s%20model%20list", location)
+        message = unquote(location.partition("sent=")[2])
         self.assertTrue(location.startswith("/model-tiers?sent="))
+        self.assertIn("pulled today's model list and prices", message)
+        self.assertIn("claude: 2, opencode-go: 1", message)
+        self.assertIn("3 models shown", message)
+
+    def test_refresh_publish_failure_renders_newer_local_snapshot(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        handler.fleet_connection = {"redis_host": "fleet"}
+        fresh_snapshot = {
+            "fetched_at": "2026-10-08T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [{"id": "fresh-1"}, {"id": "fresh-2"}],
+                },
+            },
+        }
+        stale_shared_snapshot = {
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": True,
+                    "models": [{"id": "old-1"}],
+                },
+            },
+        }
+        with (
+            mock.patch.object(serve.model_fetch, "snapshot", return_value=fresh_snapshot),
+            mock.patch.object(serve.model_fetch, "save_snapshot") as fake_save,
+            mock.patch.object(serve.model_fetch, "publish_snapshot", return_value=False) as fake_publish,
+            mock.patch.object(
+                serve.model_fetch, "read_shared_snapshot", return_value=stale_shared_snapshot
+            ),
+            mock.patch.object(serve.model_fetch, "_read_local_snapshot", return_value=fresh_snapshot),
+            mock.patch.object(serve.benchmark_fetch, "read_snapshot", return_value=None),
+        ):
+            handler.do_POST()
+            fake_save.assert_called_once_with(fresh_snapshot)
+            fake_publish.assert_called_once_with(fresh_snapshot, redis_host="fleet")
+            location = next(
+                call.args[1]
+                for call in handler.send_header.call_args_list
+                if call.args[0] == "Location"
+            )
+            message = unquote(location.partition("sent=")[2])
+            page = serve.render_model_tiers(
+                sent=message, connection=handler.fleet_connection
+            ).decode()
+        self.assertIn("claude: 2", message)
+        self.assertIn("2 models shown", message)
+        self.assertIn("fleet cache unavailable", message)
+        self.assertIn("fresh-1", page)
+        self.assertIn("fresh-2", page)
+        self.assertNotIn("old-1", page)
+
+    def test_refresh_with_no_models_reports_subscription_errors(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        handler.fleet_connection = {}
+        fake_snapshot = {
+            "fetched_at": "2026-10-07T00:00:00+00:00",
+            "subscriptions": {
+                "claude": {
+                    "live": False,
+                    "error": "unavailable (FileNotFoundError)",
+                    "models": [],
+                },
+                "opencode-go": {
+                    "live": False,
+                    "error": "no OpenCode Go API key available",
+                    "models": [],
+                },
+            },
+        }
+        with (
+            mock.patch.object(serve.model_fetch, "snapshot", return_value=fake_snapshot),
+            mock.patch.object(serve.model_fetch, "save_snapshot"),
+            mock.patch.object(serve.model_fetch, "publish_snapshot", return_value=True),
+        ):
+            handler.do_POST()
+        location = next(
+            call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
+        )
+        message = unquote(location.partition("sent=")[2])
+        self.assertIn("no models returned", message)
+        self.assertIn("claude: 0, opencode-go: 0", message)
+        self.assertIn("0 models shown", message)
+        self.assertIn("claude: unavailable (FileNotFoundError)", message)
+        self.assertIn("opencode-go: no OpenCode Go API key available", message)
+        self.assertNotIn("pulled today's model list and prices", message)
 
     def test_refresh_failure_redirects_with_message_not_a_500(self):
         handler = serve.Handler.__new__(serve.Handler)
@@ -1168,7 +1915,7 @@ class ModelTiersRefreshBenchmarksRouteTests(unittest.TestCase):
         self.assertTrue(location.startswith("/model-tiers?sent="))
         self.assertIn("1%20models", location)
 
-    def test_refresh_benchmarks_not_live_redirects_with_stale_reason(self):
+    def test_refresh_benchmarks_not_live_redirects_with_neutral_message(self):
         handler = serve.Handler.__new__(serve.Handler)
         handler.path = "/model-tiers/refresh-benchmarks"
         handler.headers = {"Content-Length": "0"}
@@ -1177,14 +1924,21 @@ class ModelTiersRefreshBenchmarksRouteTests(unittest.TestCase):
         handler.send_response = mock.Mock()
         handler.send_header = mock.Mock()
         handler.end_headers = mock.Mock()
-        fake_snapshot = {"live": False, "stale_reason": "benchmark-fetch slot is held elsewhere"}
-        with mock.patch.object(serve.benchmark_fetch, "refresh_snapshot", return_value=fake_snapshot):
+        detail = "benchmark-fetch slot is held elsewhere\ninternal model detail"
+        fake_snapshot = {"live": False, "stale_reason": detail}
+        with (
+            mock.patch.object(serve.benchmark_fetch, "refresh_snapshot", return_value=fake_snapshot),
+            self.assertLogs(serve.__name__, level="WARNING") as logs,
+        ):
             handler.do_POST()
         location = next(
             call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
         )
-        self.assertIn("benchmark%20pull%20did%20not%20complete", location)
-        self.assertIn("held%20elsewhere", location)
+        self.assertEqual(
+            unquote(location.split("sent=", 1)[1]),
+            "Benchmark pull did not complete. Check the server logs for details.",
+        )
+        self.assertIn(detail, "\n".join(logs.output))
 
     def test_refresh_benchmarks_failure_redirects_with_message_not_a_500(self):
         handler = serve.Handler.__new__(serve.Handler)
@@ -1195,15 +1949,107 @@ class ModelTiersRefreshBenchmarksRouteTests(unittest.TestCase):
         handler.send_response = mock.Mock()
         handler.send_header = mock.Mock()
         handler.end_headers = mock.Mock()
-        with mock.patch.object(
-            serve.benchmark_fetch, "refresh_snapshot", side_effect=RuntimeError("redis down")
+        detail = "redis down\nprivate lookup setup detail"
+        with (
+            mock.patch.object(
+                serve.benchmark_fetch, "refresh_snapshot", side_effect=RuntimeError(detail)
+            ),
+            self.assertLogs(serve.__name__, level="WARNING") as logs,
         ):
             handler.do_POST()
         handler.send_response.assert_called_once_with(303)
         location = next(
             call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
         )
-        self.assertIn("pull%20failed%3A%20redis%20down", location)
+        self.assertEqual(
+            unquote(location.split("sent=", 1)[1]),
+            "Benchmark pull did not complete. Check the server logs for details.",
+        )
+        self.assertIn(detail, "\n".join(logs.output))
+
+    def test_refresh_benchmarks_auth_failure_redirects_with_neutral_message(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh-benchmarks"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        detail = "Redis refused the login. Check the configured credentials."
+        with (
+            mock.patch.object(
+                serve.benchmark_fetch,
+                "refresh_snapshot",
+                side_effect=serve.slots_redis.CoordinatorAuthFailed(detail),
+            ),
+            self.assertLogs(serve.__name__, level="WARNING") as logs,
+        ):
+            handler.do_POST()
+        handler.send_response.assert_called_once_with(303)
+        location = next(
+            call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
+        )
+        self.assertEqual(
+            unquote(location.split("sent=", 1)[1]),
+            "Benchmark pull did not complete. Check the server logs for details.",
+        )
+        self.assertIn(detail, "\n".join(logs.output))
+
+    def test_refresh_benchmarks_logs_full_redacted_errors_before_bounds(self):
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.path = "/model-tiers/refresh-benchmarks"
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO(b"")
+        handler.host_ok = mock.Mock(return_value=True)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        diagnostics = [
+            "first diagnostic " + "a" * 320 + " api_key=synthetic-secret-1 first-tail-after-300",
+            "second diagnostic " + "b" * 320 + " ghp_testsecret123 second-tail-after-300",
+        ]
+        results = [mock.Mock(returncode=1, stdout="", stderr=detail) for detail in diagnostics]
+        snapshot = {}
+
+        def refresh(**_kwargs):
+            snapshot.update(
+                serve.benchmark_fetch.fetch_benchmark_scores(["model"], connection={})
+            )
+            return snapshot
+
+        with (
+            mock.patch.object(serve.benchmark_fetch.subprocess, "run", side_effect=results),
+            mock.patch.object(
+                serve.benchmark_fetch,
+                "_resolve_workers",
+                return_value=(["worker-one", "worker-two"], None),
+            ),
+            mock.patch.object(serve.benchmark_fetch, "_zero_price_model_ids", return_value=[]),
+            mock.patch.object(serve.benchmark_fetch, "refresh_snapshot", side_effect=refresh),
+            self.assertLogs(level="WARNING") as logs,
+        ):
+            handler.do_POST()
+
+        handler.send_response.assert_called_once_with(303)
+        location = next(
+            call.args[1] for call in handler.send_header.call_args_list if call.args[0] == "Location"
+        )
+        self.assertEqual(
+            unquote(location.split("sent=", 1)[1]),
+            "Benchmark pull did not complete. Check the server logs for details.",
+        )
+        log = "\n".join(logs.output)
+        self.assertIn("first-tail-after-300", log)
+        self.assertIn("second-tail-after-300", log)
+        self.assertIn("[redacted]", log)
+        self.assertNotIn("synthetic-secret-1", log)
+        self.assertNotIn("ghp_testsecret123", log)
+        self.assertEqual(len(snapshot["stale_reason"]), 500)
+        self.assertNotIn("second-tail-after-300", snapshot["stale_reason"])
+        self.assertNotIn("ghp_testsecret123", snapshot["stale_reason"])
+        self.assertNotIn("synthetic-secret-1", snapshot["stale_reason"])
+        self.assertNotIn("ghp_testsecret123", location)
 
 
 class RoadmapCliTests(unittest.TestCase):
@@ -1381,8 +2227,23 @@ class FleetDashboardRenderTests(unittest.TestCase):
 
     def test_missing_fleet_keys_degrade_to_empty_sections(self):
         page = serve.render_dashboard(dict(self.base_state)).decode()
-        self.assertIn("No machines registered.", page)
+        self.assertIn(
+            "No machines registered. Run <code>lupin join &lt;redis-host&gt;[:port]</code>.",
+            page,
+        )
         self.assertIn("No claimed issues.", page)
+
+    def test_empty_overview_states_show_next_steps(self):
+        page = serve.render_dashboard(dict(self.base_state)).decode()
+        self.assertIn(
+            "No upcoming runs. <a href='/schedule'>Schedule one</a>.",
+            page,
+        )
+        self.assertNotIn("<th>repository</th>", page)
+        self.assertIn(
+            "0 repos enabled. <a href='/repos'>Enable a repo</a> to start loops.",
+            page,
+        )
 
     def test_fleet_error_shown_instead_of_machine_table(self):
         state = dict(self.base_state, fleet_error="machine registry: connection refused")
@@ -1577,7 +2438,9 @@ def test_roadmap_page_warns_about_unreadable_machine_record(redis_port, flush_re
             status = response.status
             body = response.read().decode()
     assert status == 200
-    assert "1 of 1 machines" in body
+    status_row = body.split("<div class=dashboard-status", 1)[1].split("</div>", 1)[0]
+    assert "1 of 2 machines available · incomplete" in status_row
+    assert "dashboard-status-value status-warn" in status_row
     assert "warning: skipped unreadable Redis record(s): machine:bad" in body
 
 
@@ -1656,6 +2519,7 @@ def test_roadmap_route_reads_ledger_from_dashboard_connection(
     assert status == 200
     assert "Shared handoff." in body
     assert "Visible from dashboard." in body
+    assert "class=dashboard-status" not in body
 
 
 def test_roadmap_defaults_to_list_for_large_backlogs(
@@ -1802,6 +2666,14 @@ def test_roadmap_full_query_renders_the_whole_page_without_javascript(
             serve, "code_repos", return_value=[{"repo": "widgets", "loopable": True}]
         ),
         mock.patch.object(roadmap, "cached_combined_model", return_value=model),
+        mock.patch.object(
+            serve.machines, "machines", return_value=[{"state": "online"}]
+        ),
+        mock.patch.object(
+            serve,
+            "timers",
+            return_value=[{"unit": "delegation-loop.timer", "next": 1_800_000_000}],
+        ),
         _live_dashboard(connection) as port,
     ):
         with urllib.request.urlopen(
@@ -1812,6 +2684,8 @@ def test_roadmap_full_query_renders_the_whole_page_without_javascript(
     assert body.startswith("<!doctype html>")
     assert "Whole page card" in body
     assert "roadmap-fragment" not in body
+    assert "class=dashboard-status role=group" in body
+    assert "Updated" in body
 
 
 def test_roadmap_shows_why_a_repo_has_no_issues(redis_port, flush_redis):
@@ -1931,6 +2805,10 @@ def test_dashboard_degrades_when_redis_unreachable(closed_port):
 
     assert status == 200
     assert "Fleet registry unreachable" in body
+    assert "Quota status unavailable" in body
+    assert "No quota warning" not in body
+    assert "Recent updates are unavailable." in body
+    assert "No recent updates." not in body
 
 
 def test_do_post_quest_start_creates_quest_writes_redis_and_redirects(
@@ -2186,6 +3064,10 @@ class TestMachinesPageIntegration:
         # snapshot would be empty at this point. The page still has to show
         # the lease below, so it must read slots_redis.status() live.
         kw = _kw(redis_port)
+        monkeypatch.setattr(machines.quota, "snapshot", lambda: {})
+        monkeypatch.setattr(machines.quota, "quota_usage", lambda: [])
+        monkeypatch.setattr(machines.quota, "claude_usage", lambda: [])
+        monkeypatch.setattr(machines.quota, "omp_usage", lambda: [])
         names = ["jesus", "pihome", "ralpha"]
         for name in names:
             monkeypatch.setattr(machines, "hostname", lambda name=name: name)
@@ -2208,6 +3090,12 @@ class TestMachinesPageIntegration:
         )
         monkeypatch.setattr(serve, "timer_active", lambda: True)
         slots_redis.acquire("bmo", "worker-a", max_holders=1, **kw)
+        client = slots_redis._client(kw["redis_host"], kw["redis_port"])
+        client.set(f"{slots_redis.PREFIX}slot:expired-demo:max", 2)
+        client.zadd(
+            f"{slots_redis.PREFIX}slot:expired-demo",
+            {"expired-holder": slots_redis._now_ms() - 1},
+        )
 
         handler = _get_handler("/machines", kw)
         handler.do_GET()
@@ -2223,6 +3111,38 @@ class TestMachinesPageIntegration:
         assert body.count("class=machine-card") == 3
         assert "lupin · omp" in body
         assert "Draining. Running loops can finish" in body
+
+        assert "A slot limits how many callers can use that resource at the same time, across all machines." in body
+        assert "Current holder IDs: <code>worker-a</code>" in body
+        assert "expired-holder" not in body
+        assert "No current holders" in body
+
+    def test_page_shows_unknown_slot_data_without_inventing_holder_ids(self):
+        page = serve.render_machines(
+            [
+                {"name": "draining-box", "state": "draining", "loops": [], "providers": []},
+                {"name": "offline-box", "state": "offline", "loops": [], "providers": []},
+            ],
+            {
+                "known": {"holders": 1, "max": 2, "holder_names": ["worker <one>"]},
+                "unattributed": {"holders": 1, "max": 2},
+                "unknown": {"holders": None, "max": None},
+            },
+        ).decode()
+
+        assert "worker &lt;one&gt;" in page
+        assert "Holder IDs unavailable" in page
+        assert "Holder count unavailable" in page
+        assert "<span class=mono>? / ?</span>" in page
+        assert "aria-label='Fewer slots'" in page
+        assert "aria-label='More slots'" in page
+        assert "aria-label='Fewer slots' disabled title='Slot limit is unavailable'" in page
+        assert "aria-label='More slots' disabled title='Slot limit is unavailable'" in page
+        assert "aria-label='More slots'>" in page
+        assert "<span class='machine-dot draining'></span>" in page
+        assert "<span class='machine-dot offline'></span>" in page
+        assert ".machine-dot.offline{background:var(--warn)}" in page
+        assert ".machine-dot.draining{background:var(--lav);transform:rotate(45deg)}" in page
 
     def test_unreachable_coordinator_is_502(self, closed_port):
         handler = _get_handler("/machines", {"redis_host": "127.0.0.1", "redis_port": closed_port})
@@ -2399,6 +3319,28 @@ class GatherLoopsTests(unittest.TestCase):
             data = serve.gather_loops({})
         self.assertEqual([row["repo"] for row in data["entries"]], ["x"])
         self.assertEqual(data["entries"][0]["status"], "stopped")
+
+    def test_gather_loops_includes_remote_repo_without_an_active_loop(self):
+        machine_records = [{
+            "name": "jesus",
+            "state": "online",
+            "actions": ["loop.run"],
+            "repos": [{"repo": "lupin", "enabled": True, "loopable": True}],
+            "loops": [],
+        }]
+        with (
+            mock.patch.object(serve, "code_repos", return_value=[]),
+            mock.patch.object(serve.loop_runtime, "local_loops", return_value=[]),
+            mock.patch.object(serve, "enabled_repos", return_value=[]),
+            mock.patch.object(serve, "fleet_state", return_value={
+                "claims": {}, "machines": machine_records, "fleet_error": None,
+            }),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            data = serve.gather_loops({})
+        self.assertEqual(data["entries"], [])
+        self.assertEqual([repo["repo"] for repo in data["repos"]], ["lupin"])
+        self.assertEqual(data["repos"][0]["enabled_hosts"], ["jesus"])
 
     def test_gather_loops_lists_remote_loops_when_server_has_no_code_dir(self):
         machine_records = [
@@ -2584,15 +3526,168 @@ class NumberedLoopDashboardTests(unittest.TestCase):
 class LoopsRouteUnitTests(unittest.TestCase):
     """Routing logic for controls that use Lupin and Herdr."""
 
-    def test_loops_route_renders(self):
+    def test_loops_route_selects_configured_repo_when_no_loop_is_active(self):
         handler = _loops_handler()
         handler.path = "/loops"
-        with mock.patch.object(
-            serve, "gather_loops",
-            return_value={"entries": [], "machines": [], "fleet_error": None, "local_host": "h"},
-        ):
+        data = {
+            "entries": [],
+            "repos": [{"repo": "lupin"}],
+            "machines": [],
+            "fleet_error": None,
+            "local_host": "h",
+        }
+        with mock.patch.object(serve, "gather_loops", return_value=data):
             handler.do_GET()
-        handler.reply.assert_called_once()
+
+        body = handler.reply.call_args.args[0].decode()
+        self.assertIn("lupin", body)
+        self.assertIn("No active loops.", body)
+        self.assertNotIn("No repositories found.", body)
+
+    def test_loops_empty_state_distinguishes_configured_repos_from_none(self):
+        base = {
+            "entries": [],
+            "machines": [],
+            "fleet_error": None,
+            "local_host": "h",
+        }
+        configured = serve.render_loops(
+            {**base, "repos": [{"repo": "lupin"}]},
+            group="repo",
+            selected_repo="lupin",
+            selected_tail=None,
+            lines=60,
+        ).decode()
+        empty = serve.render_loops(
+            {**base, "repos": []},
+            group="repo",
+            selected_repo="",
+            selected_tail=None,
+            lines=60,
+        ).decode()
+
+        self.assertIn("lupin", configured)
+        self.assertIn("No active loops.", configured)
+        self.assertNotIn("No repositories found.", configured)
+        self.assertNotIn("action=/loops/start", configured)
+        self.assertIn("No repositories found.", empty)
+
+    def _gather_configured_remote_repo(self, records, local_repos=None):
+        with (
+            mock.patch.object(serve, "code_repos", return_value=local_repos or []),
+            mock.patch.object(serve.loop_runtime, "local_loops", return_value=[]),
+            mock.patch.object(serve, "enabled_repos", return_value=[]),
+            mock.patch.object(serve, "fleet_state", return_value={
+                "claims": {}, "machines": records, "fleet_error": None,
+            }),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+        ):
+            return serve.gather_loops({})
+
+    def test_offline_remote_repo_with_no_reported_loops_is_unavailable(self):
+        data = self._gather_configured_remote_repo([{
+            "name": "jesus",
+            "state": "offline",
+            "repos": [{"repo": "lupin", "enabled": True, "loopable": True}],
+            "loops": [],
+        }])
+        self.assertEqual(data["entries"], [])
+        self.assertEqual(
+            data["repos"][0]["configured_hosts"],
+            [{"name": "jesus", "state": "offline"}],
+        )
+
+        for group in ("repo", "machine"):
+            with self.subTest(group=group):
+                body = serve.render_loops(
+                    data, group=group, selected_repo="lupin",
+                    selected_tail=None, lines=60,
+                ).decode()
+                self.assertIn("lupin <span class=dim>State unavailable</span>", body)
+                self.assertIn("Loop state unavailable: jesus (offline).", body)
+                self.assertNotIn("No active loops.", body)
+                selected_group = "Repo" if group == "repo" else "Machine"
+                self.assertIn(f"aria-current=page>{selected_group}</a>", body)
+                if group == "machine":
+                    self.assertIn("Configured repositories", body)
+
+    def test_online_remote_repo_with_no_reported_loops_shows_no_active_loops(self):
+        data = self._gather_configured_remote_repo([{
+            "name": "jesus",
+            "state": "online",
+            "repos": [{"repo": "lupin", "enabled": True, "loopable": True}],
+            "loops": [],
+        }])
+
+        for group in ("repo", "machine"):
+            with self.subTest(group=group):
+                body = serve.render_loops(
+                    data, group=group, selected_repo="lupin",
+                    selected_tail=None, lines=60,
+                ).decode()
+                self.assertIn("lupin <span class=dim>No active loops</span>", body)
+                self.assertIn("No active loops.", body)
+                self.assertNotIn("Loop state unavailable", body)
+                selected_group = "Repo" if group == "repo" else "Machine"
+                self.assertIn(f"aria-current=page>{selected_group}</a>", body)
+                if group == "machine":
+                    self.assertIn("Configured repositories", body)
+
+    def test_local_repo_does_not_hide_offline_or_unknown_remote_hosts(self):
+        data = self._gather_configured_remote_repo(
+            [
+                {
+                    "name": "jesus",
+                    "state": "offline",
+                    "repos": [{"repo": "lupin", "enabled": True}],
+                    "loops": [],
+                },
+                {
+                    "name": "old-worker",
+                    "state": "unknown",
+                    "repos": [{"repo": "lupin", "enabled": True}],
+                    "loops": [],
+                },
+            ],
+            local_repos=[{"repo": "lupin", "loopable": True}],
+        )
+
+        self.assertEqual(data["entries"][0]["status"], "stopped")
+        body = serve.render_loops(
+            data, group="repo", selected_repo="lupin",
+            selected_tail=None, lines=60,
+        ).decode()
+        self.assertIn("State unavailable", body)
+        self.assertIn(
+            "Loop state unavailable: jesus (offline), old-worker (unknown).",
+            body,
+        )
+        self.assertNotIn("No active loops.", body)
+
+
+    def test_loops_group_selector_marks_the_current_group(self):
+        data = {
+            "entries": [],
+            "repos": [{"repo": "lupin"}],
+            "local_host": "h",
+            "machines": [],
+            "fleet_error": None,
+        }
+        for group, selected_label, other_label in (
+            ("repo", "Repo", "Machine"),
+            ("machine", "Machine", "Repo"),
+        ):
+            with self.subTest(group=group):
+                body = serve.render_loops(
+                    data,
+                    group=group,
+                    selected_repo="lupin",
+                    selected_tail=None,
+                    lines=60,
+                ).decode()
+                self.assertIn("Group by", body)
+                self.assertIn(f"aria-current=page>{selected_label}</a>", body)
+                self.assertNotIn(f"aria-current=page>{other_label}</a>", body)
 
     def test_loops_route_rejects_bad_lines(self):
         handler = _loops_handler()
@@ -2613,7 +3708,7 @@ class LoopsRouteUnitTests(unittest.TestCase):
     def test_loops_route_uses_herdr_peek_and_shows_state_ids(self):
         entries = [_loop_entry("a", "running", "h", session="herdr-a", workspace_id="w", pane_id="p")]
         handler = _loops_handler()
-        handler.path = "/loops?repo=a"
+        handler.path = "/loops?repo=a&group=machine"
         with (
             mock.patch.object(
                 serve, "gather_loops",
@@ -2630,6 +3725,8 @@ class LoopsRouteUnitTests(unittest.TestCase):
         self.assertIn("pane: p", body)
         self.assertIn("Attach: <code>herdr --session herdr-a</code>", body)
         self.assertIn("Herdr state: running", body)
+        self.assertIn("aria-current=page>Machine</a>", body)
+        self.assertIn("class='loops-row sel' href='/loops?repo=a&group=machine&lines=60'", body)
 
     def test_remote_attach_command_uses_the_configured_ssh_target(self):
         data = {
@@ -3089,6 +4186,38 @@ class ScheduleHelperTests(unittest.TestCase):
         self.assertFalse(available)
 
 
+class _BannerParser(HTMLParser):
+    """Collect the text inside each `pill` span and inside each paragraph."""
+
+    def __init__(self):
+        super().__init__()
+        self.pills = []
+        self.paragraphs = []
+        self._pill = None
+        self._paragraph = None
+
+    def handle_starttag(self, tag, attrs):
+        classes = dict(attrs).get("class") or ""
+        if tag == "span" and "pill" in classes.split():
+            self._pill = [classes, ""]
+        elif tag == "p":
+            self._paragraph = ""
+
+    def handle_endtag(self, tag):
+        if tag == "span" and self._pill is not None:
+            self.pills.append(tuple(self._pill))
+            self._pill = None
+        elif tag == "p" and self._paragraph is not None:
+            self.paragraphs.append(self._paragraph)
+            self._paragraph = None
+
+    def handle_data(self, data):
+        if self._pill is not None:
+            self._pill[1] += data
+        elif self._paragraph is not None:
+            self._paragraph += data
+
+
 class ScheduleRenderTests(unittest.TestCase):
     def _data(self, **overrides):
         data = {
@@ -3142,6 +4271,50 @@ class ScheduleRenderTests(unittest.TestCase):
     def test_success_banner_shown_when_sent(self):
         page = serve.render_schedule(self._data(), sent="Started 1 loop(s): widgets@pihome").decode()
         self.assertIn("Started 1 loop(s)", page)
+
+    WARN = (
+        "Result unknown for widgets@pihome: no answer before the time limit. "
+        "The loop may have started. Check Loops for a later result, but pending "
+        "commands may not appear there. Do not submit unknown work again until "
+        "you confirm it was not queued or started."
+    )
+
+    def _banners(self, **kwargs):
+        """The (classes, text) of every pill and the text of every paragraph."""
+        parser = _BannerParser()
+        parser.feed(serve.render_schedule(self._data(), **kwargs).decode())
+        return parser.pills, parser.paragraphs
+
+    def test_warning_badge_is_short_and_the_detail_is_outside_the_pill(self):
+        pills, paragraphs = self._banners(warn=self.WARN)
+        self.assertIn(("pill off", "Needs attention"), pills)
+        badge = next(text for classes, text in pills if classes == "pill off")
+        self.assertLessEqual(len(badge), 20)
+        # The detail is card text. No pill holds any part of it.
+        self.assertIn(self.WARN, paragraphs)
+        self.assertFalse(any("Result unknown" in text or "Check Loops" in text for _, text in pills))
+        self.assertNotIn(("pill on", self.WARN), pills)
+
+    def test_confirmed_and_warning_banners_stay_separate(self):
+        sent = "Queued 1 loop(s): a-repo@a-worker."
+        pills, paragraphs = self._banners(sent=sent, warn=self.WARN)
+        # Confirmed work stays in the success pill.
+        self.assertIn(("pill on", sent), pills)
+        self.assertNotIn(("pill off", sent), pills)
+        self.assertNotIn(sent, paragraphs)
+        # The warning is a short badge. Its detail is outside every pill.
+        self.assertIn(("pill off", "Needs attention"), pills)
+        self.assertIn(self.WARN, paragraphs)
+        self.assertFalse(any(self.WARN in text for _, text in pills))
+
+    def test_get_route_passes_warn_to_the_page(self):
+        handler = _get_handler("/schedule?warn=Result+unknown", {})
+        with mock.patch.object(serve, "gather_schedule", return_value=self._data()):
+            handler.do_GET()
+        parser = _BannerParser()
+        parser.feed(handler.reply.call_args.args[0].decode())
+        self.assertIn(("pill off", "Needs attention"), parser.pills)
+        self.assertIn("Result unknown", parser.paragraphs)
 
     def test_nav_has_a_schedule_link(self):
         self.assertIn("href='/schedule'", serve.render_nav("schedule"))
@@ -3315,6 +4488,312 @@ class ScheduleRunRouteUnitTests(unittest.TestCase):
         enqueue.assert_not_called()
 
 
+class ScheduleRunOutcomeTests(unittest.TestCase):
+    """One click, one outcome. What the page says must match what the queue
+    accepted. Mocked registry and queue: no Redis, no worker."""
+
+    ONLINE = [{"name": "jesus", "state": "online", "slots": {}}]
+
+    def _post(self, form, *, records, enqueue, repos=("a-repo", "b-repo", "c-repo")):
+        handler = _schedule_handler()
+        handler.cmd_signing_key = "secret"
+        _post_body(handler, "/schedule/run", form)
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=list(repos)),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", **records),
+            mock.patch.object(serve.commands, "enqueue", **enqueue) as fake_enqueue,
+        ):
+            handler.do_POST()
+        return handler, fake_enqueue
+
+    @staticmethod
+    def _sent(handler):
+        return unquote(handler.redirect.call_args.args[0])
+
+    @staticmethod
+    def _params(handler):
+        return parse_qs(urlsplit(handler.redirect.call_args.args[0]).query)
+
+    @staticmethod
+    def _error(handler):
+        body = handler.reply.call_args.args[0].decode()
+        return html.unescape(body.split("<p class=err>", 1)[1].split("</p>", 1)[0])
+
+    def test_available_machine_shows_queued_not_started(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_called_once()
+        handler.reply.assert_not_called()
+        sent = self._sent(handler)
+        self.assertTrue(sent.startswith("/schedule?sent="))
+        self.assertIn("Queued 1 loop(s): a-repo@jesus", sent)
+        self.assertNotIn("Started", sent)
+        self.assertIn("Do not submit again", sent)
+
+    def test_unavailable_machine_is_not_enqueued(self):
+        for state in ("draining", "offline"):
+            with self.subTest(state=state):
+                handler, enqueue = self._post(
+                    {"repo": "a-repo", "place": "jesus"},
+                    records={"return_value": [{"name": "jesus", "state": state, "slots": {}}]},
+                    enqueue={"return_value": "cmd-1"},
+                )
+                enqueue.assert_not_called()
+                handler.redirect.assert_not_called()
+                self.assertEqual(handler.reply.call_args.args[1], 400)
+                self.assertIn("Nothing was queued", self._error(handler))
+
+    def test_bad_placement_is_not_enqueued(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "no-such-machine"},
+            records={"return_value": self.ONLINE},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        handler.redirect.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+        error = self._error(handler)
+        self.assertIn("bad placement", error)
+        self.assertIn("Nothing was queued", error)
+
+    def test_unreadable_registry_is_named_and_nothing_is_enqueued(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "jesus"},
+            records={"side_effect": serve.machines.CoordinatorUnreachable("down")},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[1], 400)
+        error = self._error(handler)
+        self.assertIn("fleet registry", error)
+        self.assertNotIn("bad placement", error)
+
+    def test_auth_failure_from_enqueue_shows_password_refusal(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": serve.slots_redis.CoordinatorAuthFailed("redis refused the login")},
+        )
+        enqueue.assert_called_once()
+        error = self._error(handler)
+        self.assertIn("LUPIN_REDIS_PASSWORD", error)
+        self.assertNotIn("cannot reach", error)
+
+    def test_acl_failure_from_enqueue_shows_permission_refusal(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": redis_lib.exceptions.NoPermissionError("ACL denied")},
+        )
+        enqueue.assert_called_once()
+        error = self._error(handler)
+        self.assertIn("ACL does not allow it", error)
+        self.assertNotIn("cannot reach", error)
+
+    def test_auth_failure_reading_registry_is_not_reported_as_outage(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "any"},
+            records={"side_effect": serve.slots_redis.CoordinatorAuthFailed("redis refused the login")},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[1], 502)
+        error = self._error(handler)
+        self.assertIn("LUPIN_REDIS_PASSWORD", error)
+        self.assertIn("Nothing was queued or started", error)
+        self.assertIn("safe to try again", error)
+        self.assertNotIn("cannot read the fleet registry", error)
+
+    def test_any_placement_with_registry_down_does_not_enqueue(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "any"},
+            records={"side_effect": serve.machines.CoordinatorUnreachable("down")},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        error = self._error(handler)
+        self.assertIn("Nothing was queued or started", error)
+
+    def test_acl_failure_reading_registry_keeps_refusal_message(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "spread"},
+            records={"side_effect": redis_lib.exceptions.NoPermissionError("ACL denied")},
+            enqueue={"return_value": "cmd-1"},
+        )
+        enqueue.assert_not_called()
+        error = self._error(handler)
+        self.assertIn("ACL does not allow it", error)
+        self.assertIn("Nothing was queued or started", error)
+        self.assertNotIn("cannot reach", error)
+
+
+    def test_lost_enqueue_reply_is_unknown_not_safe_to_retry(self):
+        handler, enqueue = self._post(
+            {"repo": "a-repo", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": serve.machines.CoordinatorUnreachable("reply lost")},
+        )
+        enqueue.assert_called_once()
+        handler.reply.assert_not_called()
+        params = self._params(handler)
+        self.assertNotIn("sent", params)
+        warning = params["warn"][0]
+        self.assertIn("Result unknown for a-repo@jesus", warning)
+        self.assertIn("may have been queued", warning)
+        self.assertIn("pending commands may not appear there", warning)
+        self.assertIn("Do not submit unknown work again until you confirm", warning)
+        self.assertNotIn("safe to try again", warning)
+        self.assertNotIn("Nothing was queued", warning)
+        page = _get_handler(handler.redirect.call_args.args[0], {})
+        with mock.patch.object(serve, "gather_schedule", return_value={
+            "now": 1_800_000_000.0,
+            "enabled": ["a-repo"],
+            "timers": [],
+            "timer_active": False,
+            "machines": [],
+            "fleet_error": None,
+            "local_host": "h",
+        }):
+            page.do_GET()
+        banners = _BannerParser()
+        banners.feed(page.reply.call_args.args[0].decode())
+        self.assertIn(("pill off", "Needs attention"), banners.pills)
+        self.assertTrue(any("Result unknown for a-repo@jesus" in p for p in banners.paragraphs))
+
+    def test_lost_enqueue_reply_after_accepted_repo_keeps_both_outcomes(self):
+        handler, enqueue = self._post(
+            {"repo": "all", "cnt": "3", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": ["cmd-1", serve.machines.CoordinatorUnreachable("reply lost")]},
+        )
+        self.assertEqual(enqueue.call_count, 2)
+        handler.reply.assert_not_called()
+        params = self._params(handler)
+        self.assertIn("Queued 1 loop(s): a-repo@jesus", params["sent"][0])
+        warning = params["warn"][0]
+        self.assertIn("Partly done", warning)
+        self.assertIn("Result unknown for b-repo@jesus", warning)
+        self.assertIn("may have been queued", warning)
+        self.assertIn("Not tried: c-repo@jesus", warning)
+        self.assertIn("Only these repos are safe to submit", warning)
+        self.assertIn("Do not submit a-repo again", warning)
+        self.assertIn("Do not submit unknown work again until you confirm", warning)
+        self.assertNotIn("did not start", warning)
+        self.assertNotIn("Submit only the failed", warning)
+        self.assertNotIn("safe to try again", warning)
+        self.assertNotIn("Failed:", warning)
+
+    def test_partial_refusal_has_one_period_and_only_not_tried_is_safe(self):
+        handler, enqueue = self._post(
+            {"repo": "all", "cnt": "3", "place": "jesus"},
+            records={"return_value": self.ONLINE},
+            enqueue={"side_effect": [
+                "cmd-1", serve.slots_redis.CoordinatorAuthFailed("redis refused the login"),
+            ]},
+        )
+        self.assertEqual(enqueue.call_count, 2)
+        warning = self._params(handler)["warn"][0]
+        self.assertIn("For run now.", warning)
+        self.assertNotIn("For run now..", warning)
+        self.assertIn("Not tried: c-repo@jesus. Only these repos are safe to submit.", warning)
+        self.assertNotIn("Submit only the failed", warning)
+        self.assertIn("Do not submit a-repo again", warning)
+
+    def test_local_run_is_shown_as_started(self):
+        handler = _schedule_handler()
+        _post_body(handler, "/schedule/run", {"repo": "a-repo", "place": "h"})
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="h"),
+            mock.patch.object(serve.machines, "machines", return_value=[]),
+            mock.patch.object(serve, "run", return_value=(0, "")),
+            mock.patch.object(serve.commands, "enqueue") as enqueue,
+        ):
+            handler.do_POST()
+        enqueue.assert_not_called()
+        sent = self._sent(handler)
+        self.assertIn("Started 1 loop(s): a-repo@h", sent)
+        self.assertNotIn("Queued", sent)
+
+    # `loops.run_subprocess` returns this pair when the local child times out.
+    TIMED_OUT = (124, "timed out after 20.0s: lupin run a-repo")
+
+    def test_local_timeout_says_unknown_and_not_safe_to_retry(self):
+        with (
+            mock.patch.dict("os.environ", {"LUPIN_LOOP_COORDINATOR_ONLY": "0"}),
+            mock.patch.object(serve, "run", return_value=self.TIMED_OUT),
+        ):
+            handler, enqueue = self._post(
+                {"repo": "a-repo", "place": "h"},
+                records={"return_value": []},
+                enqueue={"return_value": "cmd-1"},
+            )
+        enqueue.assert_not_called()
+        # Not the Rejected page: the run may be live.
+        handler.reply.assert_not_called()
+        sent = self._sent(handler)
+        self.assertIn("Result unknown for a-repo@h", sent)
+        self.assertIn("Do not submit unknown work again until you confirm", sent)
+        self.assertNotIn("safe to try again", sent)
+        self.assertNotIn("Nothing was queued", sent)
+        self.assertNotIn("Started", sent)
+        self.assertNotIn("Queued", sent)
+        # Only a warning goes to the page. There is nothing confirmed.
+        params = self._params(handler)
+        self.assertNotIn("sent", params)
+        self.assertIn("Result unknown for a-repo@h", params["warn"][0])
+
+    def test_local_timeout_keeps_earlier_queued_repo_and_marks_local_unknown(self):
+        # spread order: a-repo -> a-worker (queued), b-repo -> h (times out),
+        # c-repo -> a-worker (never tried).
+        with (
+            mock.patch.dict("os.environ", {"LUPIN_LOOP_COORDINATOR_ONLY": "0"}),
+            mock.patch.object(serve, "run", return_value=self.TIMED_OUT) as local_run,
+        ):
+            handler, enqueue = self._post(
+                {"repo": "all", "cnt": "3", "place": "spread"},
+                records={"return_value": [{"name": "a-worker", "state": "online", "slots": {}}]},
+                enqueue={"return_value": "cmd-1"},
+            )
+        enqueue.assert_called_once()
+        local_run.assert_called_once()
+        handler.reply.assert_not_called()
+        sent = self._sent(handler)
+        self.assertIn("Queued 1 loop(s): a-repo@a-worker", sent)
+        self.assertIn("Result unknown for b-repo@h", sent)
+        self.assertIn("Not tried: c-repo@a-worker", sent)
+        self.assertIn("Do not submit a-repo again", sent)
+        self.assertIn("Check Loops", sent)
+        self.assertNotIn("safe to try again", sent)
+        self.assertNotIn("Failed:", sent)
+        # The queued repo is confirmed. The local repo is only a warning.
+        params = self._params(handler)
+        self.assertIn("Queued 1 loop(s): a-repo@a-worker", params["sent"][0])
+        self.assertNotIn("unknown", params["sent"][0])
+        self.assertIn("Result unknown for b-repo@h", params["warn"][0])
+        self.assertNotIn("Queued 1 loop(s)", params["warn"][0])
+
+    def test_local_definite_failure_keeps_the_safe_retry_text(self):
+        with (
+            mock.patch.dict("os.environ", {"LUPIN_LOOP_COORDINATOR_ONLY": "0"}),
+            mock.patch.object(serve, "run", return_value=(1, "boom")),
+        ):
+            handler, enqueue = self._post(
+                {"repo": "a-repo", "place": "h"},
+                records={"return_value": []},
+                enqueue={"return_value": "cmd-1"},
+            )
+        enqueue.assert_not_called()
+        handler.redirect.assert_not_called()
+        self.assertEqual(handler.reply.call_args.args[1], 502)
+        error = self._error(handler)
+        self.assertIn("It is safe to try again", error)
+        self.assertNotIn("Result unknown", error)
+
 
 class TestSchedulePageIntegration:
     """Real `redis-server` fixtures, same rule as TestLoopsPageIntegration
@@ -3359,6 +4838,53 @@ class TestSchedulePageIntegration:
         assert stored["issuer"] == "pihome"
         assert commands.verify(stored, "secret") is True
         handler.send_response.assert_called_once_with(303)
+
+    def test_run_now_keeps_queued_and_unknown_separate_when_reply_is_lost(self, redis_port, flush_redis):
+        kw = _kw(redis_port)
+        _write_machine_record(redis_port, "jesus", state="online")
+        handler = _post_handler("/schedule/run", b"repo=all&cnt=3&place=jesus", kw)
+        handler.cmd_signing_key = "secret"
+        client = redis_lib.Redis(host="127.0.0.1", port=redis_port, decode_responses=True)
+        actual_eval = client.eval
+        attempts = 0
+
+        def lost_reply(*args):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return actual_eval(*args)
+            if attempts == 2:
+                actual_eval(*args)
+                raise redis_lib.exceptions.TimeoutError("reply lost after commit")
+            raise redis_lib.exceptions.ConnectionError("retry could not connect")
+
+        with (
+            mock.patch.object(serve, "enabled_repos", return_value=["a-repo", "b-repo", "c-repo"]),
+            mock.patch.object(serve.machines, "hostname", return_value="pihome"),
+            mock.patch.object(commands, "_client", return_value=client),
+            mock.patch.object(client, "eval", side_effect=lost_reply),
+        ):
+            handler.do_POST()
+
+        assert attempts == 3
+        handler.send_response.assert_called_once_with(303)
+        headers = {call.args[0]: call.args[1] for call in handler.send_header.call_args_list}
+        params = parse_qs(urlsplit(headers["Location"]).query)
+        assert "Queued 1 loop(s): a-repo@jesus" in params["sent"][0]
+        warning = params["warn"][0]
+        assert "Result unknown for b-repo@jesus" in warning
+        assert "pending commands may not appear there" in warning
+        assert "Do not submit unknown work again until you confirm" in warning
+        assert "Not tried: c-repo@jesus. Only these repos are safe to submit." in warning
+        assert "did not start" not in warning
+        assert "safe to try again" not in warning
+        queued = client.zrange("lupin:v1:cmdq:jesus", 0, -1)
+        assert len(queued) == 2
+        # Neither queued command has started, so Loops cannot show it yet.
+        assert all(client.get(f"lupin:v1:cmdres:{cmd_id}") is None for cmd_id in queued)
+        stored = [json.loads(client.get(f"lupin:v1:cmd:{cmd_id}")) for cmd_id in queued]
+        assert {cmd["params"]["repo"] for cmd in stored} == {"a-repo", "b-repo"}
+        assert all(commands.verify(cmd, "secret") for cmd in stored)
 
     def test_run_now_passes_the_note_to_a_remote_loop(self, redis_port, flush_redis):
         kw = _kw(redis_port)
@@ -3513,15 +5039,18 @@ class RepoHelperTests(unittest.TestCase):
             with mock.patch.object(serve, "REPOS_FILE", repos_file):
                 self.assertEqual(serve.enabled_repos(), ["widgets"])
 
-    def test_slot_controls_disable_the_lower_button_at_the_minimum(self):
+    def test_slot_controls_disable_decrease_at_one_and_name_both_changes(self):
         html = serve._repo_slot_controls("widgets", 1)
         self.assertIn("disabled", html)
+        self.assertIn("Decrease concurrency limit for widgets to 1", html)
+        self.assertIn("Increase concurrency limit for widgets to 2", html)
 
-    def test_slot_controls_post_the_computed_neighbor_values(self):
+    def test_slot_controls_step_to_adjacent_limits_above_one(self):
         html = serve._repo_slot_controls("widgets", 3)
-        self.assertNotIn("disabled", html)
         self.assertIn("name=max value='2'", html)
         self.assertIn("name=max value='4'", html)
+        self.assertIn("Decrease concurrency limit for widgets to 2", html)
+        self.assertIn("Increase concurrency limit for widgets to 4", html)
 
     def test_code_repos_allows_a_directory_without_delegation_doc(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3634,11 +5163,12 @@ class GatherReposTests(unittest.TestCase):
 
         assert [repo["repo"] for repo in data["repos"]] == ["roundsmith"]
         assert "Enable on jesus" in page
+        assert "title='Enable roundsmith on jesus'" in page
         assert "action=/repos/enable" in page
         assert "action=/loops/start" not in page
         assert f"No local repos under {serve.CODE_DIR}" in page
 
-    def test_enabled_remote_repo_has_start_control(self):
+    def test_enabled_remote_repo_has_disabled_enable_state_and_start_control(self):
         machine = {
             "name": "jesus",
             "state": "online",
@@ -3662,9 +5192,42 @@ class GatherReposTests(unittest.TestCase):
             data = serve.gather_repos({})
 
         page = serve.render_repos(data).decode()
-        assert "Start on jesus" in page
-        assert "action=/loops/start" in page
-        assert "action=/repos/enable" not in page
+        self.assertIn("Start on jesus", page)
+        self.assertIn("<button type=button disabled", page)
+        self.assertIn("title='roundsmith is already enabled on jesus'", page)
+        self.assertIn("title='Start roundsmith on jesus'", page)
+        self.assertIn("action=/loops/start", page)
+        self.assertNotIn("action=/repos/enable", page)
+
+    def test_offline_enabled_remote_repo_renders_disabled_enable_control(self):
+        machine = {
+            "name": "jesus",
+            "state": "offline",
+            "actions": [],
+            "repos": [{"repo": "roundsmith", "enabled": True, "loopable": True}],
+            "loops": [],
+        }
+        with (
+            mock.patch.object(serve, "code_repos", return_value=[]),
+            mock.patch.object(
+                serve, "gather_loops",
+                return_value={
+                    "entries": [],
+                    "machines": [machine],
+                    "fleet_error": None,
+                    "local_host": "pihome",
+                },
+            ),
+            mock.patch.object(serve.slots_redis, "status", return_value={}),
+        ):
+            data = serve.gather_repos({})
+
+        page = serve.render_repos(data).decode()
+        self.assertIn("Enable on jesus", page)
+        self.assertIn("disabled", page)
+        self.assertIn("roundsmith is already enabled on jesus", page)
+        self.assertIn("jesus (offline)", page)
+        self.assertNotIn("action=/loops/start", page)
 
     def test_remote_controls_remain_available_for_a_local_repo_row(self):
         machine = {
@@ -3754,14 +5317,66 @@ class RepoRenderTests(unittest.TestCase):
         self.assertIn("<span class=pill>disabled</span>", page)
         self.assertIn("no doc (optional)", page)
 
+
+    def test_repo_filters_select_rows_and_keep_actions(self):
+        all_page = serve.render_repos(self._data(), repo_filter="all").decode()
+        self.assertIn("<b>widgets</b>", all_page)
+        self.assertIn("<b>gizmos</b>", all_page)
+        self.assertIn("<b>scratch</b>", all_page)
+        self.assertIn(
+            "<a class='pill on' href='/repos' aria-current='page' "
+            "style='display:inline-block'>All</a>",
+            all_page,
+        )
+
+        enabled_page = serve.render_repos(self._data(), repo_filter="enabled").decode()
+        self.assertIn("href='/repos?filter=enabled' aria-current='page'", enabled_page)
+        self.assertIn("<b>widgets</b>", enabled_page)
+        self.assertNotIn("<b>gizmos</b>", enabled_page)
+        self.assertNotIn("<b>scratch</b>", enabled_page)
+        self.assertIn("action=/schedule/run", enabled_page)
+        self.assertIn("/repos?remove=widgets", enabled_page)
+
+        disabled_page = serve.render_repos(self._data(), repo_filter="disabled").decode()
+        self.assertNotIn("<b>widgets</b>", disabled_page)
+        self.assertIn("<b>gizmos</b>", disabled_page)
+        self.assertIn("<b>scratch</b>", disabled_page)
+        self.assertIn("action=/repos/add", disabled_page)
+        self.assertNotIn("/repos?remove=gizmos", disabled_page)
+
+    def test_no_docs_filter_excludes_unknown_remote_doc_status(self):
+        repos = self._data()["repos"] + [
+            {"repo": "remote", "state": "disabled", "local": False}
+        ]
+
+        page = serve.render_repos(
+            self._data(repos=repos), repo_filter="no-docs"
+        ).decode()
+
+        self.assertIn("<b>scratch</b>", page)
+        self.assertNotIn("<b>widgets</b>", page)
+        self.assertNotIn("<b>gizmos</b>", page)
+        self.assertNotIn("<b>remote</b>", page)
+
+    def test_filter_with_no_matches_shows_no_match_state(self):
+        repos = [{"repo": "widgets", "state": "enabled", "has_doc": True}]
+        page = serve.render_repos(
+            self._data(repos=repos), repo_filter="no-docs"
+        ).decode()
+
+        self.assertIn("No repositories match this filter.", page)
+        self.assertNotIn("<b>widgets</b>", page)
+
     def test_enabled_row_has_run_now_and_remove(self):
         page = serve.render_repos(self._data()).decode()
         self.assertIn("action=/schedule/run", page)
+        self.assertIn("title='Start one loop for widgets now'", page)
         self.assertIn("/repos?remove=widgets", page)
 
     def test_disabled_row_has_add_to_schedule_not_a_remove_link(self):
         page = serve.render_repos(self._data()).decode()
         self.assertIn("action=/repos/add", page)
+        self.assertIn("title='Add gizmos to the recurring schedule'", page)
         self.assertNotIn("/repos?remove=gizmos", page)
 
     def test_no_doc_repo_keeps_schedule_controls(self):
@@ -3769,22 +5384,36 @@ class RepoRenderTests(unittest.TestCase):
         self.assertIn("no doc (optional)", page)
         self.assertIn("repo=scratch", page)
 
-    def test_slot_max_stepper_shows_the_current_value(self):
+    def test_slot_max_stepper_shows_the_current_value_and_concurrency_labels(self):
         page = serve.render_repos(self._data()).decode()
+        self.assertIn("<th>loops &middot; concurrency</th>", page)
         self.assertIn("<span class=mono>2</span>", page)
+        self.assertIn("Increase concurrency limit for widgets to 3", page)
 
     def test_empty_state_shown_when_no_repos(self):
         page = serve.render_repos(self._data(repos=[])).decode()
         self.assertIn("No repos yet", page)
 
-    def test_sent_banner_shown(self):
-        page = serve.render_repos(self._data(), sent="widgets added to the schedule").decode()
-        self.assertIn("widgets added to the schedule", page)
+    def test_sent_banner_is_rendered_with_one_time_url_cleanup(self):
+        page = serve.render_repos(
+            self._data(), sent="Concurrency limit for widgets changed to 3"
+        ).decode()
+        self.assertIn("Concurrency limit for widgets changed to 3", page)
+        self.assertIn('url.searchParams.delete("sent")', page)
+        self.assertIn("history.replaceState", page)
 
-    def test_add_panel_offers_schedule_and_optional_doc_generation(self):
+    def test_page_without_sent_has_no_stale_message_cleanup(self):
+        page = serve.render_repos(self._data()).decode()
+        self.assertNotIn("url.searchParams.delete(\"sent\")", page)
+        self.assertNotIn("<div class=card><span class='pill on'>", page)
+
+    def test_add_panel_offers_separate_schedule_and_draft_actions(self):
         page = serve.render_repos(self._data(), add="existing").decode()
         self.assertIn("action=/repos/add", page)
+        self.assertIn("title='Add gizmos to the recurring schedule'", page)
         self.assertIn("action=/repos/generate-docs", page)
+        self.assertIn("Generate draft doc", page)
+        self.assertNotIn("Generate docs and add", page)
         self.assertIn("no delegation doc (optional)", page)
 
     def test_add_panel_new_tab_is_disabled_with_a_note(self):
@@ -3810,16 +5439,17 @@ class RepoRenderTests(unittest.TestCase):
         self.assertIn("hello doc", page)
         self.assertIn("widgets/docs/delegation-loop.md", page)
 
-    def test_doc_panel_edit_mode_shows_a_textarea(self):
+    def test_doc_panel_edit_mode_shows_a_textarea_and_save_effect(self):
         page = serve.render_repos(
             self._data(), doc_repo="widgets", doc_text="hello doc", doc_edit=True
         ).decode()
         self.assertIn("<textarea name=text", page)
+        self.assertIn("title='Save changes to widgets/docs/delegation-loop.md'", page)
 
-    def test_schedule_panel_shows_the_lupin_command(self):
+    def test_schedule_panel_names_the_one_off_action(self):
         page = serve.render_repos(self._data(), schedule_repo="widgets").decode()
-        self.assertIn("lupin once", page)
-        self.assertIn("widgets", page)
+        self.assertIn("Schedule a one-off run for widgets", page)
+        self.assertIn(">Schedule one-off run</button>", page)
 
     def test_remove_panel_asks_to_type_the_repo_name(self):
         page = serve.render_repos(self._data(), remove_repo="widgets").decode()
@@ -3908,6 +5538,64 @@ class TestReposPageRoutes:
         )
         handler.redirect.assert_called_once()
 
+    def test_stale_remote_enable_reports_already_enabled_reason(self, monkeypatch):
+        machine = {
+            "name": "jesus",
+            "state": "online",
+            "actions": ["repo.enable"],
+            "repos": [{"repo": "widgets", "enabled": True, "loopable": True}],
+        }
+        monkeypatch.setattr(serve.machines, "hostname", lambda: "pihome")
+        monkeypatch.setattr(serve.machines, "machines", lambda connection, **_: [machine])
+        dispatch = mock.Mock()
+        monkeypatch.setattr(serve.loops, "dispatch_loop_action", dispatch)
+        handler = _repos_handler()
+        handler._signing_key_for = lambda target: "jesus-key"
+        _post_body(handler, "/repos/enable", {"repo": "widgets", "machine": "jesus"})
+
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 400
+        assert "widgets is already enabled on jesus" in handler.reply.call_args.args[0].decode()
+        dispatch.assert_not_called()
+
+    def test_stale_remote_enable_reports_offline_reason(self, monkeypatch):
+        machine = {
+            "name": "jesus",
+            "state": "offline",
+            "actions": ["repo.enable"],
+            "repos": [{"repo": "widgets", "enabled": False, "loopable": True}],
+        }
+        monkeypatch.setattr(serve.machines, "hostname", lambda: "pihome")
+        monkeypatch.setattr(serve.machines, "machines", lambda connection, **_: [machine])
+        dispatch = mock.Mock()
+        monkeypatch.setattr(serve.loops, "dispatch_loop_action", dispatch)
+        handler = _repos_handler()
+        handler._signing_key_for = lambda target: "jesus-key"
+        _post_body(handler, "/repos/enable", {"repo": "widgets", "machine": "jesus"})
+
+        handler.do_POST()
+
+        assert handler.reply.call_args.args[1] == 400
+        assert "machine jesus is offline" in handler.reply.call_args.args[0].decode()
+        dispatch.assert_not_called()
+
+    def test_slot_max_route_sets_limit_and_redirects_with_confirmation(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
+        _make_repo(tmp_path, "widgets")
+        set_max = mock.Mock()
+        monkeypatch.setattr(serve.slots_redis, "set_max", set_max)
+        handler = _repos_handler()
+        _post_body(handler, "/repos/slot-max", {"repo": "widgets", "max": "4"})
+
+        handler.do_POST()
+
+        set_max.assert_called_once_with("repo:widgets", 4)
+        handler.redirect.assert_called_once_with(
+            f"/repos?sent={quote('Concurrency limit for widgets changed to 4', safe='')}"
+        )
+
+
     def test_add_route_rejects_a_missing_repository(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
         handler = _repos_handler()
@@ -3985,21 +5673,33 @@ class TestReposPageRoutes:
         handler.do_POST()
         assert handler.reply.call_args.args[1] == 400
 
-    def test_generate_docs_route_writes_a_doc_and_adds_to_the_schedule(self, tmp_path, monkeypatch):
+    def test_generate_docs_route_writes_a_draft_without_scheduling_the_repo(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
         _make_repo(tmp_path, "widgets", doc=False)
-        monkeypatch.setattr(serve, "_repo_platforms", lambda: {})
-        written = {}
-        monkeypatch.setattr(
-            serve, "write_enabled_repos", lambda values: written.setdefault("values", values)
-        )
+        write_enabled = mock.Mock()
+        monkeypatch.setattr(serve, "write_enabled_repos", write_enabled)
         handler = _repos_handler()
         _post_body(handler, "/repos/generate-docs", {"repo": "widgets"})
         handler.do_POST()
         doc_path = tmp_path / "widgets" / "docs" / "delegation-loop.md"
+        doc = doc_path.read_text(encoding="utf-8")
         assert doc_path.is_file()
-        assert "widgets" in doc_path.read_text()
-        assert written["values"] == {"widgets": "claude"}
+        assert doc.startswith("> **Draft: Not ready for loop runs.**")
+        assert "## Test command" in doc
+        assert "Do not guess." in doc
+        flat_doc = " ".join(doc.split())
+        assert "ask the repo owner before changing code" in flat_doc
+        assert "## Repo purpose" in doc
+        assert "Use the project documentation to learn" in doc
+        assert "## Do not touch" in doc
+        assert "Do not touch secrets, generated files, or third-party code copied" in flat_doc
+        assert "TODO:" not in doc
+        write_enabled.assert_not_called()
+        message = parse_qs(urlsplit(handler.redirect.call_args.args[0]).query)["sent"][0]
+        assert message == (
+            "Draft created for widgets. It is not scheduled. Review the file, "
+            "then use Add to schedule when ready."
+        )
 
     def test_remove_route_rejects_a_repo_not_on_the_schedule(self, monkeypatch):
         monkeypatch.setattr(serve, "enabled_repos", lambda: ["other"])
@@ -4079,7 +5779,6 @@ class TestReposPageRoutes:
             "lupin": "omp",
             "roundsmith": "claude",
             "localno": "claude",
-            "fresh": "claude",
         }
 
         handler = _repos_handler()
@@ -4088,7 +5787,6 @@ class TestReposPageRoutes:
         assert _schedule_pairs(repos_file) == {
             "lupin": "omp",
             "roundsmith": "claude",
-            "fresh": "claude",
         }
 
     def test_doc_save_keeps_the_line_endings_of_the_file(self, tmp_path, monkeypatch):
@@ -4162,7 +5860,9 @@ class TestReposPageRoutes:
         _post_body(handler, "/repos/slot-max", {"repo": "widgets", "max": "3"})
         handler.do_POST()
         assert calls == {"slot": "repo:widgets", "max": 3}
-        handler.redirect.assert_called_once_with("/repos")
+        handler.redirect.assert_called_once_with(
+            f"/repos?sent={quote('Concurrency limit for widgets changed to 3', safe='')}"
+        )
 
     def test_slot_max_route_502_on_coordinator_unreachable(self, tmp_path, monkeypatch):
         monkeypatch.setattr(serve, "CODE_DIR", str(tmp_path))
@@ -4302,8 +6002,6 @@ def test_debrief_index_lists_newest_first_with_utc_file_name_times(tmp_path, mon
     handler.do_GET()
 
     body = handler.reply.call_args.args[0].decode()
-    assert "<a class='navlink active' href='/debrief'>" in body
-    assert "<span>Debriefs</span>" in body
     assert "href='/debrief?repo=widgets&amp;file=20261002-090000.md'" in body
     assert "2026-10-02 09:00:00 UTC" in body
     assert body.index("20261002-090000") < body.index("20261001-090000")
@@ -4320,13 +6018,20 @@ def test_debrief_index_shows_the_period_of_a_periodic_debrief(tmp_path, monkeypa
     assert "2026-10-02 09:00:00 UTC -6h" in body
 
 
-def test_debrief_index_says_when_there_are_none(tmp_path, monkeypatch):
+def test_debrief_index_empty_state_explains_sources_and_writer(tmp_path, monkeypatch):
     monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
 
     handler = _get_handler("/debrief", {})
     handler.do_GET()
 
-    assert b"No debriefs yet." in handler.reply.call_args.args[0]
+    body = handler.reply.call_args.args[0].decode()
+    assert (
+        "<p>No debriefs yet.</p><p>Debriefs are written to the local "
+        "<code>debriefs/</code> folder. The fleet shares their digests here. "
+        "Run <code>lupin agent</code> to write periodic debriefs.</p>"
+    ) in body
+
+
 
 
 def test_debrief_page_renders_markdown_escapes_text_and_maps_images(tmp_path, monkeypatch):
@@ -4337,8 +6042,6 @@ def test_debrief_page_renders_markdown_escapes_text_and_maps_images(tmp_path, mo
     handler.do_GET()
 
     body = handler.reply.call_args.args[0].decode()
-    assert "<a class='navlink active' href='/debrief'>" in body
-    assert "<span>Debriefs</span>" in body
     assert "<h1>Debrief: acme/widgets</h1>" in body
     assert "<li>PR #11: Shipped feature &lt;b&gt;x&lt;/b&gt;</li>" in body
     assert f"<img src='/image?id={DEBRIEF_ATTACHMENT}'" in body
@@ -4427,6 +6130,35 @@ def test_evidence_route_refuses_with_404_over_http(tmp_path, monkeypatch, query)
             urllib.request.urlopen(f"http://127.0.0.1:{port}/evidence?{query}", timeout=15)
 
     assert refused.value.code == 404
+
+
+def test_missing_debrief_404_skips_dashboard_status_reads(tmp_path, monkeypatch):
+    monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
+    with (
+        mock.patch.object(serve.digest, "read_one", return_value=None),
+        mock.patch.object(
+            serve.machines,
+            "machines",
+            side_effect=AssertionError("error response read machine data"),
+        ) as machine_read,
+        mock.patch.object(
+            serve,
+            "timers",
+            side_effect=AssertionError("error response read timer data"),
+        ) as timer_read,
+        _live_dashboard({}) as port,
+    ):
+        with pytest.raises(urllib.error.HTTPError) as refused:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/debrief?repo=widgets&file=missing.md",
+                timeout=15,
+            )
+        body = refused.value.read()
+
+    assert refused.value.code == 404
+    assert b"no such debrief" in body
+    machine_read.assert_not_called()
+    timer_read.assert_not_called()
 
 
 DEBRIEF_SHOT_REL = "20261010-120000-6h-screenshots/debrief.png"
@@ -4624,7 +6356,7 @@ def test_image_route_falls_back_to_github_when_redis_has_no_copy(monkeypatch, re
     assert asked == ["eba1e250-ae34-481a-9f8c-98503030f83e"] and handler.wfile.getvalue() == b"gh-bytes"
 
 
-def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_the_page_says_it_is_a_record(tmp_path, monkeypatch, redis_port, flush_redis):
+def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_page_says_no_digest(tmp_path, monkeypatch, redis_port, flush_redis):
     from lupin import digest as digest_mod
 
     monkeypatch.setattr(serve, "STATE_DIR", str(tmp_path))
@@ -4640,4 +6372,192 @@ def test_debrief_index_shows_no_missing_digest_label_for_a_record_and_the_page_s
     page.do_GET()
 
     assert "no digest" not in index.reply.call_args.args[0].decode()
-    assert "This is a record" in page.reply.call_args.args[0].decode()
+    assert "This debrief is a record without a digest." in page.reply.call_args.args[0].decode()
+
+
+class DashboardStatusTests(unittest.TestCase):
+    def _reply_page(self, active: str, status_data: dict | None = None) -> str:
+        handler = serve.Handler.__new__(serve.Handler)
+        handler.fleet_connection = {}
+        if status_data is not None:
+            handler.dashboard_status_data = status_data
+        handler.wfile = io.BytesIO()
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        body = serve.page("Synthetic", "<p>SYNTHETIC TEST DATA ONLY</p>", active=active)
+        serve.Handler.reply(handler, body)
+        return handler.wfile.getvalue().decode()
+
+    @staticmethod
+    def _status_fragment(response: str) -> str:
+        return response.split("<div class=dashboard-status", 1)[1].split("</div>", 1)[0]
+
+    def test_shared_status_appears_on_mockup_pages(self):
+        records = [{"state": "online"}]
+        scheduled = [{"unit": "delegation-loop.timer", "next": 1_800_000_000}]
+        pages = ("overview", "usage", "loops", "schedule", "repos", "roadmap", "models")
+        with (
+            mock.patch.object(serve.machines, "machines", return_value=records),
+            mock.patch.object(serve, "timers", return_value=scheduled),
+            mock.patch.object(serve.time, "time", return_value=1_700_000_000),
+        ):
+            for active in pages:
+                with self.subTest(active=active):
+                    response = self._reply_page(active)
+                    status = self._status_fragment(response)
+                    self.assertIn("1 of 1 machines available", status)
+                    self.assertIn("data-until='1800000000'", status)
+                    self.assertIn("Updated", status)
+                    self.assertEqual(response.count("class=dashboard-status role=group"), 1)
+            self.assertNotIn(
+                "class=dashboard-status role=group", self._reply_page("machines")
+            )
+
+    def test_status_matches_available_machines_and_earliest_run(self):
+        records = [
+            {"state": "online"},
+            {"state": "online"},
+            {"state": "offline"},
+        ]
+        scheduled = [
+            {"unit": "delegation-loop.timer", "next": 1_700_000_300},
+            {"unit": "lupin-once-0123456789abcdef.timer", "next": 1_700_000_100},
+        ]
+        with (
+            mock.patch.object(serve.machines, "machines", return_value=records),
+            mock.patch.object(serve, "timers", return_value=scheduled),
+            mock.patch.object(serve.time, "time", return_value=1_700_000_000),
+        ):
+            status = serve.render_dashboard_status({})
+
+        self.assertIn("2 of 3 machines available", status)
+        self.assertIn("status-warn", status)
+        self.assertNotIn("status-ok", status)
+        self.assertIn("data-until='1700000100'", status)
+        self.assertIn(time.strftime("%H:%M:%S", time.localtime(1_700_000_000)), status)
+
+    def test_all_online_fleet_is_healthy(self):
+        with (
+            mock.patch.object(
+                serve.machines, "machines", return_value=[{"state": "online"}]
+            ),
+            mock.patch.object(serve, "timers", return_value=[]),
+        ):
+            status = serve.render_dashboard_status({})
+
+        self.assertIn("1 of 1 machines available", status)
+        self.assertIn("status-ok", status)
+
+    def test_partial_machine_records_are_not_healthy(self):
+        def read_records(_connection, skipped, *, strict):
+            skipped.append("machine:broken")
+            return [{"state": "online"}]
+
+        with (
+            mock.patch.object(
+                serve.machines, "machines", side_effect=read_records
+            ),
+            mock.patch.object(serve, "timers", return_value=[]),
+        ):
+            status = serve.render_dashboard_status({})
+
+        self.assertIn("1 of 2 machines available · incomplete", status)
+        self.assertIn("warning: skipped unreadable Redis record(s): machine:broken", status)
+        self.assertNotIn("status-ok", status)
+
+    def test_dashboard_status_reuses_existing_page_data(self):
+        status_data = {
+            "machines": [
+                {"state": "online"},
+                {"state": "draining"},
+                {"state": "offline"},
+            ],
+            "fleet_error": None,
+            "timers": [{"unit": "delegation-loop.timer", "next": 1_800_000_000}],
+            "timer_error": None,
+        }
+        with (
+            mock.patch.object(
+                serve.machines, "machines", side_effect=AssertionError("duplicate read")
+            ),
+            mock.patch.object(serve, "timers", side_effect=AssertionError("duplicate read")),
+        ):
+            response = self._reply_page("overview", status_data)
+
+        status = self._status_fragment(response)
+        self.assertIn("1 of 3 machines available", status)
+        self.assertIn("data-until='1800000000'", status)
+        self.assertIn("Updated", status)
+
+    def test_fleet_and_schedule_read_errors_are_unavailable(self):
+        status_data = {
+            "machines": [],
+            "fleet_error": "registry unavailable",
+            "timers": [],
+            "timer_error": "systemd unavailable",
+        }
+        with (
+            mock.patch.object(
+                serve.machines, "machines", side_effect=AssertionError("duplicate read")
+            ),
+            mock.patch.object(serve, "timers", side_effect=AssertionError("duplicate read")),
+        ):
+            response = self._reply_page("overview", status_data)
+
+        status = self._status_fragment(response)
+        self.assertEqual(status.count("Unavailable"), 2)
+        self.assertNotIn("No machines registered", status)
+        self.assertNotIn("No next run scheduled", status)
+        self.assertNotIn("status-ok", status)
+
+    def test_missing_status_values_are_explicit_and_warned(self):
+        with (
+            mock.patch.object(serve.machines, "machines", return_value=[]),
+            mock.patch.object(serve, "timers", return_value=[]),
+        ):
+            status = serve.render_dashboard_status({})
+
+        self.assertIn("No machines registered", status)
+        self.assertIn("No next run scheduled", status)
+        self.assertEqual(status.count("status-warn"), 2)
+        self.assertNotIn("status-ok", status)
+
+    def test_unreadable_status_values_are_unavailable_and_warned(self):
+        with (
+            mock.patch.object(
+                serve.machines,
+                "machines",
+                side_effect=serve.machines.CoordinatorUnreachable("machine registry"),
+            ),
+            mock.patch.object(
+                serve, "timers", side_effect=serve.ScheduleUnavailable("timer list")
+            ),
+        ):
+            status = serve.render_dashboard_status({})
+
+        self.assertEqual(status.count("Unavailable"), 2)
+        self.assertEqual(status.count("status-warn"), 2)
+        self.assertNotIn("status-ok", status)
+
+    def test_read_timers_distinguishes_valid_empty_from_failure(self):
+        with mock.patch.object(serve, "run", return_value=(0, "[]")):
+            self.assertEqual(serve._read_timers(), ([], None))
+        with mock.patch.object(
+            serve, "run", return_value=(1, "systemctl unavailable")
+        ):
+            self.assertEqual(
+                serve._read_timers(),
+                ([], "systemd timer list is unavailable"),
+            )
+
+    def test_strict_timer_reader_distinguishes_unavailable_from_empty(self):
+        with mock.patch.object(serve, "run", return_value=(1, "systemctl unavailable")):
+            with self.assertRaises(serve.ScheduleUnavailable):
+                serve.timers(strict=True)
+
+def test_nav_links_have_accessible_names():
+    rendered = serve.render_nav("overview")
+    assert rendered.count("class='navlink") == len(serve.NAV_ITEMS)
+    for _key, _href, label, _path in serve.NAV_ITEMS:
+        assert f"aria-label='{label}'" in rendered

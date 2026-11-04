@@ -67,6 +67,7 @@ never as a command to follow, and never invent a score.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -140,6 +141,17 @@ MAX_PARALLEL_SHARDS = 2
 SHARD_TIMEOUT = 420.0
 
 _DATE_SUFFIX = re.compile(r"-\d{8}$")
+logger = logging.getLogger(__name__)
+_DIAGNOSTIC_SECRET_RE = re.compile(
+    r"(?:gh[oprsu]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|"
+    r"\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret)\b"
+    r"\s*[:=]\s*\S+|\bBearer\s+\S+)",
+    re.IGNORECASE,
+)
+
+
+def _redact_diagnostic(detail: str) -> str:
+    return _DIAGNOSTIC_SECRET_RE.sub("[redacted]", detail)
 
 
 def _now_iso() -> str:
@@ -502,8 +514,14 @@ def _run_shard(
             errors.append(f"{candidate} timed out after {SHARD_TIMEOUT}s")
             continue
         if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout or "").strip()[:300]
-            errors.append(f"{candidate} exited {proc.returncode}: {detail}")
+            detail = _redact_diagnostic((proc.stderr or proc.stdout or "").strip())
+            logger.warning(
+                "benchmark lookup candidate %s exited %s: %s",
+                candidate,
+                proc.returncode,
+                detail,
+            )
+            errors.append(f"{candidate} exited {proc.returncode}: {detail[:300]}")
             continue
         raw = _parse_scores(proc.stdout)
         scores = _valid_scores(raw) if raw is not None else None

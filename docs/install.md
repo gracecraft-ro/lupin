@@ -97,11 +97,11 @@ Do this step on one machine.
    <!-- markdownlint-disable MD013 -->
    ```text
    user default off
-   user lupin-MACHINE on >PASSWORD ~lupin:* resetchannels -@all +ping +get +set +del +ttl +pttl +multi +exec +zadd +zrem +zscore +zcard +zrange +zremrangebyscore +xadd +xrange +xrevrange +scan +eval
+   user lupin-MACHINE on >PASSWORD ~lupin:* resetchannels -@all +ping +get +set +del +ttl +multi +exec +zadd +zrem +zscore +zcard +zrange +zremrangebyscore +xadd +xrange +xrevrange +scan +eval
    ```
    <!-- markdownlint-enable MD013 -->
 
-   Give every machine user `+multi +exec +pttl`. `claims.claims_for` uses
+   Give every machine user `+multi +exec`. `claims.claims_for` uses
    these commands to read claims consistently, including in debriefs,
    `lupin serve`, `lupin quest start`, and `lupin roadmap`. Without them,
    claim reads fail or debriefs omit claims. `+ping` is only for the check

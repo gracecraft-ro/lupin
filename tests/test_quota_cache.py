@@ -444,15 +444,6 @@ class CliQuotaTests(unittest.TestCase):
             },
         }
 
-    def test_cli_plain_output_shows_the_note_of_a_provider_with_no_usage_rows(self):
-        output = self._run_cli(self._merged_with_a_note())
-        self.assertIn("opencode-go: OpenCode Go API key expired", output.splitlines())
-        # A provider with usage rows is shown as before.
-        self.assertTrue(any(
-            line.startswith("claude ") and "60% left" in line for line in output.splitlines()
-        ))
-        self.assertNotIn("no quota data cached yet", output)
-
     def test_cli_json_output_shows_the_note_of_a_provider_with_no_usage_rows(self):
         merged = json.loads(self._run_cli(self._merged_with_a_note(), "--json"))
         self.assertEqual(

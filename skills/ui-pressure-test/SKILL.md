@@ -96,9 +96,9 @@ Include all relevant items, such as:
   it.
 - Supported screen sizes, orientation changes, and browsers. Every journey
   runs on all three device sizes. See "Run the three device passes".
-- Keyboard focus and visible focus, labels and instructions, zoom, and other
-  access needs that affect the journey. Name assistive tools that were actually
-  used; do not claim a screen-reader check from keyboard testing alone.
+- Use `ux-pressure-test` for accessibility, performance, and resilience checks.
+  Name assistive tools only when you used them; keyboard checks are not a
+  screen-reader test.
 
 Create a coverage table before dispatch. Give every planned journey and
 variation a status: `not started`, `passed`, `finding`, `blocked`, or `not run`.
@@ -299,8 +299,8 @@ information order, control visibility, or workflow complexity is the problem.
 File the visual review and the design-system check as design requests. Each
 one gets its screenshot and the file the rule comes from.
 
-Use the repo's `/triage` skill and issue label map. Give every ticket a `P0` to
-`P3` priority, mapped to the repo's labels when needed:
+Use the `triage` skill and the repo's issue label map. Give every ticket a
+`P0` to `P3` priority, mapped to the repo's labels when needed:
 
 - `P0`: a core task is broken or very disruptive, or the app loses or exposes
   important user data. Escalate at once. Stop a test if continuing could cause

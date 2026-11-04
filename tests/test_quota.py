@@ -6,6 +6,7 @@ layer only.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -15,7 +16,7 @@ import tempfile
 import time
 import unittest
 from contextlib import closing, redirect_stderr, redirect_stdout
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
 from lupin import pace, quota
@@ -198,6 +199,56 @@ class QuotaUsageTests(unittest.TestCase):
         self.assertEqual(opencode_row["used_pct"], 64.0)
         self.assertEqual(opencode_row["resets_at"], reset_at_ms)
 
+
+    def test_claude_oauth_fallback_does_not_duplicate_omp_windows(self):
+        report = {
+            "reports": [{
+                "provider": "claude",
+                "limits": [
+                    {
+                        "id": "five_hour",
+                        "label": "5-hour window",
+                        "window": {"durationMs": 18_000_000},
+                        "amount": {"usedFraction": 0.2},
+                    },
+                    {
+                        "id": "seven_day",
+                        "label": "Weekly window",
+                        "window": {"durationMs": 604_800_000},
+                        "amount": {"usedFraction": 0.4},
+                    },
+                ],
+            }],
+        }
+        oauth_rows = [
+            {
+                "provider": "claude",
+                "duration": quota.QuotaDuration.FIVE_HOURS,
+                "label": "5 hours",
+                "used_pct": 30,
+            },
+            {
+                "provider": "claude",
+                "duration": quota.QuotaDuration.WEEKLY,
+                "label": "7 days",
+                "used_pct": 50,
+            },
+        ]
+        with (
+            mock.patch.object(quota, "run", return_value=(0, json.dumps(report))),
+            mock.patch.object(quota, "claude_oauth_quota", return_value=oauth_rows),
+        ):
+            rows = [row for row in quota.quota_usage() if row["provider"] == "claude"]
+
+        self.assertEqual(
+            [(row["duration"], row["label"], row["used_pct"]) for row in rows],
+            [
+                (quota.QuotaDuration.FIVE_HOURS, "5-hour window", 20.0),
+                (quota.QuotaDuration.WEEKLY, "Weekly window", 40.0),
+            ],
+        )
+
+
     def test_uses_latest_codex_snapshot_when_omp_fails(self):
         sessions = os.path.join(self.tempdir.name, "sessions")
         session_dir = os.path.join(sessions, "2026", "10", "03")
@@ -301,6 +352,23 @@ class QuotaUsageTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertNotIn("account", rows[0])
 
+    def test_non_list_reset_credits_keeps_available_count(self):
+        report = {
+            "provider": "openai-codex",
+            "resetCredits": {"availableCount": 42, "credits": 42},
+            "limits": [{
+                "label": "5 hours",
+                "window": {"durationMs": 18_000_000, "resetsAt": 1_790_547_474_348},
+                "amount": {"usedFraction": 0.4},
+            }],
+        }
+
+        rows = self._omp_rows(report)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["reset_credits"], {"available": 42, "expires_at": []})
+
+
     def test_two_logins_on_one_plan_get_different_labels(self):
         reports = (
             self._codex_report("plus", "id-one", [("5 hours", 18_000_000, 0.1)]),
@@ -368,6 +436,57 @@ class QuotaUsageTests(unittest.TestCase):
     def test_claude_fallback_always_present(self):
         rows = quota.quota_usage()
         self.assertTrue(any(row["provider"] == "claude" for row in rows))
+
+    def test_reset_credits_ride_on_their_login_rows(self):
+        # Shape from `omp usage --json` on 2026-10-21: the plus login has two
+        # available reset credits. The free login has none.
+        def limit(used_fraction):
+            return {
+                "id": "primary",
+                "label": "5 hours",
+                "window": {"id": "5h", "label": "5 hours", "durationMs": 18_000_000, "resetsAt": 1_790_547_474_348},
+                "amount": {"usedFraction": used_fraction},
+            }
+
+        report = {
+            "generatedAt": 1_790_529_505_926,
+            "reports": [
+                {
+                    "provider": "openai-codex",
+                    "metadata": {"planType": "plus"},
+                    "limits": [limit(0.0)],
+                    "resetCredits": {
+                        "availableCount": 2,
+                        "credits": [
+                            {"grantedAt": "2026-09-29T18:36:49.931644Z", "expiresAt": "2026-10-29T18:36:49.931644Z", "status": "available"},
+                            {"grantedAt": "2026-10-07T22:59:56.486921Z", "expiresAt": "2026-11-06T22:59:56.486921Z", "status": "available"},
+                        ],
+                    },
+                },
+                {
+                    "provider": "openai-codex",
+                    "metadata": {"planType": "free"},
+                    "limits": [limit(1.0)],
+                    "resetCredits": {"availableCount": 0},
+                },
+            ],
+        }
+        with mock.patch.object(quota, "run", return_value=(0, json.dumps(report))):
+            rows = quota.quota_usage()
+
+        plus = next(row for row in rows if row.get("provider") == "openai" and row["account"].startswith("plus"))
+        free = next(row for row in rows if row.get("provider") == "openai" and row["account"].startswith("free"))
+        self.assertEqual(
+            plus["reset_credits"],
+            {
+                "available": 2,
+                "expires_at": [
+                    int(datetime(2026, 10, 29, 18, 36, 49, 931644, tzinfo=timezone.utc).timestamp() * 1000),
+                    int(datetime(2026, 11, 6, 22, 59, 56, 486921, tzinfo=timezone.utc).timestamp() * 1000),
+                ],
+            },
+        )
+        self.assertEqual(free["reset_credits"], {"available": 0, "expires_at": []})
 
 
 class OpencodeGoQuotaTests(UsageReaderFixtures):
@@ -594,6 +713,9 @@ class ClaudeOauthQuotaTests(unittest.TestCase):
             [row["duration"] for row in rows],
             [quota.QuotaDuration.FIVE_HOURS, quota.QuotaDuration.WEEKLY],
         )
+        self.assertEqual(
+            [row["label"] for row in rows], ["5 hours", "7 days"]
+        )
         self.assertTrue(all(isinstance(row["resets_at"], int) for row in rows))
         self.assertEqual(
             fetch.call_args.args[0].get_header("Authorization"), "Bearer test-token"
@@ -618,6 +740,22 @@ class ClaudeOauthQuotaTests(unittest.TestCase):
                     rows, [{"provider": "claude", "note": quota.NO_CLAUDE_CREDENTIALS}]
                 )
 
+    def test_malformed_credentials_do_not_break_quota_fallback(self):
+        with (
+            mock.patch("builtins.open", mock.mock_open(read_data="{")),
+            mock.patch.object(quota, "run", return_value=(0, json.dumps({"reports": []}))),
+            mock.patch.object(
+                quota,
+                "claude_oauth_quota",
+                return_value=[{"provider": "claude", "note": quota.QUOTA_NOT_AVAILABLE}],
+            ),
+        ):
+            rows = quota.quota_usage()
+
+        self.assertIn({"provider": "claude", "note": quota.QUOTA_NOT_AVAILABLE}, rows)
+        self.assertTrue(all("_metadata" not in row for row in rows))
+
+
 
 class SnapshotTests(unittest.TestCase):
     """`snapshot()` -- the one normalized entry point `machines.py`'s
@@ -637,11 +775,16 @@ class SnapshotTests(unittest.TestCase):
             "pct_left": 60,
             "resets_at": 2,
             "source": quota.quota_source_label("claude"),
+            "windows": [
+                {"label": None, "pct_left": 90, "resets_at": 1},
+                {"label": None, "pct_left": 60, "resets_at": 2},
+            ],
         })
         self.assertEqual(result["openai"], {
             "pct_left": 75,
             "resets_at": 3,
             "source": quota.quota_source_label("openai"),
+            "windows": [{"label": None, "pct_left": 75, "resets_at": 3}],
         })
 
     def test_picks_the_account_with_the_most_quota_left(self):
@@ -673,6 +816,90 @@ class SnapshotTests(unittest.TestCase):
 
         self.assertEqual(result["openai"]["pct_left"], 50)
         self.assertEqual(result["openai"]["pct_left"], pace.headroom(rows, "openai", later))
+        self.assertEqual(
+            result["openai"]["windows"],
+            [
+                {"label": None, "pct_left": 50, "resets_at": later},
+                {"label": None, "pct_left": 50, "resets_at": later},
+            ],
+        )
+
+    def test_oauth_rows_use_matching_omp_account_before_deduplication(self):
+        reports = [
+            {
+                "provider": "claude",
+                "metadata": {"planType": "pro", "email": "oauth@example.test", "accountId": "acct-oauth"},
+                "limits": [
+                    {"id": "five_hour", "amount": {"usedFraction": 0.2}, "window": {"durationMs": 18_000_000}},
+                    {"id": "seven_day", "amount": {"usedFraction": 0.3}, "window": {"durationMs": 604_800_000}},
+                ],
+            },
+            {
+                "provider": "claude",
+                "metadata": {"planType": "pro", "email": "other@example.test", "accountId": "acct-other"},
+                "limits": [
+                    {"id": "five_hour", "amount": {"usedFraction": 0.4}, "window": {"durationMs": 18_000_000}},
+                    {"id": "seven_day", "amount": {"usedFraction": 0.5}, "window": {"durationMs": 604_800_000}},
+                ],
+            },
+        ]
+        oauth_rows = [
+            {"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 10},
+            {"provider": "claude", "duration": quota.QuotaDuration.WEEKLY, "used_pct": 15},
+        ]
+        oauth_identity = {"email": "oauth@example.test"}
+        with (
+            mock.patch.object(quota, "claude_oauth_quota", return_value=oauth_rows),
+            mock.patch.object(quota, "_claude_identity", return_value=oauth_identity),
+            mock.patch.object(quota, "run", return_value=(0, json.dumps({"reports": reports}))),
+        ):
+            rows = quota.quota_usage()
+        self.assertTrue(all("_metadata" not in row for row in rows))
+
+        labeled = [row for row in rows if "used_pct" in row]
+        self.assertEqual(len(labeled), 4)
+        self.assertEqual(
+            [(row["account"], row["duration"]) for row in labeled],
+            [
+                ("pro-" + hashlib.sha256(b"oauth@example.test\0acct-oauth").hexdigest()[:6], quota.QuotaDuration.FIVE_HOURS),
+                ("pro-" + hashlib.sha256(b"oauth@example.test\0acct-oauth").hexdigest()[:6], quota.QuotaDuration.WEEKLY),
+                ("pro-" + hashlib.sha256(b"other@example.test\0acct-other").hexdigest()[:6], quota.QuotaDuration.FIVE_HOURS),
+                ("pro-" + hashlib.sha256(b"other@example.test\0acct-other").hexdigest()[:6], quota.QuotaDuration.WEEKLY),
+            ],
+        )
+        self.assertEqual([row["used_pct"] for row in labeled[:2]], [20, 30])
+        self.assertTrue(all("_metadata" not in row for row in rows))
+    def test_snapshot_includes_every_window_for_the_selected_account(self):
+        rows = [
+            {
+                "provider": "claude",
+                "account": "plus",
+                "duration": quota.QuotaDuration.FIVE_HOURS,
+                "label": "5 Hour limit",
+                "used_pct": 2,
+                "resets_at": 3,
+            },
+            {
+                "provider": "claude",
+                "account": "plus",
+                "duration": quota.QuotaDuration.WEEKLY,
+                "label": "Weekly limit",
+                "used_pct": 91,
+                "resets_at": None,
+            },
+        ]
+        with mock.patch.object(quota, "quota_usage", return_value=rows):
+            result = quota.snapshot()
+
+        self.assertEqual(result["claude"]["pct_left"], 98)
+        self.assertEqual(
+            result["claude"]["windows"],
+            [
+                {"label": "5 Hour limit", "pct_left": 98, "resets_at": 3},
+                {"label": "Weekly limit", "pct_left": 9, "resets_at": None},
+            ],
+        )
+        self.assertNotIn("account", result["claude"])
 
     def test_ignores_a_window_with_no_reset_when_ranking_logins(self):
         # Issue #207, review finding 1: login "a" has room on both windows.

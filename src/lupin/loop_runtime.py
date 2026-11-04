@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import subprocess
@@ -20,7 +21,7 @@ from typing import Any
 
 import redis
 
-from . import claims, run_log, slots, slots_redis
+from . import claim_labels, claims, run_log, slots, slots_redis
 
 # A loop id is a repo name. `repo~2` is a second loop on the same repo on this
 # machine, `repo~3` a third, and so on. There is no `repo~1`: that is `repo`.
@@ -48,6 +49,7 @@ DEFAULT_PROMPT = (
 )
 HERDR_TIMEOUT = 20.0
 GIT_TIMEOUT = 60.0
+CODEGRAPH_TIMEOUT = 120.0
 # Files in the git directory that show an unfinished git operation.
 UNFINISHED_GIT_STATES = (
     ("MERGE_HEAD", "merge"),
@@ -57,10 +59,19 @@ UNFINISHED_GIT_STATES = (
     ("REVERT_HEAD", "revert"),
 )
 SERVER_START_TIMEOUT = 30.0
+WORKER_START_TIMEOUT = HERDR_TIMEOUT * 2 + SERVER_START_TIMEOUT + 10.0
 PANE_READ_TIMEOUT = 60.0
 SYSTEMCTL_CHECK_TIMEOUT = 3.0
 SYSTEMCTL_STOP_TIMEOUT = 30.0
 LEASE_TTL = 60.0
+# bmo serves one request at a time, so a run on a `bmo:`/`bmo/` model takes
+# this fleet-wide slot for its whole life. `digest` already uses the same slot
+# for its own calls, so a manual run and a digest cannot overlap either.
+BMO_SLOT = "bmo"
+# Wait this long for bmo before failing the run. bmo can sleep for about five
+# minutes before it answers, so 0 would fail a loop for a machine that is only
+# still waking.
+BMO_WAIT_S = 300.0
 # The monitor renews the run's claims this often. A claim lasts 10 minutes.
 CLAIM_RENEW_INTERVAL = 120.0
 HANDOFF_GRACE_S = 600.0
@@ -72,6 +83,388 @@ HANDOFF_TEXT = (
     "keep anything you need in the ledger or the issue. Lupin stops this loop when "
     "you finish, or after the wait time ends."
 )
+QUOTA_POLL_INTERVAL = 30.0
+QUOTA_HANDOFF_HEADROOM_PCT = 10.0
+QUOTA_HANDOFF_TEXT = (
+    "Quota for this orchestrator is low. Do not start another task. "
+    "Finish only the current safe step, then run /handoff. Update HANDOFF.md in "
+    "the worktree with these exact headings: Progress, Active work, Blockers, "
+    "Next action. Include the issue and branch, completed and unfinished work, "
+    "the blocker, and one concrete next action. Keep the existing worktree and "
+    "claims. Do not release or replace a claim."
+)
+
+
+def _quota_provider_for_selector(selector: str) -> str:
+    if selector == "claude":
+        return "claude"
+    provider = selector.partition("/")[0]
+    return "openai" if provider in {"openai", "openai-codex"} else provider
+
+
+def _active_quota_provider(metadata: dict) -> str | None:
+    if metadata.get("platform") == "claude":
+        return "claude"
+    if metadata.get("platform") != "omp":
+        return None
+    provider = metadata.get("provider")
+    if provider in {"openai", "openai-codex", "opencode-go"}:
+        return "openai" if provider in {"openai", "openai-codex"} else provider
+    model = metadata.get("model")
+    if isinstance(model, str) and model.startswith(("bmo:", "local:")):
+        return None
+    if isinstance(model, str) and "/" in model:
+        return _quota_provider_for_selector(model)
+    return "unknown"
+
+
+def _provider_quota_status(
+    provider: str, snapshot: dict, *, now: float | None = None
+) -> tuple[str, float | None]:
+    from . import pace, quota_cache
+
+    now = time.time() if now is None else now
+    entry = snapshot.get(provider)
+    if not isinstance(entry, dict) or not quota_cache.is_fresh(entry, now):
+        return "unknown", None
+    rows = entry.get("rows")
+    if not isinstance(rows, list):
+        return "unknown", None
+    rows = [row for row in rows if isinstance(row, dict)]
+    now_ms = now * 1000
+    if pace.blocked(rows, provider, now_ms):
+        return "exhausted", None
+    headroom = pace.headroom(rows, provider, now_ms)
+    if headroom is None:
+        return "unknown", None
+    if headroom <= QUOTA_HANDOFF_HEADROOM_PCT:
+        return "near_limit", headroom
+    return "usable", headroom
+
+
+def _alternate_orchestrator(
+    repo: str, active_provider: str, snapshot: dict, *, profile_routed: bool = False
+) -> tuple[dict | None, str]:
+    if not profile_routed:
+        return None, "no_alternate_configured"
+    if active_provider == "unknown":
+        return None, "active_provider_unknown"
+    candidates = orchestrator_profiles().get(base_repo(repo), [])
+    if not candidates:
+        return None, "no_alternate_configured"
+    candidates = [
+        candidate for candidate in candidates
+        if _quota_provider_for_selector(validate_orchestrator(candidate)) != active_provider
+    ]
+    if not candidates:
+        return None, "no_alternate_configured"
+    try:
+        return select_orchestrator(candidates, snapshot), ""
+    except LoopError:
+        return None, "no_alternate_usable_quota"
+
+
+def _handoff_file_is_complete(path: Path, previous_mtime: int | None) -> bool:
+    try:
+        stat = path.stat()
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return False
+    if previous_mtime is not None and stat.st_mtime_ns <= previous_mtime:
+        return False
+    required = {"progress", "active work", "blockers", "next action"}
+    headings = list(re.finditer(r"(?im)^#+[ \t]*(.*?)[ \t]*$", content))
+    sections = {}
+    for index, heading in enumerate(headings):
+        title = heading.group(1).casefold()
+        if title not in required:
+            continue
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(content)
+        sections[title] = content[heading.end():end].strip()
+    return all(sections.get(title) for title in required)
+
+
+def _request_quota_handoff(
+    repo: str, session: str, workspace: dict
+) -> tuple[bool, str]:
+    workspace_id = _workspace_id(workspace)
+    agent = _agent_for_workspace(session, workspace_id) if workspace_id else None
+    if agent is None:
+        return False, "agent_missing"
+    worktree = _read_metadata(repo) or {}
+    worktree_path = worktree.get("worktree")
+    if not isinstance(worktree_path, str):
+        return False, "worktree_missing"
+    handoff_path = Path(worktree_path) / "HANDOFF.md"
+    try:
+        previous_mtime = handoff_path.stat().st_mtime_ns
+    except OSError:
+        previous_mtime = None
+    try:
+        _herdr(
+            session, "agent", "prompt", agent.get("name") or AGENT_NAME,
+            QUOTA_HANDOFF_TEXT, "--wait", "--timeout", str(int(HANDOFF_GRACE_S * 1000)),
+            timeout=HANDOFF_GRACE_S + HERDR_TIMEOUT,
+        )
+    except HerdrError:
+        return False, "handoff_prompt_failed"
+    if not _handoff_file_is_complete(handoff_path, previous_mtime):
+        return False, "handoff_incomplete"
+    try:
+        _keep_handoff(repo, Path(worktree_path))
+    except (LoopError, OSError):
+        return False, "handoff_save_failed"
+    return True, ""
+
+
+def _stop_agent_for_transition(session: str, workspace: dict) -> None:
+    workspace_id = _workspace_id(workspace)
+    agent = _agent_for_workspace(session, workspace_id) if workspace_id else None
+    if agent is None or agent.get("agent_status") == "done":
+        return
+    target = agent.get("name") or _pane_id(workspace)
+    if not target:
+        raise HerdrError("Herdr agent has no name or pane ID")
+    _herdr(session, "agent", "send-keys", target, "ctrl+c")
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        agent = _agent_for_workspace(session, workspace_id)
+        if agent is None or agent.get("agent_status") == "done":
+            return
+        time.sleep(0.1)
+    raise HerdrError("the current agent did not exit after Ctrl+C")
+
+
+def _pane_output(session: str, workspace: dict) -> str:
+    pane = _pane_id(workspace)
+    if not pane:
+        return ""
+    try:
+        return _herdr(
+            session, "pane", "read", pane, "--source", "recent-unwrapped",
+            "--lines", "100", "--format", "text", timeout=PANE_READ_TIMEOUT,
+        )
+    except LoopError:
+        return ""
+
+
+def _quota_exhaustion(output: str) -> bool:
+    return bool(re.search(
+        r"quota.{0,40}(?:exhaust|limit|deplet|exceed|insufficient)|"
+        r"(?:exhaust|deplet|exceed).{0,40}quota|"
+        r"rate[_ ]limit|usage[_ ]limit|too many requests|\b429\b",
+        output,
+        re.IGNORECASE,
+    ))
+
+
+def _write_quota_handoff(
+    repo: str, metadata: dict, provider: str, reason: str, state: str
+) -> Path:
+    worktree_value = metadata.get("worktree")
+    worktree = Path(worktree_value) if isinstance(worktree_value, str) else None
+    branch = metadata.get("branch") or "unknown"
+    status = "unavailable"
+    if worktree and worktree.is_dir():
+        try:
+            status = _git(worktree, "status", "--short").strip() or "clean"
+        except LoopError:
+            pass
+    text = (
+        "# Resumable quota handoff\n\n"
+        f"- State: {state}\n- Reason: {reason}\n- Provider: {provider}\n"
+        f"- Repo: {repo}\n- Branch: {branch}\n"
+        f"- Worktree: {worktree or 'unavailable'}\n"
+        f"- Claim holder: {claim_holder(repo, metadata) or 'unavailable'}\n\n"
+        "## Progress\n\n"
+        "The previous agent stopped before it confirmed a complete handoff. "
+        f"Saved work remains in the worktree. Git status: {status}.\n\n"
+        "## Active work\n\n"
+        "Continue the existing issue and branch recorded in this run. The "
+        "workspace and its claim holder were kept; inspect the worktree and "
+        "the saved `.loop/loop-state.json` before changing the active task.\n\n"
+        "## Blockers\n\n"
+        f"{reason}\n\n"
+        "## Next action\n\n"
+        "Read this file and `.loop/loop-state.json`, inspect the existing "
+        "worktree changes, then continue the same claimed task. Do not claim "
+        "or start duplicate work.\n"
+    )
+    if worktree and worktree.is_dir():
+        handoff_path = worktree / "HANDOFF.md"
+        try:
+            previous = handoff_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            previous = ""
+        if previous:
+            text += f"\n## Partial handoff from the previous agent\n\n{previous}\n"
+        handoff_path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+        handoff_path.write_text(text, encoding="utf-8")
+        os.chmod(handoff_path, 0o640)
+    saved = STATE_DIR / "handoffs" / f"{validate_repo(repo)}.HANDOFF.md"
+    saved.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
+    saved.write_text(text, encoding="utf-8")
+    os.chmod(saved, 0o640)
+    return saved
+
+
+def _quota_watch_once(
+    repo: str, session: str, workspace: dict, watch: dict
+) -> None:
+    from . import quota_cache
+
+    with watch["lock"]:
+        phase = watch["phase"]
+        provider = watch["provider"]
+    if phase == "active":
+        snapshot = quota_cache.read_snapshot(**_redis_kwargs())
+        status, headroom = _provider_quota_status(provider, snapshot)
+        if status == "usable":
+            return
+        with watch["lock"]:
+            if watch["phase"] != "active":
+                return
+            watch["phase"] = "prompting"
+        reason = (
+            f"active provider quota is {status.replace('_', ' ')} "
+            f"({provider}; headroom {headroom if headroom is not None else 'unknown'})"
+        )
+        if status in {"exhausted", "unknown"}:
+            interrupted = status == "exhausted"
+            if interrupted:
+                reason = f"{provider} usage ended before the handoff completed"
+            agent = _agent_for_workspace(session, _workspace_id(workspace))
+            target = agent.get("name") if agent else _pane_id(workspace)
+            if target:
+                try:
+                    _herdr(session, "agent", "send-keys", target, "ctrl+c")
+                except LoopError:
+                    pass
+            pending = {
+                "kind": "handoff", "provider": provider, "quota_status": status,
+                "headroom": headroom, "completed": False,
+                "interrupted": interrupted, "reason": reason,
+            }
+            event = "quota_handoff_interrupted" if interrupted else "quota_handoff_unavailable"
+            _log_event(repo, _read_metadata(repo) or {}, event, provider=provider, reason=reason)
+        else:
+            metadata = _read_metadata(repo) or {}
+            _log_event(
+                repo, metadata, "quota_handoff_requested", provider=provider,
+                quota_status=status, quota_headroom=headroom,
+            )
+            complete, failure = _request_quota_handoff(repo, session, workspace)
+            if not complete and failure != "agent_missing":
+                agent = _agent_for_workspace(session, _workspace_id(workspace))
+                target = agent.get("name") if agent else _pane_id(workspace)
+                if target:
+                    try:
+                        _herdr(session, "agent", "send-keys", target, "ctrl+c")
+                    except LoopError:
+                        pass
+            if not complete:
+                output = _pane_output(session, workspace)
+                if _quota_exhaustion(output):
+                    reason = f"{provider} usage ended before the handoff completed"
+                else:
+                    reason = f"{reason}; handoff was not completed ({failure})"
+            pending = {
+                "kind": "handoff", "provider": provider, "quota_status": status,
+                "headroom": headroom, "completed": complete,
+                "interrupted": not complete, "reason": reason,
+            }
+        with watch["lock"]:
+            watch["pending"] = pending
+            watch["phase"] = "pending"
+            watch["wake"].set()
+        return
+    if phase == "standby":
+        active_provider = provider
+        snapshot = quota_cache.read_snapshot(**_redis_kwargs())
+        metadata = _read_metadata(repo) or {}
+        choice, _reason = _alternate_orchestrator(
+            repo, active_provider, snapshot,
+            profile_routed=metadata.get("routing_decision") == "profile",
+        )
+        if choice is None:
+            return
+        with watch["lock"]:
+            if watch["phase"] != "standby":
+                return
+            watch["pending"] = {"kind": "alternate", "choice": choice}
+            watch["phase"] = "pending"
+            watch["wake"].set()
+
+
+def _quota_watch_tick(
+    repo: str, session: str, workspace: dict, watch: dict
+) -> None:
+    try:
+        _quota_watch_once(repo, session, workspace, watch)
+    except Exception as exc:
+        with watch["lock"]:
+            if watch["phase"] == "prompting":
+                watch["phase"] = "active"
+        _log_current_event(
+            repo, "quota_watch_error", error_type=type(exc).__name__,
+        )
+
+
+def _quota_watch(
+    repo: str, session: str, workspace: dict, watch: dict
+) -> None:
+    while not watch["stop"].wait(QUOTA_POLL_INTERVAL):
+        _quota_watch_tick(repo, session, workspace, watch)
+
+
+def _set_quota_watch(
+    watch: dict, phase: str, provider: str, pending: dict | None = None
+) -> None:
+    with watch["lock"]:
+        watch.update(phase=phase, provider=provider, pending=pending)
+        watch["wake"].set()
+
+
+def _record_quota_handoff(
+    repo: str, metadata: dict, pending: dict
+) -> dict:
+    provider = pending["provider"]
+    reason = pending["reason"]
+    completed = pending["completed"]
+    if completed:
+        path = STATE_DIR / "handoffs" / f"{validate_repo(repo)}.HANDOFF.md"
+        state = "completed"
+    else:
+        state = "interrupted" if pending.get("interrupted", True) else "resumable"
+        try:
+            path = _write_quota_handoff(repo, metadata, provider, reason, state)
+        except OSError as exc:
+            path = None
+            reason = f"{reason}; could not save the handoff: {exc}"
+    handoff = {
+        "state": state,
+        "reason": reason,
+        "provider": provider,
+        "path": str(path) if path else None,
+        "updated_at": _now(),
+    }
+    if pending.get("headroom") is not None:
+        handoff["headroom"] = pending["headroom"]
+    metadata["quota_handoff"] = handoff
+    metadata["reason"] = reason
+    _write_metadata(repo, metadata)
+    event = (
+        "quota_handoff_completed" if completed
+        else "quota_handoff_interrupted" if state == "interrupted"
+        else "quota_handoff_resumable"
+    )
+    _log_event(
+        repo, metadata, event,
+        provider=provider, reason=reason, path=handoff["path"],
+    )
+    return handoff
+
+
 
 def validate_orchestrator(selector: str) -> str:
     if not isinstance(selector, str):
@@ -129,6 +522,10 @@ def select_orchestrator(
 
     now = time.time() if now is None else now
     now_ms = now * 1000
+    try:
+        weekly_targets = pace.weekly_daily_targets()
+    except pace.PacingConfigError as exc:
+        raise EnvValueError(str(exc)) from exc
     choices: list[tuple[float, int, dict[str, str | float | None]]] = []
     for index, raw in enumerate(candidates):
         selector = validate_orchestrator(raw)
@@ -148,7 +545,9 @@ def select_orchestrator(
         if not isinstance(rows, list):
             continue
         rows = [row for row in rows if isinstance(row, dict)]
-        headroom = pace.headroom(rows, provider, now_ms)
+        headroom = pace.headroom(
+            rows, provider, now_ms, weekly_targets=weekly_targets
+        )
         if headroom is None:
             continue
         choices.append((headroom, -index, {
@@ -609,6 +1008,7 @@ def _service_environment() -> list[str]:
         "LUPIN_GH_CANONICAL_FETCHER",
         "LUPIN_LOOP_STATE_DIR", "LUPIN_LOOP_CODE_DIR", "LUPIN_LOOP_USER", "LUPIN_LOOP_GROUP",
         "LUPIN_LOOP_DEFAULT_REPOS", "LUPIN_LOOP_CLAUDE_MAX_CONCURRENT",
+        "LUPIN_WEEKLY_QUOTA_DAILY_TARGETS",
         "LUPIN_LOOP_CREDENTIALS_FILE", "LUPIN_LOOP_REDIS_PASSWORD_FILE",
         "LUPIN_LOOP_PROMPT_FILE", "LUPIN_LOOP_PATH", "ANTHROPIC_BASE_URL",
         "LUPIN_SYSTEMD_RUN",
@@ -800,31 +1200,21 @@ def _refuse_unfinished_git_work(checkout: Path) -> None:
 
 
 def _default_base(checkout: Path) -> str:
-    """Return the remote branch that a run starts from, for example `origin/main`.
-
-    Use `origin/release/next` when the remote has it.
-    """
-    try:
-        _git(checkout, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/release/next")
-        return "origin/release/next"
-    except LoopError:
-        pass
+    """Return the remote branch that a run starts from, for example `origin/main`."""
     try:
         base = _git(checkout, "symbolic-ref", "--short", "refs/remotes/origin/HEAD").strip()
     except LoopError:
         base = ""
     if base:
         return base
-    for candidate in ("origin/main", "origin/master"):
-        try:
-            _git(checkout, "rev-parse", "--verify", "--quiet", f"refs/remotes/{candidate}")
-        except LoopError:
-            continue
-        return candidate
-    raise LoopError(
-        f"cannot find the default branch of {checkout}. "
-        "Run `git remote set-head origin --auto` in it."
-    )
+    try:
+        _git(checkout, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/main")
+    except LoopError:
+        raise LoopError(
+            f"cannot find the default branch of {checkout}. "
+            "Run `git remote set-head origin --auto` in it."
+        ) from None
+    return "origin/main"
 
 
 def _create_worktree(repo: str, checkout: Path) -> tuple[Path, str]:
@@ -841,6 +1231,44 @@ def _create_worktree(repo: str, checkout: Path) -> tuple[Path, str]:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o750)
     _git(checkout, "worktree", "add", "--no-track", "-b", branch, str(path), base)
     return path, branch
+
+
+def _index_worktree(checkout: Path, worktree: Path) -> dict[str, str] | None:
+    """Build a CodeGraph index in a new worktree. Return the log fields, or None.
+
+    The repo ignores the index, so git does not copy it from the checkout. Do
+    nothing when the checkout has no index. Skip when `codegraph` is not on PATH.
+    Skip when git does not ignore the index: it would make the worktree dirty,
+    and `lupin stop` keeps a dirty worktree. A failure never stops the run.
+    """
+    if not (checkout / ".codegraph" / "codegraph.db").is_file():
+        return None
+    codegraph = shutil.which("codegraph")
+    if not codegraph:
+        return {"status": "skipped", "reason": "codegraph is not on PATH"}
+    try:
+        ignored = subprocess.run(
+            ["git", "-C", str(worktree), "check-ignore", "-q", ".codegraph/codegraph.db"],
+            capture_output=True,
+            timeout=GIT_TIMEOUT,
+            check=False,
+        )
+        if ignored.returncode:
+            return {"status": "skipped", "reason": "git does not ignore .codegraph/codegraph.db"}
+        proc = subprocess.run(
+            [codegraph, "init", "-y", str(worktree)],
+            capture_output=True,
+            text=True,
+            timeout=CODEGRAPH_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+    if proc.returncode:
+        lines = (proc.stderr or proc.stdout).strip().splitlines()
+        reason = lines[-1][:200] if lines else f"exit code {proc.returncode}"
+        return {"status": "failed", "reason": reason}
+    return {"status": "indexed"}
 
 
 def _resumed_worktree(repo: str, metadata: dict | None) -> tuple[Path, str]:
@@ -930,18 +1358,23 @@ def _clear_previous_worktree(repo: str, metadata: dict | None) -> str:
     return note
 
 
-def _finish_failed_start(repo: str, value: dict, resume: bool) -> str:
+def _finish_failed_start(
+    repo: str,
+    value: dict,
+    resume: bool,
+    *,
+    remove_worktree: bool = True,
+) -> str:
     """Record a failed start and remove what it made. Return a note for the message.
 
-    A resume keeps the recorded worktree, so the next resume can reuse it.
-    Otherwise remove the worktree and its branch. When git keeps the worktree,
-    the note names its path. Metadata is written even if removal raises.
+    A resume keeps its worktree. A caller can also keep it when the worker
+    cannot be stopped safely.
     """
     previous_state = value.get("state")
     value["state"] = "failed"
     removed_note = ""
     try:
-        if not resume:
+        if not resume and remove_worktree:
             try:
                 _, removed_note = _remove_worktree(repo, value)
             except LoopError as exc:
@@ -955,7 +1388,76 @@ def _finish_failed_start(repo: str, value: dict, resume: bool) -> str:
             )
         if value["prompt_file"]:
             Path(value["prompt_file"]).unlink(missing_ok=True)
+    if not resume and remove_worktree:
+        checkout = CODE_DIR / base_repo(repo)
+        if value.get("worktree"):
+            removed_note += (
+                f"; run `git -C {shlex.quote(str(checkout))} worktree remove "
+                f"{shlex.quote(str(value['worktree']))}` after saving its changes"
+            )
+        if value.get("branch"):
+            removed_note += (
+                f"; after its work is merged, run "
+                f"`git -C {shlex.quote(str(checkout))} branch -d "
+                f"{shlex.quote(str(value['branch']))}`"
+            )
     return removed_note
+
+
+def _wait_for_worker_start(repo: str, worker_unit: str) -> tuple[dict | None, str]:
+    deadline = time.monotonic() + WORKER_START_TIMEOUT
+    next_status_check = 0.0
+    while True:
+        try:
+            metadata = _read_metadata(repo)
+        except LoopError as exc:
+            return None, f"could not read worker state: {exc}"
+        if metadata is None:
+            return None, "worker state disappeared before reaching running"
+        state = metadata.get("state")
+        if state == "running":
+            return metadata, ""
+        if state != "starting":
+            return metadata, f"worker entered {state or 'unknown'} state before reaching running"
+        now = time.monotonic()
+        if now >= deadline:
+            return metadata, f"worker did not reach running within {WORKER_START_TIMEOUT:g}s"
+        if now >= next_status_check:
+            try:
+                _, service_state = _run(
+                    ["systemctl", "is-active", f"{worker_unit}.service"],
+                    timeout=SYSTEMCTL_CHECK_TIMEOUT,
+                )
+            except LoopError as exc:
+                return metadata, f"could not check worker service: {exc}"
+            if service_state not in {"active", "activating", "deactivating"}:
+                return metadata, "worker exited before reaching running"
+            next_status_check = now + 1.0
+        time.sleep(0.25)
+
+
+def _stop_failed_worker(repo: str) -> str:
+    unit = f"{unit_name(repo)}.service"
+    try:
+        _, state = _run(
+            ["systemctl", "is-active", unit], timeout=SYSTEMCTL_CHECK_TIMEOUT
+        )
+    except LoopError as exc:
+        return f"; could not check worker service: {exc}"
+    if state in {"inactive", "failed", "unknown"}:
+        return ""
+    if state not in {"active", "activating", "deactivating"}:
+        return f"; could not confirm worker service state ({state or 'no output'})"
+    try:
+        rc, output = _run(
+            _sudo_argv("systemctl", "stop", unit), timeout=SYSTEMCTL_STOP_TIMEOUT
+        )
+    except LoopError as exc:
+        return f"; could not stop worker service: {exc}"
+    if rc:
+        detail = output or f"exit code {rc}"
+        return f"; could not stop worker service: {detail}"
+    return ""
 
 
 def start_loop(
@@ -1008,6 +1510,7 @@ def start_loop(
             return False, f"skip {repo}: an old Herdr session is still running; use lupin stop first"
         routing_decision = "configured_platform"
         quota_headroom = None
+        skipped_profile = None
         if platform is None and provider is None and model is None:
             candidates = orchestrator_profiles().get(source)
             if candidates:
@@ -1021,9 +1524,26 @@ def start_loop(
                 model = choice["model"]
         else:
             routing_decision = "explicit"
+            skipped_profile = orchestrator_profiles().get(source)
         provider, model = validate_omp_options(selected, provider, model)
-        _refuse_unfinished_git_work(checkout)
         run_id = run_log.new_run_id()
+        if skipped_profile:
+            _log_event(
+                repo, {"run_id": run_id}, "profile_skipped",
+                profile=skipped_profile, reason="explicit_options",
+                platform=selected, provider=provider, model=model,
+            )
+        if selected == "claude" and model is None:
+            message = (
+                "Claude requires an explicit model; use --platform omp "
+                "with --model or an OMP orchestrator profile"
+            )
+            _log_event(
+                repo, {"run_id": run_id}, "error",
+                error_type="LoopError", message=message,
+            )
+            return False, message
+        _refuse_unfinished_git_work(checkout)
         previous_state = metadata.get("state") if metadata else None
         if resume:
             worktree, branch = _resumed_worktree(repo, metadata)
@@ -1038,6 +1558,7 @@ def start_loop(
             "platform": selected,
             "provider": provider,
             "model": model,
+            "routing_decision": routing_decision,
             "session": session,
             "state": "starting",
             "started_at": _now(),
@@ -1060,6 +1581,10 @@ def start_loop(
                 decision=routing_decision, platform=selected, provider=provider, model=model,
                 quota_headroom=quota_headroom,
             )
+            if not resume:
+                indexed = _index_worktree(checkout, worktree)
+                if indexed:
+                    _log_event(repo, value, "codegraph_index", **indexed)
             run_log.prune_runs(STATE_DIR, repo)
             _write_metadata(repo, value)
             if previous_state != "starting":
@@ -1098,6 +1623,32 @@ def start_loop(
             )
             removed_note = _finish_failed_start(repo, value, resume)
             return False, (output or f"could not start loop service for {repo}") + removed_note
+        startup_metadata, startup_error = _wait_for_worker_start(repo, worker_unit)
+        if startup_error:
+            try:
+                latest = _read_metadata(repo)
+            except LoopError:
+                latest = None
+            latest = latest or startup_metadata or value
+            _log_event(
+                repo, latest, "error",
+                error_type="WorkerStartError", message=startup_error,
+            )
+            stop_note = _stop_failed_worker(repo)
+            if latest.get("workspace_id"):
+                return False, (
+                    f"{startup_error}{stop_note}; workspace needs review; "
+                    f"run `lupin stop {repo}` to hand off and clean its worktree"
+                )
+            removed_note = _finish_failed_start(
+                repo, latest, resume, remove_worktree=not bool(stop_note)
+            )
+            if stop_note:
+                removed_note += (
+                    f"; run `lupin stop {repo}` to stop the worker and "
+                    "clean its worktree"
+                )
+            return False, f"{startup_error}{stop_note}{removed_note}"
         return True, (
             f"started {repo} ({selected}) in Herdr session {session}; "
             f"worktree {worktree}{previous_note}"
@@ -1265,6 +1816,8 @@ def _launch_agent(
     session: str, platform: str, workspace: dict, prompt_file: str, resume: bool,
     name: str = AGENT_NAME, provider: str | None = None, model: str | None = None,
 ) -> int:
+    if platform == "claude" and not model:
+        raise LoopError("Claude requires an explicit model; the Claude default is not allowed")
     pane = _pane_id(workspace)
     workspace_id = _workspace_id(workspace)
     if not pane or not workspace_id:
@@ -1283,8 +1836,8 @@ def _launch_agent(
     if platform == "omp":
         if provider:
             argv.extend(["--provider", provider])
-        if model:
-            argv.extend(["--model", model])
+    if model:
+        argv.extend(["--model", model])
     argv.append(prompt)
     rc, output = _run(argv, timeout=310.0, env=_herdr_env())
     if rc:
@@ -1357,9 +1910,13 @@ def _renew_claims(repo: str, holder: str, stop: threading.Event) -> None:
     while not stop.wait(CLAIM_RENEW_INTERVAL):
         what = f"renewing the claims of {holder}"
         try:
-            claims.renew_holder_claims(holder, ttl=claims.DEFAULT_TTL, **_redis_kwargs())
+            claim_labels.renew_holder_claims(
+                holder, ttl=claims.DEFAULT_TTL, **_redis_kwargs()
+            )
         except (slots_redis.CoordinatorAuthFailed, redis.exceptions.NoPermissionError) as exc:
             line = slots_redis.refusal_message(exc, what, fleet=True)
+        except claim_labels.ClaimLabelSyncError as exc:
+            line = str(exc)
         except slots.CoordinatorUnreachable:
             line = f"cannot reach the redis coordinator for {what}"
         except redis.exceptions.RedisError as exc:
@@ -1371,6 +1928,37 @@ def _renew_claims(repo: str, holder: str, stop: threading.Event) -> None:
             _log_current_event(repo, "claim_renew_error", message=line)
             print(f"lupin: {line}", file=sys.stderr, flush=True)
             reported = line
+
+
+def _bmo_model(model: object) -> bool:
+    """True when `model` names bmo.
+
+    `model-tiers.json` spells the pick `bmo:MODEL`; omp, and therefore the
+    `--model` a loop carries, spells the same model `bmo/MODEL`.
+    """
+    return isinstance(model, str) and model.startswith(("bmo:", "bmo/"))
+
+
+def _renew_slot(repo: str, slot: str, lease: str, stop: threading.Event) -> None:
+    """Renew `lease` each LEASE_TTL/3 until `stop` is set.
+
+    A failed renewal does not stop the thread. A dropped renewal loses the
+    lease and lets a second run take bmo while the first is still using it,
+    which is worse than retrying, so it keeps trying and reports once per
+    new error.
+    """
+    reported = None
+    while not stop.wait(LEASE_TTL / 3):
+        try:
+            slots_redis.renew(lease, ttl=LEASE_TTL, **_redis_kwargs())
+        except Exception as exc:  # noqa: BLE001 -- retried; never fatal here
+            line = f"cannot renew the {slot} slot: {exc}"
+            if line != reported:
+                _log_current_event(repo, "slot_renew_error", slot=slot, message=line)
+                print(f"lupin: {line}", file=sys.stderr, flush=True)
+            reported = line
+        else:
+            reported = None
 
 
 def _monitor_loop(
@@ -1403,18 +1991,142 @@ def _monitor_loop(
     workspace_id = _workspace_id(workspace)
     if not workspace_id:
         raise HerdrError("Herdr workspace has no ID")
-    command = _agent_command(
-        repo, session, workspace_id, platform, prompt_file, resume, launch,
-        provider=metadata.get("provider"), model=metadata.get("model"),
+
+    provider = _active_quota_provider(metadata)
+    watch = {
+        "lock": threading.Lock(),
+        "stop": threading.Event(),
+        "wake": threading.Event(),
+        "phase": "active" if provider else "disabled",
+        "provider": provider or "",
+        "pending": None,
+    }
+    quota_watcher = threading.Thread(
+        target=_quota_watch, args=(repo, session, workspace, watch), daemon=True,
     )
-    max_holders = (
-        _env_int("LUPIN_LOOP_CLAUDE_MAX_CONCURRENT", 1)
-        if platform == "claude" else 1
-    )
-    wait_s = 0.0 if launch and platform == "claude" else 10800.0
-    # Renew the run's claims until the workspace closes or the Herdr server
-    # stops (issue #156). `hold` returns when the agent is `done`, but the
-    # agent is still alive then and waits for input.
+    if provider:
+        quota_watcher.start()
+
+    def can_start_agent() -> bool:
+        with watch["lock"]:
+            return watch["pending"] is None
+
+    def run_agent(
+        agent_platform: str, agent_prompt: str, *, launch_agent: bool, resume_agent: bool
+    ) -> int:
+        command = _agent_command(
+            repo, session, workspace_id, agent_platform, agent_prompt, resume_agent,
+            launch_agent, provider=metadata.get("provider"), model=metadata.get("model"),
+        )
+        max_holders = (
+            _env_int("LUPIN_LOOP_CLAUDE_MAX_CONCURRENT", 1)
+            if agent_platform == "claude" else 1
+        )
+        wait_s = 0.0 if launch_agent and agent_platform == "claude" else 10800.0
+        _log_event(
+            repo, metadata, "slot_wait", slot=agent_platform, scope="agent",
+            wait_seconds=wait_s,
+        )
+        bmo_lease = None
+        bmo_stop = threading.Event()
+        if _bmo_model(metadata.get("model")):
+            _log_event(
+                repo, metadata, "slot_wait", slot=BMO_SLOT, scope="agent",
+                wait_seconds=BMO_WAIT_S,
+            )
+            try:
+                bmo_lease = slots_redis.acquire(
+                    BMO_SLOT, unit_name(repo), wait=BMO_WAIT_S, ttl=LEASE_TTL,
+                    max_holders=1, **_redis_kwargs(),
+                )
+            except slots.SlotFull:
+                _log_event(
+                    repo, metadata, "slot_wait_failed", slot=BMO_SLOT,
+                    scope="agent", reason="full",
+                )
+                raise LoopError(
+                    f"bmo is in use: Lupin's fleet {BMO_SLOT} slot is held. "
+                    "bmo serves one request at a time, so wait for it to free "
+                    "or use a different model"
+                )
+            threading.Thread(
+                target=_renew_slot, args=(repo, BMO_SLOT, bmo_lease, bmo_stop),
+                daemon=True,
+            ).start()
+            _log_event(repo, metadata, "slot_acquired", slot=BMO_SLOT, scope="agent")
+        try:
+            try:
+                rc = slots.hold(
+                    command, slot=agent_platform, holder=unit_name(repo), wait=wait_s,
+                    ttl=LEASE_TTL, max_holders=max_holders, before_run=can_start_agent,
+                )
+            except slots.SlotFull:
+                if not can_start_agent():
+                    return 0
+                raise
+        finally:
+            if bmo_lease is not None:
+                bmo_stop.set()
+                try:
+                    slots_redis.release(bmo_lease, **_redis_kwargs())
+                except Exception as exc:  # noqa: BLE001 -- expiry frees it anyway
+                    _log_current_event(
+                        repo, "slot_release_error", slot=BMO_SLOT, message=str(exc),
+                    )
+                _log_event(repo, metadata, "slot_released", slot=BMO_SLOT, scope="agent")
+        if rc is None:
+            return 0
+        metadata["agent_exit_code"] = rc
+        _write_metadata(repo, metadata)
+        _log_event(
+            repo, metadata, "slot_released", slot=agent_platform, scope="agent",
+            exit_code=rc,
+        )
+        return rc
+
+    def pending_handoff() -> dict | None:
+        with watch["lock"]:
+            pending = watch["pending"]
+            if pending is not None:
+                watch["pending"] = None
+                watch["wake"].clear()
+            return pending
+
+    def mark_unexpected_exhaustion(rc: int) -> bool:
+        if not rc:
+            return False
+        output = _pane_output(session, workspace)
+        if not _quota_exhaustion(output):
+            from . import quota_cache
+
+            status, headroom = _provider_quota_status(
+                _active_quota_provider(metadata) or "unknown",
+                quota_cache.read_snapshot(**_redis_kwargs()),
+            )
+            if status != "exhausted":
+                return False
+        else:
+            status, headroom = "exhausted", None
+        active_provider = _active_quota_provider(metadata) or "unknown"
+        with watch["lock"]:
+            if watch["pending"] is not None:
+                return True
+            watch["phase"] = "pending"
+            watch["pending"] = {
+                "kind": "handoff",
+                "provider": active_provider,
+                "quota_status": status,
+                "headroom": headroom,
+                "completed": False,
+                "reason": f"{active_provider} usage ended before the handoff completed",
+            }
+            watch["wake"].set()
+        _log_event(
+            repo, metadata, "quota_handoff_interrupted",
+            provider=active_provider, reason="usage_ended_before_handoff",
+        )
+        return True
+
     stop_renewing = threading.Event()
     renewer = threading.Thread(
         target=_renew_claims, args=(repo, holder, stop_renewing), daemon=True
@@ -1423,19 +2135,8 @@ def _monitor_loop(
         renewer.start()
     try:
         try:
-            _log_event(
-                repo, metadata, "slot_wait", slot=platform, scope="agent",
-                wait_seconds=wait_s,
-            )
-            rc = slots.hold(
-                command, slot=platform, holder=unit_name(repo), wait=wait_s,
-                ttl=LEASE_TTL, max_holders=max_holders,
-            )
-            metadata["agent_exit_code"] = rc
-            _write_metadata(repo, metadata)
-            _log_event(
-                repo, metadata, "slot_released", slot=platform, scope="agent",
-                exit_code=rc,
+            rc = run_agent(
+                platform, prompt_file, launch_agent=launch, resume_agent=resume,
             )
         except slots.SlotFull:
             _log_event(
@@ -1454,40 +2155,225 @@ def _monitor_loop(
                 _set_loop_state(repo, metadata, "failed", reason="slot_full")
                 raise LoopError(f"{platform} slot is full{removed_note}")
             raise LoopError(f"{platform} slot is full")
-        if rc:
+
+        if provider:
+            _quota_watch_tick(repo, session, workspace, watch)
+        while True:
+            pending = pending_handoff()
+            if (
+                pending
+                and pending.get("kind") == "handoff"
+                and pending.get("quota_status") == "unknown"
+                and rc
+                and _quota_exhaustion(_pane_output(session, workspace))
+            ):
+                pending["interrupted"] = True
+                pending["reason"] = (
+                    f"{pending['provider']} usage ended before the handoff completed"
+                )
             if not _server_running(session):
                 reason = "Herdr server stopped while the agent was running"
+                handoff = None
+                if pending and pending["kind"] == "handoff":
+                    handoff = pending.get("recorded") or _record_quota_handoff(
+                        repo, metadata, pending,
+                    )
+                    reason = f"{handoff['reason']}; Herdr server stopped before resume"
+                elif pending and pending["kind"] == "alternate":
+                    handoff = metadata.get("quota_handoff")
+                    reason = "Herdr server stopped before the alternate provider could resume"
+                if isinstance(handoff, dict):
+                    handoff["resume_reason"] = reason
+                    handoff.pop("resumed_by", None)
+                    handoff.pop("resumed_at", None)
+                    if handoff.get("state") == "completed":
+                        handoff["state"] = "resumable"
+                    metadata["quota_handoff"] = handoff
+                    metadata["reason"] = reason
+                    _write_metadata(repo, metadata)
                 _log_event(
                     repo, metadata, "herdr_server_stopped",
                     reason=reason, agent_exit_code=rc,
                 )
                 _set_loop_state(
-                    repo, metadata, "needs_attention",
-                    reason=reason, exit_code=rc,
+                    repo, metadata, "needs_attention", reason=reason, exit_code=rc,
                 )
-            else:
-                _log_event(repo, metadata, "agent_exit", exit_code=rc)
-                _set_loop_state(
-                    repo, metadata, "needs_attention", reason="agent_exit", exit_code=rc,
-                )
-            raise LoopError(f"Herdr agent for {repo} stopped with status {rc}")
-        while True:
-            if not _server_running(session):
-                _log_event(
-                    repo, metadata, "herdr_server_stopped",
-                    reason="Herdr server is not running",
-                )
-                _set_loop_state(
-                    repo, metadata, "needs_attention",
-                    reason="Herdr server is not running",
-                )
+                if rc:
+                    raise LoopError(f"Herdr agent for {repo} stopped with status {rc}")
                 return 1
+            if pending is None and mark_unexpected_exhaustion(rc):
+                pending = pending_handoff()
             if _workspace_by_id(session, workspace_id) is None:
-                metadata["stopped_at"] = _now()
-                _set_loop_state(repo, metadata, "stopped", reason="workspace_closed")
-                return 0
-            time.sleep(2)
+                if pending and pending["kind"] == "handoff":
+                    handoff = pending.get("recorded") or _record_quota_handoff(
+                        repo, metadata, pending,
+                    )
+                    resume_reason = f"{handoff['reason']}; workspace closed before resume"
+                elif pending and pending["kind"] == "alternate":
+                    handoff = metadata.get("quota_handoff") or {}
+                    resume_reason = "workspace closed before the alternate provider could resume"
+                else:
+                    metadata["stopped_at"] = _now()
+                    _set_loop_state(repo, metadata, "stopped", reason="workspace_closed")
+                    return 0
+                handoff["resume_reason"] = resume_reason
+                handoff.pop("resumed_by", None)
+                handoff.pop("resumed_at", None)
+                if handoff.get("state") == "completed":
+                    handoff["state"] = "resumable"
+                metadata["quota_handoff"] = handoff
+                metadata["reason"] = resume_reason
+                _write_metadata(repo, metadata)
+                _set_loop_state(repo, metadata, "needs_attention", reason=resume_reason)
+                return 1
+            if pending and pending["kind"] == "handoff":
+                handoff = pending.get("recorded") or _record_quota_handoff(
+                    repo, metadata, pending,
+                )
+                try:
+                    _stop_agent_for_transition(session, workspace)
+                except HerdrError:
+                    pending["reason"] = "could not stop the previous provider agent"
+                    pending["recorded"] = handoff
+                    handoff["resume_reason"] = pending["reason"]
+                    if handoff["state"] == "completed":
+                        handoff["state"] = "resumable"
+                    metadata["reason"] = pending["reason"]
+                    _write_metadata(repo, metadata)
+                    _set_loop_state(
+                        repo, metadata, "needs_attention", reason=pending["reason"],
+                    )
+                    with watch["lock"]:
+                        watch["phase"] = "pending"
+                        watch["pending"] = pending
+                    rc = 0
+                    time.sleep(2)
+                    continue
+                if handoff.get("path") is None:
+                    choice, unavailable_reason = None, "handoff_save_failed"
+                else:
+                    from . import quota_cache
+
+                    snapshot = quota_cache.read_snapshot(**_redis_kwargs())
+                    choice, unavailable_reason = _alternate_orchestrator(
+                        repo, pending["provider"], snapshot,
+                        profile_routed=metadata.get("routing_decision") == "profile",
+                    )
+                if choice is None:
+                    resume_reason = (
+                        f"{pending['reason']}; {unavailable_reason.replace('_', ' ')}"
+                    )
+                    handoff["resume_reason"] = resume_reason
+                    if handoff["state"] == "completed":
+                        handoff["state"] = "resumable"
+                    metadata["reason"] = resume_reason
+                    _write_metadata(repo, metadata)
+                    _set_loop_state(repo, metadata, "needs_attention", reason=resume_reason)
+                    _log_event(
+                        repo, metadata, "quota_handoff_waiting",
+                        provider=pending["provider"], reason=resume_reason,
+                        path=handoff["path"],
+                    )
+                    _set_quota_watch(
+                        watch,
+                        "standby" if handoff.get("path") else "disabled",
+                        pending["provider"],
+                    )
+                    rc = 0
+                    continue
+            elif pending and pending["kind"] == "alternate":
+                choice = pending["choice"]
+                handoff = metadata.get("quota_handoff") or {}
+            else:
+                if rc:
+                    reason = "Herdr agent stopped with an unexpected error"
+                    _log_event(repo, metadata, "agent_exit", exit_code=rc)
+                    _set_loop_state(
+                        repo, metadata, "needs_attention", reason=reason, exit_code=rc,
+                    )
+                    raise LoopError(f"Herdr agent for {repo} stopped with status {rc}")
+                rc = 0
+                watch["wake"].wait(2)
+                watch["wake"].clear()
+                continue
+
+            old_platform = metadata.get("platform")
+            old_provider_value = metadata.get("provider")
+            old_provider = _active_quota_provider(metadata) or "unknown"
+            old_model = metadata.get("model")
+            new_selector = choice.get("model") or choice.get("provider")
+            note = (
+                f"Quota handoff from {old_provider}. Read "
+                f"{STATE_DIR / 'handoffs' / f'{repo}.HANDOFF.md'} before continuing. "
+                f"Continue the same worktree and branch {metadata.get('branch')}; "
+                f"keep claim holder {holder or 'unchanged'}; do not claim or start "
+                "duplicate work. Do not use the exhausted provider."
+            )
+            prompt_file = _write_prompt(
+                repo, note, True, _run_worktree(repo, metadata),
+            )
+            metadata.update({
+                "platform": choice["platform"],
+                "provider": choice["provider"],
+                "model": choice["model"],
+                "prompt_file": prompt_file,
+                "reason": None,
+            })
+            if isinstance(handoff, dict):
+                handoff["resumed_by"] = new_selector
+                handoff.pop("resume_reason", None)
+                handoff["resumed_at"] = _now()
+                if handoff.get("state") != "interrupted":
+                    handoff["state"] = "resumed"
+                metadata["quota_handoff"] = handoff
+            _write_metadata(repo, metadata)
+            _set_loop_state(
+                repo, metadata, "running",
+                provider_transition={"from": old_provider, "to": new_selector},
+            )
+            _log_event(
+                repo, metadata, "provider_transition",
+                from_provider=old_provider, from_model=old_model,
+                to_provider=choice["provider"], to_model=choice["model"],
+                workspace_id=workspace_id, worktree=metadata.get("worktree"),
+                claim_holder=holder,
+            )
+            _set_quota_watch(
+                watch, "active", _active_quota_provider(metadata) or "unknown",
+            )
+            try:
+                rc = run_agent(
+                    choice["platform"], prompt_file,
+                    launch_agent=True, resume_agent=False,
+                )
+            except slots.SlotFull:
+                reason = f"{choice['platform']} slot is full after the quota handoff"
+                handoff = metadata.get("quota_handoff")
+                if isinstance(handoff, dict):
+                    handoff["resume_reason"] = reason
+                    handoff.pop("resumed_by", None)
+                    handoff.pop("resumed_at", None)
+                    if handoff.get("state") != "interrupted":
+                        handoff["state"] = "resumable"
+                metadata.update({
+                    "platform": old_platform,
+                    "provider": old_provider_value,
+                    "model": old_model,
+                    "reason": reason,
+                })
+                _write_metadata(repo, metadata)
+                _set_loop_state(repo, metadata, "needs_attention", reason=reason)
+                _set_quota_watch(
+                    watch, "standby",
+                    (handoff or {}).get("provider", old_provider),
+                )
+                rc = 0
+                continue
+            _quota_watch_tick(repo, session, workspace, watch)
     finally:
+        watch["stop"].set()
+        if provider:
+            quota_watcher.join(timeout=5)
         stop_renewing.set()
         if holder:
             renewer.join(timeout=5)
@@ -1784,9 +2670,17 @@ def write_due_periodic_debriefs(now: datetime | None = None) -> None:
         checkout = CODE_DIR / repo
         if not checkout.is_dir():
             continue
-        for period in debrief.PERIODS:
+        periods = [(period, period) for period in debrief.PERIODS]
+        if repo == "lupin":
+            periods.append((debrief.OWNER_BLOCKED_PERIOD, "24h"))
+        for period, window_period in periods:
             try:
-                if not debrief.window_due(STATE_DIR, repo, period, now):
+                is_due = (
+                    debrief.owner_blocked_window_due(STATE_DIR, repo, now)
+                    if period == debrief.OWNER_BLOCKED_PERIOD
+                    else debrief.window_due(STATE_DIR, repo, period, now)
+                )
+                if not is_due:
                     continue
                 if not client_tried:
                     client_tried = True
@@ -1794,12 +2688,15 @@ def write_due_periodic_debriefs(now: datetime | None = None) -> None:
                         client = slots_redis.debrief_client(*debrief._redis_connection())
                     except (ValueError, OSError) as exc:  # A fleet config file that cannot be read.
                         print(f"lupin agent: debrief claims off: {exc}", file=sys.stderr)
-                end = debrief.finished_window_end(period, now)
+                end = debrief.finished_window_end(window_period, now)
                 if not debrief.claim_window(client, repo, period, end, machine):
                     continue  # Another machine writes this window.
                 written = False
                 try:
-                    debrief.write_window(STATE_DIR, repo, checkout, period, now=now)
+                    if period == debrief.OWNER_BLOCKED_PERIOD:
+                        debrief.write_owner_blocked_window(STATE_DIR, repo, checkout, now=now)
+                    else:
+                        debrief.write_window(STATE_DIR, repo, checkout, period, now=now)
                     written = wrote = True
                 finally:
                     debrief.finish_window(client, repo, period, end, machine, written=written)
@@ -1889,6 +2786,25 @@ def loop_state(repo: str) -> dict:
     if not metadata:
         return {"repo": repo, "backend": "herdr", "state": "stopped", "session": session_name(repo)}
     session = metadata.get("session") or session_name(repo)
+    handoff = metadata.get("quota_handoff")
+    if (
+        metadata.get("state") not in {"stopped", "failed"}
+        and isinstance(handoff, dict)
+        and handoff.get("state") in {"resumable", "interrupted"}
+        and not handoff.get("resumed_by")
+    ):
+        return {
+            "repo": repo,
+            "platform": metadata.get("platform", "claude"),
+            "backend": "herdr",
+            "state": "needs_attention",
+            "session": session,
+            "workspace_id": metadata.get("workspace_id"),
+            "pane_id": metadata.get("pane_id"),
+            "since": metadata.get("started_at"),
+            "reason": metadata.get("reason") or handoff.get("resume_reason") or handoff.get("reason"),
+            "handoff": handoff.get("path"),
+        }
     if metadata.get("state") in {"stopped", "failed"}:
         return {
             "repo": repo,
@@ -1939,10 +2855,7 @@ def loop_state(repo: str) -> dict:
 def read_run_logs(repo: str, run_id: str | None = None, *, tail: int = 50) -> list[dict]:
     repo = validate_repo(repo)
     if run_id is None:
-        metadata = _read_metadata(repo)
-        run_id = metadata.get("run_id") if metadata else None
-        if not run_log.valid_run_id(run_id):
-            run_id = run_log.latest_run_id(STATE_DIR, repo)
+        run_id = run_log.latest_run_id(STATE_DIR, repo)
     if not run_id:
         raise LoopError(f"no run logs for {repo}")
     try:
@@ -1984,19 +2897,27 @@ def _agent_repo(agent: dict) -> str | None:
         return None
 
 
+_AGENT_STATE_PRIORITY = {
+    "unknown": 0,
+    "done": 1,
+    "running": 2,
+    "needs_attention": 3,
+}
+
+
 def _reported_agent_state(status: object) -> str:
     if not isinstance(status, str):
         return "unknown"
-    if status in {"idle", "working"}:
+    if status in {"idle", "working", "running"}:
         return "running"
-    if status == "blocked":
+    if status in {"blocked", "needs_attention"}:
         return "needs_attention"
     if status == "done":
         return "done"
     return "unknown"
 
 
-def local_loops() -> list[dict]:
+def local_loops(*, include_unmanaged: bool = False) -> list[dict]:
     result = []
     if LOOPS_DIR.is_dir():
         for path in sorted(LOOPS_DIR.glob("*.json")):
@@ -2035,45 +2956,50 @@ def local_loops() -> list[dict]:
         agents = _agents(SESSION_NAME)
     except LoopError:
         agents = []
-    groups: dict[str, list[dict]] = {}
+    unmanaged_agents = []
     for agent in agents:
-        repo = _agent_repo(agent)
-        if repo:
-            groups.setdefault(repo, []).append(agent)
-
-    for repo, agents_for_repo in groups.items():
-        panes = [
-            {
-                "workspace_id": agent.get("workspace_id"),
-                "pane_id": agent.get("pane_id"),
-                "agent_status": agent.get("agent_status", "unknown"),
-                "agent": agent.get("agent"),
-            }
-            for agent in agents_for_repo
+        workspace_id = agent.get("workspace_id")
+        pane_id = agent.get("pane_id")
+        matches = [
+            row for row in result
+            if (
+                workspace_id and workspace_id == row.get("workspace_id")
+                or pane_id and pane_id == row.get("pane_id")
+            )
         ]
-        state = max(
-            (_reported_agent_state(agent.get("agent_status")) for agent in agents_for_repo),
-            key=lambda item: {"needs_attention": 3, "running": 2, "done": 1, "unknown": 0}[item],
-        )
-        existing_rows = [row for row in result if loop_repo(row["repo"]) == repo]
-        if not existing_rows:
-            first = agents_for_repo[0]
-            result.append({
-                "repo": repo,
-                "platform": first.get("agent"),
-                "state": state,
-                "since": first.get("started_at"),
+        if not matches:
+            unmanaged_agents.append(agent)
+            continue
+        pane = {
+            "workspace_id": workspace_id,
+            "pane_id": pane_id,
+            "agent_status": agent.get("agent_status", "unknown"),
+            "agent": agent.get("agent"),
+        }
+        state = _reported_agent_state(agent.get("agent_status"))
+        for row in matches:
+            row.setdefault("panes", []).append(pane)
+            current_state = _reported_agent_state(row.get("state"))
+            if current_state != "unknown":
+                row["state"] = current_state
+            if _AGENT_STATE_PRIORITY[state] > _AGENT_STATE_PRIORITY[current_state]:
+                row["state"] = state
+
+    if include_unmanaged:
+        result.extend(
+            {
+                "repo": None,
+                "managed": False,
+                "state": agent.get("agent_status") or "unknown",
+                "since": agent.get("started_at"),
                 "backend": "herdr",
                 "session": SESSION_NAME,
-                "workspace_id": first.get("workspace_id"),
-                "pane_id": first.get("pane_id"),
-                "panes": panes,
-            })
-        else:
-            for existing in existing_rows:
-                existing["panes"] = panes
-                if state != "unknown":
-                    existing["state"] = state
+                "workspace_id": agent.get("workspace_id"),
+                "pane_id": agent.get("pane_id"),
+                "agent": agent.get("agent"),
+            }
+            for agent in unmanaged_agents
+        )
     return result
 
 def attach_argv(repo: str, machine: str, local_host: str, ssh_target: str | None) -> list[str]:
@@ -2301,7 +3227,9 @@ def schedule_local(args: list[str]) -> str:
 
 def status_rows(repos: list[str] | None = None) -> list[dict]:
     enabled = enabled_repos()
-    values = {row["repo"]: row for row in local_loops()}
+    rows = local_loops(include_unmanaged=repos is None)
+    unmanaged = [row for row in rows if row.get("managed") is False]
+    values = {row["repo"]: row for row in rows if row.get("managed") is not False}
     selected = repos if repos is not None else list(dict.fromkeys([*enabled, *values]))
     return [
         values.get(repo, {
@@ -2313,7 +3241,7 @@ def status_rows(repos: list[str] | None = None) -> list[dict]:
             "since": None,
         })
         for repo in selected
-    ]
+    ] + unmanaged
 
 
 def _print_json(value: Any) -> None:
