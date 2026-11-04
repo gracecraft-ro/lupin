@@ -8,7 +8,7 @@ compatibility: >-
 
 # Superloop
 
-The superloop is the overseer *of the orchestrators* of delegation loops for each project. Two parts do the work:
+The superloop is the overseer _of the orchestrators_ of delegation loops for each project. Two parts do the work:
 
 - `lupin supervise` runs fixed rules. It quickly checks each loop and sends the nudge. It uses no model.
 - An agent with this skill does the steps that need judgment: a blocked loop, an alert, dynamic priciing, or an unclear reply.
@@ -50,7 +50,6 @@ Terms:
 - Ledger: the shared Lupin event record. It is stored in Redis.
 - Monitor log: the file that the hourly monitor writes. The owner gives its path.
 - Owner: the person who owns the fleet.
-
 
 ## What the `lupin supervise` command does
 
@@ -134,11 +133,11 @@ Check the burn rate.
    Each `ALERT` line is a block. Apply "Decide".
 3. For an `ALERT`, read the pane with `lupin peek REPO 25`.
 4. Check the burn rate with `lupin quota`; if a loop is burning through usage faster than the daily budget, adjust accordingly. In general, evenly spread out usage across days of the quota, and budget 10% of weekly headroom for the owner to use at their discretion, _unless_ the weekly limit is just hours from resetting. Always try to use free models as needed to triage, etc.
-5. Occasionally inspect the workers to identify areas where ANY process could be streamlined or improved; proactively ticket anything you see that seems less than optimal. E.g. unpushed local changes, confusing or brittle instructions, wasteful spend, failure to trigger ui-pressure-tests, doc bloat, etc.
+5. Inspect the transcripts to identify areas where ANY process could be streamlined or improved; proactively ticket anything you see that seems less than optimal. E.g. unpushed local changes, confusing or brittle instructions, wasteful spend, failure to trigger ui-pressure-tests, doc bloat, etc. Message them with corrections as needed.
 6. Ensure that all open PRs are production ready (with as many code-review and fix rounds as needed); for approved PRs, make sure they do not have merge conflicts with master and ensure they pulled in all relevant changes based on the changing state of the repo.
-Loop orchestrators occasionally need to be reminded to pull the latest from origin and to do another pass of triage or PR management. Use your discretion.
-7. Ensure the spend is 
- 
+   Loop orchestrators occasionally need to be reminded to pull the latest from origin and to do another pass of triage or PR management. Use your discretion.
+7. Ensure the spend is
+
 Do not start a model run unless you can read
 `~/.local/state/lupin/model-snapshot.json`. If you cannot read it, record the
 block.
