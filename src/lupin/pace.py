@@ -154,6 +154,24 @@ def _account_blocked(
     )
 
 
+def account_state(
+    account_rows: list[dict],
+    provider: str,
+    now_ms: float,
+    *,
+    weekly_targets: dict[str, float] | None = None,
+) -> str:
+    """`blocked`, `open`, or `unknown` for the rows of one account.
+
+    `unknown` means no usable row, the same test `blocked` uses.
+    """
+    targets = _weekly_targets(weekly_targets)
+    usable = _usable_rows(account_rows, provider, targets)
+    if not usable:
+        return "unknown"
+    return "blocked" if _account_blocked(usable, now_ms, targets) else "open"
+
+
 def blocked(
     rows: list[dict],
     provider: str,
