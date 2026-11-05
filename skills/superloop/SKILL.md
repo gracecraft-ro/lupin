@@ -1,7 +1,7 @@
 ---
 name: superloop
 description: >-
-  Supervise Lupin loops on one machine, by hand or with lupin supervise. Use it when asked to supervise loops.
+  Supervise one or several simultaneous Lupin delegation loops on one machine, by hand or with lupin supervise. Use it when asked to *supervise* delegation loops rather than orchestrate one yourself.
 compatibility: >-
   Requires Lupin, Herdr, and the delegation-loop skill on the supervisor host. Redis is required for ledger records.
 ---

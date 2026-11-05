@@ -2,7 +2,7 @@
 name: delegation-loop
 description: >-
   Orchestrate task execution loops using Lupin. Use this skill when starting or
-  continuing an issue loop, selecting work for agents, watching a fleet, or
+continuing an issue loop, selecting work for agents, watching a fleet, or
   handing off a loop run.
 compatibility: >-
   Requires Lupin, GitHub CLI, an agent runner, and the `delegation-loop`,
