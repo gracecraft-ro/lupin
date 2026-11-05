@@ -1,7 +1,7 @@
 ---
 name: delegation-loop
 description: >-
-  Coordinate an issue backlog with Lupin. Use this skill when starting or
+  Orchestrate task execution loops using Lupin. Use this skill when starting or
   continuing an issue loop, selecting work for agents, watching a fleet, or
   handing off a loop run.
 compatibility: >-
@@ -38,6 +38,8 @@ On a Herdr worker, make the worktree as "Dispatch work" says instead. Record the
 machine, worktree path, branch, and issue in the dispatch and the repository's
 handoff record. For a worker in a Herdr pane, also record its agent name,
 workspace ID, pane ID, tab ID, and cwd (`herdr agent list` shows them).
+
+Use your tokens as efficiently as possible and control your context; have economical subagents do any tangential investigations or code changes.
 
 ## Pull requests come first
 
@@ -119,8 +121,6 @@ title,body,labels > FILE` for the linked issue, or `gh pr view` with the same
    the line `The fix worker did not push.` The first line is
    `Round N. LEVEL: <LEVEL>.`, as in "Output format" in `code-review`. Check the
    stall rule (step 3) before posting. That is the next round.
-6. `size-l` usually gives Opus. That is allowed here. Never use Fable without
-   the user's approval.
 
 ### Roll up Dependabot PRs
 
@@ -132,8 +132,7 @@ each cycle.
    `dependabot/`, and whose head repo is the repo itself. A single Dependabot
    PR is handled as any other PR that the loop does not own.
 2. Claim: the orchestrator runs `lupin claim OWNER/REPO#N` for each Dependabot
-   PR before it dispatches. It leaves out each PR where the claim does not exit
-   0. Exit 2 means another holder has the PR. While the worker runs, it runs
+   PR before it dispatches. It leaves out each PR where the claim does not exit 0. Exit 2 means another holder has the PR. While the worker runs, it runs
    `lupin renew-claim OWNER/REPO#N` for each claim.
 3. One worker: the orchestrator dispatches one worker for the whole roll-up, not
    one for each PR. Route it with "Fix worker models" at LEVEL `size-m`. A major
@@ -156,7 +155,7 @@ each cycle.
    - the lockfile matches the manifest,
    - the release notes of each major bump show no breaking change that the
      repo uses.
-   The fix cycle then runs as for any loop PR.
+     The fix cycle then runs as for any loop PR.
 6. Dependabot PRs stay untouched: the loop does not push to, close, or comment
    on them. The owner closes them when the roll-up merges. Dependabot also
    closes a PR itself when its bump is on `main`. Skip each Dependabot PR that
@@ -659,3 +658,7 @@ true:
 Then run `/handoff`. State the exact next action and any missing owner input.
 Before that, do not ask the owner whether to go on. Never write "tell me if you
 want me to continue" or "if you want me to".
+
+## Superloop
+
+Note: You may receieve instructions from the superloop, which is the Lupin loop in charge of managing a set of delegation loops. Adhere to them; the instructions typically involve ways to maximize productivity based on current quota burn rates. In their absence, keep an eye on the quota yourself using `lupin quota` and titrate weekly/monthly usage accordingly to keep us on an even daily pace, maintaining some healthy headroom for the owner if the weekly quota reset is not coming up quickly.
