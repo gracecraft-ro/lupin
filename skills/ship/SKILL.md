@@ -143,17 +143,10 @@ covers screenshots, follow it. Otherwise follow this section.
    command `gh pr view --json number,url --jq '.number, .url'`. The URL is
    `https://github.com/<owner>/<repo>/pull/<number>`. Use that `<owner>/<repo>`,
    not the fork name, unless the PR is on the fork.
-2. Open each screenshot. Look for a secret, token, private address, or personal
-   data. After a crop or recapture, reopen the final image and look again before
-   upload. Write the comment in `evidence/<issue-number>/report.md`. Show before
+2. Open each screenshot and sanity check it before commenting; you may detect embarrassing mistakes this way.
+   attach it along with a detailed comment in GitHub on the PR and issue. Show the before
    and after, or the new screen if there is no before. Say what to look at. Use
    the same path in the body and in `--attach`:
-
-   ```md
-   Loop: Screenshots for PR #123.
-   Before: ![before](./evidence/123/before.png)
-   After: ![after](./evidence/123/after.png)
-   ```
 
 3. Attach the files and post the comment:
 
@@ -177,17 +170,8 @@ covers screenshots, follow it. Otherwise follow this section.
 An upload needs write access to the repo that holds the PR. The error message
 `attaching files requires write access to the repository` means your token has
 none. A fork token can post a plain comment on an upstream PR but cannot upload.
-If your default login is read-only on the repo, use the upload token that the
-repo's `AGENTS.md` names. Do not skip the screenshots. Keep the image files in
-`evidence/<issue-number>/`. In your report, say that the upload failed. Post
-that report as a PR comment before `lupin stop`. Do not leave it only in
-`evidence/<issue-number>/report.md`: the stop deletes it with the worktree.
-Include the PR number, machine, and absolute path of each image. The
-orchestrator must copy the image files before stopping the loop.
-
-GitHub CLI 2.99.0 and newer has `--attach`. If it is missing, check the version
-with `gh --version`. Upgrade, or report that you cannot attach. Do not skip it
-silently. Attach only a screenshot you opened and checked.
+Do not skip the screenshots. Post that report as a PR comment before `lupin stop`.
+Include the PR number, machine, and absolute path of each image.
 
 If you could not capture a screenshot, post a PR comment that says so and why.
 Say so in your report too. The orchestrator must escalate.
