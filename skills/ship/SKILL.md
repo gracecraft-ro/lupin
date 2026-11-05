@@ -2,7 +2,7 @@
 name: ship
 description: >-
   Finish a delegated GitHub issue from its acceptance checks through verification
-  and a clear report. Use this Lupin skill when implementing or finishing an issue,
+  and a clear report. Use this Lupin skill when implementing or finishing code changes,
   preparing its pull request, or reporting completed work.
 compatibility: Requires the repository's tools and GitHub CLI. Lupin and Redis are used when fleet claims are configured.
 ---
