@@ -1348,13 +1348,14 @@ def _remove_worktree(repo: str, metadata: dict) -> tuple[bool, str]:
 def _clear_previous_worktree(repo: str, metadata: dict | None) -> str:
     """Remove the last run's worktree before a new run starts. Return a note.
 
-    Raise LoopError if git keeps that worktree.
+    If git keeps that worktree, return a warning that names its path. The new
+    run still starts. The kept worktree stays on disk.
     """
     if not metadata:
         return ""
     gone, note = _remove_worktree(repo, metadata)
     if not gone:
-        raise LoopError(f"cannot start {repo}{note}. Save or remove that work, then start again.")
+        return f"warning: previous run {note.lstrip('; ')}. Save or remove that work."
     return note
 
 

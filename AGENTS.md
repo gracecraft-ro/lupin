@@ -476,7 +476,8 @@ run. `run` writes a `codegraph_index` event with the status (`indexed`,
 checkout gets no event. A resumed run keeps its worktree and its index.
 
 `run` removes the previous run's worktree and branch before it adds a new one.
-If git keeps that worktree, `run` refuses to start and names its path. With
+If git keeps that worktree, `run` warns and starts. The kept worktree stays on
+disk, and the warning names its path. With
 `--resume`, `run` reuses the worktree that the last run recorded, and never
 creates one. If that worktree is missing, or is on another branch, `run` refuses
 and names the path. If `run` fails after it adds a worktree, it removes that

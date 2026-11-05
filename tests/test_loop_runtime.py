@@ -2091,7 +2091,7 @@ def test_start_loop_removes_the_previous_clean_worktree_first(
     assert _worktree_count(checkout) == 2
 
 
-def test_start_loop_refuses_when_the_previous_worktree_has_changes(
+def test_start_loop_warns_and_starts_when_the_previous_worktree_has_changes(
     monkeypatch, tmp_path: Path, make_checkout
 ):
     checkout, launches = _start_harness(monkeypatch, tmp_path, make_checkout)
@@ -2101,12 +2101,14 @@ def test_start_loop_refuses_when_the_previous_worktree_has_changes(
     _set_state("widgets", "stopped")
     launched = len(launches)
 
-    with pytest.raises(loop_runtime.LoopError, match=re.escape(str(first))):
-        loop_runtime.start_loop("widgets", platform="omp")
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
 
-    assert len(launches) == launched
+    assert started is True
+    assert "started widgets" in message
+    assert f"{first}: it has changes" in message
+    assert len(launches) == launched + 1
     assert first.is_dir()
-    assert loop_runtime._read_metadata("widgets")["worktree"] == str(first)
+    assert (first / "README.md").read_text(encoding="utf-8") == "unsaved work\n"
 
 
 @pytest.mark.parametrize("dirty", [False, True], ids=["clean", "dirty"])
@@ -2166,8 +2168,10 @@ def test_start_failure_cleans_up_and_records_the_run_as_failed(
     assert "branch -d" in message
     assert (run_dir / "unsaved.txt").read_text(encoding="utf-8") == "work\n"
     assert metadata["worktree"] == str(run_dir)
-    with pytest.raises(loop_runtime.LoopError, match=re.escape(str(run_dir))):
-        loop_runtime.start_loop("widgets", platform="omp")
+    monkeypatch.setattr(loop_runtime, step, real)
+    started, message = loop_runtime.start_loop("widgets", platform="omp")
+    assert started is True
+    assert f"{run_dir}: it has changes" in message
 
 
 def test_resume_failure_keeps_the_recorded_worktree_and_records_it_as_failed(
