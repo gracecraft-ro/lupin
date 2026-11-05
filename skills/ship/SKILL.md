@@ -75,8 +75,7 @@ Compare before and after from the same views. Attach the sheet to the PR.
 
 ## Save evidence
 
-Save screenshots, renders, and other artifacts in `evidence/<issue-number>/`. If
-`.gitignore` lacks `evidence/`, add it. Do not commit these copies.
+Store screenshots, renders, and other artifacts in `evidence/<issue-number>/`. If`.gitignore` lacks `evidence/`, add it. _Do not commit these copies._
 
 ## Commit and open the pull request
 
