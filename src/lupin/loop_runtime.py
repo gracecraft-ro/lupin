@@ -800,9 +800,10 @@ def _agent_state(session: str, workspace: dict) -> str:
     return state if state in {"idle", "working", "blocked", "done", "unknown"} else "unknown"
 
 
-# A loop whose agent session file has not changed for this long shows as idle.
+# A loop whose agent session file has not changed for this long is idle.
 AGENT_STALE_S = 3600
 _ACTIVE_AGENT_STATES = {"idle", "working", "running"}
+IDLE_AGENT_STATES = {"idle", "done"}
 
 
 def _agent_activity_age(agent: dict | None) -> float | None:
@@ -819,13 +820,31 @@ def _agent_activity_age(agent: dict | None) -> float | None:
         return None
 
 
-def display_state(row: dict) -> str:
-    """The state label `lupin loops` prints. Does not change row["state"]."""
+def _is_idle(row: dict) -> bool:
+    """True when the agent is idle or done, or has not acted for AGENT_STALE_S."""
     state = row.get("state", "unknown")
     age = row.get("activity_age_s")
-    if state in _ACTIVE_AGENT_STATES and isinstance(age, (int, float)) and age > AGENT_STALE_S:
-        return "idle"
-    return state
+    if state in IDLE_AGENT_STATES:
+        return True
+    return state in _ACTIVE_AGENT_STATES and isinstance(age, (int, float)) and age > AGENT_STALE_S
+
+
+def display_state(row: dict) -> str:
+    """The loop state, with `idle` for an idle or stale agent."""
+    return "idle" if _is_idle(row) else row.get("state", "unknown")
+
+
+def _pane_is_idle(session: str, metadata: dict) -> bool:
+    """True when the saved workspace's live agent is idle, done, or stale."""
+    if not _server_running(session):
+        return False
+    workspace = _find_workspace(session, metadata)
+    if workspace is None:
+        return False
+    workspace_id = _workspace_id(workspace)
+    agent = _agent_for_workspace(session, workspace_id) if workspace_id else None
+    row = {"state": _agent_state(session, workspace), "activity_age_s": _agent_activity_age(agent)}
+    return _is_idle(row)
 
 
 def _metadata_path(repo: str) -> Path:
@@ -1509,6 +1528,16 @@ def start_loop(
         not isinstance(note, str) or len(note) > MAX_NOTE_CHARS or "\x00" in note
     ):
         raise LoopError("note is invalid or too long")
+    saved = _read_metadata(repo)
+    if (
+        saved
+        and saved.get("state") in {"running", "starting", "needs_attention"}
+        and _session_running(saved.get("session") or session_name(repo))
+        and loop_state(repo).get("state") == "idle"
+    ):
+        # An idle run does not block a new one. Stop it first, as `stop --force` does.
+        # This runs before the start lock, because stop_loop takes that lock.
+        stop_loop(repo, force=True)
     session = session_name(repo)
     worker_unit = unit_name(repo)
     lock = _lock_file(repo)
@@ -2821,6 +2850,7 @@ def loop_state(repo: str) -> dict:
         and isinstance(handoff, dict)
         and handoff.get("state") in {"resumable", "interrupted"}
         and not handoff.get("resumed_by")
+        and not _pane_is_idle(session, metadata)
     ):
         return {
             "repo": repo,
@@ -2882,6 +2912,8 @@ def loop_state(repo: str) -> dict:
     age = _agent_activity_age(agent)
     if age is not None:
         result["activity_age_s"] = age
+    if _is_idle(result):
+        result["state"] = "idle"
     return result
 
 
@@ -2932,7 +2964,7 @@ def _agent_repo(agent: dict) -> str | None:
 
 _AGENT_STATE_PRIORITY = {
     "unknown": 0,
-    "done": 1,
+    "idle": 1,
     "running": 2,
     "needs_attention": 3,
 }
@@ -2941,12 +2973,12 @@ _AGENT_STATE_PRIORITY = {
 def _reported_agent_state(status: object) -> str:
     if not isinstance(status, str):
         return "unknown"
-    if status in {"idle", "working", "running"}:
+    if status in {"working", "running"}:
         return "running"
     if status in {"blocked", "needs_attention"}:
         return "needs_attention"
-    if status == "done":
-        return "done"
+    if status in IDLE_AGENT_STATES:
+        return "idle"
     return "unknown"
 
 
@@ -3021,6 +3053,9 @@ def local_loops(*, include_unmanaged: bool = False) -> list[dict]:
             if age is not None:
                 # Keep the most recent activity when several agents match.
                 row["activity_age_s"] = min(age, row.get("activity_age_s", age))
+    for row in result:
+        if row.get("state") != "needs_attention" and _is_idle(row):
+            row["state"] = "idle"
 
     if include_unmanaged:
         result.extend(

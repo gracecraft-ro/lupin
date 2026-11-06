@@ -68,7 +68,10 @@ def resolve_machine_for_repo(repo: str, connection: dict) -> str:
     candidates = [
         record["name"]
         for record in records
-        if any(loop.get("repo") == repo for loop in record.get("loops", []))
+        if any(
+            loop.get("repo") == repo and loop.get("state") != "idle"
+            for loop in record.get("loops", [])
+        )
     ]
     if len(candidates) != 1:
         raise AmbiguousMachine(repo, candidates)

@@ -40,6 +40,23 @@ def test_resolve_machine_for_repo_raises_on_zero_matches():
     assert exc.value.candidates == []
 
 
+def test_resolve_machine_for_repo_skips_an_idle_loop():
+    records = [
+        {"name": "jesus", "loops": [{"repo": "widgets", "state": "idle"}]},
+        _record("mini", ["widgets"]),
+    ]
+    with mock.patch.object(machines, "machines", return_value=records):
+        assert loops.resolve_machine_for_repo("widgets", {}) == "mini"
+
+
+def test_resolve_machine_for_repo_finds_no_machine_for_an_idle_loop():
+    records = [{"name": "jesus", "loops": [{"repo": "widgets", "state": "idle"}]}]
+    with mock.patch.object(machines, "machines", return_value=records):
+        with pytest.raises(loops.AmbiguousMachine) as exc:
+            loops.resolve_machine_for_repo("widgets", {})
+    assert exc.value.candidates == []
+
+
 def test_resolve_machine_for_repo_raises_on_multiple_matches():
     records = [_record("jesus", ["widgets"]), _record("mini", ["widgets"])]
     with mock.patch.object(machines, "machines", return_value=records):
