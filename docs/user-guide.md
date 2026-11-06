@@ -183,9 +183,10 @@ one-off runs keep them. `run --all` applies them to each repo.
 
 A Claude agent must have an explicit model. Lupin refuses a Claude run with
 no model. It never uses the Claude default. This check also applies when an
-agent starts from saved state or after a quota handoff. The current CLI accepts
-`--model` only for OMP. Use an OMP profile with a model, or
-`--platform omp --model MODEL`. A bare `claude` profile cannot start an agent.
+agent starts from saved state or after a quota handoff. Start a Claude agent
+with `--platform claude --model MODEL`, for example
+`--model claude-sonnet-5-5`. `--provider` is OMP only. A bare `claude` profile
+cannot start an agent.
 
 `once now` starts the listed repos, or every enabled repo when none is listed. A
 future `once` run uses the same default. It fails if no repo is enabled.

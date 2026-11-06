@@ -1147,8 +1147,8 @@ def validate_omp_options(
         or any(ord(character) < 32 or ord(character) == 127 for character in model)
     ):
         raise LoopError("invalid OMP model")
-    if platform != "omp" and (provider is not None or model is not None):
-        raise LoopError("--provider and --model require --platform omp")
+    if platform != "omp" and provider is not None:
+        raise LoopError("--provider requires --platform omp")
     if provider == "openai":
         provider = "openai-codex"
     if model and model.startswith("openai/"):
@@ -1539,8 +1539,7 @@ def start_loop(
             raise LoopError("--effort requires --platform claude")
         if selected == "claude" and model is None:
             message = (
-                "Claude requires an explicit model; use --platform omp "
-                "with --model or an OMP orchestrator profile"
+                "Claude requires --model; for example --model claude-sonnet-5-5"
             )
             _log_event(
                 repo, {"run_id": run_id}, "error",
@@ -3106,8 +3105,8 @@ def schedule_once(
         raise LoopError("note is invalid or too long")
     selected = validate_platform(platform) if platform else None
     provider, model = validate_omp_options(selected, provider, model) if selected else (provider, model)
-    if (provider is not None or model is not None) and selected != "omp":
-        raise LoopError("--provider and --model require --platform omp")
+    if provider is not None and selected != "omp":
+        raise LoopError("--provider requires --platform omp")
     repos = [validate_plain_repo(repo) for repo in repos]
     if not repos:
         raise LoopError("at least one repo is required for a one-off run")

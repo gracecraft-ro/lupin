@@ -1787,8 +1787,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if args.all and args.resume:
         print("run --all cannot resume", file=sys.stderr)
         return 1
-    if (args.provider or args.model) and args.platform != "omp":
-        print("--provider and --model require --platform omp", file=sys.stderr)
+    if args.provider and args.platform != "omp":
+        print("--provider requires --platform omp", file=sys.stderr)
         return 1
     local_host = machines.hostname()
     machine = args.machine or local_host

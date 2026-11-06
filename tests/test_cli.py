@@ -170,6 +170,34 @@ def test_run_refuses_effort_for_another_machine(capsys):
     assert "--effort runs only on this machine" in capsys.readouterr().err
 
 
+def test_run_accepts_model_on_claude_and_passes_it_to_start_loop(monkeypatch, capsys):
+    started = []
+
+    def start_loop(repo, **kwargs):
+        started.append((repo, kwargs))
+        return True, "started"
+
+    monkeypatch.setattr(loop_runtime, "start_loop", start_loop)
+
+    code = cli.main(["run", "widgets", "--platform", "claude", "--model", "claude-sonnet-5-5", "--json"])
+
+    assert code == 0
+    assert "--model" not in capsys.readouterr().err
+    assert started[0][0] == "widgets"
+    assert started[0][1]["platform"] == "claude"
+    assert started[0][1]["model"] == "claude-sonnet-5-5"
+
+
+def test_run_refuses_provider_on_claude_and_starts_nothing(monkeypatch, capsys):
+    monkeypatch.setattr(
+        loop_runtime, "start_loop", mock.Mock(side_effect=AssertionError("must not start")),
+    )
+
+    assert cli.main(["run", "widgets", "--platform", "claude", "--provider", "openai"]) == 1
+
+    assert "--provider requires --platform omp" in capsys.readouterr().err
+
+
 def test_logs_cli_reads_latest_and_selected_run_as_jsonl(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
     earlier = loop_runtime.run_log.new_run_id()

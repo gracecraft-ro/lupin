@@ -875,6 +875,17 @@ def test_validate_omp_options_rejects_invalid_options(platform, provider, model)
         loop_runtime.validate_omp_options(platform, provider, model)
 
 
+def test_validate_omp_options_accepts_model_on_claude():
+    assert loop_runtime.validate_omp_options("claude", None, "claude-sonnet-5-5") == (
+        None, "claude-sonnet-5-5",
+    )
+
+
+def test_validate_omp_options_refuses_provider_on_claude():
+    with pytest.raises(loop_runtime.LoopError, match="--provider requires --platform omp"):
+        loop_runtime.validate_omp_options("claude", "openai", None)
+
+
 
 def test_start_loop_refuses_an_open_legacy_session(monkeypatch, tmp_path: Path):
     state_dir = tmp_path / "state"
@@ -1385,7 +1396,7 @@ def test_start_loop_refuses_null_claude_model_and_logs_skipped_profile(
     started, message = loop_runtime.start_loop("widgets", platform=platform)
 
     assert not started
-    assert "Claude requires an explicit model" in message
+    assert "Claude requires --model" in message
     assert launches == []
     assert loop_runtime._read_metadata("widgets") is None
     assert not (tmp_path / "state" / "worktrees").exists()
@@ -1420,7 +1431,7 @@ def test_refused_claude_run_keeps_the_previous_worktree(
     started, message = loop_runtime.start_loop("widgets", platform="claude", resume=resume)
 
     assert not started
-    assert "Claude requires an explicit model" in message
+    assert "Claude requires --model" in message
     assert launches == []
     assert loop_runtime._read_metadata("widgets") == metadata
     assert Path(metadata["worktree"]).is_dir()
