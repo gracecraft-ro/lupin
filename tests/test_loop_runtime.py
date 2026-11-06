@@ -725,6 +725,48 @@ def test_launch_agent_starts_claude_with_skip_permissions(monkeypatch, tmp_path:
     assert argv[-1] == "finish the handoff"
 
 
+def test_launch_agent_passes_claude_effort_after_model(monkeypatch, tmp_path: Path):
+    prompt_file = tmp_path / "prompt"
+    prompt_file.write_text("finish the handoff\n", encoding="utf-8")
+    workspace = {"id": "w1", "root_pane": {"pane_id": "w1:p1", "workspace_id": "w1"}}
+    calls = []
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: calls.append(argv) or (0, ""))
+    monkeypatch.setattr(loop_runtime, "_wait_agent", lambda got_session, workspace_id: 0)
+
+    loop_runtime._launch_agent(
+        "lupin-widgets-abc123", "claude", workspace, str(prompt_file), resume=False,
+        model="sonnet", effort="high",
+    )
+
+    assert calls[0][-5:] == ["--model", "sonnet", "--effort", "high", "finish the handoff"]
+
+
+def test_launch_agent_refuses_effort_on_omp(monkeypatch, tmp_path: Path):
+    prompt_file = tmp_path / "prompt"
+    prompt_file.write_text("finish the handoff\n", encoding="utf-8")
+    workspace = {"id": "w1", "root_pane": {"pane_id": "w1:p1", "workspace_id": "w1"}}
+    calls = []
+    monkeypatch.setattr(loop_runtime, "_run", lambda argv, **kwargs: calls.append(argv) or (0, ""))
+
+    with pytest.raises(loop_runtime.LoopError, match="--effort requires --platform claude"):
+        loop_runtime._launch_agent(
+            "lupin-widgets-abc123", "omp", workspace, str(prompt_file), resume=False,
+            effort="high",
+        )
+
+    assert calls == []
+
+
+def test_agent_command_passes_effort_only_when_set():
+    base = loop_runtime._agent_command("widgets", "s", "w1", "claude", "p.md", False, True, model="sonnet")
+    assert "--effort" not in base
+
+    command = loop_runtime._agent_command(
+        "widgets", "s", "w1", "claude", "p.md", False, True, model="sonnet", effort="high",
+    )
+    assert command[command.index("--effort") + 1] == "high"
+
+
 def test_launch_agent_omp_does_not_skip_permissions(monkeypatch, tmp_path: Path):
     prompt_file = tmp_path / "prompt"
     prompt_file.write_text("finish the handoff\n", encoding="utf-8")
