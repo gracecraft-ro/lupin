@@ -2087,6 +2087,32 @@ def test_next_prompt_inlines_only_the_last_five_entries_of_a_large_ledger(
     assert '"entry-1994' not in inserted
 
 
+def test_next_prompt_inlines_only_the_last_ten_lines_of_a_kept_handoff(
+    monkeypatch, tmp_path: Path
+):
+    kept = tmp_path / "handoffs" / "widgets.HANDOFF.md"
+    kept.parent.mkdir()
+    kept.write_text("".join(f"line-{i:02d}\n" for i in range(1, 26)), encoding="utf-8")
+
+    prompt = _next_prompt(monkeypatch, tmp_path)
+
+    assert f"kept HANDOFF.md at {kept}" in prompt
+    for i in range(16, 26):
+        assert f"line-{i:02d}\n" in prompt
+    assert "line-15\n" not in prompt
+
+
+def test_next_prompt_inlines_every_line_of_a_short_kept_handoff(monkeypatch, tmp_path: Path):
+    kept = tmp_path / "handoffs" / "widgets.HANDOFF.md"
+    kept.parent.mkdir()
+    kept.write_text("alpha-note\nbeta-note\ngamma-note\n", encoding="utf-8")
+
+    prompt = _next_prompt(monkeypatch, tmp_path)
+
+    for marker in ("alpha-note", "beta-note", "gamma-note"):
+        assert marker in prompt
+
+
 def test_next_prompt_reports_a_kept_ledger_that_is_not_an_array_in_one_line(
     monkeypatch, tmp_path: Path
 ):

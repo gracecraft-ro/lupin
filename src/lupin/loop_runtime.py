@@ -38,6 +38,9 @@ PROMPT_DOC_INLINE_LIMIT = 8000
 # Last entries of the kept ledger that the run prompt shows, and the cap on that text.
 PROMPT_LEDGER_TAIL = 5
 PROMPT_LEDGER_INLINE_LIMIT = 8000
+# Last lines of the kept HANDOFF.md that the run prompt shows, and the cap on that text.
+PROMPT_HANDOFF_TAIL = 10
+PROMPT_HANDOFF_INLINE_LIMIT = 8000
 CODE_DIR = Path(os.environ.get("LUPIN_LOOP_CODE_DIR", "/code"))
 REPOS_FILE = STATE_DIR / "repos"
 ORCHESTRATORS_FILE = STATE_DIR / "orchestrators.json"
@@ -1129,6 +1132,37 @@ def _kept_ledger_prompt(path: Path) -> str:
     return header + "```json\n" + body + "\n```\n\n"
 
 
+def _kept_handoff_prompt(path: Path) -> str:
+    """Return the prompt text for a kept HANDOFF.md: its last lines, or a one-line note.
+
+    Returns "" when the file is missing. Never raises.
+    """
+    note = f"The last run kept its HANDOFF.md at {path}, but its lines are not shown: "
+    try:
+        if not path.is_file():
+            return ""
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):
+        return note + "the file could not be read.\n\n"
+    if not lines:
+        return note + "the file is empty.\n\n"
+
+    header = (
+        f"The last lines (at most {PROMPT_HANDOFF_TAIL}) of the kept HANDOFF.md at {path} "
+        f"are below. The full file is at {path} if you need more.\n"
+    )
+    tail = lines[-PROMPT_HANDOFF_TAIL:]
+    room = PROMPT_HANDOFF_INLINE_LIMIT - len(header) - len("```\n\n```\n\n")
+    body = "\n".join(tail)
+    while len(tail) > 1 and len(body) > room:
+        tail = tail[1:]
+        body = "\n".join(tail)
+    if len(body) > room:
+        # One line alone is too long. Cut it and mark the cut.
+        body = body[: room - len(" [truncated]")] + " [truncated]"
+    return header + "```\n" + body + "\n```\n\n"
+
+
 def _write_prompt(repo: str, note: str | None, resume: bool, worktree: Path) -> str:
     base_path = os.environ.get("LUPIN_LOOP_PROMPT_FILE")
     base = Path(base_path).read_text(encoding="utf-8") if base_path else DEFAULT_PROMPT
@@ -1153,11 +1187,7 @@ def _write_prompt(repo: str, note: str | None, resume: bool, worktree: Path) -> 
     handoff = STATE_DIR / "handoffs" / f"{validate_repo(repo)}.json"
     base = _kept_ledger_prompt(handoff) + base
     handoff_doc = STATE_DIR / "handoffs" / f"{validate_repo(repo)}.HANDOFF.md"
-    if handoff_doc.is_file():
-        base = (
-            f"The last run kept its HANDOFF.md at {handoff_doc}. Read it before you start.\n\n"
-            + base
-        )
+    base = _kept_handoff_prompt(handoff_doc) + base
     if repo != base_repo(repo):
         base += (
             f"\n\nYou are the loop {repo}. Other loops work on {base_repo(repo)} on this "
