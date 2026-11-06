@@ -35,6 +35,9 @@ STATE_DIR = Path(os.environ.get("LUPIN_LOOP_STATE_DIR", "/var/lib/delegation-loo
 # decide when a brief is too long to pass as the note itself.
 MAX_NOTE_CHARS = 8000
 PROMPT_DOC_INLINE_LIMIT = 8000
+# Last entries of the kept ledger that the run prompt shows, and the cap on that text.
+PROMPT_LEDGER_TAIL = 5
+PROMPT_LEDGER_INLINE_LIMIT = 8000
 CODE_DIR = Path(os.environ.get("LUPIN_LOOP_CODE_DIR", "/code"))
 REPOS_FILE = STATE_DIR / "repos"
 ORCHESTRATORS_FILE = STATE_DIR / "orchestrators.json"
@@ -1084,6 +1087,48 @@ def _session_running(session: str) -> bool:
     return bool(info and info.get("running"))
 
 
+def _kept_ledger_prompt(path: Path) -> str:
+    """Return the prompt text for a kept ledger: its last entries, or a one-line note.
+
+    Returns "" when the file is missing. Never raises.
+    """
+    note = f"The last run kept its ledger at {path}, but its entries are not shown: "
+    try:
+        if not path.is_file():
+            return ""
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return note + "the file could not be read.\n\n"
+    if not text.strip():
+        return note + "the file is empty.\n\n"
+    try:
+        entries = json.loads(text)
+    except (ValueError, RecursionError):
+        return note + "the file is not valid JSON.\n\n"
+    if not isinstance(entries, list):
+        return note + "the file is not a JSON array.\n\n"
+    if not entries:
+        return note + "the array has no entries.\n\n"
+
+    header = (
+        f"The most recent entries of the kept ledger at {path} are below. "
+        f"The full file is at {path} if you need more.\n"
+    )
+    tail = entries[-PROMPT_LEDGER_TAIL:]
+    room = PROMPT_LEDGER_INLINE_LIMIT - len(header) - len("```json\n\n```\n\n")
+    while True:
+        body = json.dumps(tail, indent=2, ensure_ascii=False)
+        if len(body) <= room:
+            break
+        if len(tail) > 1:
+            tail = tail[1:]
+            continue
+        # One entry alone is too long. Cut it and mark the cut.
+        body = body[: room - len(" [truncated]")] + " [truncated]"
+        break
+    return header + "```json\n" + body + "\n```\n\n"
+
+
 def _write_prompt(repo: str, note: str | None, resume: bool, worktree: Path) -> str:
     base_path = os.environ.get("LUPIN_LOOP_PROMPT_FILE")
     base = Path(base_path).read_text(encoding="utf-8") if base_path else DEFAULT_PROMPT
@@ -1106,11 +1151,7 @@ def _write_prompt(repo: str, note: str | None, resume: bool, worktree: Path) -> 
             if len(current_doc) <= PROMPT_DOC_INLINE_LIMIT:
                 base += f"\n\nCurrent docs/delegation-loop.md:\n\n{current_doc}"
     handoff = STATE_DIR / "handoffs" / f"{validate_repo(repo)}.json"
-    if handoff.is_file():
-        base = (
-            f"The last run kept its ledger at {handoff}. Read it before you start.\n\n"
-            + base
-        )
+    base = _kept_ledger_prompt(handoff) + base
     handoff_doc = STATE_DIR / "handoffs" / f"{validate_repo(repo)}.HANDOFF.md"
     if handoff_doc.is_file():
         base = (

@@ -2046,6 +2046,61 @@ def test_next_prompt_names_the_kept_ledger_file_only_when_it_exists(monkeypatch,
     assert str(kept) in after
 
 
+def _next_prompt(monkeypatch, tmp_path: Path) -> str:
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", tmp_path / "code")
+    monkeypatch.delenv("LUPIN_LOOP_PROMPT_FILE", raising=False)
+    return Path(
+        loop_runtime._write_prompt("widgets", None, False, tmp_path / "worktree")
+    ).read_text(encoding="utf-8")
+
+
+def test_next_prompt_inlines_every_entry_of_a_short_kept_ledger(monkeypatch, tmp_path: Path):
+    kept = tmp_path / "handoffs" / "widgets.json"
+    kept.parent.mkdir()
+    entries = [{"summary": "first-entry"}, {"summary": "second-entry"}, {"summary": "third-entry"}]
+    kept.write_text(json.dumps(entries), encoding="utf-8")
+
+    prompt = _next_prompt(monkeypatch, tmp_path)
+
+    assert f"most recent entries of the kept ledger at {kept}" in prompt
+    for marker in ("first-entry", "second-entry", "third-entry"):
+        assert marker in prompt
+
+
+def test_next_prompt_inlines_only_the_last_five_entries_of_a_large_ledger(
+    monkeypatch, tmp_path: Path
+):
+    before = _next_prompt(monkeypatch, tmp_path)
+    kept = tmp_path / "handoffs" / "widgets.json"
+    kept.parent.mkdir()
+    entries = [{"summary": f"entry-{i:04d}" + "." * 40} for i in range(2000)]
+    kept.write_text(json.dumps(entries), encoding="utf-8")
+
+    prompt = _next_prompt(monkeypatch, tmp_path)
+
+    inserted = prompt[: len(prompt) - len(before)]
+    assert prompt.endswith(before)
+    assert len(inserted) <= 8000
+    for i in range(1995, 2000):
+        assert f'"entry-{i:04d}' in inserted
+    assert '"entry-1994' not in inserted
+
+
+def test_next_prompt_reports_a_kept_ledger_that_is_not_an_array_in_one_line(
+    monkeypatch, tmp_path: Path
+):
+    kept = tmp_path / "handoffs" / "widgets.json"
+    kept.parent.mkdir()
+    kept.write_text('{"not": "an array"}', encoding="utf-8")
+
+    prompt = _next_prompt(monkeypatch, tmp_path)
+
+    lines = [line for line in prompt.splitlines() if str(kept) in line]
+    assert len(lines) == 1
+    assert "not a JSON array" in lines[0]
+
+
 def test_stop_keeps_an_ignored_handoff_file_outside_the_worktree(
     monkeypatch, tmp_path: Path, make_checkout
 ):
