@@ -404,6 +404,24 @@ def test_loops_output_includes_quota_handoff_reason(monkeypatch, capsys):
         "(handoff: /state/handoffs/widgets.HANDOFF.md)"
     )
 
+def test_loops_prints_idle_for_a_loop_with_a_stale_session(monkeypatch, capsys):
+    monkeypatch.setattr(machines, "hostname", lambda: "local")
+    monkeypatch.setattr(
+        loop_runtime,
+        "loop_state",
+        lambda repo: {
+            "repo": repo,
+            "state": "working",
+            "backend": "herdr",
+            "activity_age_s": 7200.0,
+        },
+    )
+
+    assert cli.main(["loops", "widgets"]) == 0
+
+    assert capsys.readouterr().out.strip() == "widgets: idle (herdr)"
+
+
 def test_loops_json_shows_checkout_agent_as_unmanaged(monkeypatch, tmp_path: Path, capsys):
     monkeypatch.setattr(loop_runtime, "LOOPS_DIR", tmp_path / "missing")
     monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"lupin": "claude"})

@@ -107,6 +107,95 @@ def test_loop_state_uses_herdr_agent_state_and_ids(monkeypatch):
         "agent": "lupin-loop",
     }
 
+
+def _session_file(tmp_path: Path, age_s: float) -> str:
+    path = tmp_path / "session.jsonl"
+    path.write_text("{}\n", encoding="utf-8")
+    past = time.time() - age_s
+    os.utime(path, (past, past))
+    return str(path)
+
+
+def _agent(status: str, session_path: str | None) -> dict:
+    agent = {"name": "lupin-loop", "agent_status": status}
+    if session_path is not None:
+        agent["agent_session"] = {"kind": "path", "value": session_path}
+    return agent
+
+
+def _mock_workspace_loop(monkeypatch, agent: dict) -> None:
+    metadata = {
+        "repo": "widgets",
+        "platform": "claude",
+        "session": "lupin-widgets-abc123",
+        "started_at": "2025-01-02T03:04:05Z",
+        "workspace_id": "workspace-1",
+    }
+    workspace = {
+        "id": "workspace-1",
+        "root_pane": {"pane_id": "pane-1", "workspace_id": "workspace-1"},
+    }
+    monkeypatch.setattr(loop_runtime, "_read_metadata", lambda repo: metadata)
+    monkeypatch.setattr(loop_runtime, "_server_running", lambda session: True)
+    monkeypatch.setattr(loop_runtime, "_find_workspace", lambda session, data: workspace)
+    monkeypatch.setattr(loop_runtime, "_agent_for_workspace", lambda session, workspace_id: agent)
+
+
+@pytest.mark.parametrize(
+    "status, age_s, label",
+    [
+        ("working", 7200, "idle"),
+        ("working", 60, "working"),
+        ("idle", 7200, "idle"),
+        ("blocked", 7200, "blocked"),
+        ("done", 7200, "done"),
+    ],
+)
+def test_display_state_shows_idle_for_a_stale_loop(monkeypatch, tmp_path: Path, status, age_s, label):
+    _mock_workspace_loop(monkeypatch, _agent(status, _session_file(tmp_path, age_s)))
+
+    state = loop_runtime.loop_state("widgets")
+
+    assert state["state"] == status
+    assert loop_runtime.display_state(state) == label
+
+
+@pytest.mark.parametrize("session_path", [None, "/nonexistent/session.jsonl"])
+def test_display_state_keeps_herdr_status_without_a_readable_session(monkeypatch, session_path):
+    _mock_workspace_loop(monkeypatch, _agent("working", session_path))
+
+    state = loop_runtime.loop_state("widgets")
+
+    assert "activity_age_s" not in state
+    assert loop_runtime.display_state(state) == "working"
+
+
+def test_local_loops_labels_a_stale_loop_idle_without_changing_its_state(
+    monkeypatch, tmp_path: Path
+):
+    loops_dir = tmp_path / "herdr-loops"
+    loops_dir.mkdir()
+    (loops_dir / "widgets.json").write_text(
+        '{"repo":"widgets","platform":"omp","session":"lupin-loops",'
+        '"state":"running","started_at":"2026-01-01T00:00:00Z"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", loops_dir)
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", Path("/code"))
+    monkeypatch.setattr(
+        loop_runtime,
+        "loop_state",
+        lambda repo: {"repo": repo, "state": "working", "workspace_id": "saved", "pane_id": "saved:p1"},
+    )
+    monkeypatch.setattr(loop_runtime, "_agents", lambda session: [
+        _agent("working", _session_file(tmp_path, 7200)) | {"workspace_id": "saved", "pane_id": "saved:p1"},
+    ])
+
+    loops = loop_runtime.local_loops()
+
+    assert loops[0]["state"] == "running"
+    assert loop_runtime.display_state(loops[0]) == "idle"
+
 def test_local_loops_marks_a_missing_running_workspace_for_attention(monkeypatch, tmp_path: Path):
     loops_dir = tmp_path / "herdr-loops"
     loops_dir.mkdir()

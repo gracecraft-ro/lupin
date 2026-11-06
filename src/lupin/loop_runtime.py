@@ -800,6 +800,34 @@ def _agent_state(session: str, workspace: dict) -> str:
     return state if state in {"idle", "working", "blocked", "done", "unknown"} else "unknown"
 
 
+# A loop whose agent session file has not changed for this long shows as idle.
+AGENT_STALE_S = 3600
+_ACTIVE_AGENT_STATES = {"idle", "working", "running"}
+
+
+def _agent_activity_age(agent: dict | None) -> float | None:
+    """Seconds since the agent session file changed, or None if unknown."""
+    session = agent.get("agent_session") if agent else None
+    if not isinstance(session, dict) or session.get("kind") != "path":
+        return None
+    path = session.get("value")
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        return time.time() - os.stat(path).st_mtime
+    except OSError:
+        return None
+
+
+def display_state(row: dict) -> str:
+    """The state label `lupin loops` prints. Does not change row["state"]."""
+    state = row.get("state", "unknown")
+    age = row.get("activity_age_s")
+    if state in _ACTIVE_AGENT_STATES and isinstance(age, (int, float)) and age > AGENT_STALE_S:
+        return "idle"
+    return state
+
+
 def _metadata_path(repo: str) -> Path:
     return LOOPS_DIR / f"{validate_repo(repo)}.json"
 
@@ -2840,7 +2868,7 @@ def loop_state(repo: str) -> dict:
         }
     workspace_id = _workspace_id(workspace)
     agent = _agent_for_workspace(session, workspace_id) if workspace_id else None
-    return {
+    result = {
         "repo": repo,
         "platform": metadata.get("platform", "claude"),
         "backend": "herdr",
@@ -2851,6 +2879,10 @@ def loop_state(repo: str) -> dict:
         "since": metadata.get("started_at"),
         "agent": agent.get("name", AGENT_NAME) if agent else AGENT_NAME,
     }
+    age = _agent_activity_age(agent)
+    if age is not None:
+        result["activity_age_s"] = age
+    return result
 
 
 def read_run_logs(repo: str, run_id: str | None = None, *, tail: int = 50) -> list[dict]:
@@ -2978,6 +3010,7 @@ def local_loops(*, include_unmanaged: bool = False) -> list[dict]:
             "agent": agent.get("agent"),
         }
         state = _reported_agent_state(agent.get("agent_status"))
+        age = _agent_activity_age(agent) if agent.get("agent_status") in _ACTIVE_AGENT_STATES else None
         for row in matches:
             row.setdefault("panes", []).append(pane)
             current_state = _reported_agent_state(row.get("state"))
@@ -2985,6 +3018,9 @@ def local_loops(*, include_unmanaged: bool = False) -> list[dict]:
                 row["state"] = current_state
             if _AGENT_STATE_PRIORITY[state] > _AGENT_STATE_PRIORITY[current_state]:
                 row["state"] = state
+            if age is not None:
+                # Keep the most recent activity when several agents match.
+                row["activity_age_s"] = min(age, row.get("activity_age_s", age))
 
     if include_unmanaged:
         result.extend(
