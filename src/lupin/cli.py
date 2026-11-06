@@ -708,6 +708,10 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--platform", choices=("claude", "omp"))
     run_parser.add_argument("--provider", choices=("openai", "openai-codex", "opencode-go"))
     run_parser.add_argument("--model")
+    run_parser.add_argument(
+        "--effort", choices=("low", "medium", "high", "xhigh", "max"),
+        help="Claude effort level (--platform claude only)",
+    )
     run_parser.add_argument("--note")
     run_parser.add_argument("--resume", action="store_true")
     run_parser.add_argument("--machine", help="run on a fleet machine")
@@ -1768,6 +1772,7 @@ def _start_loop_with_result(repo: str, args: argparse.Namespace) -> tuple[bool, 
             model=args.model,
             note=args.note,
             resume=args.resume,
+            effort=getattr(args, "effort", None),
         )
     except loop_runtime.EnvValueError:
         raise
@@ -1782,11 +1787,14 @@ def _cmd_run(args: argparse.Namespace) -> int:
     if args.all and args.resume:
         print("run --all cannot resume", file=sys.stderr)
         return 1
-    if (args.provider or args.model) and args.platform != "omp":
-        print("--provider and --model require --platform omp", file=sys.stderr)
+    if args.provider and args.platform != "omp":
+        print("--provider requires --platform omp", file=sys.stderr)
         return 1
     local_host = machines.hostname()
     machine = args.machine or local_host
+    if args.effort is not None and machine != local_host:
+        print("--effort runs only on this machine", file=sys.stderr)
+        return 1
     if machine != local_host:
         queue_action = "loop.run-all" if args.all else "loop.run"
         queue_params = {"note": args.note} if args.all else {

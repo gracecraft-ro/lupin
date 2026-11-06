@@ -1147,8 +1147,8 @@ def validate_omp_options(
         or any(ord(character) < 32 or ord(character) == 127 for character in model)
     ):
         raise LoopError("invalid OMP model")
-    if platform != "omp" and (provider is not None or model is not None):
-        raise LoopError("--provider and --model require --platform omp")
+    if platform != "omp" and provider is not None:
+        raise LoopError("--provider requires --platform omp")
     if provider == "openai":
         provider = "openai-codex"
     if model and model.startswith("openai/"):
@@ -1469,6 +1469,7 @@ def start_loop(
     model: str | None = None,
     note: str | None = None,
     resume: bool = False,
+    effort: str | None = None,
 ) -> tuple[bool, str]:
     repo = validate_repo(repo)
     source = base_repo(repo)
@@ -1534,10 +1535,11 @@ def start_loop(
                 profile=skipped_profile, reason="explicit_options",
                 platform=selected, provider=provider, model=model,
             )
+        if effort is not None and selected != "claude":
+            raise LoopError("--effort requires --platform claude")
         if selected == "claude" and model is None:
             message = (
-                "Claude requires an explicit model; use --platform omp "
-                "with --model or an OMP orchestrator profile"
+                "Claude requires --model; for example --model claude-sonnet-5-5"
             )
             _log_event(
                 repo, {"run_id": run_id}, "error",
@@ -1559,6 +1561,7 @@ def start_loop(
             "platform": selected,
             "provider": provider,
             "model": model,
+            "effort": effort,
             "routing_decision": routing_decision,
             "session": session,
             "state": "starting",
@@ -1816,9 +1819,12 @@ def _wait_agent(session: str, workspace_id: str) -> int:
 def _launch_agent(
     session: str, platform: str, workspace: dict, prompt_file: str, resume: bool,
     name: str = AGENT_NAME, provider: str | None = None, model: str | None = None,
+    effort: str | None = None,
 ) -> int:
     if platform == "claude" and not model:
         raise LoopError("Claude requires an explicit model; the Claude default is not allowed")
+    if effort is not None and platform != "claude":
+        raise LoopError("--effort requires --platform claude")
     pane = _pane_id(workspace)
     workspace_id = _workspace_id(workspace)
     if not pane or not workspace_id:
@@ -1839,6 +1845,8 @@ def _launch_agent(
             argv.extend(["--provider", provider])
     if model:
         argv.extend(["--model", model])
+    if effort:
+        argv.extend(["--effort", effort])
     argv.append(prompt)
     rc, output = _run(argv, timeout=310.0, env=_herdr_env())
     if rc:
@@ -1874,6 +1882,7 @@ def _wait_existing_agent(session: str, workspace_id: str) -> int:
 def _agent_command(
     repo: str, session: str, workspace_id: str, platform: str, prompt_file: str,
     resume: bool, launch: bool, provider: str | None = None, model: str | None = None,
+    effort: str | None = None,
 ) -> list[str]:
     args = [
         "launch-agent" if launch else "wait-agent",
@@ -1886,6 +1895,8 @@ def _agent_command(
             args.extend(["--provider", provider])
         if model:
             args.extend(["--model", model])
+        if effort:
+            args.extend(["--effort", effort])
     if resume:
         args.append("--resume")
     return _lupin_command(*args)
@@ -2018,6 +2029,7 @@ def _monitor_loop(
         command = _agent_command(
             repo, session, workspace_id, agent_platform, agent_prompt, resume_agent,
             launch_agent, provider=metadata.get("provider"), model=metadata.get("model"),
+            effort=metadata.get("effort"),
         )
         max_holders = (
             _env_int("LUPIN_LOOP_CLAUDE_MAX_CONCURRENT", 1)
@@ -2468,7 +2480,7 @@ def herdr_server(session: str) -> int:
 
 def launch_agent(
     repo: str, session: str, workspace_id: str, platform: str, prompt_file: str, resume: bool,
-    provider: str | None = None, model: str | None = None,
+    provider: str | None = None, model: str | None = None, effort: str | None = None,
 ) -> int:
     _log_current_event(repo, "slot_acquired", slot=platform, scope="agent")
     workspace = _workspace_by_id(session, workspace_id)
@@ -2480,7 +2492,7 @@ def launch_agent(
     provider, model = validate_omp_options(platform, provider, model)
     rc = _launch_agent(
         session, platform, workspace, prompt_file, resume,
-        _agent_name_for(repo, session), provider, model,
+        _agent_name_for(repo, session), provider, model, effort,
     )
     _log_current_event(repo, "agent_exit", exit_code=rc)
     return rc
@@ -3093,8 +3105,8 @@ def schedule_once(
         raise LoopError("note is invalid or too long")
     selected = validate_platform(platform) if platform else None
     provider, model = validate_omp_options(selected, provider, model) if selected else (provider, model)
-    if (provider is not None or model is not None) and selected != "omp":
-        raise LoopError("--provider and --model require --platform omp")
+    if provider is not None and selected != "omp":
+        raise LoopError("--provider requires --platform omp")
     repos = [validate_plain_repo(repo) for repo in repos]
     if not repos:
         raise LoopError("at least one repo is required for a one-off run")
@@ -3294,6 +3306,7 @@ def main(argv: list[str] | None = None) -> int:
     launch_parser.add_argument("--prompt-file", required=True)
     launch_parser.add_argument("--provider", choices=("openai", "openai-codex", "opencode-go"))
     launch_parser.add_argument("--model")
+    launch_parser.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"))
     launch_parser.add_argument("--resume", action="store_true")
     wait_parser = sub.add_parser("wait-agent", help=argparse.SUPPRESS)
     wait_parser.add_argument("--repo", required=True)
@@ -3326,6 +3339,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.resume,
                 args.provider,
                 args.model,
+                args.effort,
             )
         if args.action == "wait-agent":
             return wait_agent(args.repo, args.session, args.workspace, args.platform)

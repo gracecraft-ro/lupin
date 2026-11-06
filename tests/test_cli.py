@@ -119,6 +119,85 @@ def test_run_creates_herdr_worker_metadata_and_systemd_unit(
     assert events[1]["quota_headroom"] is None
 
 
+def _run_fixture(monkeypatch, tmp_path, make_checkout):
+    """Mock a local `run` of repo widgets. Return the state dir and the worker launches."""
+    state_dir = tmp_path / "state"
+    code_dir = tmp_path / "code"
+    make_checkout(code_dir / "widgets")
+    (code_dir / "widgets" / "docs").mkdir()
+    (code_dir / "widgets" / "docs" / "delegation-loop.md").write_text("run this repo\n", encoding="utf-8")
+    monkeypatch.setattr(loop_runtime, "STATE_DIR", state_dir)
+    monkeypatch.setattr(loop_runtime, "LOOPS_DIR", state_dir / "herdr-loops")
+    monkeypatch.setattr(loop_runtime, "REPORTS_DIR", state_dir / "reports")
+    monkeypatch.setattr(loop_runtime, "REPOS_FILE", state_dir / "repos")
+    monkeypatch.setattr(loop_runtime, "CODE_DIR", code_dir)
+    monkeypatch.setattr(loop_runtime, "enabled_repos", lambda: {"widgets": "claude"})
+    monkeypatch.setattr(
+        loop_runtime,
+        "_run",
+        lambda argv, **kwargs: (
+            (1, "inactive") if argv[0] in {"systemctl", "tmux"} else (0, '{"running": false}')
+        ),
+    )
+    launched = []
+
+    def systemd_run(repo, kind, command, **kwargs):
+        launched.append(command)
+        metadata = loop_runtime._read_metadata(repo)
+        loop_runtime._set_loop_state(repo, metadata, "running")
+        return 0, ""
+
+    monkeypatch.setattr(loop_runtime, "_systemd_run", systemd_run)
+    return state_dir, launched
+
+
+def test_run_refuses_effort_on_omp_and_starts_nothing(monkeypatch, tmp_path, capsys, make_checkout):
+    _, launched = _run_fixture(monkeypatch, tmp_path, make_checkout)
+
+    assert cli.main(["run", "widgets", "--platform", "omp", "--effort", "high"]) == 1
+
+    captured = capsys.readouterr()
+    assert "--effort requires --platform claude" in captured.out + captured.err
+    assert launched == []
+
+
+def test_run_refuses_effort_for_another_machine(capsys):
+    with mock.patch.object(loops, "dispatch_loop_action") as dispatch:
+        code = cli.main(["run", "widgets", "--machine", "remote", "--platform", "claude", "--effort", "high"])
+
+    assert code == 1
+    dispatch.assert_not_called()
+    assert "--effort runs only on this machine" in capsys.readouterr().err
+
+
+def test_run_accepts_model_on_claude_and_passes_it_to_start_loop(monkeypatch, capsys):
+    started = []
+
+    def start_loop(repo, **kwargs):
+        started.append((repo, kwargs))
+        return True, "started"
+
+    monkeypatch.setattr(loop_runtime, "start_loop", start_loop)
+
+    code = cli.main(["run", "widgets", "--platform", "claude", "--model", "claude-sonnet-5-5", "--json"])
+
+    assert code == 0
+    assert "--model" not in capsys.readouterr().err
+    assert started[0][0] == "widgets"
+    assert started[0][1]["platform"] == "claude"
+    assert started[0][1]["model"] == "claude-sonnet-5-5"
+
+
+def test_run_refuses_provider_on_claude_and_starts_nothing(monkeypatch, capsys):
+    monkeypatch.setattr(
+        loop_runtime, "start_loop", mock.Mock(side_effect=AssertionError("must not start")),
+    )
+
+    assert cli.main(["run", "widgets", "--platform", "claude", "--provider", "openai"]) == 1
+
+    assert "--provider requires --platform omp" in capsys.readouterr().err
+
+
 def test_logs_cli_reads_latest_and_selected_run_as_jsonl(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(loop_runtime, "STATE_DIR", tmp_path)
     earlier = loop_runtime.run_log.new_run_id()
