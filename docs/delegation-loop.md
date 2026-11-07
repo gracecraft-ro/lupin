@@ -10,19 +10,19 @@ its own Git worktree in the loop state directory. See [State](user-guide.md#stat
 
 ## Lupin commands for a pass
 
-| Job | Command |
-| --- | --- |
-| Read the latest events | `lupin ledger read OWNER/REPO --json` |
-| Rank open issues (`--repo` is the checkout folder name under `LUPIN_LOOP_CODE_DIR`, default `/code`) | `lupin roadmap --repo lupin --stage all --json` |
-| Show dependencies | `lupin roadmap --repo lupin --dag` |
-| Select a model and a machine | `lupin place N --explain` |
-| Show provider quota | `lupin quota` |
-| Show every open PR in one view | `lupin pr-status` |
-| Claim an issue | `lupin claim OWNER/REPO#N --holder SESSION` |
-| Brief and start one issue or PR (unless no-start is passed) | `lupin dispatch OWNER/REPO#N` |
-| Claim related issues together | `lupin quest start --issue N --issue M` |
-| See machines and loops | `lupin machines`, `lupin loops`, `lupin peek lupin` |
-| Write a handoff at the end of a session | `/handoff`. It runs `lupin ledger append`. |
+| Job                                                                                                  | Command                                             |
+| ---------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| Read the latest events                                                                               | `lupin ledger read OWNER/REPO --json`               |
+| Rank open issues (`--repo` is the checkout folder name under `LUPIN_LOOP_CODE_DIR`, default `/code`) | `lupin roadmap --repo lupin --stage all --json`     |
+| Show dependencies                                                                                    | `lupin roadmap --repo lupin --dag`                  |
+| Select a model and a machine                                                                         | `lupin place N --explain`                           |
+| Show provider quota                                                                                  | `lupin quota`                                       |
+| Show every open PR in one view                                                                       | `lupin pr-status`                                   |
+| Claim an issue                                                                                       | `lupin claim OWNER/REPO#N --holder SESSION`         |
+| Brief and start one issue or PR (unless no-start is passed)                                          | `lupin dispatch OWNER/REPO#N`                       |
+| Claim related issues together                                                                        | `lupin quest start --issue N --issue M`             |
+| See machines and loops                                                                               | `lupin machines`, `lupin loops`, `lupin peek lupin` |
+| Write a handoff at the end of a session                                                              | `/handoff`. It runs `lupin ledger append`.          |
 
 ## Rule 1: push the branch, open the PR upstream
 
@@ -32,7 +32,7 @@ existing fork. Do not create a new one. Do not open a PR or an issue on a fork.
 
 1. Fetch upstream. From the repo checkout, run `git fetch origin`.
 2. Create a worktree under `.claude/worktrees/`. Run `git worktree add <path> -b
-   <branch> origin/main`.
+<branch> origin/main`.
 3. Add the fork remote if it is missing, then push the branch to the fork. Never
    push to `origin` or `main`. Use `/ship` for steps 3 and 4.
 
@@ -47,9 +47,11 @@ existing fork. Do not create a new one. Do not open a PR or an issue on a fork.
    The orchestrator dispatches `/code-review`.
 
    <!-- markdownlint-disable MD013 -->
+
    ```sh
    gh pr create --repo OWNER/REPO --base main --head FORK_OWNER:<branch> --title "<title>" --body "Closes #N"
    ```
+
    <!-- markdownlint-enable MD013 -->
 
 On a Herdr worker that opens a new branch, use these in place of step 2:
@@ -72,7 +74,7 @@ goes to upstream `main`. In this repo:
 
 1. A worker follows rule 1. If the fork push fails, the worker stops. Report the
    branch name and commit range. Do not review the branch.
-2. The orchestrator dispatches `/code-review` for every PR, even a docs-only
+2. The orchestrator must dispatch subagents that use the `/code-review` skill to review PRs, even a docs-only
    one. The reviewer is not the worker and has an equal or higher model tier.
 3. If the review finds a problem and the loop owns the PR, the reviewer starts
    the fix worker and runs the fix cycle until the PR is ready for production.
