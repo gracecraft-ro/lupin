@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import redis as redis_lib
@@ -136,6 +137,23 @@ def test_refresh_publishes_real_rows_only(redis_port, flush_redis):
 
 # The key that `lupin` versions before issue #169 read and write.
 OLD_KEY = f"{slots_redis.PREFIX}quota-snapshot"
+
+
+def test_refresh_writes_local_rows_even_when_another_host_published(redis_port, flush_redis, tmp_path, monkeypatch):
+    # Another host's fresh entry blocks this host's publish. The local file still gets this host's rows.
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    other = {"claude": {
+        "rows": [{"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 5, "resets_at": 1}],
+        "fetched_at": quota_cache._now_iso(), "fetched_by": "another-host",
+    }}
+    _raw_client(redis_port).set(quota_cache.REDIS_KEY, json.dumps(other))
+    mine = [{"provider": "claude", "duration": quota.QuotaDuration.FIVE_HOURS, "used_pct": 40, "resets_at": 1}]
+    with mock.patch.object(quota, "quota_usage", return_value=mine):
+        quota_cache.refresh_snapshot(**_kw(redis_port))
+    stored = json.loads(_raw_client(redis_port).get(quota_cache.REDIS_KEY))
+    assert stored["claude"]["fetched_by"] == "another-host"
+    local = json.loads(Path(quota_cache.local_snapshot_path()).read_text())
+    assert local["rows"] == mine
 
 
 def test_new_reader_does_not_trust_rows_from_an_old_writer(redis_port, flush_redis):

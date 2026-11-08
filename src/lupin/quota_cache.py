@@ -39,13 +39,18 @@ provider at once -- same narrow job `gh_cache.py`'s and
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 
 import redis
 
 from . import quota, slots_redis
+
+logger = logging.getLogger(__name__)
 
 CoordinatorUnreachable = slots_redis.CoordinatorUnreachable
 
@@ -76,6 +81,38 @@ _REDIS_ERRORS = (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def local_snapshot_path() -> str:
+    """This host's own latest quota rows. Written on every `refresh_snapshot`,
+    whether or not this host published them. The heartbeat reads it.
+    """
+    return os.path.join(
+        os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")),
+        "lupin",
+        "quota-local.json",
+    )
+
+
+def _write_local_rows(rows: list[dict]) -> None:
+    """Atomic write. A failure only logs, so the timer keeps going."""
+    path = Path(local_snapshot_path())
+    temporary = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, prefix=".quota-local.", delete=False,
+        ) as handle:
+            temporary = handle.name
+            json.dump({"written_at": _now_iso(), "rows": rows}, handle)
+        os.replace(temporary, path)
+    except (OSError, TypeError, ValueError) as error:
+        logger.warning("could not write %s: %s", path, error)
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
 
 
 def _client(connection: dict):
@@ -229,7 +266,9 @@ def refresh_snapshot(*, force: bool = False, holder: str | None = None, **connec
     except _REDIS_ERRORS:
         current, old = {}, {}
     cached = _merge(current, old)
-    local_rows = group_by_provider(quota.quota_usage())
+    local = quota.quota_usage()
+    _write_local_rows(local)
+    local_rows = group_by_provider(local)
     updated = dict(cached)
     changed = False
     hostname = socket.gethostname()

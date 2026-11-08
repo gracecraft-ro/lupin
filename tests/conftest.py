@@ -305,6 +305,7 @@ def clean_lupin_env(monkeypatch, tmp_path):
     for name in [key for key in os.environ if key.startswith("LUPIN_")]:
         monkeypatch.delenv(name)
     monkeypatch.setenv("LUPIN_BACKEND", "local")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
 
     from lupin import loop_runtime
 

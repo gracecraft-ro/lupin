@@ -211,33 +211,23 @@ def _slot_summary(connection: dict) -> dict:
     return {name: {"used": info["holders"], "max": info["max"]} for name, info in raw.items()}
 
 
-def _recent_enough(entry: dict) -> bool:
-    try:
-        fetched = datetime.fromisoformat(entry["fetched_at"]).timestamp()
-    except (KeyError, TypeError, ValueError):
-        return False
-    return time.time() - fetched < HEARTBEAT_QUOTA_MAX_AGE
-
-
-def _cached_quota_rows(connection: dict) -> list[dict]:
-    """This host's own recent quota rows, from the shared cache the `lupin
-    quota` timer publishes. Never calls a provider API. `[]` if the cache is
-    unreachable or has no recent entry published by this host.
+def _local_quota_rows() -> list[dict]:
+    """This host's quota rows, from the file `lupin quota` writes on every
+    run. Never calls a provider API. `[]` if the file is missing, unreadable,
+    or older than `HEARTBEAT_QUOTA_MAX_AGE`.
     """
     try:
-        cached = quota_cache.read_snapshot(**connection)
-    except _REDIS_ERRORS:
+        with open(quota_cache.local_snapshot_path(), encoding="utf-8") as handle:
+            data = json.load(handle)
+        written = datetime.fromisoformat(data["written_at"]).timestamp()
+        rows = data["rows"]
+    except (OSError, ValueError, KeyError, TypeError):
         return []
-    mine = socket.gethostname()
-    return [
-        row
-        for entry in cached.values()
-        # `old_writer` entries are display-only (see `quota_cache._merge`).
-        if entry.get("fetched_by") == mine
-        and not entry.get("old_writer")
-        and _recent_enough(entry)
-        for row in entry.get("rows", [])
-    ]
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        return []
+    if time.time() - written >= HEARTBEAT_QUOTA_MAX_AGE:
+        return []
+    return rows
 
 
 def _write_record(
@@ -260,7 +250,7 @@ def _write_record(
     from . import agent  # deferred import, dodges the cycle noted above
 
     existing = _read_record(client, name)
-    quota_rows = _cached_quota_rows(connection)
+    quota_rows = _local_quota_rows()
     record = {
         "version": package_version(),
         "heartbeat": _now_iso(),
