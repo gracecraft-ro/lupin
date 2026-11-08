@@ -602,8 +602,10 @@ merges on `origin`. The loop policy is in `docs/delegation-loop.md`.
    ```
    <!-- markdownlint-enable MD013 -->
 
-   The PR body has one line per issue. Use `Closes #N` when the PR finishes the
-   issue. Use `Refs #N` only when work stays open. If the push fails, report the
+   The PR body has one line per issue. Use `Closes #N` when the PR completes the
+   issue's acceptance checks. The owner's review and merge are not work left.
+   Use `Refs #N` only when work remains after this PR merges, and name that work
+   in the PR body. If the push fails, report the
    branch name and commit range. Do not review or merge that branch. If the PR
    opens, report its number to the orchestrator, which dispatches
    `/code-review`.

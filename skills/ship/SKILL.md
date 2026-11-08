@@ -111,8 +111,9 @@ the error. Then go to "Report and release" below.
      --head FORK_OWNER:<branch> --title "..." --body "Closes #<issue>. ..."
    ```
 
-   Use `Closes #<issue>` when the PR finishes the issue. Use `Refs #<issue>`
-   only when work stays open.
+   Use `Closes #<issue>` when the PR completes the issue's acceptance checks.
+   Use `Refs #<issue>` only when work remains after this PR merges, and name
+   that work in the PR body.
 
 4. Request review with one comment on the PR:
 
@@ -188,7 +189,8 @@ Post a short report to the issue. Include:
 - **Decisions:** important choices or limits.
 - **Next:** PR review, merge, owner action, or `None`.
 
-Keep the issue open while the PR waits for review or merge. Do not say it is
-shipped until the owner merges it. If you own the Lupin claim (a lock on the
+A merged PR with `Closes #N` closes its issue. The owner's review and merge are
+not work left, so do not comment that an issue is open for owner review. Do not
+say it is shipped before the merge. If you own the Lupin claim (a lock on the
 issue), release it when your work ends. Remove the `claimed` label. Then comment
 with the PR number or stop reason. If the label edit fails, report it and stop.

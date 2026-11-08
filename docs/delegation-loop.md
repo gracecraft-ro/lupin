@@ -42,7 +42,8 @@ existing fork. Do not create a new one. Do not open a PR or an issue on a fork.
    ```
 
 4. Open the PR on upstream, with the fork branch as head. Use `Closes #N` when
-   the PR finishes the issue. Use `Refs #N` only when it leaves work open.
+   the PR completes the issue's acceptance checks. The owner's review and merge
+   are not work left. Use `Refs #N` only when work remains after the merge.
    Report the PR number to the orchestrator (the agent that dispatches work).
    The orchestrator dispatches `/code-review`.
 
