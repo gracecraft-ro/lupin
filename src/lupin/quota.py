@@ -656,13 +656,14 @@ def quota_source_label(provider: str) -> str:
     }.get(provider, "omp quota data")
 
 
-def snapshot() -> dict[str, dict]:
+def snapshot(rows: list[dict] | None = None) -> dict[str, dict]:
     """One primary percentage plus all windows per provider.
 
     `quota_usage()` can return several rows per provider -- one per
     window (5 hours, 7 days, 30 days). `pct_left` and `resets_at` keep the
     existing 5-hour-first summary. `windows` lists each window for readers
-    that need to show long-term limits too.
+    that need to show long-term limits too. `rows` replaces the live
+    `quota_usage()` call, so a caller can summarize rows it already has.
 
     With more than one account, this picks one row for each account as
     above. Then it keeps the account with the most quota left on its
@@ -674,7 +675,8 @@ def snapshot() -> dict[str, dict]:
     # `pace` imports this module, so import it here, not at the top.
     from . import pace
 
-    rows = quota_usage()
+    if rows is None:
+        rows = quota_usage()
     now_ms = time.time() * 1000
     weekly_targets = pace.weekly_daily_targets()
     per_account: dict[tuple[str, str | None], dict] = {}

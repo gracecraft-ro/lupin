@@ -11,6 +11,7 @@ indistinguishable from one that really went stale that long ago.
 from __future__ import annotations
 
 import json
+import socket
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
@@ -18,7 +19,7 @@ import pytest
 import redis as redis_lib
 
 from lupin import agent as agent_mod
-from lupin import cli, machines
+from lupin import cli, machines, quota_cache
 
 
 _AMBIENT_ENV_VARS = (
@@ -132,6 +133,21 @@ def test_heartbeat_fills_quota_from_quota_snapshot(redis_port, flush_redis, tmp_
     kw = _kw(redis_port)
     record = machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
     assert record["quota"] == {"claude": {"pct_left": 50, "resets_at": None, "source": "test"}}
+
+
+def test_heartbeat_reads_this_hosts_cached_quota_not_live_api(redis_port, flush_redis, tmp_path):
+    # Undo the change and the heartbeat calls the live `quota_usage()`, which
+    # raises here, so this test fails.
+    machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
+    mine = {"provider": "claude", "duration": "5 hours", "used_pct": 40.0, "resets_at": None}
+    theirs = {"provider": "openai", "duration": "5 hours", "used_pct": 90.0, "resets_at": None}
+    _raw_client(redis_port).set(quota_cache.REDIS_KEY, json.dumps({
+        "claude": {"rows": [mine], "fetched_at": machines._now_iso(), "fetched_by": socket.gethostname()},
+        "openai": {"rows": [theirs], "fetched_at": machines._now_iso(), "fetched_by": "another-host"},
+    }))
+    with mock.patch.object(machines.quota, "quota_usage", side_effect=AssertionError("live API")):
+        record = machines.heartbeat(_kw(redis_port))
+    assert record["usage_detail"]["quota_rows"] == [mine]
 
 
 def test_heartbeat_does_not_wipe_out_of_band_providers(redis_port, flush_redis, tmp_path):

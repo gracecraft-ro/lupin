@@ -3064,7 +3064,7 @@ class TestMachinesPageIntegration:
         # snapshot would be empty at this point. The page still has to show
         # the lease below, so it must read slots_redis.status() live.
         kw = _kw(redis_port)
-        monkeypatch.setattr(machines.quota, "snapshot", lambda: {})
+        monkeypatch.setattr(machines.quota, "snapshot", lambda rows=None: {})
         monkeypatch.setattr(machines.quota, "quota_usage", lambda: [])
         monkeypatch.setattr(machines.quota, "claude_usage", lambda: [])
         monkeypatch.setattr(machines.quota, "omp_usage", lambda: [])

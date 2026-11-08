@@ -50,7 +50,7 @@ from pathlib import Path
 
 import redis
 
-from . import quota, slots_redis
+from . import quota, quota_cache, slots_redis
 
 CoordinatorUnreachable = slots_redis.CoordinatorUnreachable
 
@@ -209,6 +209,25 @@ def _slot_summary(connection: dict) -> dict:
     return {name: {"used": info["holders"], "max": info["max"]} for name, info in raw.items()}
 
 
+def _cached_quota_rows(connection: dict) -> list[dict]:
+    """This host's own quota rows, from the shared cache the `lupin quota`
+    timer publishes. Never calls a provider API. `[]` if the cache is
+    unreachable or has no entry published by this host.
+    """
+    try:
+        cached = quota_cache.read_snapshot(**connection)
+    except _REDIS_ERRORS:
+        return []
+    mine = socket.gethostname()
+    return [
+        row
+        for entry in cached.values()
+        # `old_writer` entries are display-only (see `quota_cache._merge`).
+        if entry.get("fetched_by") == mine and not entry.get("old_writer")
+        for row in entry.get("rows", [])
+    ]
+
+
 def _write_record(
     client, name: str, *, state: str, connection: dict,
     loops: list[dict] | None = None, repos: list[dict] | None = None,
@@ -229,15 +248,16 @@ def _write_record(
     from . import agent  # deferred import, dodges the cycle noted above
 
     existing = _read_record(client, name)
+    quota_rows = _cached_quota_rows(connection)
     record = {
         "version": package_version(),
         "heartbeat": _now_iso(),
         "state": state,
         "slots": _slot_summary(connection),
         "providers": existing.get("providers", []) if existing else [],
-        "quota": quota.snapshot(),
+        "quota": quota.snapshot(rows=quota_rows),
         "usage_detail": {
-            "quota_rows": quota.quota_usage(),
+            "quota_rows": quota_rows,
             "token_rows": quota.claude_usage() + quota.omp_usage(),
         },
         "loops": loops if loops is not None else (existing.get("loops", []) if existing else []),
