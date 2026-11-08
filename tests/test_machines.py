@@ -142,10 +142,13 @@ def test_heartbeat_reads_this_hosts_cached_quota_not_live_api(redis_port, flush_
     mine = {"provider": "claude", "duration": "5 hours", "used_pct": 40.0, "resets_at": None}
     theirs = {"provider": "openai", "duration": "5 hours", "used_pct": 90.0, "resets_at": None}
     stale = {"provider": "claude", "duration": "5 hours", "used_pct": 1.0, "resets_at": None}
-    hour_ago = (datetime.now(timezone.utc) - timedelta(seconds=3600)).isoformat()
+
+    def ago(seconds):
+        return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+
     _raw_client(redis_port).set(quota_cache.REDIS_KEY, json.dumps({
-        "claude": {"rows": [mine], "fetched_at": machines._now_iso(), "fetched_by": socket.gethostname()},
-        "claude-stale": {"rows": [stale], "fetched_at": hour_ago, "fetched_by": socket.gethostname()},
+        "claude": {"rows": [mine], "fetched_at": ago(600), "fetched_by": socket.gethostname()},
+        "claude-stale": {"rows": [stale], "fetched_at": ago(1200), "fetched_by": socket.gethostname()},
         "openai": {"rows": [theirs], "fetched_at": machines._now_iso(), "fetched_by": "another-host"},
     }))
     with mock.patch.object(machines.quota, "quota_usage", side_effect=AssertionError("live API")):

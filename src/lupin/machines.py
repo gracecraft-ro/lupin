@@ -57,6 +57,8 @@ CoordinatorUnreachable = slots_redis.CoordinatorUnreachable
 PREFIX = slots_redis.PREFIX
 OFFLINE_AFTER = 120.0
 RECORD_TTL = int(OFFLINE_AFTER * 20)
+# The quota timer runs every ~302 s. 900 s is about 3 runs, so one missed run does not drop the host from `place`.
+HEARTBEAT_QUOTA_MAX_AGE = 900.0
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "lupin" / "fleet.json"
 _REDIS_ERRORS = (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)
 
@@ -209,10 +211,18 @@ def _slot_summary(connection: dict) -> dict:
     return {name: {"used": info["holders"], "max": info["max"]} for name, info in raw.items()}
 
 
+def _recent_enough(entry: dict) -> bool:
+    try:
+        fetched = datetime.fromisoformat(entry["fetched_at"]).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return False
+    return time.time() - fetched < HEARTBEAT_QUOTA_MAX_AGE
+
+
 def _cached_quota_rows(connection: dict) -> list[dict]:
-    """This host's own fresh quota rows, from the shared cache the `lupin
+    """This host's own recent quota rows, from the shared cache the `lupin
     quota` timer publishes. Never calls a provider API. `[]` if the cache is
-    unreachable or has no fresh entry published by this host.
+    unreachable or has no recent entry published by this host.
     """
     try:
         cached = quota_cache.read_snapshot(**connection)
@@ -222,8 +232,10 @@ def _cached_quota_rows(connection: dict) -> list[dict]:
     return [
         row
         for entry in cached.values()
-        # `is_fresh` also rejects `old_writer` entries (display-only).
-        if entry.get("fetched_by") == mine and quota_cache.is_fresh(entry)
+        # `old_writer` entries are display-only (see `quota_cache._merge`).
+        if entry.get("fetched_by") == mine
+        and not entry.get("old_writer")
+        and _recent_enough(entry)
         for row in entry.get("rows", [])
     ]
 
