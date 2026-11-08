@@ -648,6 +648,7 @@ class RoadmapTests(unittest.TestCase):
         # roadmap.py used to hardcode /home/ghosta here. CACHE_FILE must be
         # computed from HOME at import time, so it works for any user.
         with mock.patch.dict(os.environ, {"HOME": "/tmp/fake-home-for-test"}):
+            os.environ.pop("XDG_STATE_HOME", None)  # conftest sets it; this test checks the HOME path
             importlib.reload(roadmap)
             self.addCleanup(importlib.reload, roadmap)
             self.assertEqual(
