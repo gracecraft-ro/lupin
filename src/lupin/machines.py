@@ -210,9 +210,9 @@ def _slot_summary(connection: dict) -> dict:
 
 
 def _cached_quota_rows(connection: dict) -> list[dict]:
-    """This host's own quota rows, from the shared cache the `lupin quota`
-    timer publishes. Never calls a provider API. `[]` if the cache is
-    unreachable or has no entry published by this host.
+    """This host's own fresh quota rows, from the shared cache the `lupin
+    quota` timer publishes. Never calls a provider API. `[]` if the cache is
+    unreachable or has no fresh entry published by this host.
     """
     try:
         cached = quota_cache.read_snapshot(**connection)
@@ -222,8 +222,8 @@ def _cached_quota_rows(connection: dict) -> list[dict]:
     return [
         row
         for entry in cached.values()
-        # `old_writer` entries are display-only (see `quota_cache._merge`).
-        if entry.get("fetched_by") == mine and not entry.get("old_writer")
+        # `is_fresh` also rejects `old_writer` entries (display-only).
+        if entry.get("fetched_by") == mine and quota_cache.is_fresh(entry)
         for row in entry.get("rows", [])
     ]
 
