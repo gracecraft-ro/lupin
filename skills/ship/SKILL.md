@@ -9,14 +9,11 @@ compatibility: Requires the repository's tools and GitHub CLI. Lupin and Redis a
 
 ## Check the issue and checkout
 
-1. Read the issue (when available) and its latest comments. For a Lupin-managed repo, run:
+1. Read the issue (when available) and its latest comments. For a Lupin-managed repo, try running this:
 
    ```sh
    lupin review-route --prefetch 123 --repo OWNER/REPO
    ```
-
-   Use `lupin place 123 --json` for a model, effort, and machine suggestion. It
-   does not claim or start the task.
 
    In the absence of an issue, quickly create a brief issue and claim it. Keep it concise.
 
@@ -48,7 +45,7 @@ compatibility: Requires the repository's tools and GitHub CLI. Lupin and Redis a
   where outside data enters, data-loss handling, security, or accessibility.
 - Write a comment only for the why, on one line. Mark a shortcut with a known
   limit: `shortcut: <limit>, <upgrade trigger>`.
-- For ALL visual / spatial changes, open a draft PR as soon as you have any screenshots to share of the proposed final result (that you have inspected and confirm match expectations)! It is critical to do this as early as is feasible in the process; do not wait for the full gate to finish running to start your draft, otherwise your work risks being lost. By sticking to this policy, you may also receive valuable early feedback from the owner from occasion. Of course, update the PR and promote it from a draft as soon as it is fully polished and ready for review.
+- For ALL visual / spatial changes, open a draft PR as soon as you have any screenshots or gifs to share of the proposed final result (that you have inspected and confirm match expectations)! It is critical to do this as early as is feasible in the process; do not wait for the full gate to finish running to start your draft, otherwise your work risks being lost. By sticking to this policy, you may also receive valuable early feedback from the owner from occasion. Of course, update the PR and promote it from a draft as soon as it is fully polished and ready for review.
 - Add a test only if no test for that behavior fails when you undo your change. Check:
   undo the change, run the tests for that area, and read which tests fail. If
   an existing test for the same behavior fails, add no test; unrelated failures
@@ -68,8 +65,10 @@ you could not view it. If you decide a change is not visual, say so and why in
 your report and in a PR comment.
 
 For a 3D change, render a contact sheet with the useful views. Use top, bottom,
-front, side or 90-degree, and 45-degree views when they help show the change.
-Compare before and after from the same views. Attach the sheet to the PR.
+front, side or 90-degree, and 45-degree views when they help show the change. 
+Titles and any captions should be baked into the contact sheet. 
+Compare before and after from the same views. Attach the sheet to the PR. 
+For 3d changes that involve multiple related objects, such as one new object designed for an existing object, include any reference object.
 
 ## Save evidence
 
@@ -132,17 +131,16 @@ the error. Then go to "Report and release" below.
    branch. A local commit is not a pull request and is not shipped. Then go to
    "Report and release" below.
 
-## Attach screenshots to the PR
+## Attach screenshots and gifs to the PR
 
-A visual PR must have screenshots. If the repo's `AGENTS.md` or a repo skill
-covers screenshots, follow it. Otherwise follow this section.
+A visual PR must have visual evidence in order to be approved. If UI elements are modified in a way that changes user interactions at all, such as adding new functionality to the interface, attach a gif. If you only changed the appearance of a button, screenshots suffice. If your repo has specific screenshot / gif guidance, that can be a helpful starting point. 
 
 1. Find the PR that holds the change. For the PR in the current branch, run the
    command `gh pr view --json number,url --jq '.number, .url'`. The URL is
    `https://github.com/<owner>/<repo>/pull/<number>`. Use that `<owner>/<repo>`,
    not the fork name, unless the PR is on the fork.
 2. Open each screenshot and sanity check it before commenting; you may detect embarrassing mistakes this way.
-   attach it along with a detailed comment in GitHub on the PR and issue. Show the before
+   Attach it along with a detailed comment in GitHub on the PR and issue. Show the before
    and after, or the new screen if there is no before. Say what to look at. Use
    the same path in the body and in `--attach`:
 
@@ -168,10 +166,10 @@ covers screenshots, follow it. Otherwise follow this section.
 An upload needs write access to the repo that holds the PR. The error message
 `attaching files requires write access to the repository` means your token has
 none. A fork token can post a plain comment on an upstream PR but cannot upload.
-Do not skip the screenshots. Post that report as a PR comment before `lupin stop`.
-Include the PR number, machine, and absolute path of each image.
+Do not skip the evidence. Post that report as a PR comment before `lupin stop`.
+Include the PR number, machine, and absolute path of each image and gif for redundancy.
 
-If you could not capture a screenshot, post a PR comment that says so and why.
+If you could not share a screenshot or gif, post a PR comment that says so and why.
 Say so in your report too. The orchestrator must escalate.
 
 Do not attach a non-image file, such as a 3D model. Before `lupin stop`, copy it
@@ -184,7 +182,7 @@ Post a short report to the issue. Include:
 
 - **Highlights:** what changed and the main files.
 - **Evidence:** exact tests, commands, and observed output.
-- **Decisions:** important choices or limits.
+- **Decisions:** important choices or limits, with full context for anyone new to the codebase.
 - **Next:** PR review, merge, owner action, or `None`.
 
 A merged PR with `Closes #N` closes its issue. The owner's review and merge are
