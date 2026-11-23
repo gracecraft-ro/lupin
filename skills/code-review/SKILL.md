@@ -18,41 +18,36 @@ the orchestrator to open one.
 ## Read
 
 ```sh
-lupin review-route --prefetch 123 --repo OWNER/REPO
-gh pr view 123 --repo OWNER/REPO --json title,body,comments,reviews
-gh pr diff 123 --repo OWNER/REPO
-gh pr checks 123 --repo OWNER/REPO
+lupin review-route --prefetch 123 --repo OWNER/REPO && gh pr view 123 --repo OWNER/REPO --json title,body,comments,reviews && gh pr diff 123 --repo OWNER/REPO
 ```
 
-Also read the repo's `AGENTS.md`. Review the current head again each time the PR
-changes. Do not edit files or merge the PR.
+Review the current head again each time the PR
+changes, if needed. (Never necessary for docs changes, etc)
 
 ## Check
 
 Check the diff against the issue's acceptance checks, the repo rules, and these
-lenses. Passing CI does not prove the design is sound.
+lenses. Passing CI does not prove the design is sound. Before you start writing your review, please merge in the latest master if the PR is lagging behind so that your review is as accurate as possible.
 
 Review critical RFCs and research as thoroughly as major logic or UI changes.
-Use the full independent review process. Check sources and evidence for key
-claims. State assumptions. Compare alternatives. Assess risks. Check that
-conclusions follow from evidence. Report unsupported claims or missing analysis
-as findings.
+Use a full independent review process. You may dispatch subagents to check sources, do supplementary online research, and evaluate evidence for key claims. State assumptions. Compare alternatives. Assess risks. Check that conclusions follow from evidence. Report unsupported claims or missing analysis as findings.
 
-| Lens | Look for | Label |
-| --- | --- | --- |
-| `bug` | Wrong result, crash, or missed edge case (empty input, zero, last item, time zones). Grep every caller of a changed function. | `🔴 bug` |
-| `risk` | Security hole, unsafe access, data loss, an ignored error, or writes that must all succeed together but do not. | `🔴 bug` |
-| `scale` | Fine for one user, wrong for many. Read the expected load in the README and deploy config first. | `🟡 risk` |
-| `missing test` | Risky new logic has no test that fails when the logic breaks. One good test is enough. | `🟡 risk` |
-| `speed` | A big slowdown. | `🟡 risk` (big), `🔵 nit` (small) |
-| `lean` | Dead code, a helper the repo already has (name its path), a dependency for a few lines, an abstraction with one use, near-copies, or tests that check nothing. | `🟡 risk` if it adds code, `🔵 nit` for a shorter form |
-| `test bloat` | A new test that fails in the same cases as an existing test. A new test file where one exists for the area. An issue number in a test title or file name. Table rows that run one code path. Duplicate tests are `🟡 risk`, never `🔵 nit`. | `🟡 risk` |
+| Lens             | Look for                                                                                                                                                                                                                                                                                                                                                          | Label                                                  |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `bug`            | Wrong result, crash, or missed edge case (empty input, zero, last item, time zones). Grep every caller of a changed function.                                                                                                                                                                                                                                     | `🔴 bug`                                               |
+| `risk`           | Security hole, unsafe access, data loss, an ignored error, or writes that must all succeed together but do not.                                                                                                                                                                                                                                                   | `🔴 bug`                                               |
+| `scale`          | Fine for one user, wrong for many. Read the expected load in the README and deploy config first.                                                                                                                                                                                                                                                                  | `🟡 risk`                                              |
+| `missing test`   | Risky new logic has no test that fails when the logic breaks.                                                                                                                                                                                                                                                                                                     | `🟡 risk`                                              |
+| `speed`          | An unnecessary slowdown. (missed async opportunities, memory leaks, clumsy algorithms, etc)                                                                                                                                                                                                                                                                       | `🟡 risk` (big), `🔵 nit` (small)                      |
+| `lean`           | Dead code, a helper the repo already has (name its path), a dependency for a few lines, an abstraction with one use, near-copies, or tests that check nothing. Unnecessary complexity is unacceptable.                                                                                                                                                            | `🟡 risk` if it adds code, `🔵 nit` for a shorter form |
+| `test bloat`     | A new test that fails in the same cases as an existing test. A new test file where one exists for the area. An issue number in a test title or file name. Table rows that run one code path. Duplicate tests are `🟡 risk`, never `🔵 nit`.                                                                                                                       | `🟡 risk`                                              |
+| `slop`           | Visual evidence with ANY sign of slop, bugs, failure, bad UI/UX, or lack of polish. Look EXTREMELY closely and be ruthless; 50% of critical bugs and failed implementations can be caught from CAREFUL review of the images. Upload your own images and add them before reviewing them in cases where the author failed to follow protocol in uploading evidence. | `🟡 risk` (big)                                        |
+| `missed-comment` | Look carefully for owner comments on the PR that were ignored or not addressed. If the owner took the time to comment, it's something important to address and a blocker until it is addressed.                                                                                                                                                                   | `🟡 risk` (big)                                        |
 
 Also:
 
-- Find docs that the change makes wrong.
-- A visual change with no before and after screenshots on the PR is a `🔴 bug`.
-  A new screen needs no before. For 3D changes, inspect the contact sheet.
+- Identify docs that the change makes wrong.
+  A new screen needs a gif demonstrating the UI/UX that happens, covering how the screen is reached, how the screen is interacted with, and what happens after that screen (when applicable). For 3D changes, inspect the contact sheet.
 - An owner comment that names a problem is a finding. A PR comment is never an
   approval.
 - A `shortcut:` comment that names its limit is a decision. Report it only if
@@ -66,20 +61,20 @@ fixes that delete code. Give no style preferences and no vague advice.
 
 Use short sentences and everyday words. Explain each technical term once.
 
-1. First line: `Round N. LEVEL: <LEVEL>. Target: OWNER/REPO PR #<number> at <full head SHA>.`
-2. Second line: `What this change does:` and two or three sentences.
+1. First line: `Round N. LEVEL: <LEVEL>. Target: OWNER/REPO PR #<number> at <full head SHA>.` Diff: `+#<lines added> lines, -#<lines removed>`. `Verdict: <Approved or Not Approved>`
+2. Second line: `Summary:` and two or three sentences explaining the PR, its potential impact, and any observations. Write enough for a reader who has no context to get the need-to-know facts on the proposed changes.
 3. Findings, numbered across all groups so the author can say "fix 2 and 5".
    Skip an empty group.
    - **Must fix:** each `🔴 bug`, and each `🟡 risk` that breaks at the expected
-     load.
+     load. Start by describing the impact of each bug.
    - **Should fix:** other `🟡 risk`.
    - **Nice to have:** `🔵 nit`, and `❓ q` (a question; it blocks only if the
      answer changes what to do).
 4. `Verdict: Ship.` or `Verdict: fix 1 and 3 first.` Use `Ship` only when no
    blocking finding remains.
-5. Optional: `Lean: -<N> lines possible.` and `Not checked: <one line>`.
+5. `Not checked: <one line>` if any corners were cut during review - try to be thorough.
 
-With no findings, write lines 1 and 2, then `Looks good. Ship.` and one line on
+With no findings, write lines 1 and 2, then `Ship.` and one line on
 what you checked.
 
 One finding looks like this:
