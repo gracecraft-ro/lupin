@@ -87,6 +87,9 @@
               ]))
               # tests/conftest.py starts `redis-server` from PATH.
               pkgs.redis
+              # tests/test_visual_evidence.py skips its ffmpeg and node tests without these.
+              pkgs.ffmpeg
+              pkgs.nodejs
             ];
             # uv puts .venv in the checkout by default. /code is shared with the Mac.
             shellHook = ''
