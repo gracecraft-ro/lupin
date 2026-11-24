@@ -34,10 +34,15 @@ LABEL_H = 40  # px band above each pair panel
 LABEL_SIZE = 24
 TITLE_SIZE = 24
 TILE_LABEL_SIZE = 18
+PAIR_GAP = 16  # px of white between the two pair panels
+CAPTION_GAP = 16  # px between a pair caption and its labels
+SHEET_GAP = 8  # px of white between sheet tiles
+BORDER = "0xc8cdd3"  # 1 px grey frame around each panel and tile
+CAPTION_COLOR = "0x2b3038"  # dark grey caption text
 RENDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "render_stl.mjs")
 STL_SIZE = 800  # px per rendered view, before tiling
-STL_VIEWS = [("iso", "ISO"), ("plus-x", "+X"), ("minus-x", "-X"), ("plus-y", "+Y"),
-             ("minus-y", "-Y"), ("plus-z", "+Z"), ("minus-z", "-Z")]
+STL_VIEWS = [("iso", "ISO"), ("iso-cutaway", "ISO CUT"), ("plus-x", "+X"), ("minus-x", "-X"),
+             ("plus-y", "+Y"), ("minus-y", "-Y"), ("plus-z", "+Z"), ("minus-z", "-Z")]
 
 
 def die(message):
@@ -156,6 +161,10 @@ def band_height(line_count, size):
     return 2 * PAD + line_count * (size + LINE_GAP)
 
 
+def text_height(line_count, size):
+    return line_count * size + (line_count - 1) * LINE_GAP
+
+
 def write_text(folder, name, text):
     """ffmpeg reads text from a file. This avoids escaping the caption."""
     with open(os.path.join(folder, name), "w", encoding="utf-8") as handle:
@@ -165,7 +174,7 @@ def write_text(folder, name, text):
 
 def caption_draw(font, name, size, x, y):
     return (f"drawtext={font_option(font)}:textfile={name}:x={x}:y={y}:"
-            f"fontsize={size}:fontcolor=black:line_spacing={LINE_GAP}")
+            f"fontsize={size}:fontcolor={CAPTION_COLOR}:line_spacing={LINE_GAP}")
 
 
 def output_args(chain, out, fps):
@@ -190,23 +199,30 @@ def report(out):
     print(f"wrote {out} {width}x{height} bytes={os.path.getsize(out)}")
 
 
+def panel_chain(height, label, font):
+    """Frame a panel, pad it to the shared height, then put its label above it."""
+    return (f"pad=iw+2:ih+2:1:1:{BORDER},pad=iw:{height + 2}:0:0:white,"
+            f"pad=iw:ih+{LABEL_H}:0:{LABEL_H}:white,"
+            f"drawtext={font_option(font)}:text={label}:x=12:y=0:"
+            f"fontsize={LABEL_SIZE}:fontcolor=black")
+
+
 def cmd_pair(args, folder):
     before = checked_input(args.before)
     after = checked_input(args.after)
     out = checked_out(args.out, ".png")
     w1, h1 = probe(before)
     w2, h2 = probe(after)
-    h = min(h1, h2)  # both panels share one height
-    panel_w = round(w1 * h / h1) + round(w2 * h / h2)
-    lines = wrap(args.caption, panel_w - 24, args.font, args.size, folder)
-    band = band_height(len(lines), args.size)
+    height = max(h1, h2)  # nothing is scaled; the shorter panel gets white below it
+    row_w = (w1 + 2) + PAIR_GAP + (w2 + 2)  # +2 for each 1 px border
+    lines = wrap(args.caption, row_w - 24, args.font, args.size, folder)
+    caption_h = PAD + text_height(len(lines), args.size) + CAPTION_GAP
     write_text(folder, "caption.txt", "\n".join(lines))
     chain = (
-        f"[0:v]scale=-2:{h},pad=iw:ih+{LABEL_H}:0:{LABEL_H}:white,"
-        f"drawtext=text=Before:x=12:y={PAD}:fontsize={LABEL_SIZE}:fontcolor=black[a];"
-        f"[1:v]scale=-2:{h},pad=iw:ih+{LABEL_H}:0:{LABEL_H}:white,"
-        f"drawtext=text=After:x=12:y={PAD}:fontsize={LABEL_SIZE}:fontcolor=black[b];"
-        f"[a][b]hstack=inputs=2:shortest=1,pad=iw:ih+{band}:0:{band}:white,"
+        f"[0:v]{panel_chain(height, 'Before', args.font)}[a];"
+        f"[1:v]{panel_chain(height, 'After', args.font)}[b];"
+        f"[a]pad=iw+{PAIR_GAP}:ih:0:0:white[a2];"
+        f"[a2][b]hstack=inputs=2,pad=iw:ih+{caption_h}:0:{caption_h}:white,"
         + caption_draw(args.font, "caption.txt", args.size, 12, PAD)
     )
     run_ffmpeg(["-i", before, "-i", after], output_args(chain, out, args.fps), folder)
@@ -241,8 +257,10 @@ def make_sheet(items, args, out, folder):
     tile_w = args.tile_width
     first_w, first_h = probe(items[0][0])
     tile_h = round(tile_w * first_h / first_w) // 2 * 2
+    frame_w, frame_h = tile_w + 2, tile_h + 2  # +2 for the 1 px border
     cols = min(args.cols, len(items))
-    lines = wrap(args.title, cols * tile_w - 24, args.font, TITLE_SIZE, folder)
+    grid_w = cols * frame_w + (cols - 1) * SHEET_GAP
+    lines = wrap(args.title, grid_w - 24, args.font, TITLE_SIZE, folder)
     band = band_height(len(lines), TITLE_SIZE)
     write_text(folder, "caption.txt", "\n".join(lines))
     chains = []
@@ -251,11 +269,13 @@ def make_sheet(items, args, out, folder):
         chains.append(
             f"[{index}:v]scale={tile_w}:{tile_h}:force_original_aspect_ratio=decrease,"
             f"pad={tile_w}:{tile_h}:(ow-iw)/2:(oh-ih)/2:white,"
+            f"pad={frame_w}:{frame_h}:1:1:{BORDER},"
             f"drawtext={font_option(args.font)}:textfile={name}:x=6:y=6:"
             f"fontsize={TILE_LABEL_SIZE}:fontcolor=white:box=1:boxcolor=black@0.5[t{index}]"
         )
     layout = "|".join(
-        f"{(index % cols) * tile_w}_{(index // cols) * tile_h}" for index in range(len(items))
+        f"{(index % cols) * (frame_w + SHEET_GAP)}_{(index // cols) * (frame_h + SHEET_GAP)}"
+        for index in range(len(items))
     )
     tiles = "".join(f"[t{index}]" for index in range(len(items)))
     chains.append(
@@ -269,7 +289,7 @@ def make_sheet(items, args, out, folder):
 
 
 def render_views(stl, folder, frame=None):
-    """Render the seven views of stl. Return (path, label) pairs in STL_VIEWS order.
+    """Render the eight views of stl. Return (path, label) pairs in STL_VIEWS order.
 
     frame is another STL. Both files then share one scale and centre, so a size change shows.
     """
@@ -297,7 +317,7 @@ def cmd_stl(args, folder):
     else:
         items = render_views(new, os.path.join(folder, "new"))
     # One row for one part. Two rows, before then after, when --before is given.
-    sheet = argparse.Namespace(title=args.title, cols=7, tile_width=args.tile_width,
+    sheet = argparse.Namespace(title=args.title, cols=8, tile_width=args.tile_width,
                                font=args.font, fps=args.fps)
     make_sheet(items, sheet, out, folder)
 
@@ -331,7 +351,7 @@ def build_parser():
     sheet.add_argument("--tile-width", type=int, default=480, help="tile width in px")
 
     stl = sub.add_parser("stl", parents=[common],
-                         help="STL rendered to six sides and iso, with labels")
+                         help="STL rendered to six sides, iso, and iso cutaway, with labels")
     stl.add_argument("stl", help="the part, as a binary STL")
     stl.add_argument("--before", help="the part before the change. Adds a BEFORE row.")
     stl.add_argument("--title", required=True)

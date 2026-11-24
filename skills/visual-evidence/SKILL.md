@@ -57,8 +57,8 @@ starting point. If it is stricter than this skill, follow the repo guidance.
 - Make a contact sheet for any change to code that generates a spatial object.
   Do this even when the change looks small. This includes a change that adds a
   feature to that code, or fixes it.
-- Run the `stl` command in Scripts, below. It renders all six sides and the iso
-  view, and it labels each tile. With `--before`, the before and after tiles use
+- Run the `stl` command in Scripts, below. It renders all six sides, the iso view,
+  and the iso cutaway, and it labels each tile. With `--before`, the before and after tiles use
   one scale, so a size change shows. You do not pick the views.
 - If the object is not a binary STL, export it to binary STL first. Then run the
   command on the export.
@@ -92,7 +92,7 @@ starting point. If it is stricter than this skill, follow the repo guidance.
 - For a new screen, check that the gif covers how the screen is reached, how it
   is used, and what happens after.
 - For a spatial-object change, check the contact sheet. It must have the six
-  sides and the iso view. Before and after must use the same scale. A close-up
+  sides, the iso view, and the iso cutaway. Before and after must use the same scale. A close-up
   is needed when the change is too small to see at full size.
 
 ## Scripts
@@ -144,8 +144,8 @@ DejaVu Sans.
      before.png after.png --caption "Save button moves to the bottom bar" --out pair.png
    ```
 
-Both panels scale to the height of the shorter one. The taller screenshot is
-scaled down.
+Each panel keeps its own size. The shorter one gets white space below it, so
+nothing is scaled. The panels sit 16 px apart.
 
 ### New behaviour or new screen (gif)
 
@@ -171,9 +171,10 @@ twice. Name the files `before.gif` and `after.gif`. Attach both (section 3).
      part-after.stl --before part-before.stl --title "Part, before and after" --out sheet.png
    ```
 
-   With `--before`, the sheet has two rows of seven tiles. The first row is
-   BEFORE and the second is AFTER. Each row shows ISO, +X, -X, +Y, -Y, +Z, and
-   -Z, in that order. Both rows use one scale, so a size change shows.
+   With `--before`, the sheet has two rows of eight tiles. The first row is
+   BEFORE and the second is AFTER. Each row shows ISO, ISO CUT, +X, -X, +Y, -Y,
+   +Z, and -Z, in that order. ISO CUT removes the half nearest the camera. The
+   inside of the far walls shows in orange, so wall thickness is visible. Both rows use one scale, so a size change shows.
    Without `--before`, the sheet has one row.
 3. For a close-up, `stl` does not make one. Render the view larger, then crop
    it. `crop=WIDTH:HEIGHT:X:Y` counts pixels from the top-left corner:
@@ -183,8 +184,9 @@ twice. Name the files `before.gif` and `after.gif`. Attach both (section 3).
    nix develop -c ffmpeg -i closeup/part-after-plus-z.png -vf crop=600:400:900:700 closeup.png
    ```
 
-   Open the crop and check that it shows the changed area. The renderer uses
-   flat grey shading, so small detail such as an engraving can be hard to see.
+   Open the crop and check that it shows the changed area. The renderer lights the part
+   from several sides and darkens crevices. Small detail such as an engraving can
+   still be hard to see.
    Say so in the report if the detail does not show.
 
 ### Several views that are not STL (sheet)
@@ -199,8 +201,8 @@ nix develop -c python3 $SKILL/scripts/visual_evidence.py sheet \
 
 ### Direct render (render_stl.mjs)
 
-`$SKILL/scripts/render_stl.mjs FILE.stl OUTDIR` writes seven PNG files: `iso`,
-`plus-x`, `minus-x`, `plus-y`, `minus-y`, `plus-z`, and `minus-z`. Use it only
+`$SKILL/scripts/render_stl.mjs FILE.stl OUTDIR` writes eight PNG files: `iso`,
+`iso-cutaway`, `plus-x`, `minus-x`, `plus-y`, `minus-y`, `plus-z`, and `minus-z`. Use it only
 for a plain render or a close-up (see the STL section). `--size` sets the view
 width in px (default 800). `--frame OTHER.stl` sets one scale from both files.
 

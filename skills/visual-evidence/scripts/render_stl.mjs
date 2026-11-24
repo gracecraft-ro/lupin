@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-// Render a binary STL to seven PNG views: iso, plus-x, minus-x, plus-y,
-// minus-y, plus-z, minus-z. Orthographic, grey on white, one light for all
-// views. Built-in Node modules only. ASCII STL is not supported.
+// Render a binary STL to eight PNG views: iso, iso-cutaway, plus-x, minus-x,
+// plus-y, minus-y, plus-z, minus-z. Orthographic. Built-in Node modules only.
+// ASCII STL is not supported.
 //
 // Usage: node render_stl.mjs FILE.stl OUTDIR [--size 800] [--frame OTHER.stl]
 // --frame sets the scale and centre from the union of both files. For before
 // and after, give each side the other as --frame. A size change then shows.
+// iso-cutaway removes the half of the part nearest the iso camera, cut through
+// the centre. The cut face is drawn in a warm colour, so wall thickness shows.
 // Then tile the views with visual_evidence.py sheet, which adds the captions.
 
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
@@ -15,9 +17,20 @@ import { basename, extname, join } from "node:path";
 const SUPERSAMPLE = 2; // render at 2x size, then average 2x2 blocks
 const MARGIN = 0.86; // the model fills this share of the square image
 const CREASE_COS = Math.cos((30 * Math.PI) / 180); // no smoothing across sharper edges
-const AMBIENT = 0.3;
-const DIFFUSE = 0.55;
-const BASE_GREY = 140;
+
+// Colours are 0 to 255. The background and the cut face are flat.
+const BACKGROUND = [247, 245, 241];
+const CUT_FACE = [236, 166, 112];
+const PART = [0.56, 0.62, 0.68]; // soft slate, scaled by the light
+const SKY_LIGHT = [0.7, 0.72, 0.76]; // ambient light from above
+const GROUND_LIGHT = [0.5, 0.44, 0.38]; // warm bounce from below
+const SPEC_GAIN = 0.2;
+const SPEC_POWER = 40;
+const AO_STRENGTH = 0.4; // how dark the most occluded pixels get
+const AO_RADIUS = 0.03; // share of the image size
+const AO_RANGE = 0.1; // depth gap, as a share of the part size, that counts as full occlusion
+const AO_BIAS = 0.04; // smaller depth gaps are slope, not occlusion
+const W_UP = [0, 0, 1];
 
 // Each view: the direction the camera looks, and the up direction.
 const VIEWS = {
@@ -52,7 +65,13 @@ function normalize(v) {
   return len > 0 ? [v[0] / len, v[1] / len, v[2] / len] : [0, 0, 0];
 }
 
-const LIGHT = normalize([0.4, 0.55, 1]); // fixed in world space
+// Light directions are in camera space: x right, y up on screen, z toward the camera.
+// The same lights light every view, so each view is lit the same way.
+const LIGHTS = [
+  { dir: normalize([-0.45, 0.6, 0.66]), colour: [1.0, 0.93, 0.82], gain: 0.7 }, // key, upper left
+  { dir: normalize([0.8, -0.25, 0.55]), colour: [0.85, 0.9, 1.0], gain: 0.2 }, // fill, right
+  { dir: normalize([-0.95, 0.12, 0.28]), colour: [1.0, 0.97, 0.9], gain: 0.55 }, // raking, low from the left
+].map((light) => ({ ...light, half: normalize([light.dir[0], light.dir[1], light.dir[2] + 1]) }));
 
 // Returns Float64Array of 9 numbers per triangle: three corners, x y z each.
 function readBinarySTL(buf) {
@@ -71,6 +90,25 @@ function readBinarySTL(buf) {
     offset += 2; // attribute byte count
   }
   return tris;
+}
+
+// Outward faces give a positive signed volume. A file wound the other way is turned around.
+function orientOutward(tris) {
+  let volume = 0;
+  for (let f = 0; f < tris.length; f += 9) {
+    const a = [tris[f], tris[f + 1], tris[f + 2]];
+    const b = [tris[f + 3], tris[f + 4], tris[f + 5]];
+    const c = [tris[f + 6], tris[f + 7], tris[f + 8]];
+    volume += dot(a, cross(b, c));
+  }
+  if (volume >= 0) return;
+  for (let f = 0; f < tris.length; f += 9) {
+    for (let k = 0; k < 3; k++) {
+      const t = tris[f + 3 + k];
+      tris[f + 3 + k] = tris[f + 6 + k];
+      tris[f + 6 + k] = t;
+    }
+  }
 }
 
 // Per-corner normals. A corner blends the faces that share its position,
@@ -131,7 +169,58 @@ function screenBounds(tris, right, up) {
   return b;
 }
 
-function fillTriangle(xs, ys, ds, is, depth, rgb, size) {
+// Centre of the box around every vertex in the given arrays.
+function boundsCentre(arrays) {
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  for (const arr of arrays) {
+    for (let i = 0; i < arr.length; i += 3) {
+      for (let k = 0; k < 3; k++) {
+        lo[k] = Math.min(lo[k], arr[i + k]);
+        hi[k] = Math.max(hi[k], arr[i + k]);
+      }
+    }
+  }
+  return [0, 1, 2].map((k) => (lo[k] + hi[k]) / 2);
+}
+
+// Keep the part on the far side of the cut: where dot(p, fwd) >= planeDepth.
+// Triangles that cross the cut are split. Normals are interpolated along the cut.
+function clipFar(tris, normals, fwd, planeDepth) {
+  const outTris = [];
+  const outNormals = [];
+  for (let f = 0; f < tris.length / 9; f++) {
+    const verts = [0, 1, 2].map((k) => {
+      const p = [tris[f * 9 + k * 3], tris[f * 9 + k * 3 + 1], tris[f * 9 + k * 3 + 2]];
+      const n = [normals[f * 9 + k * 3], normals[f * 9 + k * 3 + 1], normals[f * 9 + k * 3 + 2]];
+      return { p, n, s: dot(p, fwd) - planeDepth };
+    });
+    const poly = [];
+    for (let i = 0; i < 3; i++) {
+      const a = verts[i];
+      const b = verts[(i + 1) % 3];
+      if (a.s >= 0) poly.push(a);
+      if ((a.s >= 0) !== (b.s >= 0)) {
+        const t = a.s / (a.s - b.s);
+        poly.push({
+          p: a.p.map((v, k) => v + (b.p[k] - v) * t),
+          n: normalize(a.n.map((v, k) => v + (b.n[k] - v) * t)),
+        });
+      }
+    }
+    for (let k = 1; k + 1 < poly.length; k++) {
+      for (const v of [poly[0], poly[k], poly[k + 1]]) {
+        outTris.push(...v.p);
+        outNormals.push(...v.n);
+      }
+    }
+  }
+  return { tris: Float64Array.from(outTris), normals: Float64Array.from(outNormals) };
+}
+
+// Write the nearest triangle at each pixel. back is 1 when that face points away
+// from the camera. After a cut, that means the ray starts inside the part.
+function fillTriangle(buf, size, xs, ys, ds, ns, back) {
   const den = (ys[1] - ys[2]) * (xs[0] - xs[2]) + (xs[2] - xs[1]) * (ys[0] - ys[2]);
   if (Math.abs(den) < 1e-12) return; // degenerate
   const minX = Math.max(0, Math.floor(Math.min(...xs)));
@@ -148,18 +237,62 @@ function fillTriangle(xs, ys, ds, is, depth, rgb, size) {
       if (w0 < -1e-9 || w1 < -1e-9 || w2 < -1e-9) continue;
       const z = w0 * ds[0] + w1 * ds[1] + w2 * ds[2];
       const idx = py * size + px;
-      if (z >= depth[idx]) continue;
-      depth[idx] = z;
-      const intensity = Math.min(1, w0 * is[0] + w1 * is[1] + w2 * is[2]);
-      const v = Math.round(BASE_GREY * intensity);
-      rgb[idx * 3] = v;
-      rgb[idx * 3 + 1] = v;
-      rgb[idx * 3 + 2] = v;
+      if (z >= buf.depth[idx]) continue;
+      buf.depth[idx] = z;
+      buf.back[idx] = back;
+      buf.nx[idx] = w0 * ns[0][0] + w1 * ns[1][0] + w2 * ns[2][0];
+      buf.ny[idx] = w0 * ns[0][1] + w1 * ns[1][1] + w2 * ns[2][1];
+      buf.nz[idx] = w0 * ns[0][2] + w1 * ns[1][2] + w2 * ns[2][2];
     }
   }
 }
 
-function renderView(tris, normals, fwd, up, size, frame) {
+// Screen-space occlusion. A pixel is darker when a nearby pixel is much closer to the camera.
+function occlusion(depth, size, radius, range, bias) {
+  const ao = new Float32Array(size * size).fill(1);
+  const offsets = [];
+  for (let k = 0; k < 8; k++) {
+    const a = (k * Math.PI) / 4;
+    offsets.push([Math.round(radius * Math.cos(a)), Math.round(radius * Math.sin(a))]);
+  }
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const d = depth[y * size + x];
+      if (d === Infinity) continue;
+      let occluded = 0;
+      for (const [dx, dy] of offsets) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+        const nd = depth[ny * size + nx];
+        if (nd === Infinity) continue;
+        occluded += Math.min(1, Math.max(0, (d - nd - bias) / range));
+      }
+      ao[y * size + x] = 1 - (AO_STRENGTH * occluded) / offsets.length;
+    }
+  }
+  return ao;
+}
+
+function clamp255(v) {
+  return Math.max(0, Math.min(255, Math.round(v)));
+}
+
+// Colour of one lit pixel. n is the unit normal in camera space, z toward the camera.
+function litColour(n, upCam, ao) {
+  const hemi = 0.5 + 0.5 * dot(n, upCam);
+  const light = [0, 1, 2].map((c) => SKY_LIGHT[c] * hemi + GROUND_LIGHT[c] * (1 - hemi));
+  let spec = 0;
+  for (const l of LIGHTS) {
+    const ndl = Math.max(0, dot(n, l.dir));
+    for (let c = 0; c < 3; c++) light[c] += l.colour[c] * l.gain * ndl;
+    spec += l.gain * Math.pow(Math.max(0, dot(n, l.half)), SPEC_POWER);
+  }
+  return [0, 1, 2].map((c) => clamp255((PART[c] * 255 * light[c] + 255 * SPEC_GAIN * spec) * ao));
+}
+
+function renderView(tris, normals, fwd, up, size, frame, cutDepth) {
+  const toCam = [-fwd[0], -fwd[1], -fwd[2]];
   const [right, trueUp] = basis(fwd, up);
   const b = screenBounds(tris, right, trueUp);
   if (frame) {
@@ -169,43 +302,56 @@ function renderView(tris, normals, fwd, up, size, frame) {
     b.minY = Math.min(b.minY, f.minY);
     b.maxY = Math.max(b.maxY, f.maxY);
   }
-  const count = tris.length / 9;
-  const sx = new Float64Array(count * 3);
-  const sy = new Float64Array(count * 3);
-  const sd = new Float64Array(count * 3);
-  const si = new Float64Array(count * 3);
-  for (let i = 0; i < count * 3; i++) {
-    const p = [tris[i * 3], tris[i * 3 + 1], tris[i * 3 + 2]];
-    sx[i] = dot(p, right);
-    sy[i] = dot(p, trueUp);
-    sd[i] = dot(p, fwd); // smaller is nearer the camera
-    // Light faces the camera. Flip a normal that points away.
-    let n = [normals[i * 3], normals[i * 3 + 1], normals[i * 3 + 2]];
-    if (dot(n, fwd) > 0) n = [-n[0], -n[1], -n[2]];
-    si[i] = Math.min(1, AMBIENT + DIFFUSE * Math.max(0, dot(n, LIGHT)));
-  }
-  const scale = (MARGIN * size) / Math.max(b.maxX - b.minX, b.maxY - b.minY);
+  const extent = Math.max(b.maxX - b.minX, b.maxY - b.minY);
+  const scale = (MARGIN * size) / extent;
   const cx = (b.minX + b.maxX) / 2;
   const cy = (b.minY + b.maxY) / 2;
-  const px = new Float64Array(count * 3);
-  const py = new Float64Array(count * 3);
-  for (let i = 0; i < count * 3; i++) {
-    px[i] = (sx[i] - cx) * scale + size / 2;
-    py[i] = size / 2 - (sy[i] - cy) * scale;
-  }
-  const rgb = new Uint8Array(size * size * 3).fill(255);
-  const depth = new Float64Array(size * size).fill(Infinity);
-  for (let f = 0; f < count; f++) {
-    const c = [f * 3, f * 3 + 1, f * 3 + 2];
+
+  const solid = cutDepth === null ? { tris, normals } : clipFar(tris, normals, fwd, cutDepth);
+  const pixels = size * size;
+  const buf = {
+    depth: new Float64Array(pixels).fill(Infinity),
+    back: new Uint8Array(pixels),
+    nx: new Float32Array(pixels),
+    ny: new Float32Array(pixels),
+    nz: new Float32Array(pixels),
+  };
+  for (let f = 0; f < solid.tris.length / 9; f++) {
+    const v = [0, 1, 2].map((k) => [solid.tris[f * 9 + k * 3], solid.tris[f * 9 + k * 3 + 1], solid.tris[f * 9 + k * 3 + 2]]);
+    const n = [0, 1, 2].map((k) => [solid.normals[f * 9 + k * 3], solid.normals[f * 9 + k * 3 + 1], solid.normals[f * 9 + k * 3 + 2]]);
+    const faceNormal = normalize(cross(sub(v[1], v[0]), sub(v[2], v[0])));
+    const back = dot(faceNormal, fwd) > 0 ? 1 : 0;
     fillTriangle(
-      c.map((i) => px[i]),
-      c.map((i) => py[i]),
-      c.map((i) => sd[i]),
-      c.map((i) => si[i]),
-      depth,
-      rgb,
+      buf,
       size,
+      v.map((p) => (dot(p, right) - cx) * scale + size / 2),
+      v.map((p) => size / 2 - (dot(p, trueUp) - cy) * scale),
+      v.map((p) => dot(p, fwd)), // smaller is nearer the camera
+      n.map((q) => [dot(q, right), dot(q, trueUp), dot(q, toCam)]),
+      back,
     );
+  }
+
+  const ao = occlusion(
+    buf.depth,
+    size,
+    Math.max(2, Math.round(AO_RADIUS * size)),
+    AO_RANGE * extent,
+    AO_BIAS * extent,
+  );
+  const upCam = [dot(W_UP, right), dot(W_UP, trueUp), dot(W_UP, toCam)];
+  const rgb = new Uint8Array(pixels * 3);
+  for (let i = 0; i < pixels; i++) {
+    const o = i * 3;
+    if (buf.depth[i] === Infinity) {
+      rgb.set(BACKGROUND, o);
+    } else if (cutDepth !== null && buf.back[i]) {
+      rgb.set(CUT_FACE, o);
+    } else {
+      let n = normalize([buf.nx[i], buf.ny[i], buf.nz[i]]);
+      if (n[2] < 0) n = [-n[0], -n[1], -n[2]]; // face the camera
+      rgb.set(litColour(n, upCam, ao[i]), o);
+    }
   }
   return rgb;
 }
@@ -301,12 +447,21 @@ function parseArgs(argv) {
 function main() {
   const { file, outDir, size, frameFile } = parseArgs(process.argv.slice(2));
   const tris = readBinarySTL(readFileSync(file));
+  orientOutward(tris);
   const frame = frameFile ? readBinarySTL(readFileSync(frameFile)) : null;
   const normals = cornerNormals(tris);
+  // The cut runs through the centre of the frame, across the iso view.
+  const isoFwd = normalize(VIEWS.iso[0]);
+  const cutDepth = dot(boundsCentre(frame ? [tris, frame] : [tris]), isoFwd);
   mkdirSync(outDir, { recursive: true });
   const stem = basename(file, extname(file));
+  const jobs = [];
   for (const [name, [fwd, up]] of Object.entries(VIEWS)) {
-    const big = renderView(tris, normals, normalize(fwd), up, size * SUPERSAMPLE, frame);
+    jobs.push([name, fwd, up, null]);
+    if (name === "iso") jobs.push(["iso-cutaway", fwd, up, cutDepth]);
+  }
+  for (const [name, fwd, up, cut] of jobs) {
+    const big = renderView(tris, normals, normalize(fwd), up, size * SUPERSAMPLE, frame, cut);
     const rgb = downsample(big, size);
     const path = join(outDir, `${stem}-${name}.png`);
     writeFileSync(path, encodePNG(size, size, rgb));
