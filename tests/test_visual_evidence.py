@@ -5,6 +5,7 @@ without node.
 """
 
 import importlib.util
+import math
 import os
 import shutil
 import struct
@@ -18,7 +19,8 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills" / "visual-evidence" / "scripts"
 TOOL = SCRIPTS / "visual_evidence.py"
 RENDER = SCRIPTS / "render_stl.mjs"
-BACKGROUND = b"\xf7\xf5\xf1"  # the renderer's off-white ground
+GROUND_CENTRE = (251, 250, 247)  # the renderer's ground at its centre
+GROUND_EDGE = (234, 231, 225)  # the renderer's ground at its corners
 CUT_FACE = (236, 166, 112)  # the renderer's colour for the inside of a cut
 
 HAVE_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
@@ -45,23 +47,34 @@ def make_png(folder, name, width, height, color):
 
 
 @unittest.skipUnless(HAVE_FFMPEG, "needs ffmpeg and ffprobe")
+class FontTests(unittest.TestCase):
+    def test_bold_title_resolves_to_the_bold_file(self):
+        self.assertTrue(ve.font_file(ve.FONTS["title"]).endswith("Bold.ttf"))
+
+    def test_unknown_family_stops_instead_of_substituting(self):
+        with self.assertRaises(SystemExit):
+            ve.font_file("No Such Font Xyz")
+
+
+@unittest.skipUnless(HAVE_FFMPEG, "needs ffmpeg and ffprobe")
 class WrapTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.folder)
+        self.face = ve.font_file(ve.FONTS["caption"])
 
     def fits(self, line, width):
-        return ve.ink_width(line, ve.FONT, 22, self.folder) <= width
+        return ve.ink_width(line, self.face,22, self.folder) <= width
 
     def test_wrap_breaks_long_text_and_keeps_newlines(self):
         text = "Save button moves to the bottom bar, so it stays visible on phones"
-        lines = ve.wrap(text, 300, ve.FONT, 22, self.folder)
+        lines = ve.wrap(text, 300, self.face,22, self.folder)
         self.assertGreater(len(lines), 1)
         self.assertTrue(all(self.fits(line, 300) for line in lines))
-        self.assertEqual(ve.wrap("one\ntwo", 1000, ve.FONT, 22, self.folder), ["one", "two"])
+        self.assertEqual(ve.wrap("one\ntwo", 1000, self.face,22, self.folder), ["one", "two"])
 
     def test_wrap_cuts_wide_letters_to_fit(self):
-        lines = ve.wrap("W" * 40, 400, ve.FONT, 22, self.folder)
+        lines = ve.wrap("W" * 40, 400, self.face,22, self.folder)
         self.assertEqual("".join(lines), "W" * 40)
         self.assertTrue(all(self.fits(line, 400) for line in lines))
 
@@ -78,17 +91,48 @@ class VisualEvidenceTests(unittest.TestCase):
         out = os.path.join(self.folder, "pair.png")
         result = run_tool("pair", before, after, "--caption", "OK", "--out", out)
         self.assertEqual(result.returncode, 0, result.stderr)
-        # Panels 64 + 32 wide, each with a 1 px border, 16 px apart: 66 + 16 + 34 = 116.
-        # Caption band 8 + 22 + 16 = 46. Label band 40. Panel 40 + 2 = 42. Total 128.
-        self.assertEqual(ve.probe(out), (116, 128))
+        # Panels framed: 66 and 34 px, 32 px apart: 132. Canvas margin 24 each side: 180.
+        # Caption at y 24, one 16 px line, 26 px gap: the content starts at y 66.
+        # Label strip 28 px, then the 42 px frame: 70. Bottom margin 24: 66 + 70 + 24 = 160.
+        self.assertEqual(ve.probe(out), (180, 160))
+
+    def test_pair_title_sits_above_caption(self):
+        before = make_png(self.folder, "before.png", 64, 40, "red")
+        after = make_png(self.folder, "after.png", 32, 40, "blue")
+        out = os.path.join(self.folder, "pair.png")
+        result = run_tool("pair", before, after, "--title", "T", "--caption", "OK", "--out", out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Title 22 px, hairline, 14 px gaps: 22 + 14 + 1 + 14 = 51. Caption at y 75, then 16 + 26.
+        # Content starts at y 117. Row 70. Bottom margin 24: 117 + 70 + 24 = 211.
+        self.assertEqual(ve.probe(out), (180, 211))
+
+    def test_pair_crop_takes_the_same_region_from_both_panels(self):
+        before = make_png(self.folder, "before.png", 64, 40, "red")
+        after = make_png(self.folder, "after.png", 64, 40, "blue")
+        out = os.path.join(self.folder, "pair.png")
+        result = run_tool("pair", before, after, "--crop", "40:30:4:5", "--caption", "OK", "--out", out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Each crop is 40 x 30, framed 42 x 32. 42 + 32 + 42 = 116. Canvas 164 wide.
+        # Content starts at y 66. Row 28 px label strip + 32 px frame = 60. Bottom 24: 150.
+        self.assertEqual(ve.probe(out), (164, 150))
+
+    def test_crop_outside_the_image_stops_with_message(self):
+        before = make_png(self.folder, "before.png", 64, 40, "red")
+        after = make_png(self.folder, "after.png", 64, 40, "blue")
+        out = os.path.join(self.folder, "pair.png")
+        result = run_tool("pair", before, after, "--crop", "100:30:0:0", "--caption", "OK", "--out", out)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--crop is outside the 64x40 image", result.stderr)
+        self.assertFalse(os.path.exists(out))
 
     def test_gif_keeps_width_and_adds_caption_band(self):
         src = make_png(self.folder, "src.png", 240, 120, "green")
         out = os.path.join(self.folder, "demo.gif")
         result = run_tool("gif", src, "--caption", "Tap Save", "--width", "120", "--out", out)
         self.assertEqual(result.returncode, 0, result.stderr)
-        # 120 wide scales to 60 high. One caption line at 18 px: 2*8 + 24 = 40.
-        self.assertEqual(ve.probe(out), (120, 100))
+        # 120 wide scales to 60 high. Canvas margin 24 each side: 168 wide, 24 px above the image.
+        # One caption line at 16 px: a band of 16 + 2 * 24 = 64. Total 24 + 60 + 64 = 148.
+        self.assertEqual(ve.probe(out), (168, 148))
 
     def test_sheet_grid_and_title_band(self):
         views = [make_png(self.folder, f"v{i}.png", 60, 40, "gray") for i in range(4)]
@@ -96,9 +140,19 @@ class VisualEvidenceTests(unittest.TestCase):
         result = run_tool("sheet", *views, "--title", "Part", "--cols", "2",
                           "--tile-width", "60", "--out", out)
         self.assertEqual(result.returncode, 0, result.stderr)
-        # Tiles of 60 x 40 with a 1 px border: 62 x 42. Two across, 8 px apart: 132.
-        # Two down, 8 px apart: 92. Title band 2*8 + 24+6 = 46. Total 138.
-        self.assertEqual(ve.probe(out), (132, 138))
+        # Tiles of 60 x 40 framed: 62 x 42. Label strip 28 px above each: cell 70.
+        # Two across, 24 px apart: 148. Two down, 24 px apart: 164. Canvas margin 24: 196 wide.
+        # Title 22 px, hairline, gaps: content starts at y 75. Bottom 24: 75 + 164 + 24 = 263.
+        self.assertEqual(ve.probe(out), (196, 263))
+
+    def test_sheet_defaults_to_the_first_image_width(self):
+        views = [make_png(self.folder, f"v{i}.png", 60, 40, "gray") for i in range(4)]
+        out = os.path.join(self.folder, "sheet.png")
+        result = run_tool("sheet", *views, "--title", "Part", "--cols", "2", "--out", out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # No --tile-width: the tiles keep the 60 px width of the first image, so the size matches
+        # the explicit --tile-width test above.
+        self.assertEqual(ve.probe(out), (196, 263))
 
     @unittest.skipUnless(HAVE_NODE, "needs node")
     def test_stl_before_and_after_sheet_is_two_rows_of_eight(self):
@@ -110,9 +164,11 @@ class VisualEvidenceTests(unittest.TestCase):
         result = run_tool("stl", after, "--before", before, "--title", "Box",
                           "--tile-width", "120", "--out", out)
         self.assertEqual(result.returncode, 0, result.stderr)
-        # Eight 122 px frames (120 px tile + border), 8 px apart: 8*122 + 7*8 = 1032.
-        # Two rows: 2*122 + 8 = 252. Title band 46. Total 298.
-        self.assertEqual(ve.probe(out), (1032, 298))
+        # Eight 122 px frames (120 px tile + border), 24 px apart: 8*122 + 7*24 = 1144.
+        # Canvas margin 24 each side: 1192. Label strip 28 px, so each row is 150 px.
+        # Two rows 24 px apart: 324. Title, hairline and gaps: content starts at y 76.
+        # Bottom margin 24: 76 + 324 + 24 = 424.
+        self.assertEqual(ve.probe(out), (1192, 424))
 
     def test_missing_input_stops_with_message(self):
         result = run_tool("gif", os.path.join(self.folder, "nope.mp4"),
@@ -220,6 +276,18 @@ def pixel(rows, x, y):
     return rows[y][x * 3:x * 3 + 3]
 
 
+def ground(x, y, size):
+    """The renderer's ground colour at a pixel. It runs from GROUND_CENTRE to GROUND_EDGE."""
+    t = min(1.0, math.hypot(x + 0.5 - size / 2, y + 0.5 - size / 2) / (size * math.sqrt(0.5)))
+    s = t * t * (3 - 2 * t)
+    return tuple(round(c + (e - c) * s) for c, e in zip(GROUND_CENTRE, GROUND_EDGE))
+
+
+def is_ground(rows, x, y):
+    """True when the pixel is the ground, within 2 levels per channel."""
+    return all(abs(a - b) <= 2 for a, b in zip(pixel(rows, x, y), ground(x, y, len(rows))))
+
+
 @unittest.skipUnless(HAVE_NODE, "needs node")
 class RenderStlTests(unittest.TestCase):
     VIEWS = ["iso", "iso-cutaway", "plus-x", "minus-x", "plus-y", "minus-y", "plus-z", "minus-z"]
@@ -247,14 +315,20 @@ class RenderStlTests(unittest.TestCase):
     def test_top_view_has_tall_arm_on_the_left(self):
         # Top view: +X points right, +Y points up. The tall arm is at low X and high Y.
         _, _, rows = read_png(os.path.join(self.out, "L-plus-z.png"))
-        self.assertNotEqual(pixel(rows, 40, 80), BACKGROUND)
-        self.assertEqual(pixel(rows, 160, 80), BACKGROUND)
+        self.assertFalse(is_ground(rows, 40, 80))
+        self.assertTrue(is_ground(rows, 160, 80))
 
     def test_front_view_has_tab_on_the_right(self):
         # Front view: +X points right, +Z points up. The tab is at high X and high Z.
         _, _, rows = read_png(os.path.join(self.out, "L-minus-y.png"))
-        self.assertNotEqual(pixel(rows, 164, 68), BACKGROUND)
-        self.assertEqual(pixel(rows, 40, 68), BACKGROUND)
+        self.assertFalse(is_ground(rows, 164, 68))
+        self.assertTrue(is_ground(rows, 40, 68))
+
+    def test_ground_follows_the_centre_to_corner_gradient(self):
+        _, _, rows = read_png(os.path.join(self.out, "L-plus-z.png"))
+        self.assertTrue(is_ground(rows, 0, 0))
+        self.assertTrue(is_ground(rows, 100, 2))
+        self.assertTrue(is_ground(rows, 20, 180))
 
     def test_frame_keeps_one_scale_for_before_and_after(self):
         short = os.path.join(self.folder, "short.stl")
@@ -263,9 +337,9 @@ class RenderStlTests(unittest.TestCase):
         write_stl(tall, box(0, 10, 0, 10, 0, 20))
 
         def filled_rows(folder):
-            # Count the rows that are not background at column 100 of the front view.
+            # Count the rows that are not ground at column 100 of the front view.
             _, _, rows = read_png(os.path.join(folder, "short-minus-y.png"))
-            return sum(1 for row in rows if row[300:303] != BACKGROUND)
+            return sum(1 for y in range(len(rows)) if not is_ground(rows, 100, y))
 
         alone = os.path.join(self.folder, "alone")
         framed = os.path.join(self.folder, "framed")
@@ -330,9 +404,11 @@ class RenderLookTests(unittest.TestCase):
     def test_a_boss_darkens_the_floor_around_it(self):
         # Top view. The centre pixel is the boss top. A flat cube has no pixel darker than
         # its top. The floor beside the boss is in its shadow, so some pixels are darker.
+        # Only the centre window is counted. The ink line on the cube outline is outside it.
         def darker(name):
             rows = self.rows(name, "plus-z")
-            return count_darker(rows, sum(pixel(rows, 100, 100)) / 3, 6)
+            window = [row[60 * 3:140 * 3] for row in rows[60:140]]
+            return count_darker(window, sum(pixel(rows, 100, 100)) / 3, 6)
 
         self.assertEqual(darker("cube"), 0)
         self.assertGreater(darker("boss"), 100)

@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """Add captions and layouts to visual evidence. Needs ffmpeg and ffprobe.
 
-Run it through Nix so both tools are on PATH:
+Run it in the dev shell. It puts ffmpeg, fontconfig (fc-match), node, and the DejaVu faces on PATH:
 
-  nix shell nixpkgs#ffmpeg -c python3 scripts/visual_evidence.py pair \
-    before.png after.png --caption "Save button moves to the bottom bar" --out pair.png
+  nix develop -c python3 scripts/visual_evidence.py pair \
+    before.png after.png --title "Save button" \
+    --caption "The save button moves to the bottom bar" --out pair.png
 
-  nix shell nixpkgs#ffmpeg -c python3 scripts/visual_evidence.py gif \
+  nix develop -c python3 scripts/visual_evidence.py gif \
     demo.mp4 --caption "Tap Save to confirm" --out demo.gif
 
-  nix shell nixpkgs#ffmpeg -c python3 scripts/visual_evidence.py sheet \
+  nix develop -c python3 scripts/visual_evidence.py sheet \
     top.png="Top" front.png="Front" --title "Part A, same views" --out sheet.png
 
-  nix shell nixpkgs#ffmpeg nixpkgs#nodejs -c python3 scripts/visual_evidence.py stl \
+  nix develop -c python3 scripts/visual_evidence.py stl \
     part-after.stl --before part-before.stl --title "Part, before and after" --out part.png
 
 Each command prints one line: wrote PATH WIDTHxHEIGHT bytes=N
@@ -26,19 +27,28 @@ import subprocess
 import sys
 import tempfile
 
-FONT = "DejaVu Sans"  # fontconfig name; --font takes a .ttf/.ttc path instead
-PAD = 8  # px between a band edge and its text
-LINE_GAP = 6  # px between caption lines
+# fontconfig name and style for each text role. --font replaces all three.
+FONTS = {
+    "title": "DejaVu Serif:bold",
+    "caption": "DejaVu Serif",
+    "label": "DejaVu Sans:bold",
+}
+PAD = 8  # px of padding used when measuring text
+LINE_GAP = 6  # px between text lines
 MAX_LINES = 4  # a caption or title longer than this is too long to read at this size
-LABEL_H = 40  # px band above each pair panel
-LABEL_SIZE = 24
-TITLE_SIZE = 24
-TILE_LABEL_SIZE = 18
-PAIR_GAP = 16  # px of white between the two pair panels
-CAPTION_GAP = 16  # px between a pair caption and its labels
-SHEET_GAP = 8  # px of white between sheet tiles
-BORDER = "0xc8cdd3"  # 1 px grey frame around each panel and tile
-CAPTION_COLOR = "0x2b3038"  # dark grey caption text
+MARGIN = 24  # px of canvas around the content
+PAIR_GAP = 32  # px between the two pair panels
+SHEET_GAP = 24  # px between sheet tiles, across and down
+TITLE_GAP = 14  # px between a title and the hairline under it, and from the hairline to the next block
+CAPTION_GAP = 26  # px between a caption and the image labels
+LABEL_PAD = 8  # px between a label and the top or bottom of its label strip
+MIN_LABEL = 9  # px. A label shrinks no further than this to fit its image
+CANVAS = "0xf6f4f0"  # warm off-white ground, not pure white
+FRAME = "0xcdc7bd"  # 1 px frame around each image
+RULE = "0xd9d4cb"  # hairline under a title
+TITLE_INK = "0x1f2733"  # dark slate, not black
+CAPTION_INK = "0x3f4858"
+LABEL_INK = "0x6b7383"  # muted, so labels do not compete with the image
 RENDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "render_stl.mjs")
 STL_SIZE = 800  # px per rendered view, before tiling
 STL_VIEWS = [("iso", "ISO"), ("iso-cutaway", "ISO CUT"), ("plus-x", "+X"), ("minus-x", "-X"),
@@ -71,10 +81,29 @@ def esc(value):
     return value.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
 
 
-def font_option(font):
-    if os.path.isfile(font):
-        return f"fontfile={esc(font)}"
-    return f"font={esc(font)}"
+def font_file(spec):
+    """Return the .ttf path for a family name such as "DejaVu Serif:bold", or for a path.
+
+    fc-match swaps in another face when a name is unknown, so check the family it chose.
+    """
+    if os.path.isfile(spec):
+        return os.path.abspath(spec)
+    if shutil.which("fc-match") is None:
+        die("fc-match not found. Run in the dev shell (nix develop -c), or pass --font PATH.ttf")
+    family = spec.split(":")[0]
+    result = subprocess.run(["fc-match", "-f", "%{family}\t%{file}", spec],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        die(f"fc-match failed for font {spec!r}:\n" + result.stderr.strip())
+    chosen, _, path = result.stdout.partition("\t")
+    if family.lower() not in (name.strip().lower() for name in chosen.split(",")):
+        die(f"font {family!r} is not installed. fontconfig chose {chosen!r}. Pass --font PATH.ttf")
+    return path.strip()
+
+
+def font_option(path):
+    """drawtext ignores style=, so bold needs its own .ttf file."""
+    return f"fontfile={esc(path)}"
 
 
 def probe(path):
@@ -157,10 +186,6 @@ def wrap(text, width_px, font, size, folder):
     return lines
 
 
-def band_height(line_count, size):
-    return 2 * PAD + line_count * (size + LINE_GAP)
-
-
 def text_height(line_count, size):
     return line_count * size + (line_count - 1) * LINE_GAP
 
@@ -172,9 +197,9 @@ def write_text(folder, name, text):
     return name
 
 
-def caption_draw(font, name, size, x, y):
+def caption_draw(font, name, size, x, y, colour=CAPTION_INK):
     return (f"drawtext={font_option(font)}:textfile={name}:x={x}:y={y}:"
-            f"fontsize={size}:fontcolor={CAPTION_COLOR}:line_spacing={LINE_GAP}")
+            f"fontsize={size}:fontcolor={colour}:line_spacing={LINE_GAP}")
 
 
 def output_args(chain, out, fps):
@@ -199,45 +224,134 @@ def report(out):
     print(f"wrote {out} {width}x{height} bytes={os.path.getsize(out)}")
 
 
-def panel_chain(height, label, font):
-    """Frame a panel, pad it to the shared height, then put its label above it."""
-    return (f"pad=iw+2:ih+2:1:1:{BORDER},pad=iw:{height + 2}:0:0:white,"
-            f"pad=iw:ih+{LABEL_H}:0:{LABEL_H}:white,"
-            f"drawtext={font_option(font)}:text={label}:x=12:y=0:"
-            f"fontsize={LABEL_SIZE}:fontcolor=black")
+def type_sizes(canvas_w, caption=None):
+    """Return (title, caption, label) sizes in px. They grow with the canvas width.
+
+    caption is the size from --size. None means use the scale.
+    """
+    base = min(32, max(16, round(canvas_w / 72)))
+    return round(base * 1.35), caption or base, round(base * 0.75)
+
+
+def label_size_for(panel_w, label_max):
+    """Nominal label size for an image this wide. The strip height comes from this size."""
+    return min(label_max, max(12, round(panel_w / 14)))
+
+
+def label_band(nominal):
+    """Height of the strip above an image that holds its label."""
+    return nominal + 2 * LABEL_PAD
+
+
+def fit_label_size(labels, max_w, size, font, folder):
+    """Shrink the labels until the longest fits max_w. The strip keeps its nominal height."""
+    unique = set(labels)
+    while size > MIN_LABEL and max(ink_width(text, font, size, folder) for text in unique) > max_w:
+        size -= 1
+    return size
+
+
+def canvas_pad(top):
+    """Add the margin on every side. top px above the content hold the header."""
+    return f"pad=iw+{2 * MARGIN}:ih+{top + MARGIN}:{MARGIN}:{top}:{CANVAS}"
+
+
+def header(faces, canvas_w, title, caption, title_size, caption_size, folder):
+    """Return (top, filters) for the title, its hairline, and the caption.
+
+    top is the y where the content starts. The filters draw on the canvas after canvas_pad.
+    """
+    top = MARGIN
+    filters = []
+    wrap_w = canvas_w - 2 * MARGIN
+    if title:
+        lines = wrap(title, wrap_w, faces["title"], title_size, folder)
+        name = write_text(folder, "title.txt", "\n".join(lines))
+        height = text_height(len(lines), title_size)
+        rule_y = top + height + TITLE_GAP
+        filters.append(caption_draw(faces["title"], name, title_size, MARGIN, top, TITLE_INK))
+        filters.append(f"drawbox=x={MARGIN}:y={rule_y}:w=iw-{2 * MARGIN}:h=1:color={RULE}:t=fill")
+        top = rule_y + 1 + TITLE_GAP
+    if caption:
+        lines = wrap(caption, wrap_w, faces["caption"], caption_size, folder)
+        name = write_text(folder, "caption.txt", "\n".join(lines))
+        filters.append(caption_draw(faces["caption"], name, caption_size, MARGIN, top, CAPTION_INK))
+        top += text_height(len(lines), caption_size) + CAPTION_GAP
+    return top, filters
+
+
+def parse_crop(value):
+    """Parse W:H:X:Y in px, the order of ffmpeg's crop filter. None means no crop."""
+    if value is None:
+        return None
+    parts = value.split(":")
+    if len(parts) != 4 or not all(part.isdigit() for part in parts) or int(parts[0]) == 0 or int(parts[1]) == 0:
+        die("--crop needs W:H:X:Y in px, for example 600:400:900:700")
+    return tuple(int(part) for part in parts)
+
+
+def cropped_size(size, crop):
+    """Return (width, height) left after the crop. Stop if the crop is outside the image."""
+    if crop is None:
+        return size
+    width, height, x, y = crop
+    if x + width > size[0] or y + height > size[1]:
+        die(f"--crop is outside the {size[0]}x{size[1]} image")
+    return width, height
+
+
+def crop_filter(crop):
+    return "" if crop is None else f"crop={crop[0]}:{crop[1]}:{crop[2]}:{crop[3]},"
+
+
+def panel_chain(height, label, size, nominal, font):
+    """Frame a panel, pad it to the shared height, then add its label strip above."""
+    band = label_band(nominal)
+    return (f"pad=iw+2:ih+2:1:1:{FRAME},pad=iw:{height + 2}:0:0:{CANVAS},"
+            f"pad=iw:ih+{band}:0:{band}:{CANVAS},"
+            f"drawtext={font_option(font)}:text={label}:x=0:y={LABEL_PAD}:"
+            f"fontsize={size}:fontcolor={LABEL_INK}")
 
 
 def cmd_pair(args, folder):
     before = checked_input(args.before)
     after = checked_input(args.after)
     out = checked_out(args.out, ".png")
-    w1, h1 = probe(before)
-    w2, h2 = probe(after)
-    height = max(h1, h2)  # nothing is scaled; the shorter panel gets white below it
-    row_w = (w1 + 2) + PAIR_GAP + (w2 + 2)  # +2 for each 1 px border
-    lines = wrap(args.caption, row_w - 24, args.font, args.size, folder)
-    caption_h = PAD + text_height(len(lines), args.size) + CAPTION_GAP
-    write_text(folder, "caption.txt", "\n".join(lines))
+    crop = parse_crop(args.crop)
+    (w1, h1), (w2, h2) = (cropped_size(probe(path), crop) for path in (before, after))
+    height = max(h1, h2)  # nothing is scaled; the shorter panel gets canvas below it
+    row_w = (w1 + 2) + PAIR_GAP + (w2 + 2)  # +2 for each 1 px frame
+    canvas_w = row_w + 2 * MARGIN
+    title_size, caption_size, label_max = type_sizes(canvas_w, args.size)
+    panel_w = min(w1, w2)
+    nominal = label_size_for(panel_w, label_max)
+    size = fit_label_size(["BEFORE", "AFTER"], panel_w, nominal, args.faces["label"], folder)
+    top, head = header(args.faces, canvas_w, args.title, args.caption, title_size, caption_size, folder)
+    crop_part = crop_filter(crop)
     chain = (
-        f"[0:v]{panel_chain(height, 'Before', args.font)}[a];"
-        f"[1:v]{panel_chain(height, 'After', args.font)}[b];"
-        f"[a]pad=iw+{PAIR_GAP}:ih:0:0:white[a2];"
-        f"[a2][b]hstack=inputs=2,pad=iw:ih+{caption_h}:0:{caption_h}:white,"
-        + caption_draw(args.font, "caption.txt", args.size, 12, PAD)
+        f"[0:v]{crop_part}{panel_chain(height, 'BEFORE', size, nominal, args.faces['label'])}[a];"
+        f"[1:v]{crop_part}{panel_chain(height, 'AFTER', size, nominal, args.faces['label'])}[b];"
+        f"[a]pad=iw+{PAIR_GAP}:ih:0:0:{CANVAS}[a2];"
+        f"[a2][b]hstack=inputs=2"
     )
-    run_ffmpeg(["-i", before, "-i", after], output_args(chain, out, args.fps), folder)
+    run_ffmpeg(["-i", before, "-i", after],
+               output_args(",".join([chain, canvas_pad(top), *head]), out, args.fps), folder)
     report(out)
 
 
 def cmd_gif(args, folder):
     src = checked_input(args.input)
     out = checked_out(args.out, ".gif")
-    lines = wrap(args.caption, args.width - 16, args.font, args.size, folder)
-    band = band_height(len(lines), args.size)
-    write_text(folder, "caption.txt", "\n".join(lines))
+    canvas_w = args.width + 2 * MARGIN
+    _, caption_size, _ = type_sizes(canvas_w, args.size)
+    lines = wrap(args.caption, args.width, args.faces["caption"], caption_size, folder)
+    band = text_height(len(lines), caption_size) + 2 * MARGIN
+    name = write_text(folder, "caption.txt", "\n".join(lines))
     chain = (
-        f"[0:v]scale={args.width}:-2:flags=lanczos,pad=iw:ih+{band}:0:0:white,"
-        + caption_draw(args.font, "caption.txt", args.size, 8, f"h-{band - PAD}")
+        f"[0:v]scale={args.width}:-2:flags=lanczos,"
+        f"pad=iw+{2 * MARGIN}:ih+{MARGIN}:{MARGIN}:{MARGIN}:{CANVAS},"
+        f"pad=iw:ih+{band}:0:0:{CANVAS},"
+        + caption_draw(args.faces["caption"], name, caption_size, MARGIN, f"h-{band - MARGIN}")
     )
     run_ffmpeg(["-i", src], output_args(chain, out, args.fps), folder)
     report(out)
@@ -254,35 +368,38 @@ def cmd_sheet(args, folder):
 
 
 def make_sheet(items, args, out, folder):
-    tile_w = args.tile_width
     first_w, first_h = probe(items[0][0])
+    tile_w = args.tile_width or first_w  # the first image's width unless --tile-width is given
     tile_h = round(tile_w * first_h / first_w) // 2 * 2
-    frame_w, frame_h = tile_w + 2, tile_h + 2  # +2 for the 1 px border
+    frame_w, frame_h = tile_w + 2, tile_h + 2  # +2 for the 1 px frame
     cols = min(args.cols, len(items))
     grid_w = cols * frame_w + (cols - 1) * SHEET_GAP
-    lines = wrap(args.title, grid_w - 24, args.font, TITLE_SIZE, folder)
-    band = band_height(len(lines), TITLE_SIZE)
-    write_text(folder, "caption.txt", "\n".join(lines))
+    canvas_w = grid_w + 2 * MARGIN
+    title_size, _, label_max = type_sizes(canvas_w)
+    labels = [label for _, label in items]
+    nominal = label_size_for(frame_w, label_max)
+    size = fit_label_size(labels, frame_w, nominal, args.faces["label"], folder)
+    band = label_band(nominal)
+    cell_h = band + frame_h
+    top, head = header(args.faces, canvas_w, args.title, None, title_size, None, folder)
     chains = []
-    for index, (_, label) in enumerate(items):
+    for index, label in enumerate(labels):
         name = write_text(folder, f"tile{index}.txt", label)
         chains.append(
             f"[{index}:v]scale={tile_w}:{tile_h}:force_original_aspect_ratio=decrease,"
-            f"pad={tile_w}:{tile_h}:(ow-iw)/2:(oh-ih)/2:white,"
-            f"pad={frame_w}:{frame_h}:1:1:{BORDER},"
-            f"drawtext={font_option(args.font)}:textfile={name}:x=6:y=6:"
-            f"fontsize={TILE_LABEL_SIZE}:fontcolor=white:box=1:boxcolor=black@0.5[t{index}]"
+            f"pad={tile_w}:{tile_h}:(ow-iw)/2:(oh-ih)/2:{CANVAS},"
+            f"pad={frame_w}:{frame_h}:1:1:{FRAME},"
+            f"pad=iw:ih+{band}:0:{band}:{CANVAS},"
+            f"drawtext={font_option(args.faces['label'])}:textfile={name}:x=0:y={LABEL_PAD}:"
+            f"fontsize={size}:fontcolor={LABEL_INK}[t{index}]"
         )
     layout = "|".join(
-        f"{(index % cols) * (frame_w + SHEET_GAP)}_{(index // cols) * (frame_h + SHEET_GAP)}"
+        f"{(index % cols) * (frame_w + SHEET_GAP)}_{(index // cols) * (cell_h + SHEET_GAP)}"
         for index in range(len(items))
     )
     tiles = "".join(f"[t{index}]" for index in range(len(items)))
-    chains.append(
-        f"{tiles}xstack=inputs={len(items)}:layout={layout}:fill=white,"
-        f"pad=iw:ih+{band}:0:{band}:white,"
-        + caption_draw(args.font, "caption.txt", TITLE_SIZE, 12, PAD)
-    )
+    body = f"{tiles}xstack=inputs={len(items)}:layout={layout}:fill={CANVAS}"
+    chains.append(",".join([body, canvas_pad(top), *head]))
     inputs = [arg for path, _ in items for arg in ("-i", path)]
     run_ffmpeg(inputs, output_args(";".join(chains), out, args.fps), folder)
     report(out)
@@ -318,14 +435,14 @@ def cmd_stl(args, folder):
         items = render_views(new, os.path.join(folder, "new"))
     # One row for one part. Two rows, before then after, when --before is given.
     sheet = argparse.Namespace(title=args.title, cols=8, tile_width=args.tile_width,
-                               font=args.font, fps=args.fps)
+                               faces=args.faces, fps=args.fps)
     make_sheet(items, sheet, out, folder)
 
 
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--font", default=FONT,
-                        help="fontconfig name, or a .ttf/.ttc file path")
+    common.add_argument("--font", help="one face for all text: a fontconfig name or a .ttf path "
+                                       "(default: serif titles and captions, bold sans labels)")
     common.add_argument("--fps", type=int, default=10, help="frame rate for gif output")
     common.add_argument("--out", required=True, help="output .png or .gif")
 
@@ -335,20 +452,23 @@ def build_parser():
     pair = sub.add_parser("pair", parents=[common], help="before and after side by side")
     pair.add_argument("before")
     pair.add_argument("after")
-    pair.add_argument("--caption", required=True)
-    pair.add_argument("--size", type=int, default=22, help="caption font size in px")
+    pair.add_argument("--title", help="names the whole picture, above the caption")
+    pair.add_argument("--caption", required=True, help="says what changed")
+    pair.add_argument("--crop", help="W:H:X:Y in px, applied to both panels, for a close-up")
+    pair.add_argument("--size", type=int, help="caption font size in px (default: from the width)")
 
     gif = sub.add_parser("gif", parents=[common], help="caption bar on a video or gif")
     gif.add_argument("input")
     gif.add_argument("--caption", required=True)
     gif.add_argument("--width", type=int, default=480, help="output width in px")
-    gif.add_argument("--size", type=int, default=18, help="caption font size in px")
+    gif.add_argument("--size", type=int, help="caption font size in px (default: from the width)")
 
     sheet = sub.add_parser("sheet", parents=[common], help="labelled grid of views")
     sheet.add_argument("views", nargs="+", help="PATH or PATH=LABEL, one per tile")
     sheet.add_argument("--title", required=True)
     sheet.add_argument("--cols", type=int, default=3)
-    sheet.add_argument("--tile-width", type=int, default=480, help="tile width in px")
+    sheet.add_argument("--tile-width", type=int,
+                       help="tile width in px (default: the first image's width)")
 
     stl = sub.add_parser("stl", parents=[common],
                          help="STL rendered to six sides, iso, and iso cutaway, with labels")
@@ -363,6 +483,8 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     need("ffmpeg")
     need("ffprobe")
+    specs = {role: args.font for role in FONTS} if args.font else FONTS
+    args.faces = {role: font_file(spec) for role, spec in specs.items()}
     commands = {"pair": cmd_pair, "gif": cmd_gif, "sheet": cmd_sheet, "stl": cmd_stl}
     with tempfile.TemporaryDirectory() as folder:
         commands[args.cmd](args, folder)

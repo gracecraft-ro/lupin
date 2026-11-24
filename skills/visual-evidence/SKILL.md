@@ -100,8 +100,7 @@ starting point. If it is stricter than this skill, follow the repo guidance.
 The scripts are in `scripts/`, next to this file. In the examples, `$SKILL` is
 this skill's folder. In the lupin repo it is `skills/visual-evidence`. Run the
 examples from the repo root, in the repo's dev shell (`nix develop -c`). The
-shell has ffmpeg, ffprobe, and node. Outside a dev shell, use
-`nix shell nixpkgs#ffmpeg nixpkgs#nodejs -c` in place of `nix develop -c`.
+shell has ffmpeg, ffprobe, node, fontconfig (fc-match), and the DejaVu faces.
 
 Each command prints one line: `wrote PATH WIDTHxHEIGHT bytes=N`. Open the file
 and check it. The scripts do not judge the picture.
@@ -117,21 +116,25 @@ and check it. The scripts do not judge the picture.
   `text needs more than 4 lines at this width. Shorten it.` Shorten the text.
   Do not make the font smaller.
 - `--caption` is for `pair` and `gif`. A caption says what changed.
-  `--title` is for `sheet` and `stl`. A title names the whole picture. Keep
-  them separate.
-- Placement: `pair` puts the caption at the top, above the Before and After
-  labels. `gif` puts the caption at the bottom. `sheet` and `stl` put the title
-  at the top.
+  `--title` is for `pair`, `sheet`, and `stl`. A title names the whole picture.
+  Keep them separate.
+- Placement: `pair` puts the title at the top, then the caption, then the Before
+  and After labels. `gif` puts the caption at the bottom. `sheet` and `stl` put
+  the title at the top. A title has a hairline under it. Labels sit above their
+  image, never on it.
+- Text size grows with the width of the output. `--size` sets the caption size
+  only.
 
 | Command | Input | Writes | Text | Other options (default) |
 | --- | --- | --- | --- | --- |
-| `pair` | Two PNG screenshots | `.png` | `--caption` | `--size` caption px (22) |
-| `gif` | A video or gif | `.gif` | `--caption` | `--width` px (480), `--size` caption px (18), `--fps` (10) |
-| `sheet` | Two or more PNG images | `.png` | `--title` | `--cols` (3), `--tile-width` px (480) |
+| `pair` | Two PNG screenshots | `.png` | `--title` (optional), `--caption` | `--crop W:H:X:Y` px, applied to both panels. `--size` caption px (from the width) |
+| `gif` | A video or gif | `.gif` | `--caption` | `--width` px (480), `--size` caption px (from the width), `--fps` (10) |
+| `sheet` | Two or more PNG images | `.png` | `--title` | `--cols` (3), `--tile-width` px (the first image's width) |
 | `stl` | A binary STL. `--before` takes the old STL. | `.png` | `--title` | `--tile-width` px (240) |
 
-Every command takes `--font`, a font name or a `.ttf` path. The default is
-DejaVu Sans.
+Titles use DejaVu Serif Bold, captions DejaVu Serif, and labels DejaVu Sans Bold.
+Every command takes `--font` to set one face for all text: a fontconfig name, or
+a `.ttf` path.
 
 ### Same screen, before and after (screenshots)
 
@@ -144,8 +147,20 @@ DejaVu Sans.
      before.png after.png --caption "Save button moves to the bottom bar" --out pair.png
    ```
 
-Each panel keeps its own size. The shorter one gets white space below it, so
-nothing is scaled. The panels sit 16 px apart.
+Each panel keeps its own size. The shorter one gets space below it, so nothing
+is scaled. The panels sit 32 px apart.
+
+For a close-up of a small area, add `--crop`. It takes `W:H:X:Y` in px, counted
+from the top-left corner, and applies the same crop to both panels:
+
+   ```sh
+   nix develop -c python3 $SKILL/scripts/visual_evidence.py pair \
+     before.png after.png --title "Save button, close-up" --crop 600:400:900:700 \
+     --caption "The save button moves to the bottom bar" --out pair.png
+   ```
+
+The crop must lie inside the image. Otherwise the command stops with
+`--crop is outside the WIDTHxHEIGHT image`.
 
 ### New behaviour or new screen (gif)
 
@@ -185,8 +200,9 @@ twice. Name the files `before.gif` and `after.gif`. Attach both (section 3).
    ```
 
    Open the crop and check that it shows the changed area. The renderer lights the part
-   from several sides and darkens crevices. Small detail such as an engraving can
-   still be hard to see.
+   from several sides, darkens crevices, and draws a thin ink line where a surface
+   meets a farther one. It tints each part of the surface with a pastel colour from
+   its place in the part, so a spot keeps its colour from every view. Small detail such as an engraving can still be hard to see.
    Say so in the report if the detail does not show.
 
 ### Several views that are not STL (sheet)
