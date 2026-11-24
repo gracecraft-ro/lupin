@@ -43,13 +43,26 @@ def make_png(folder, name, width, height, color):
     return path
 
 
+@unittest.skipUnless(HAVE_FFMPEG, "needs ffmpeg and ffprobe")
 class WrapTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.folder)
+
+    def fits(self, line, width):
+        return ve.ink_width(line, ve.FONT, 22, self.folder) <= width
+
     def test_wrap_breaks_long_text_and_keeps_newlines(self):
-        lines = ve.wrap("Save button moves to the bottom bar, so it stays visible on phones", 200, 22)
-        per_line = int(200 / (22 * ve.CHAR_EM))
+        text = "Save button moves to the bottom bar, so it stays visible on phones"
+        lines = ve.wrap(text, 300, ve.FONT, 22, self.folder)
         self.assertGreater(len(lines), 1)
-        self.assertTrue(all(len(line) <= per_line for line in lines))
-        self.assertEqual(ve.wrap("one\ntwo", 1000, 22), ["one", "two"])
+        self.assertTrue(all(self.fits(line, 300) for line in lines))
+        self.assertEqual(ve.wrap("one\ntwo", 1000, ve.FONT, 22, self.folder), ["one", "two"])
+
+    def test_wrap_cuts_wide_letters_to_fit(self):
+        lines = ve.wrap("W" * 40, 400, ve.FONT, 22, self.folder)
+        self.assertEqual("".join(lines), "W" * 40)
+        self.assertTrue(all(self.fits(line, 400) for line in lines))
 
 
 @unittest.skipUnless(HAVE_FFMPEG, "needs ffmpeg and ffprobe")
@@ -102,6 +115,32 @@ class VisualEvidenceTests(unittest.TestCase):
                           "--caption", "x", "--out", os.path.join(self.folder, "x.gif"))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("input not found", result.stderr)
+
+    def test_each_command_refuses_the_wrong_output_type(self):
+        src = make_png(self.folder, "src.png", 64, 40, "green")
+        before = make_png(self.folder, "before.png", 64, 40, "red")
+        after = make_png(self.folder, "after.png", 64, 40, "blue")
+        cases = [
+            (["pair", before, after, "--caption", "OK"], "pair.gif", ".png"),
+            (["gif", src, "--caption", "OK"], "demo.png", ".gif"),
+            (["sheet", src, src, "--title", "OK"], "sheet.gif", ".png"),
+        ]
+        for command, name, ext in cases:
+            with self.subTest(command=command[0]):
+                out = os.path.join(self.folder, name)
+                result = run_tool(*command, "--out", out)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"--out must end in {ext}", result.stderr)
+                self.assertFalse(os.path.exists(out))
+
+    def test_caption_longer_than_four_lines_stops_with_message(self):
+        before = make_png(self.folder, "before.png", 64, 40, "red")
+        after = make_png(self.folder, "after.png", 32, 40, "blue")
+        out = os.path.join(self.folder, "pair.png")
+        result = run_tool("pair", before, after, "--caption", "word " * 400, "--out", out)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Shorten it", result.stderr)
+        self.assertFalse(os.path.exists(out))
 
 
 def box(x0, x1, y0, y1, z0, z1):

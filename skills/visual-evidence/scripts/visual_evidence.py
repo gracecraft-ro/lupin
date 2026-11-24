@@ -25,12 +25,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import textwrap
 
 FONT = "DejaVu Sans"  # fontconfig name; --font takes a .ttf/.ttc path instead
 PAD = 8  # px between a band edge and its text
 LINE_GAP = 6  # px between caption lines
-CHAR_EM = 0.6  # average glyph width in em; a little wide, so lines do not clip
+MAX_LINES = 4  # a caption or title longer than this is too long to read at this size
 LABEL_H = 40  # px band above each pair panel
 LABEL_SIZE = 24
 TITLE_SIZE = 24
@@ -56,9 +55,9 @@ def checked_input(path):
     return os.path.abspath(path)
 
 
-def checked_out(path):
-    if os.path.splitext(path)[1].lower() not in (".png", ".gif"):
-        die("--out must end in .png or .gif")
+def checked_out(path, ext):
+    if os.path.splitext(path)[1].lower() != ext:
+        die(f"--out must end in {ext} for this command")
     return os.path.abspath(path)
 
 
@@ -86,12 +85,70 @@ def probe(path):
     return int(width), int(height)
 
 
-def wrap(text, width_px, size):
-    """Break text into lines that fit. drawtext does not wrap on its own."""
-    per_line = max(8, int(width_px / (size * CHAR_EM)))
+def ink_width(text, font, size, folder):
+    """Return the width in px of the ink that drawtext draws for text."""
+    if not text:
+        return 0
+    width = len(text) * size * 2 + 2 * PAD  # wider than any line of this text
+    width += width % 2  # yuv sources need an even width
+    height = 2 * size
+    name = write_text(folder, "measure.txt", text)
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error",
+         "-f", "lavfi", "-i", f"color=c=white:s={width}x{height},format=gray",
+         "-vf", caption_draw(font, name, size, PAD, PAD),
+         "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+        cwd=folder, capture_output=True,
+    )
+    if result.returncode != 0 or len(result.stdout) != width * height:
+        die("ffmpeg failed while measuring text:\n" + result.stderr.decode(errors="replace").strip())
+    rows = [result.stdout[i:i + width] for i in range(0, width * height, width)]
+    ink_right = max(len(row.rstrip(b"\xff")) for row in rows)  # 0xff is white
+    return max(0, ink_right - PAD)
+
+
+def longest_fit(word, fits):
+    """Return the longest prefix of word that fits. word itself must not fit."""
+    low, high = 1, len(word) - 1
+    while low < high:
+        mid = (low + high + 1) // 2
+        if fits(word[:mid]):
+            low = mid
+        else:
+            high = mid - 1
+    return word[:low]
+
+
+def wrap(text, width_px, font, size, folder):
+    """Break text into lines that fit width_px, measured with the font that draws them.
+
+    A glyph-width guess clips wide letters. A word wider than a line is cut.
+    """
+    def fits(line):
+        return ink_width(line, font, size, folder) <= width_px
+
     lines = []
+
+    def emit(line):
+        lines.append(line)
+        if len(lines) > MAX_LINES:
+            die(f"text needs more than {MAX_LINES} lines at this width. Shorten it.")
+
     for paragraph in text.splitlines() or [""]:
-        lines.extend(textwrap.wrap(paragraph, per_line) or [""])
+        line = ""
+        for word in paragraph.split():
+            candidate = f"{line} {word}" if line else word
+            if fits(candidate):
+                line = candidate
+                continue
+            if line:
+                emit(line)
+            line = word
+            while not fits(line):
+                cut = longest_fit(line, fits)
+                emit(cut)
+                line = line[len(cut):]
+        emit(line)
     return lines
 
 
@@ -136,12 +193,12 @@ def report(out):
 def cmd_pair(args, folder):
     before = checked_input(args.before)
     after = checked_input(args.after)
-    out = checked_out(args.out)
+    out = checked_out(args.out, ".png")
     w1, h1 = probe(before)
     w2, h2 = probe(after)
     h = min(h1, h2)  # both panels share one height
     panel_w = round(w1 * h / h1) + round(w2 * h / h2)
-    lines = wrap(args.caption, panel_w - 24, args.size)
+    lines = wrap(args.caption, panel_w - 24, args.font, args.size, folder)
     band = band_height(len(lines), args.size)
     write_text(folder, "caption.txt", "\n".join(lines))
     chain = (
@@ -158,10 +215,8 @@ def cmd_pair(args, folder):
 
 def cmd_gif(args, folder):
     src = checked_input(args.input)
-    out = checked_out(args.out)
-    if not out.lower().endswith(".gif"):
-        die("gif needs --out ending in .gif")
-    lines = wrap(args.caption, args.width - 16, args.size)
+    out = checked_out(args.out, ".gif")
+    lines = wrap(args.caption, args.width - 16, args.font, args.size, folder)
     band = band_height(len(lines), args.size)
     write_text(folder, "caption.txt", "\n".join(lines))
     chain = (
@@ -179,7 +234,7 @@ def cmd_sheet(args, folder):
     for raw in args.views:
         path, _, label = raw.partition("=")
         items.append((checked_input(path), label or os.path.splitext(os.path.basename(path))[0]))
-    make_sheet(items, args, checked_out(args.out), folder)
+    make_sheet(items, args, checked_out(args.out, ".png"), folder)
 
 
 def make_sheet(items, args, out, folder):
@@ -187,7 +242,7 @@ def make_sheet(items, args, out, folder):
     first_w, first_h = probe(items[0][0])
     tile_h = round(tile_w * first_h / first_w) // 2 * 2
     cols = min(args.cols, len(items))
-    lines = wrap(args.title, cols * tile_w - 24, TITLE_SIZE)
+    lines = wrap(args.title, cols * tile_w - 24, args.font, TITLE_SIZE, folder)
     band = band_height(len(lines), TITLE_SIZE)
     write_text(folder, "caption.txt", "\n".join(lines))
     chains = []
@@ -232,7 +287,7 @@ def render_views(stl, folder, frame=None):
 def cmd_stl(args, folder):
     need("node")
     new = checked_input(args.stl)
-    out = checked_out(args.out)
+    out = checked_out(args.out, ".png")
     if args.before:
         before = checked_input(args.before)
         before_views = render_views(before, os.path.join(folder, "before"), frame=new)

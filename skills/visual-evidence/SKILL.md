@@ -97,45 +97,110 @@ starting point. If it is stricter than this skill, follow the repo guidance.
 
 ## Scripts
 
-The scripts are in `scripts/`, next to this file. Each one prints the path of
-the file it wrote, its size, and its width and height. Open the file and check
-it. The scripts do not judge the picture.
+The scripts are in `scripts/`, next to this file. In the examples, `$SKILL` is
+this skill's folder. In the lupin repo it is `skills/visual-evidence`. Run the
+examples from the repo root, in the repo's dev shell (`nix develop -c`). The
+shell has ffmpeg, ffprobe, and node. Outside a dev shell, use
+`nix shell nixpkgs#ffmpeg nixpkgs#nodejs -c` in place of `nix develop -c`.
 
-- `scripts/visual_evidence.py stl` renders a binary STL to six sides and the iso
-  view, then tiles them with labels. With `--before`, it adds a BEFORE row above
-  an AFTER row, at one scale. It needs ffmpeg and node.
+Each command prints one line: `wrote PATH WIDTHxHEIGHT bytes=N`. Open the file
+and check it. The scripts do not judge the picture.
 
-  ```sh
-  nix shell nixpkgs#ffmpeg nixpkgs#nodejs -c python3 scripts/visual_evidence.py stl \
-    part-after.stl --before part-before.stl --title "Part, before and after" --out sheet.png
-  ```
+### Rules for every command
 
-- `scripts/visual_evidence.py pair` puts before and after side by side, with a
-  `Before` and `After` label. It needs ffmpeg.
+- `--out` must end in the type the command writes. `pair`, `sheet`, and `stl`
+  write `.png`. `gif` writes `.gif`. Another name stops the command before it
+  writes a file.
+- Text is measured with the font that draws it. A word too wide for one line is
+  cut at the line edge, and the rest goes on the next line.
+- A caption or title can be at most 4 lines. Longer text stops the command with
+  `text needs more than 4 lines at this width. Shorten it.` Shorten the text.
+  Do not make the font smaller.
+- `--caption` is for `pair` and `gif`. A caption says what changed.
+  `--title` is for `sheet` and `stl`. A title names the whole picture. Keep
+  them separate.
+- Placement: `pair` puts the caption at the top, above the Before and After
+  labels. `gif` puts the caption at the bottom. `sheet` and `stl` put the title
+  at the top.
 
-  ```sh
-  nix shell nixpkgs#ffmpeg -c python3 scripts/visual_evidence.py pair \
-    before.png after.png --caption "Save button moves to the bottom bar" --out pair.png
-  ```
+| Command | Input | Writes | Text | Other options (default) |
+| --- | --- | --- | --- | --- |
+| `pair` | Two PNG screenshots | `.png` | `--caption` | `--size` caption px (22) |
+| `gif` | A video or gif | `.gif` | `--caption` | `--width` px (480), `--size` caption px (18), `--fps` (10) |
+| `sheet` | Two or more PNG images | `.png` | `--title` | `--cols` (3), `--tile-width` px (480) |
+| `stl` | A binary STL. `--before` takes the old STL. | `.png` | `--title` | `--tile-width` px (240) |
 
-- `scripts/visual_evidence.py gif` adds a caption bar to a video or gif. It needs
-  ffmpeg.
+Every command takes `--font`, a font name or a `.ttf` path. The default is
+DejaVu Sans.
 
-  ```sh
-  nix shell nixpkgs#ffmpeg -c python3 scripts/visual_evidence.py gif \
-    demo.mp4 --caption "Tap Save to confirm" --out demo.gif
-  ```
+### Same screen, before and after (screenshots)
 
-- `scripts/visual_evidence.py sheet` tiles any images you name, with labels and a
-  title. It needs ffmpeg.
+1. Take one screenshot before the change and one after. Use the same window
+   size, theme, data, and state.
+2. Run:
 
-  ```sh
-  nix shell nixpkgs#ffmpeg -c python3 scripts/visual_evidence.py sheet \
-    top.png="Top" front.png="Front" --title "Part A, same views" --out sheet.png
-  ```
+   ```sh
+   nix develop -c python3 $SKILL/scripts/visual_evidence.py pair \
+     before.png after.png --caption "Save button moves to the bottom bar" --out pair.png
+   ```
 
-- `scripts/render_stl.mjs` renders one binary STL to seven PNG files: `iso`,
-  `plus-x`, `minus-x`, `plus-y`, `minus-y`, `plus-z`, and `minus-z`. The `stl`
-  command calls it. Run it directly only for a plain render. Its `--frame
-  OTHER.stl` option sets the scale from both files. It does not read ASCII STL.
-  It draws one grey part under one light, so it shows shape, not colour or text.
+Both panels scale to the height of the shorter one. The taller screenshot is
+scaled down.
+
+### New behaviour or new screen (gif)
+
+1. Record the steps as a video or a gif. The whole input becomes frames, so
+   keep the recording short.
+2. Run:
+
+   ```sh
+   nix develop -c python3 $SKILL/scripts/visual_evidence.py gif \
+     demo.mp4 --caption "Tap Save to confirm" --out demo.gif
+   ```
+
+`pair` takes still images only. To show before and after as gifs, run `gif`
+twice. Name the files `before.gif` and `after.gif`. Attach both (section 3).
+
+### Spatial object (STL)
+
+1. Export the part as a binary STL. The renderer does not read ASCII STL.
+2. For a change, pass the old file with `--before`:
+
+   ```sh
+   nix develop -c python3 $SKILL/scripts/visual_evidence.py stl \
+     part-after.stl --before part-before.stl --title "Part, before and after" --out sheet.png
+   ```
+
+   With `--before`, the sheet has two rows of seven tiles. The first row is
+   BEFORE and the second is AFTER. Each row shows ISO, +X, -X, +Y, -Y, +Z, and
+   -Z, in that order. Both rows use one scale, so a size change shows.
+   Without `--before`, the sheet has one row.
+3. For a close-up, `stl` does not make one. Render the view larger, then crop
+   it. `crop=WIDTH:HEIGHT:X:Y` counts pixels from the top-left corner:
+
+   ```sh
+   nix develop -c node $SKILL/scripts/render_stl.mjs part-after.stl closeup --size 2400
+   nix develop -c ffmpeg -i closeup/part-after-plus-z.png -vf crop=600:400:900:700 closeup.png
+   ```
+
+   Open the crop and check that it shows the changed area. The renderer uses
+   flat grey shading, so small detail such as an engraving can be hard to see.
+   Say so in the report if the detail does not show.
+
+### Several views that are not STL (sheet)
+
+Use `sheet` for PNG images you made yourself. Each `PATH=LABEL` sets a tile
+label:
+
+```sh
+nix develop -c python3 $SKILL/scripts/visual_evidence.py sheet \
+  top.png="Top" front.png="Front" --title "Part A, same views" --out sheet.png
+```
+
+### Direct render (render_stl.mjs)
+
+`$SKILL/scripts/render_stl.mjs FILE.stl OUTDIR` writes seven PNG files: `iso`,
+`plus-x`, `minus-x`, `plus-y`, `minus-y`, `plus-z`, and `minus-z`. Use it only
+for a plain render or a close-up (see the STL section). `--size` sets the view
+width in px (default 800). `--frame OTHER.stl` sets one scale from both files.
+
