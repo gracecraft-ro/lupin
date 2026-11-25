@@ -371,6 +371,20 @@ directory saves time and disk. It is also easy to destroy:
 Use the agent runner's prompt and message tools for its own workers. Lupin's
 remote commands control loops. They do not send free-form messages.
 
+### Fleet roles
+
+A loop starts five kinds of agent:
+
+- lens: reviews one pull request head.
+- build: implements an issue or a fix.
+- sync: merges the upstream branch into a pull request.
+- fix: answers one round of review findings.
+- persist: copies loop rules into a skill.
+
+A purposes file gives each one a short purpose. The key is a number or an agent
+name, and the purpose follows it on the line. The `herdr` skill holds the pane
+and name rules, and the format of that file.
+
 ### Talk to an agent in a Herdr pane
 
 A Lupin loop runs in the `lupin-loops` Herdr session on its machine. Each loop
@@ -414,11 +428,8 @@ herdr pane read <pane_id> --source recent-unwrapped --lines 120
 ```
 
 Address panes by pane ID, or with `--current` for your own pane. Never use
-another client's focused pane. Put each worker, reviewer, and builder in the
-workers tab. Never split the owner's tab or the coordinator's own tab: a split
-makes the owner's pane smaller. Make another tab after 12 panes in the workers
-tab. Address an agent by name, because a pane ID changes when the pane moves.
-Close a pane when its agent is done and its work is on GitHub.
+another client's focused pane. Place and name worker panes as the `herdr` skill
+says.
 
 To start a worker in a Herdr pane, make the pane
 first, then start the agent in it. `agent start` needs a shell that waits at its
