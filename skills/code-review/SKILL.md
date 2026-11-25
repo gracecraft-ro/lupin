@@ -24,6 +24,22 @@ lupin review-route --prefetch 123 --repo OWNER/REPO && gh pr diff 123 --repo OWN
 Review the current head again each time the PR
 changes, if needed. (Never necessary for docs changes, etc)
 
+The brief for a reviewer is in `lens-brief-template.md`, next to this file.
+
+## Gate the evidence
+
+Run the visual evidence gate before you review. It is in the `visual-evidence`
+skill:
+
+```sh
+<checkout>/skills/visual-evidence/scripts/pr-evidence-check.sh \
+  --repo OWNER/REPO <PR>
+```
+
+A `FAIL` line is a BLOCKING finding. The change must show its pictures in a
+comment on the PR itself, with a `User impact:` line in the body. Pictures on
+the linked issue do not count.
+
 ## Check
 
 Check the diff against the issue's acceptance checks, the repo rules, and these
@@ -46,6 +62,16 @@ Use a full independent review process. You may dispatch subagents to check sourc
 
 Also:
 
+- Walk the issue's acceptance checks one by one. Give each one `pass` or
+  `fail` and the command or the `file:line` that shows it.
+- Try at least three inputs the author did not test: empty, zero, maximum,
+  another unit, another locale, a second item.
+- Read the changed behaviour in the running app or the render. A test result is
+  not a picture of the result.
+- Contrast figures come from the rendered element, read with
+  `getComputedStyle`. Never compute a ratio from two tokens you picked by hand.
+- A failing check is not a regression until you compare it with the base commit
+  and with the upstream branch. Name both SHAs.
 - Identify docs that the change makes wrong.
   Check visual, spatial, and gif evidence against the `visual-evidence` skill, section 8. For spatial-object changes, inspect the contact sheet.
 - An owner comment that names a problem is a finding. A PR comment is never an
@@ -63,16 +89,19 @@ Use short sentences and everyday words. Explain each technical term once.
 
 1. First line: `Round N. LEVEL: <LEVEL>. Target: OWNER/REPO PR #<number> at <full head SHA>.` Diff: `+#<lines added> lines, -#<lines removed>`. `Verdict: <Approved or Not Approved>`
 2. Second line: `Summary:` and two or three sentences explaining the PR, its potential impact, and any observations. Write enough for a reader who has no context to get the need-to-know facts on the proposed changes.
-3. Findings, numbered across all groups so the author can say "fix 2 and 5".
+3. Third line: `Model: <model id>`. Read the id from the session, not from
+   memory. A comment on logic, an export, or a screen needs two reviewers on
+   different models; each review names its own model.
+4. Findings, numbered across all groups so the author can say "fix 2 and 5".
    Skip an empty group.
    - **Must fix:** each `🔴 bug`, and each `🟡 risk` that breaks at the expected
      load. Start by describing the impact of each bug.
    - **Should fix:** other `🟡 risk`.
    - **Nice to have:** `🔵 nit`, and `❓ q` (a question; it blocks only if the
      answer changes what to do).
-4. `Verdict: Ship.` or `Verdict: fix 1 and 3 first.` Use `Ship` only when no
+5. `Verdict: Ship.` or `Verdict: fix 1 and 3 first.` Use `Ship` only when no
    blocking finding remains.
-5. `Not checked: <one line>` if any corners were cut during review - try to be thorough.
+6. `Not checked: <one line>` if any corners were cut during review - try to be thorough.
 
 With no findings, write lines 1 and 2, then `Ship.` and one line on
 what you checked.
@@ -85,6 +114,29 @@ One finding looks like this:
    - **Fix:** Reject an empty token before the check runs.
    - **If we skip it:** Anyone who sends an empty token can use the endpoint.
 ```
+
+## Rounds and deltas
+
+- A pull request gets at most three review rounds. From round three, report
+  only BLOCKING findings. Put the other findings in one follow-up issue and
+  label it `follow-up`.
+- After a push, run `git diff --name-only <old head>...<new head>`.
+- A test-only or docs-only delta keeps the earlier approval. Do not start a
+  second reviewer.
+- A delta that touches shipped code needs both reviewers again at the new head.
+  A source change that only answers a reviewer keeps one reviewer, and only
+  when no other reviewer asked for changes.
+
+## Lint the review
+
+After you post the review, run:
+
+```sh
+<checkout>/skills/code-review/scripts/review-lint.sh --repo OWNER/REPO <number>
+```
+
+A `FAIL` line means the review does not match this format. Fix the review before
+you report the verdict. A review that fails the lint is not a verdict.
 
 ## Run the fix cycle
 
