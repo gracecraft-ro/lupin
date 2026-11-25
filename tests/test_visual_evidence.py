@@ -792,6 +792,60 @@ class DrawingTests(unittest.TestCase):
         # Two 302 px frames (300 px tile + border), 24 px apart, with 24 px margins: 302*2 + 24 + 48 = 676.
         self.assertEqual(ve.probe(out)[0], 676)
 
+    def test_mark_svg_puts_dot_leader_and_badge_on_the_point(self):
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"></svg>'
+        marked = ve.mark_svg(
+            svg, [(40, 50)], (0, 0, 100, 100), ve.THEMES["paper"], flip=False
+        )
+        self.assertIn('<g id="marks">', marked)
+        self.assertIn('cx="40.0000" cy="50.0000"', marked)
+        self.assertEqual(marked.count("<text"), 1)
+        self.assertTrue(marked.endswith("</svg>"))
+
+    def test_mark_svg_negates_y_for_dxf(self):
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -100 100 100"></svg>'
+        marked = ve.mark_svg(
+            svg, [(40, 20)], (0, -100, 100, 100), ve.THEMES["paper"], flip=True
+        )
+        self.assertIn('cx="40.0000" cy="-20.0000"', marked)
+
+    def test_mark_outside_the_drawing_stops_with_its_coordinates(self):
+        with self.assertRaises(SystemExit) as caught:
+            ve.check_marks((0, 0, 100, 100), [(150, 50)], flip=False)
+        self.assertIn("mark 1 at (150, 50) is outside", str(caught.exception))
+
+    def test_mark_view_grows_so_the_badge_fits_past_the_edge(self):
+        left, top, width, height = ve.mark_view((0, 0, 100, 100), [(100, 50)], False)
+        self.assertEqual((left, top), (0, 0))
+        # The room is 0.125 of the span, and the span includes the room:
+        # right = 100 + 0.125 * right, so right = 100 / 0.875.
+        self.assertAlmostEqual(left + width, 100 / 0.875, places=3)
+        self.assertEqual(height, 100)
+
+    @unittest.skipUnless(HAVE_RSVG and HAVE_FFMPEG, "needs rsvg-convert and ffmpeg")
+    def test_marks_add_a_legend_below_at_the_same_width(self):
+        after = write_dxf(os.path.join(self.folder, "after.dxf"), rect_entities(120))
+        plain = os.path.join(self.folder, "plain.png")
+        marked = os.path.join(self.folder, "marked.png")
+        base = ["drawing", after, "--title", "Rect", "--tile-width", "300"]
+        self.assertEqual(run_tool(*base, "--out", plain).returncode, 0)
+        result = run_tool(
+            *base,
+            "--mark",
+            "0",
+            "0",
+            "Corner",
+            "--mark",
+            "120",
+            "50",
+            "Far corner",
+            "--out",
+            marked,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(ve.probe(marked)[0], ve.probe(plain)[0])
+        self.assertGreater(ve.probe(marked)[1], ve.probe(plain)[1])
+
 
 def write_pdf(path, sizes):
     """Write a PDF with one page per (width, height) in points. Each page has a black square."""

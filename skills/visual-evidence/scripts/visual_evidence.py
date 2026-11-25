@@ -48,6 +48,8 @@ MAX_LINES = 4  # a caption or title longer than this is too long to read at this
 MARGIN = 24  # px of canvas around the content
 PAIR_GAP = 32  # px between the two pair panels
 SHEET_GAP = 24  # px between sheet tiles, across and down
+LEGEND_GAP = 26  # px between a sheet and its legend
+LEGEND_ENTRY_GAP = 16  # px between legend entries
 TITLE_GAP = 14  # px between a title and the hairline under it, and from the hairline to the next block
 CAPTION_GAP = 26  # px between a caption and the image labels
 LABEL_PAD = 8  # px between a label and the top or bottom of its label strip
@@ -467,7 +469,25 @@ def cmd_sheet(args, folder):
     make_sheet(items, args, checked_out(args.out, ".png"), folder)
 
 
-def make_sheet(items, args, out, folder, row_heads=None):
+def legend_filters(lines, width, height, faces, folder):
+    """Return the filters that draw a legend under a grid of width x height px.
+
+    Each line wraps to width px in the caption face. The next line starts below it.
+    """
+    _, caption_size, _ = type_sizes()
+    wrapped = [wrap(line, width, faces["caption"], caption_size, folder) for line in lines]
+    heights = [text_height(len(entry), caption_size) for entry in wrapped]
+    total = sum(heights) + LEGEND_ENTRY_GAP * (len(lines) - 1)
+    filters = [f"pad=iw:ih+{LEGEND_GAP + total}:0:0:{CANVAS}"]
+    y = height + LEGEND_GAP
+    for index, (entry, entry_h) in enumerate(zip(wrapped, heights)):
+        name = write_text(folder, f"legend{index}.txt", "\n".join(entry))
+        filters.append(caption_draw(faces["caption"], name, caption_size, 0, y))
+        y += entry_h + LEGEND_ENTRY_GAP
+    return filters
+
+
+def make_sheet(items, args, out, folder, row_heads=None, legend=None):
     first_w, first_h = probe(items[0][0])
     tile_w = (
         args.tile_width or first_w
@@ -526,7 +546,12 @@ def make_sheet(items, args, out, folder, row_heads=None):
         if len(items) > 1
         else f"{tiles}null"
     )
-    chains.append(",".join([body, canvas_pad(top), *head]))
+    body_chain = [body]
+    if legend:
+        rows = (len(items) + cols - 1) // cols
+        grid_h = rows * cell_h + (rows - 1) * SHEET_GAP
+        body_chain += legend_filters(legend, grid_w, grid_h, args.faces, folder)
+    chains.append(",".join([*body_chain, canvas_pad(top), *head]))
     inputs = [arg for path, _ in items for arg in ("-i", path)]
     run_ffmpeg(inputs, output_args(";".join(chains), out, args.fps), folder)
     report(out)
@@ -568,6 +593,10 @@ DXF_STYLE = {
     "LABELS": ("cut", None),
 }
 DRAWING_PAD = 0.05  # margin round a drawing, as a share of its size
+MARK_DOT = 0.012  # radius of a mark's dot on the curve, as a share of the drawing's larger side
+MARK_BADGE = 0.035  # radius of the numbered badge, same share
+MARK_OFFSET = 0.09  # the badge centre sits this far right and up from the dot, same share
+MARK_STROKE = 0.004  # width of the leader and the badge outline, same share
 SVG_ROOT = re.compile(r"<svg\b[^>]*>")
 
 
@@ -696,6 +725,73 @@ def fit_view(text, view):
     )
 
 
+def parse_marks(raw):
+    """Return (x, y, text) for each --mark X Y TEXT. Return [] when there are none."""
+    marks = []
+    for x, y, text in raw or []:
+        if not text.strip():
+            die("--mark needs a text for the legend")
+        try:
+            marks.append((float(x), float(y), text))
+        except ValueError:
+            die(f"--mark needs numbers for X and Y, got {x!r} and {y!r}")
+    return marks
+
+
+def check_marks(view, points, flip):
+    """Stop unless every (x, y) point lies on the drawing. flip is True for a DXF, whose y points up."""
+    left, top, width, height = view
+    for number, (x, given_y) in enumerate(points, start=1):
+        y = -given_y if flip else given_y
+        if not (left <= x <= left + width and top <= y <= top + height):
+            die(
+                f"mark {number} at ({x:g}, {given_y:g}) is outside the drawing. Check its coordinates."
+            )
+
+
+def mark_view(view, points, flip):
+    """Return the view grown so every mark's badge fits. The badge sits up and right of its dot.
+
+    The room is a share of the span, and growing the view changes the span. So repeat until it settles.
+    """
+    left, top, width, height = view
+    room = max(width, height) * (MARK_OFFSET + MARK_BADGE)
+    for _ in range(10):
+        l, t, r, b = left, top, left + width, top + height
+        for x, given_y in points:
+            y = -given_y if flip else given_y
+            l, r = min(l, x - room), max(r, x + room)
+            t, b = min(t, y - room), max(b, y + room)
+        room = max(r - l, b - t) * (MARK_OFFSET + MARK_BADGE)
+    return l, t, r - l, b - t
+
+
+def mark_svg(text, points, view, theme, flip):
+    """Return the SVG with a numbered mark at each (x, y) point, in the SVG's own units.
+
+    A mark is a dot on the curve, a leader line, and a badge with its number. view is
+    (x, y, width, height) of the viewBox. Check the points first. flip is True for a DXF.
+    """
+    span = max(view[2], view[3])
+    ink, ground = theme["title"], theme["canvas"]
+    stroke = f"{span * MARK_STROKE:.4f}"
+    shapes = []
+    for number, (x, given_y) in enumerate(points, start=1):
+        y = -given_y if flip else given_y
+        bx, by = x + span * MARK_OFFSET, y - span * MARK_OFFSET
+        shapes.append(
+            f'<line x1="{x:.4f}" y1="{y:.4f}" x2="{bx:.4f}" y2="{by:.4f}" stroke="{ink}" stroke-width="{stroke}"/>'
+            f'<circle cx="{x:.4f}" cy="{y:.4f}" r="{span * MARK_DOT:.4f}" fill="{ink}"/>'
+            f'<circle cx="{bx:.4f}" cy="{by:.4f}" r="{span * MARK_BADGE:.4f}" fill="{ground}" stroke="{ink}" stroke-width="{stroke}"/>'
+            f'<text x="{bx:.4f}" y="{by:.4f}" font-family="DejaVu Sans Mono" font-weight="bold" '
+            f'font-size="{span * MARK_BADGE * 1.3:.4f}" text-anchor="middle" dominant-baseline="central" fill="{ink}">{number}</text>'
+        )
+    end = text.rfind("</svg>")
+    if end < 0:
+        die("the SVG has no closing </svg> tag. Marks cannot be added.")
+    return text[:end] + '<g id="marks">' + "".join(shapes) + "</g>" + text[end:]
+
+
 def cmd_drawing(args, folder):
     need("rsvg-convert")
     out = checked_out(args.out, ".png")
@@ -713,15 +809,23 @@ def cmd_drawing(args, folder):
     top = min(v[1] for v in views)
     right = max(v[0] + v[2] for v in views)
     bottom = max(v[1] + v[3] for v in views)
-    view = " ".join(
-        f"{v:.4f}" for v in (left, top, right - left, bottom - top)
-    )  # one viewBox, one scale
+    shared = (left, top, right - left, bottom - top)
+    marks = parse_marks(args.mark)
+    points = [(x, y) for x, y, _ in marks]
+    flip = args.file.lower().endswith(".dxf")
+    check_marks(shared, points, flip)
+    if marks:  # badges may pass the drawing edge, so the view grows to hold them
+        shared = mark_view(shared, points, flip)
+    view = " ".join(f"{v:.4f}" for v in shared)  # one viewBox, one scale
     items = []
     for index, (text, (_, label)) in enumerate(zip(texts, inputs)):
         svg = os.path.join(folder, f"drawing{index}.svg")
         png = os.path.join(folder, f"drawing{index}.png")
+        fitted = fit_view(text, view)
+        if marks and index == len(inputs) - 1:  # only the after drawing carries marks
+            fitted = mark_svg(fitted, points, shared, theme, flip)
         with open(svg, "w", encoding="utf-8") as handle:
-            handle.write(fit_view(text, view))
+            handle.write(fitted)
         result = subprocess.run(
             [
                 "rsvg-convert",
@@ -746,7 +850,8 @@ def cmd_drawing(args, folder):
         faces=args.faces,
         fps=args.fps,
     )
-    make_sheet(items, sheet, out, folder)
+    legend = [f"{number}. {text}" for number, (_, _, text) in enumerate(marks, start=1)]
+    make_sheet(items, sheet, out, folder, legend=legend or None)
 
 
 def cmd_stl(args, folder):
@@ -947,6 +1052,14 @@ def build_parser():
     )
     drawing.add_argument("--title", required=True)
     drawing.add_argument("--tile-width", type=int, default=800, help="tile width in px")
+    drawing.add_argument(
+        "--mark",
+        nargs=3,
+        action="append",
+        metavar=("X", "Y", "TEXT"),
+        help="number a point on the after drawing and add TEXT to the legend. "
+        "X and Y are in the drawing's units. Repeat for each mark.",
+    )
 
     pdf = sub.add_parser(
         "pdf", parents=[common], help="PDF pages, before and after, at one scale"

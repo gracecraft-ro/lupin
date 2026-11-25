@@ -254,6 +254,37 @@ Use this for a 2D drawing that code writes, such as a cut file.
 - Roundsmith writes these files with `writeDxf` in `src/core/export/dxf.ts`.
 - Without `--before`, the sheet has one tile. The tile is labeled with the file name.
 
+### Mark a curve or part (drawing)
+
+Use `--mark` to explain one curve or part of a drawing. Each mark adds three things to the after tile:
+
+- a dot on the curve,
+- a line from the dot to a badge,
+- a number in the badge.
+
+The legend under the sheet has one line for each mark. The line gives the number and your text.
+
+1. Pick a point on the curve. Use an end point, or a point on the path. A control point of a Bezier curve is not on the curve.
+2. Give X and Y in the drawing's own units. For a DXF, Y points up, as it does in the DXF file.
+
+   ```sh
+   nix develop -c python3 $SKILL/scripts/visual_evidence.py drawing \
+     cut-after.svg --title "Cut pattern" \
+     --mark 35 35 "Dashed S-curve. Seam path, left edge to right edge." \
+     --mark 50 47.5 "Lower arc. Fold line." --out drawing.png
+   ```
+
+3. Open the picture. Check that each dot sits on its curve. If a dot is off, fix the coordinate and run the command again.
+
+Rules for marks:
+
+- Marks go on the after drawing only. The before tile has no marks.
+- Each mark point must be inside the drawing. Otherwise the command stops and prints the point.
+- A badge can sit past the drawing edge. The view grows so the badge fits. Both tiles use the grown view.
+- Each legend line is at most 4 lines long, the same as a caption.
+- The mark numbers use DejaVu Sans Mono bold. `--font` does not change them.
+- The legend uses the caption size (34 px).
+
 ### PDF pages
 
 Use this for a PDF that code writes, such as a print template.
