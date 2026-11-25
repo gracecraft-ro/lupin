@@ -4146,6 +4146,18 @@ class ScheduleHelperTests(unittest.TestCase):
         ranked = serve._rank_candidates(records, "pihome")
         self.assertEqual(ranked, [])
 
+    def test_rank_candidates_skips_a_dispatch_only_machine(self):
+        records = [
+            {"name": "pihome", "state": "online", "role": "dispatch", "slots": {}},
+            {"name": "jesus", "state": "online", "role": "worker", "slots": {}},
+        ]
+        ranked = serve._rank_candidates(records, "jesus")
+        self.assertEqual([r["name"] for r in ranked], ["jesus"])
+
+    def test_machine_available_refuses_a_dispatch_only_machine(self):
+        records = [{"name": "pihome", "state": "online", "role": "dispatch"}]
+        self.assertFalse(serve._machine_available("pihome", records, "jesus"))
+
     def test_machine_available_accepts_unregistered_local_host_only(self):
         records = [{"name": "jesus", "state": "online"}]
         self.assertTrue(serve._machine_available("pihome", records, "pihome"))

@@ -293,6 +293,8 @@ def _filter_candidates(
     skipped = {"offline": 0, "other_provider": 0, "no_key": 0, "read_failed": 0}
     matched = []
     for record in records:
+        if record.get("role") == "dispatch":  # Coordinates only. It takes no work.
+            continue
         if provider in _NO_QUOTA_PROVIDERS:
             if record["state"] == "offline":
                 skipped["offline"] += 1

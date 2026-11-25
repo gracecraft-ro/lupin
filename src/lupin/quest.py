@@ -810,6 +810,8 @@ def _resolve_machine(machine: str | None, issue_numbers: list[int], connection: 
         record = records.get(machine)
         if record is not None and record["state"] == "draining":
             raise StartMachineDraining(machine)
+        if record is not None and record.get("role") == "dispatch":
+            raise QuestError(f"{machine} only coordinates and cannot run a quest.")
         return machine
     placed = place_mod.place(str(issue_numbers[0]), connection)
     pick = placed.get("pick")

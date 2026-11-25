@@ -172,6 +172,7 @@ def dispatch_fleet_runs(
         for record in records
         if record.get("name") != local_host
         and record.get("state") == "online"
+        and record.get("role", "worker") != "dispatch"
         and "loop.run" in record.get("actions", [])
         and record.get("name") in signing_keys
     ]

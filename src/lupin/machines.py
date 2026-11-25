@@ -101,6 +101,11 @@ def hostname() -> str:
     return socket.gethostname()
 
 
+def _role() -> str:
+    """`dispatch` if this machine only coordinates. It runs no loops and takes no work."""
+    return "dispatch" if os.environ.get("LUPIN_LOOP_COORDINATOR_ONLY") == "1" else "worker"
+
+
 def _record_key(name: str) -> str:
     return f"{PREFIX}machine:{name}"
 
@@ -256,6 +261,7 @@ def _write_record(
         "version": package_version(),
         "heartbeat": _now_iso(),
         "state": state,
+        "role": _role(),
         "slots": _slot_summary(connection),
         "providers": existing.get("providers", []) if existing else [],
         "quota": quota.snapshot(rows=quota_rows),
@@ -389,7 +395,7 @@ def machines(
     connection: dict, skipped: list[str] | None = None, *, strict: bool = True
 ) -> list[dict]:
     """Every registered machine, each as:
-    `{"name", "state", "version", "heartbeat", "version_mismatch", "slots",
+    `{"name", "state", "role", "version", "heartbeat", "version_mismatch", "slots",
     "providers", "quota", "usage_detail", "loops", "session_backend",
     "actions"}`.
 
@@ -449,6 +455,7 @@ def machines(
                 {
                     "name": name,
                     "state": state,
+                    "role": record.get("role", "worker"),
                     "version": record.get("version"),
                     "heartbeat": record.get("heartbeat"),
                     "version_mismatch": record.get("version") != local_version,

@@ -130,6 +130,18 @@ def test_heartbeat_refreshes_fields_and_keeps_state(redis_port, flush_redis, tmp
     assert record["heartbeat"] >= before["heartbeat"]
 
 
+def test_heartbeat_records_a_dispatch_only_role(redis_port, flush_redis, tmp_path, monkeypatch):
+    monkeypatch.setenv("LUPIN_LOOP_COORDINATOR_ONLY", "1")
+    kw = _kw(redis_port)
+    machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
+
+    record = machines.heartbeat(kw)
+
+    assert record["role"] == "dispatch"
+    listed = {row["name"]: row for row in machines.machines(kw)}
+    assert listed[machines.hostname()]["role"] == "dispatch"
+
+
 def test_heartbeat_fills_quota_from_quota_snapshot(redis_port, flush_redis, tmp_path):
     # `quota.snapshot()` itself is mocked (see `fake_quota_snapshot`) -- this
     # only checks that `_write_record` calls it and stores what it returns.

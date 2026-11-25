@@ -131,6 +131,7 @@ online/offline.
   "version": "0.4.0",
   "heartbeat": "2026-10-05T12:00:00Z",
   "state": "online",
+  "role": "worker",
   "slots": {"bmo": {"used": 1, "max": 1}},
   "providers": ["claude", "openai"],
   "quota": {

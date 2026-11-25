@@ -1211,7 +1211,9 @@ def _rank_candidates(records: list[dict], local_host: str) -> list[dict]:
     online = [
         record
         for record in records
-        if record["state"] == "online" and (local_worker or record["name"] != local_host)
+        if record["state"] == "online"
+        and record.get("role") != "dispatch"
+        and (local_worker or record["name"] != local_host)
     ]
     if local_worker and local_host not in {record["name"] for record in records}:
         online.append({"name": local_host, "state": "online", "slots": {}})
@@ -1230,7 +1232,7 @@ def _machine_available(name: str, records: list[dict], local_host: str) -> bool:
     record = next((r for r in records if r["name"] == name), None)
     if record is None:
         return name == local_host and not _coordinator_only()
-    return record["state"] == "online"
+    return record["state"] == "online" and record.get("role") != "dispatch"
 
 
 def _timer_loop_count(unit: str, repo_label: str, enabled: list[str]) -> int:
@@ -3699,7 +3701,7 @@ def render_schedule(
     cnt_options = "".join(f"<option value={n}>{n} loop{'s' if n != 1 else ''}</option>" for n in range(1, 5))
     place_options = ["<option value=spread>spread out</option>", "<option value=any>any machine</option>"]
     coordinator_only = _coordinator_only()
-    by_name = {m["name"]: m for m in fleet_machines}
+    by_name = {m["name"]: m for m in fleet_machines if m.get("role") != "dispatch"}
     if coordinator_only:
         by_name.pop(local_host, None)
     else:

@@ -792,3 +792,17 @@ def test_cli_place_unreachable_redis_exits_3(closed_port, tmp_path, capsys, clea
 
     assert code == 3
     assert "cannot reach" in captured.err
+
+
+def test_filter_candidates_never_lists_a_dispatch_only_machine():
+    records = [
+        {"name": "pihome", "state": "online", "role": "dispatch", "slots": {},
+         "quota": {"claude": {"pct_left": 90}}},
+        {"name": "jesus", "state": "online", "role": "worker", "slots": {},
+         "quota": {"claude": {"pct_left": 50}}},
+    ]
+
+    _skipped, candidates, pick = place._filter_candidates(records, "claude", None, time.time())
+
+    assert [c["name"] for c in candidates] == ["jesus"]
+    assert pick["name"] == "jesus"
