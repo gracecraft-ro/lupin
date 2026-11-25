@@ -227,7 +227,8 @@ def _local_quota_rows() -> list[dict]:
         return []
     if time.time() - written >= HEARTBEAT_QUOTA_MAX_AGE:
         return []
-    return rows
+    # JSON turns the duration enum into a plain str. Restore it, as the Redis read does.
+    return quota_cache._restore_durations(rows)
 
 
 def _write_record(
