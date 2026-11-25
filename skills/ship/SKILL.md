@@ -59,16 +59,11 @@ compatibility: Requires the repository's tools and GitHub CLI. Lupin and Redis a
 - The final report says what you skipped, what you did not check, and any risk
   the user must know.
 
-A visual change is any change a person can see. Open the real surface and
-capture before and after. For a new screen, capture the new screen. Report if
-you could not view it. If you decide a change is not visual, say so and why in
-your report and in a PR comment.
-
-For a 3D change, render a contact sheet with the useful views. Use top, bottom,
-front, side or 90-degree, and 45-degree views when they help show the change. 
-Titles and any captions should be baked into the contact sheet. 
-Compare before and after from the same views. Attach the sheet to the PR. 
-For 3d changes that involve multiple related objects, such as one new object designed for an existing object, include any reference object.
+A visual or spatial change needs evidence. Load the `visual-evidence` skill before you
+capture. It sets what to capture, how to caption it, how to show before and
+after, and the contact sheet rule for spatial objects. Report if you could not view
+the change. If you decide a change is not visual, say so and why in your report
+and in a PR comment.
 
 ## Save evidence
 
@@ -124,8 +119,9 @@ the error. Then go to "Report and release" below.
    report the error and the PR number. Then go to step 5. Do not merge. Do not
    wait for approval. The owner merges the PR.
 
-5. Attach the screenshots for every visual change. See "Attach screenshots to
-   the PR" below. Then go to "Report and release" below.
+5. Attach the screenshots for every visual change. See "Attach screenshots and
+   gifs to the PR" below. Check each file against the `visual-evidence` skill
+   before you upload it. Then go to "Report and release" below.
 6. If every push route fails, or PR creation fails, report the branch name and
    the commit range. If the repo does not allow fork PRs, also keep the local
    branch. A local commit is not a pull request and is not shipped. Then go to
@@ -133,13 +129,14 @@ the error. Then go to "Report and release" below.
 
 ## Attach screenshots and gifs to the PR
 
-A visual PR must have visual evidence in order to be approved. If UI elements are modified in a way that changes user interactions at all, such as adding new functionality to the interface, attach a gif. If you only changed the appearance of a button, screenshots suffice. If your repo has specific screenshot / gif guidance, that can be a helpful starting point. 
+What to capture, how to caption it, and how to lay out before and after follow
+the `visual-evidence` skill. This section covers the upload steps only.
 
 1. Find the PR that holds the change. For the PR in the current branch, run the
    command `gh pr view --json number,url --jq '.number, .url'`. The URL is
    `https://github.com/<owner>/<repo>/pull/<number>`. Use that `<owner>/<repo>`,
    not the fork name, unless the PR is on the fork.
-2. Open each screenshot and sanity check it before commenting; you may detect embarrassing mistakes this way.
+2. Open each file and check it before you comment. See section 6 of the `visual-evidence` skill.
    Attach it along with a detailed comment in GitHub on the PR and issue. Show the before
    and after, or the new screen if there is no before. Say what to look at. Use
    the same path in the body and in `--attach`:
