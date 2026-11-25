@@ -19,7 +19,10 @@ import pytest
 import redis as redis_lib
 
 from lupin import agent as agent_mod
-from lupin import cli, machines, quota_cache
+from lupin import cli, machines, quota, quota_cache
+
+# Saved before the autouse fixture below mocks `quota.snapshot`.
+_real_quota_snapshot = quota.snapshot
 
 
 _AMBIENT_ENV_VARS = (
@@ -166,6 +169,16 @@ def test_heartbeat_has_no_quota_rows_without_local_file(redis_port, flush_redis,
     machines.join(f"127.0.0.1:{redis_port}", config_path=tmp_path / "fleet.json")
     record = machines.heartbeat(_kw(redis_port))
     assert record["usage_detail"]["quota_rows"] == []
+
+
+def test_local_quota_rows_restore_duration_enum_for_snapshot(monkeypatch, tmp_path):
+    # JSON turns the enum into "P7D". pace then needs the enum's `.milliseconds`.
+    resets_at = datetime.now(timezone.utc).timestamp() * 1000 + 86_400_000
+    row = {"provider": "claude", "duration": "P7D", "used_pct": 40.0, "resets_at": resets_at}
+    _write_local_quota(monkeypatch, tmp_path, [row], seconds_ago=60)
+    rows = machines._local_quota_rows()
+    assert "claude" in _real_quota_snapshot(rows=rows)
+    assert rows[0]["duration"] is quota.QuotaDuration.WEEKLY
 
 
 def test_heartbeat_does_not_wipe_out_of_band_providers(redis_port, flush_redis, tmp_path):
