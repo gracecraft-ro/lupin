@@ -59,7 +59,7 @@ compatibility: Requires the repository's tools and GitHub CLI. Lupin and Redis a
 - The final report says what you skipped, what you did not check, and any risk
   the user must know.
 
-A visual change needs evidence. Load the `visual-evidence` skill before you
+A visual or spatial change needs evidence. Load the `visual-evidence` skill before you
 capture. It sets what to capture, how to caption it, how to show before and
 after, and the contact sheet rule for spatial objects. Report if you could not view
 the change. If you decide a change is not visual, say so and why in your report

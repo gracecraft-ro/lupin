@@ -87,6 +87,17 @@
               ]))
               # tests/conftest.py starts `redis-server` from PATH.
               pkgs.redis
+              # tests/test_visual_evidence.py skips its ffmpeg and node tests without these.
+              pkgs.ffmpeg
+              pkgs.nodejs
+              # visual_evidence.py drawing renders SVG and DXF with rsvg-convert.
+              pkgs.librsvg
+              # visual_evidence.py pdf renders PDF pages with pdftoppm.
+              pkgs.poppler-utils
+              # visual_evidence.py needs the bold and serif faces. The minimal set has Sans Book only.
+              pkgs.dejavu_fonts
+              # visual_evidence.py finds those faces with fc-match.
+              pkgs.fontconfig
             ];
             # uv puts .venv in the checkout by default. /code is shared with the Mac.
             shellHook = ''

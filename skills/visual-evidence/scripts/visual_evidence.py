@@ -1,44 +1,99 @@
 #!/usr/bin/env python3
 """Add captions and layouts to visual evidence. Needs ffmpeg and ffprobe.
 
-Run it through Nix so both tools are on PATH:
+Run it in the dev shell. It puts ffmpeg, fontconfig (fc-match), node, rsvg-convert, and the DejaVu faces on PATH:
 
-  nix shell nixpkgs#ffmpeg -c python3 scripts/visual_evidence.py pair \
-    before.png after.png --caption "Save button moves to the bottom bar" --out pair.png
+  nix develop -c python3 scripts/visual_evidence.py pair \
+    before.png after.png --title "Save button" \
+    --caption "The save button moves to the bottom bar" --out pair.png
 
-  nix shell nixpkgs#ffmpeg -c python3 scripts/visual_evidence.py gif \
+  nix develop -c python3 scripts/visual_evidence.py gif \
     demo.mp4 --caption "Tap Save to confirm" --out demo.gif
 
-  nix shell nixpkgs#ffmpeg -c python3 scripts/visual_evidence.py sheet \
+  nix develop -c python3 scripts/visual_evidence.py sheet \
     top.png="Top" front.png="Front" --title "Part A, same views" --out sheet.png
 
-  nix shell nixpkgs#ffmpeg nixpkgs#nodejs -c python3 scripts/visual_evidence.py stl \
+  nix develop -c python3 scripts/visual_evidence.py stl \
     part-after.stl --before part-before.stl --title "Part, before and after" --out part.png
+
+  nix develop -c python3 scripts/visual_evidence.py drawing \
+    cut-after.dxf --before cut-before.dxf --title "Cut sheet, before and after" --out drawing.png
+
+  nix develop -c python3 scripts/visual_evidence.py pdf \
+    after.pdf --before before.pdf --title "Print, before and after" --out pdf.png
 
 Each command prints one line: wrote PATH WIDTHxHEIGHT bytes=N
 Open the file and check it. The script does not judge the picture.
 """
 
 import argparse
+import glob
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
-import textwrap
 
-FONT = "DejaVu Sans"  # fontconfig name; --font takes a .ttf/.ttc path instead
-PAD = 8  # px between a band edge and its text
-LINE_GAP = 6  # px between caption lines
-CHAR_EM = 0.6  # average glyph width in em; a little wide, so lines do not clip
-LABEL_H = 40  # px band above each pair panel
-LABEL_SIZE = 24
-TITLE_SIZE = 24
-TILE_LABEL_SIZE = 18
+# fontconfig name and style for each text role. --font replaces all three.
+FONTS = {
+    "title": "DejaVu Serif:bold",
+    "caption": "DejaVu Serif",
+    "label": "DejaVu Sans Mono:bold",
+}
+PAD = 8  # px of padding used when measuring text
+LINE_GAP = 6  # px between text lines
+MAX_LINES = 4  # a caption or title longer than this is too long to read at this size
+MARGIN = 24  # px of canvas around the content
+PAIR_GAP = 32  # px between the two pair panels
+SHEET_GAP = 24  # px between sheet tiles, across and down
+TITLE_GAP = 14  # px between a title and the hairline under it, and from the hairline to the next block
+CAPTION_GAP = 26  # px between a caption and the image labels
+LABEL_PAD = 8  # px between a label and the top or bottom of its label strip
+MIN_LABEL = 9  # px. A label shrinks no further than this to fit its image
+TITLE_PX = 44  # title size in px. Fixed, so captions and labels match across commands
+CAPTION_PX = 34  # caption size in px, unless --size sets it
+LABEL_PX = 24  # label size in px, before fit_label_size shrinks a long one
+# Ground and ink colours per theme, from themes.json. The renderer reads the same file.
+THEMES = json.load(
+    open(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "themes.json"),
+        encoding="utf-8",
+    )
+)
+CANVAS = FRAME = RULE = TITLE_INK = CAPTION_INK = LABEL_INK = ""
+
+
+def apply_theme(name):
+    """Set the ground and ink colours from THEMES[name]. Values become ffmpeg colours."""
+    global CANVAS, FRAME, RULE, TITLE_INK, CAPTION_INK, LABEL_INK
+    colour = {
+        key: "0x" + value[1:]
+        for key, value in THEMES[name].items()
+        if value.startswith("#")
+    }
+    CANVAS, FRAME, RULE = colour["canvas"], colour["frame"], colour["rule"]
+    TITLE_INK, CAPTION_INK, LABEL_INK = (
+        colour["title"],
+        colour["caption"],
+        colour["label"],
+    )
+
+
+apply_theme("paper")
 RENDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "render_stl.mjs")
 STL_SIZE = 800  # px per rendered view, before tiling
-STL_VIEWS = [("iso", "ISO"), ("plus-x", "+X"), ("minus-x", "-X"), ("plus-y", "+Y"),
-             ("minus-y", "-Y"), ("plus-z", "+Z"), ("minus-z", "-Z")]
+STL_VIEWS = [
+    ("iso", "ISO"),
+    ("iso-cutaway", "ISO CUT"),
+    ("plus-x", "+X"),
+    ("minus-x", "-X"),
+    ("plus-y", "+Y"),
+    ("minus-y", "-Y"),
+    ("plus-z", "+Z"),
+    ("minus-z", "-Z"),
+]
 
 
 def die(message):
@@ -56,9 +111,9 @@ def checked_input(path):
     return os.path.abspath(path)
 
 
-def checked_out(path):
-    if os.path.splitext(path)[1].lower() not in (".png", ".gif"):
-        die("--out must end in .png or .gif")
+def checked_out(path, ext):
+    if os.path.splitext(path)[1].lower() != ext:
+        die(f"--out must end in {ext} for this command")
     return os.path.abspath(path)
 
 
@@ -67,18 +122,53 @@ def esc(value):
     return value.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
 
 
-def font_option(font):
-    if os.path.isfile(font):
-        return f"fontfile={esc(font)}"
-    return f"font={esc(font)}"
+def font_file(spec):
+    """Return the .ttf path for a family name such as "DejaVu Serif:bold", or for a path.
+
+    fc-match swaps in another face when a name is unknown, so check the family it chose.
+    """
+    if os.path.isfile(spec):
+        return os.path.abspath(spec)
+    if shutil.which("fc-match") is None:
+        die(
+            "fc-match not found. Run in the dev shell (nix develop -c), or pass --font PATH.ttf"
+        )
+    family = spec.split(":")[0]
+    result = subprocess.run(
+        ["fc-match", "-f", "%{family}\t%{file}", spec], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        die(f"fc-match failed for font {spec!r}:\n" + result.stderr.strip())
+    chosen, _, path = result.stdout.partition("\t")
+    if family.lower() not in (name.strip().lower() for name in chosen.split(",")):
+        die(
+            f"font {family!r} is not installed. fontconfig chose {chosen!r}. Pass --font PATH.ttf"
+        )
+    return path.strip()
+
+
+def font_option(path):
+    """drawtext ignores style=, so bold needs its own .ttf file."""
+    return f"fontfile={esc(path)}"
 
 
 def probe(path):
     """Return (width, height) of the first video stream."""
     result = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
-        capture_output=True, text=True,
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+            path,
+        ],
+        capture_output=True,
+        text=True,
     )
     if result.returncode != 0 or not result.stdout.strip():
         die(f"cannot read an image or video from {path}")
@@ -86,17 +176,95 @@ def probe(path):
     return int(width), int(height)
 
 
-def wrap(text, width_px, size):
-    """Break text into lines that fit. drawtext does not wrap on its own."""
-    per_line = max(8, int(width_px / (size * CHAR_EM)))
+def ink_width(text, font, size, folder):
+    """Return the width in px of the ink that drawtext draws for text."""
+    if not text:
+        return 0
+    width = len(text) * size * 2 + 2 * PAD  # wider than any line of this text
+    width += width % 2  # yuv sources need an even width
+    height = 2 * size
+    name = write_text(folder, "measure.txt", text)
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=white:s={width}x{height},format=gray",
+            "-vf",
+            caption_draw(font, name, size, PAD, PAD),
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "-",
+        ],
+        cwd=folder,
+        capture_output=True,
+    )
+    if result.returncode != 0 or len(result.stdout) != width * height:
+        die(
+            "ffmpeg failed while measuring text:\n"
+            + result.stderr.decode(errors="replace").strip()
+        )
+    rows = [result.stdout[i : i + width] for i in range(0, width * height, width)]
+    ink_right = max(len(row.rstrip(b"\xff")) for row in rows)  # 0xff is white
+    return max(0, ink_right - PAD)
+
+
+def longest_fit(word, fits):
+    """Return the longest prefix of word that fits. word itself must not fit."""
+    low, high = 1, len(word) - 1
+    while low < high:
+        mid = (low + high + 1) // 2
+        if fits(word[:mid]):
+            low = mid
+        else:
+            high = mid - 1
+    return word[:low]
+
+
+def wrap(text, width_px, font, size, folder):
+    """Break text into lines that fit width_px, measured with the font that draws them.
+
+    A glyph-width guess clips wide letters. A word wider than a line is cut.
+    """
+
+    def fits(line):
+        return ink_width(line, font, size, folder) <= width_px
+
     lines = []
+
+    def emit(line):
+        lines.append(line)
+        if len(lines) > MAX_LINES:
+            die(f"text needs more than {MAX_LINES} lines at this width. Shorten it.")
+
     for paragraph in text.splitlines() or [""]:
-        lines.extend(textwrap.wrap(paragraph, per_line) or [""])
+        line = ""
+        for word in paragraph.split():
+            candidate = f"{line} {word}" if line else word
+            if fits(candidate):
+                line = candidate
+                continue
+            if line:
+                emit(line)
+            line = word
+            while not fits(line):
+                cut = longest_fit(line, fits)
+                emit(cut)
+                line = line[len(cut) :]
+        emit(line)
     return lines
 
 
-def band_height(line_count, size):
-    return 2 * PAD + line_count * (size + LINE_GAP)
+def text_height(line_count, size):
+    return line_count * size + (line_count - 1) * LINE_GAP
 
 
 def write_text(folder, name, text):
@@ -106,17 +274,21 @@ def write_text(folder, name, text):
     return name
 
 
-def caption_draw(font, name, size, x, y):
-    return (f"drawtext={font_option(font)}:textfile={name}:x={x}:y={y}:"
-            f"fontsize={size}:fontcolor=black:line_spacing={LINE_GAP}")
+def caption_draw(font, name, size, x, y, colour=CAPTION_INK):
+    return (
+        f"drawtext={font_option(font)}:textfile={name}:x={x}:y={y}:"
+        f"fontsize={size}:fontcolor={colour}:line_spacing={LINE_GAP}"
+    )
 
 
 def output_args(chain, out, fps):
     """Return the ffmpeg arguments that write the filtergraph to out."""
     if out.lower().endswith(".gif"):
         # -r, not the fps filter: the fps filter drops a lone still frame.
-        graph = (f"{chain},split[s0][s1];"
-                 "[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer")
+        graph = (
+            f"{chain},split[s0][s1];"
+            "[s0]palettegen=max_colors=128[p];[s1][p]paletteuse=dither=bayer"
+        )
         return ["-filter_complex", graph, "-r", str(fps), out]
     return ["-filter_complex", chain, "-frames:v", "1", out]
 
@@ -133,40 +305,151 @@ def report(out):
     print(f"wrote {out} {width}x{height} bytes={os.path.getsize(out)}")
 
 
+def type_sizes(caption=None):
+    """Return (title, caption, label) sizes in px. The sizes are fixed, so every command matches.
+
+    caption is the size from --size. None means use CAPTION_PX.
+    """
+    return TITLE_PX, caption or CAPTION_PX, LABEL_PX
+
+
+def label_band(nominal):
+    """Height of the strip above an image that holds its label."""
+    return nominal + 2 * LABEL_PAD
+
+
+def fit_label_size(labels, max_w, size, font, folder):
+    """Shrink the labels until the longest fits max_w. The strip keeps its nominal height."""
+    unique = set(labels)
+    while (
+        size > MIN_LABEL
+        and max(ink_width(text, font, size, folder) for text in unique) > max_w
+    ):
+        size -= 1
+    return size
+
+
+def canvas_pad(top):
+    """Add the margin on every side. top px above the content hold the header."""
+    return f"pad=iw+{2 * MARGIN}:ih+{top + MARGIN}:{MARGIN}:{top}:{CANVAS}"
+
+
+def header(faces, canvas_w, title, caption, title_size, caption_size, folder):
+    """Return (top, filters) for the title, its hairline, and the caption.
+
+    top is the y where the content starts. The filters draw on the canvas after canvas_pad.
+    """
+    top = MARGIN
+    filters = []
+    wrap_w = canvas_w - 2 * MARGIN
+    if title:
+        lines = wrap(title, wrap_w, faces["title"], title_size, folder)
+        name = write_text(folder, "title.txt", "\n".join(lines))
+        height = text_height(len(lines), title_size)
+        rule_y = top + height + TITLE_GAP
+        filters.append(
+            caption_draw(faces["title"], name, title_size, MARGIN, top, TITLE_INK)
+        )
+        filters.append(
+            f"drawbox=x={MARGIN}:y={rule_y}:w=iw-{2 * MARGIN}:h=1:color={RULE}:t=fill"
+        )
+        top = rule_y + 1 + TITLE_GAP
+    if caption:
+        lines = wrap(caption, wrap_w, faces["caption"], caption_size, folder)
+        name = write_text(folder, "caption.txt", "\n".join(lines))
+        filters.append(
+            caption_draw(faces["caption"], name, caption_size, MARGIN, top, CAPTION_INK)
+        )
+        top += text_height(len(lines), caption_size) + CAPTION_GAP
+    return top, filters
+
+
+def parse_crop(value):
+    """Parse W:H:X:Y in px, the order of ffmpeg's crop filter. None means no crop."""
+    if value is None:
+        return None
+    parts = value.split(":")
+    if (
+        len(parts) != 4
+        or not all(part.isdigit() for part in parts)
+        or int(parts[0]) == 0
+        or int(parts[1]) == 0
+    ):
+        die("--crop needs W:H:X:Y in px, for example 600:400:900:700")
+    return tuple(int(part) for part in parts)
+
+
+def cropped_size(size, crop):
+    """Return (width, height) left after the crop. Stop if the crop is outside the image."""
+    if crop is None:
+        return size
+    width, height, x, y = crop
+    if x + width > size[0] or y + height > size[1]:
+        die(f"--crop is outside the {size[0]}x{size[1]} image")
+    return width, height
+
+
+def crop_filter(crop):
+    return "" if crop is None else f"crop={crop[0]}:{crop[1]}:{crop[2]}:{crop[3]},"
+
+
+def panel_chain(height, label, size, nominal, font):
+    """Frame a panel, pad it to the shared height, then add its label strip above."""
+    band = label_band(nominal)
+    return (
+        f"pad=iw+2:ih+2:1:1:{FRAME},pad=iw:{height + 2}:0:0:{CANVAS},"
+        f"pad=iw:ih+{band}:0:{band}:{CANVAS},"
+        f"drawtext={font_option(font)}:text={label}:x=0:y={LABEL_PAD}:y_align=font:"
+        f"fontsize={size}:fontcolor={LABEL_INK}"
+    )
+
+
 def cmd_pair(args, folder):
     before = checked_input(args.before)
     after = checked_input(args.after)
-    out = checked_out(args.out)
-    w1, h1 = probe(before)
-    w2, h2 = probe(after)
-    h = min(h1, h2)  # both panels share one height
-    panel_w = round(w1 * h / h1) + round(w2 * h / h2)
-    lines = wrap(args.caption, panel_w - 24, args.size)
-    band = band_height(len(lines), args.size)
-    write_text(folder, "caption.txt", "\n".join(lines))
-    chain = (
-        f"[0:v]scale=-2:{h},pad=iw:ih+{LABEL_H}:0:{LABEL_H}:white,"
-        f"drawtext=text=Before:x=12:y={PAD}:fontsize={LABEL_SIZE}:fontcolor=black[a];"
-        f"[1:v]scale=-2:{h},pad=iw:ih+{LABEL_H}:0:{LABEL_H}:white,"
-        f"drawtext=text=After:x=12:y={PAD}:fontsize={LABEL_SIZE}:fontcolor=black[b];"
-        f"[a][b]hstack=inputs=2:shortest=1,pad=iw:ih+{band}:0:{band}:white,"
-        + caption_draw(args.font, "caption.txt", args.size, 12, PAD)
+    out = checked_out(args.out, ".png")
+    crop = parse_crop(args.crop)
+    (w1, h1), (w2, h2) = (cropped_size(probe(path), crop) for path in (before, after))
+    height = max(h1, h2)  # nothing is scaled; the shorter panel gets canvas below it
+    row_w = (w1 + 2) + PAIR_GAP + (w2 + 2)  # +2 for each 1 px frame
+    canvas_w = row_w + 2 * MARGIN
+    title_size, caption_size, nominal = type_sizes(args.size)
+    panel_w = min(w1, w2)
+    size = fit_label_size(
+        ["Before", "After"], panel_w, nominal, args.faces["label"], folder
     )
-    run_ffmpeg(["-i", before, "-i", after], output_args(chain, out, args.fps), folder)
+    top, head = header(
+        args.faces, canvas_w, args.title, args.caption, title_size, caption_size, folder
+    )
+    crop_part = crop_filter(crop)
+    chain = (
+        f"[0:v]{crop_part}{panel_chain(height, 'Before', size, nominal, args.faces['label'])}[a];"
+        f"[1:v]{crop_part}{panel_chain(height, 'After', size, nominal, args.faces['label'])}[b];"
+        f"[a]pad=iw+{PAIR_GAP}:ih:0:0:{CANVAS}[a2];"
+        f"[a2][b]hstack=inputs=2"
+    )
+    run_ffmpeg(
+        ["-i", before, "-i", after],
+        output_args(",".join([chain, canvas_pad(top), *head]), out, args.fps),
+        folder,
+    )
     report(out)
 
 
 def cmd_gif(args, folder):
     src = checked_input(args.input)
-    out = checked_out(args.out)
-    if not out.lower().endswith(".gif"):
-        die("gif needs --out ending in .gif")
-    lines = wrap(args.caption, args.width - 16, args.size)
-    band = band_height(len(lines), args.size)
-    write_text(folder, "caption.txt", "\n".join(lines))
+    out = checked_out(args.out, ".gif")
+    _, caption_size, _ = type_sizes(args.size)
+    lines = wrap(args.caption, args.width, args.faces["caption"], caption_size, folder)
+    band = text_height(len(lines), caption_size) + 2 * MARGIN
+    name = write_text(folder, "caption.txt", "\n".join(lines))
     chain = (
-        f"[0:v]scale={args.width}:-2:flags=lanczos,pad=iw:ih+{band}:0:0:white,"
-        + caption_draw(args.font, "caption.txt", args.size, 8, f"h-{band - PAD}")
+        f"[0:v]scale={args.width}:-2:flags=lanczos,"
+        f"pad=iw+{2 * MARGIN}:ih+{MARGIN}:{MARGIN}:{MARGIN}:{CANVAS},"
+        f"pad=iw:ih+{band}:0:0:{CANVAS},"
+        + caption_draw(
+            args.faces["caption"], name, caption_size, MARGIN, f"h-{band - MARGIN}"
+        )
     )
     run_ffmpeg(["-i", src], output_args(chain, out, args.fps), folder)
     report(out)
@@ -178,117 +461,518 @@ def cmd_sheet(args, folder):
     items = []
     for raw in args.views:
         path, _, label = raw.partition("=")
-        items.append((checked_input(path), label or os.path.splitext(os.path.basename(path))[0]))
-    make_sheet(items, args, checked_out(args.out), folder)
+        items.append(
+            (checked_input(path), label or os.path.splitext(os.path.basename(path))[0])
+        )
+    make_sheet(items, args, checked_out(args.out, ".png"), folder)
 
 
-def make_sheet(items, args, out, folder):
-    tile_w = args.tile_width
+def make_sheet(items, args, out, folder, row_heads=None):
     first_w, first_h = probe(items[0][0])
+    tile_w = (
+        args.tile_width or first_w
+    )  # the first image's width unless --tile-width is given
     tile_h = round(tile_w * first_h / first_w) // 2 * 2
+    frame_w, frame_h = tile_w + 2, tile_h + 2  # +2 for the 1 px frame
     cols = min(args.cols, len(items))
-    lines = wrap(args.title, cols * tile_w - 24, TITLE_SIZE)
-    band = band_height(len(lines), TITLE_SIZE)
-    write_text(folder, "caption.txt", "\n".join(lines))
+    grid_w = cols * frame_w + (cols - 1) * SHEET_GAP
+    canvas_w = grid_w + 2 * MARGIN
+    title_size, _, nominal = type_sizes()
+    labels = [label for _, label in items]
+    heads = row_heads or []
+    size = fit_label_size(labels, frame_w, nominal, args.faces["label"], folder)
+    band = label_band(nominal)
+    head_band = (
+        text_height(1, title_size) + 2 * TITLE_GAP + 1 if heads else 0
+    )  # heading, gap, hairline, gap
+    cell_h = head_band + band + frame_h
+    top, head = header(args.faces, canvas_w, args.title, None, title_size, None, folder)
+    for row, text in enumerate(
+        heads
+    ):  # each heading is in the title face, with a hairline under it
+        y = top + row * (cell_h + SHEET_GAP)
+        name = write_text(folder, f"head{row}.txt", text)
+        head.append(
+            caption_draw(args.faces["title"], name, title_size, MARGIN, y, TITLE_INK)
+        )
+        head.append(
+            f"drawbox=x={MARGIN}:y={y + text_height(1, title_size) + TITLE_GAP}:w=iw-{2 * MARGIN}:h=1:color={RULE}:t=fill"
+        )
     chains = []
-    for index, (_, label) in enumerate(items):
+    for index, label in enumerate(labels):
         name = write_text(folder, f"tile{index}.txt", label)
+        # y_align=font puts every label on one baseline. The default aligns each string's own ink top,
+        # so a label with no ascenders, such as "sea", sat high.
+        texts = [
+            f"drawtext={font_option(args.faces['label'])}:textfile={name}:x=0:y={head_band + LABEL_PAD}:y_align=font:"
+            f"fontsize={size}:fontcolor={LABEL_INK}"
+        ]
         chains.append(
             f"[{index}:v]scale={tile_w}:{tile_h}:force_original_aspect_ratio=decrease,"
-            f"pad={tile_w}:{tile_h}:(ow-iw)/2:(oh-ih)/2:white,"
-            f"drawtext={font_option(args.font)}:textfile={name}:x=6:y=6:"
-            f"fontsize={TILE_LABEL_SIZE}:fontcolor=white:box=1:boxcolor=black@0.5[t{index}]"
+            f"pad={tile_w}:{tile_h}:(ow-iw)/2:(oh-ih)/2:{CANVAS},"
+            f"pad={frame_w}:{frame_h}:1:1:{FRAME},"
+            f"pad=iw:ih+{band + head_band}:0:{band + head_band}:{CANVAS},"
+            + ",".join(texts)
+            + f"[t{index}]"
         )
     layout = "|".join(
-        f"{(index % cols) * tile_w}_{(index // cols) * tile_h}" for index in range(len(items))
+        f"{(index % cols) * (frame_w + SHEET_GAP)}_{(index // cols) * (cell_h + SHEET_GAP)}"
+        for index in range(len(items))
     )
     tiles = "".join(f"[t{index}]" for index in range(len(items)))
-    chains.append(
-        f"{tiles}xstack=inputs={len(items)}:layout={layout}:fill=white,"
-        f"pad=iw:ih+{band}:0:{band}:white,"
-        + caption_draw(args.font, "caption.txt", TITLE_SIZE, 12, PAD)
+    # xstack needs two or more inputs. One tile passes through.
+    body = (
+        f"{tiles}xstack=inputs={len(items)}:layout={layout}:fill={CANVAS}"
+        if len(items) > 1
+        else f"{tiles}null"
     )
+    chains.append(",".join([body, canvas_pad(top), *head]))
     inputs = [arg for path, _ in items for arg in ("-i", path)]
     run_ffmpeg(inputs, output_args(";".join(chains), out, args.fps), folder)
     report(out)
 
 
-def render_views(stl, folder, frame=None):
-    """Render the seven views of stl. Return (path, label) pairs in STL_VIEWS order.
+def render_views(
+    stl, folder, frame=None, palette=None, palette_file=None, theme="paper"
+):
+    """Render the eight views of stl. Return (path, label) pairs in STL_VIEWS order.
 
     frame is another STL. Both files then share one scale and centre, so a size change shows.
+    palette is a palette name, or palette_file is a JSON palette. None for both uses the default.
     """
     os.makedirs(folder, exist_ok=True)
     cmd = ["node", RENDER, stl, folder, "--size", str(STL_SIZE)]
     if frame:
         cmd += ["--frame", frame]
+    if palette_file:
+        cmd += ["--palette-file", palette_file]
+    elif palette is not None:
+        cmd += ["--palette", palette]
+    cmd += ["--theme", theme]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         die("render_stl failed:\n" + result.stderr.strip())
     stem = os.path.splitext(os.path.basename(stl))[0]
-    return [(os.path.join(folder, f"{stem}-{name}.png"), label) for name, label in STL_VIEWS]
+    return [
+        (os.path.join(folder, f"{stem}-{name}.png"), label) for name, label in STL_VIEWS
+    ]
+
+
+# Roundsmith writes LINE and LWPOLYLINE. Any other entity stops the command.
+DXF_ENTITIES = ("LINE", "LWPOLYLINE")
+# layer: (theme colour key, dash pattern). Other layers use the caption colour, solid.
+DXF_STYLE = {
+    "CUT": ("title", None),
+    "SEAM": ("caption", "6 4"),
+    "FOLD": ("label", "2 3"),
+    "LABELS": ("cut", None),
+}
+DRAWING_PAD = 0.05  # margin round a drawing, as a share of its size
+SVG_ROOT = re.compile(r"<svg\b[^>]*>")
+
+
+def dxf_entities(path):
+    """Return (type, [(code, value), ...]) for each entity in the ENTITIES section."""
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        lines = handle.read().splitlines()
+    entities, section, name_next = [], None, False
+    for i in range(0, len(lines) - 1, 2):
+        code, value = lines[i].strip(), lines[i + 1].strip()
+        if code == "0":
+            name_next = value == "SECTION"
+            if value == "ENDSEC":
+                section = None
+            elif value == "EOF":
+                break
+            elif section == "ENTITIES":
+                entities.append((value, []))
+        elif code == "2" and name_next:
+            section, name_next = value, False
+        elif section == "ENTITIES" and entities:
+            entities[-1][1].append((code, value))
+    return entities
+
+
+def dxf_paths(path):
+    """Return (layer, points, closed) for each LINE or LWPOLYLINE in a DXF."""
+    paths = []
+    for kind, data in dxf_entities(path):
+        if kind not in DXF_ENTITIES:
+            die(
+                f"DXF entity {kind} is not supported. Supported: {', '.join(DXF_ENTITIES)}"
+            )
+        layer = next((value for code, value in data if code == "8"), "0")
+        if kind == "LINE":
+            coords = {
+                code: float(value)
+                for code, value in data
+                if code in ("10", "20", "11", "21")
+            }
+            paths.append(
+                (
+                    layer,
+                    [(coords["10"], coords["20"]), (coords["11"], coords["21"])],
+                    False,
+                )
+            )
+        else:
+            xs = [float(value) for code, value in data if code == "10"]
+            ys = [float(value) for code, value in data if code == "20"]
+            closed = bool(
+                int(next((value for code, value in data if code == "70"), "0")) & 1
+            )
+            paths.append((layer, list(zip(xs, ys)), closed))
+    return paths
+
+
+def dxf_svg(path, theme):
+    """Return an SVG of a DXF. DXF is y up, so the drawing is flipped to the SVG's y down."""
+    paths = dxf_paths(path)
+    if not paths:
+        die("the DXF has no LINE or LWPOLYLINE entities")
+    xs = [x for _, points, _ in paths for x, _ in points]
+    ys = [-y for _, points, _ in paths for _, y in points]
+    span = max(max(xs) - min(xs), max(ys) - min(ys)) or 1
+    pad = span * DRAWING_PAD
+    view = " ".join(
+        f"{v:.4f}"
+        for v in (
+            min(xs) - pad,
+            min(ys) - pad,
+            max(xs) - min(xs) + 2 * pad,
+            max(ys) - min(ys) + 2 * pad,
+        )
+    )
+    by_layer = {}
+    for layer, points, closed in paths:
+        d = (
+            "M"
+            + " L".join(f"{x:.4f} {-y:.4f}" for x, y in points)
+            + (" Z" if closed else "")
+        )
+        by_layer.setdefault(layer, []).append(d)
+    shapes = []
+    for layer, ds in by_layer.items():
+        key, dash = DXF_STYLE.get(layer, ("caption", None))
+        dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
+        shapes.append(
+            f'<path fill="none" stroke="{theme[key]}" stroke-width="{span / 500:.4f}"'
+            f'{dash_attr} d="{" ".join(ds)}"/>'
+        )
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{view}">'
+        + "".join(shapes)
+        + "</svg>"
+    )
+
+
+def drawing_svg(path, theme):
+    """Return the SVG text of a .svg or .dxf file."""
+    if path.lower().endswith(".dxf"):
+        return dxf_svg(path, theme)
+    if path.lower().endswith(".svg"):
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    die("drawing takes an .svg or a .dxf file")
+
+
+def svg_view(text):
+    """Return the viewBox of an SVG as (x, y, width, height)."""
+    root = SVG_ROOT.search(text)
+    match = re.search(r'viewBox="([^"]*)"', root.group(0)) if root else None
+    if not match:
+        die("the SVG has no viewBox. Add one, so its scale is known.")
+    return tuple(float(value) for value in re.split(r"[\s,]+", match.group(1).strip()))
+
+
+def fit_view(text, view):
+    """Return the SVG with the shared viewBox and no width or height, so every file has one scale."""
+    root = SVG_ROOT.search(text)
+    tag = re.sub(r'\s(?:width|height|viewBox)="[^"]*"', "", root.group(0))
+    return (
+        text[: root.start()]
+        + tag.replace("<svg", f'<svg viewBox="{view}"', 1)
+        + text[root.end() :]
+    )
+
+
+def cmd_drawing(args, folder):
+    need("rsvg-convert")
+    out = checked_out(args.out, ".png")
+    theme = THEMES[args.theme]
+    if args.before:
+        inputs = [
+            (checked_input(args.before), "Before"),
+            (checked_input(args.file), "After"),
+        ]
+    else:
+        inputs = [(checked_input(args.file), os.path.basename(args.file))]
+    texts = [drawing_svg(path, theme) for path, _ in inputs]
+    views = [svg_view(text) for text in texts]
+    left = min(v[0] for v in views)
+    top = min(v[1] for v in views)
+    right = max(v[0] + v[2] for v in views)
+    bottom = max(v[1] + v[3] for v in views)
+    view = " ".join(
+        f"{v:.4f}" for v in (left, top, right - left, bottom - top)
+    )  # one viewBox, one scale
+    items = []
+    for index, (text, (_, label)) in enumerate(zip(texts, inputs)):
+        svg = os.path.join(folder, f"drawing{index}.svg")
+        png = os.path.join(folder, f"drawing{index}.png")
+        with open(svg, "w", encoding="utf-8") as handle:
+            handle.write(fit_view(text, view))
+        result = subprocess.run(
+            [
+                "rsvg-convert",
+                "--width",
+                str(args.tile_width),
+                "--background-color",
+                theme["canvas"],
+                "--output",
+                png,
+                svg,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            die("rsvg-convert failed:\n" + result.stderr.strip())
+        items.append((png, label))
+    sheet = argparse.Namespace(
+        title=args.title,
+        cols=len(items),
+        tile_width=args.tile_width,
+        faces=args.faces,
+        fps=args.fps,
+    )
+    make_sheet(items, sheet, out, folder)
 
 
 def cmd_stl(args, folder):
     need("node")
     new = checked_input(args.stl)
-    out = checked_out(args.out)
+    out = checked_out(args.out, ".png")
+    if args.palette and args.palette_file:
+        die("use --palette or --palette-file, not both")
+    palette_file = checked_input(args.palette_file) if args.palette_file else None
     if args.before:
         before = checked_input(args.before)
-        before_views = render_views(before, os.path.join(folder, "before"), frame=new)
-        after_views = render_views(new, os.path.join(folder, "after"), frame=before)
-        items = ([(path, f"BEFORE {label}") for path, label in before_views]
-                 + [(path, f"AFTER {label}") for path, label in after_views])
+        before_views = render_views(
+            before,
+            os.path.join(folder, "before"),
+            frame=new,
+            palette=args.palette,
+            palette_file=palette_file,
+            theme=args.theme,
+        )
+        after_views = render_views(
+            new,
+            os.path.join(folder, "after"),
+            frame=before,
+            palette=args.palette,
+            palette_file=palette_file,
+            theme=args.theme,
+        )
+        items = before_views + after_views
     else:
-        items = render_views(new, os.path.join(folder, "new"))
+        items = render_views(
+            new,
+            os.path.join(folder, "new"),
+            palette=args.palette,
+            palette_file=palette_file,
+            theme=args.theme,
+        )
     # One row for one part. Two rows, before then after, when --before is given.
-    sheet = argparse.Namespace(title=args.title, cols=7, tile_width=args.tile_width,
-                               font=args.font, fps=args.fps)
-    make_sheet(items, sheet, out, folder)
+    sheet = argparse.Namespace(
+        title=args.title,
+        cols=8,
+        tile_width=args.tile_width,
+        faces=args.faces,
+        fps=args.fps,
+    )
+    make_sheet(
+        items,
+        sheet,
+        out,
+        folder,
+        row_heads=["Before", "After"] if args.before else None,
+    )
+
+
+def pdf_pages(path, folder, name):
+    """Render each page of a PDF at 150 dpi. Return the PNG paths in page order."""
+    prefix = os.path.join(folder, name)
+    result = subprocess.run(
+        ["pdftoppm", "-r", "150", "-png", path, prefix], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        die("pdftoppm failed:\n" + result.stderr.strip())
+    pages = glob.glob(glob.escape(prefix) + "-*.png")
+    return sorted(
+        pages, key=lambda page: int(re.search(r"-(\d+)\.png$", page).group(1))
+    )
+
+
+def cmd_pdf(args, folder):
+    need("pdftoppm")
+    out = checked_out(args.out, ".png")
+    if args.before:
+        inputs = [
+            ("Before", checked_input(args.before)),
+            ("After", checked_input(args.file)),
+        ]
+    else:
+        inputs = [(None, checked_input(args.file))]
+    rows = [
+        (heading, pdf_pages(path, folder, f"row{index}"))
+        for index, (heading, path) in enumerate(inputs)
+    ]
+    counts = [len(pages) for _, pages in rows]
+    if 0 in counts:
+        die("a PDF has no pages")
+    if len(set(counts)) > 1:
+        die(
+            f"the PDFs have different page counts {counts}. Use the same number of pages."
+        )
+    # Roundsmith keeps each page at its own size. Pad every page to the largest, top-left, so each keeps its
+    # true scale when the sheet scales the tiles.
+    sizes = [probe(page) for _, pages in rows for page in pages]
+    width, height = max(w for w, _ in sizes), max(h for _, h in sizes)
+    items = []
+    for index, (_, pages) in enumerate(rows):
+        for number, page in enumerate(pages, start=1):
+            padded = os.path.join(folder, f"pad{index}-{number}.png")
+            run_ffmpeg(
+                ["-i", page],
+                ["-vf", f"pad={width}:{height}:0:0:{CANVAS}", "-frames:v", "1", padded],
+                folder,
+            )
+            items.append((padded, f"Page {number}"))
+    sheet = argparse.Namespace(
+        title=args.title,
+        cols=counts[0],
+        tile_width=args.tile_width,
+        faces=args.faces,
+        fps=args.fps,
+    )
+    make_sheet(
+        items,
+        sheet,
+        out,
+        folder,
+        row_heads=[heading for heading, _ in rows] if args.before else None,
+    )
 
 
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--font", default=FONT,
-                        help="fontconfig name, or a .ttf/.ttc file path")
+    common.add_argument(
+        "--font",
+        help="one face for all text: a fontconfig name or a .ttf path "
+        "(default: serif titles and captions, bold sans labels)",
+    )
     common.add_argument("--fps", type=int, default=10, help="frame rate for gif output")
     common.add_argument("--out", required=True, help="output .png or .gif")
+    common.add_argument(
+        "--theme",
+        default="paper",
+        choices=sorted(THEMES),
+        help="ground, ink, cut face, and default palette. Names are in themes.json",
+    )
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    pair = sub.add_parser("pair", parents=[common], help="before and after side by side")
+    pair = sub.add_parser(
+        "pair", parents=[common], help="before and after side by side"
+    )
     pair.add_argument("before")
     pair.add_argument("after")
-    pair.add_argument("--caption", required=True)
-    pair.add_argument("--size", type=int, default=22, help="caption font size in px")
+    pair.add_argument("--title", help="names the whole picture, above the caption")
+    pair.add_argument("--caption", required=True, help="says what changed")
+    pair.add_argument(
+        "--crop", help="W:H:X:Y in px, applied to both panels, for a close-up"
+    )
+    pair.add_argument(
+        "--size", type=int, help=f"caption font size in px (default: {CAPTION_PX})"
+    )
 
     gif = sub.add_parser("gif", parents=[common], help="caption bar on a video or gif")
     gif.add_argument("input")
     gif.add_argument("--caption", required=True)
     gif.add_argument("--width", type=int, default=480, help="output width in px")
-    gif.add_argument("--size", type=int, default=18, help="caption font size in px")
+    gif.add_argument(
+        "--size", type=int, help=f"caption font size in px (default: {CAPTION_PX})"
+    )
 
     sheet = sub.add_parser("sheet", parents=[common], help="labelled grid of views")
     sheet.add_argument("views", nargs="+", help="PATH or PATH=LABEL, one per tile")
     sheet.add_argument("--title", required=True)
     sheet.add_argument("--cols", type=int, default=3)
-    sheet.add_argument("--tile-width", type=int, default=480, help="tile width in px")
+    sheet.add_argument(
+        "--tile-width",
+        type=int,
+        help="tile width in px (default: the first image's width)",
+    )
 
-    stl = sub.add_parser("stl", parents=[common],
-                         help="STL rendered to six sides and iso, with labels")
+    stl = sub.add_parser(
+        "stl",
+        parents=[common],
+        help="STL rendered to six sides, iso, and iso cutaway, with labels",
+    )
     stl.add_argument("stl", help="the part, as a binary STL")
-    stl.add_argument("--before", help="the part before the change. Adds a BEFORE row.")
+    stl.add_argument("--before", help="the part before the change. Adds a Before row.")
     stl.add_argument("--title", required=True)
     stl.add_argument("--tile-width", type=int, default=240, help="tile width in px")
+    stl.add_argument(
+        "--palette",
+        help="colour set: rainbow, sunset, sea, meadow, berry, emerald, orchard, pine, or straw. "
+        "Default: the theme's own",
+    )
+    stl.add_argument(
+        "--palette-file",
+        help="your own colours: JSON with 3 hex anchors and an optional base colour",
+    )
+
+    drawing = sub.add_parser(
+        "drawing",
+        parents=[common],
+        help="SVG or DXF drawing, before and after, at one scale",
+    )
+    drawing.add_argument("file", help="the drawing after the change, as .svg or .dxf")
+    drawing.add_argument(
+        "--before",
+        help="the drawing before the change, as .svg or .dxf. Adds a Before tile.",
+    )
+    drawing.add_argument("--title", required=True)
+    drawing.add_argument("--tile-width", type=int, default=800, help="tile width in px")
+
+    pdf = sub.add_parser(
+        "pdf", parents=[common], help="PDF pages, before and after, at one scale"
+    )
+    pdf.add_argument("file", help="the PDF after the change")
+    pdf.add_argument("--before", help="the PDF before the change. Adds a Before row.")
+    pdf.add_argument("--title", required=True)
+    pdf.add_argument("--tile-width", type=int, default=600, help="tile width in px")
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    apply_theme(args.theme)
     need("ffmpeg")
     need("ffprobe")
-    commands = {"pair": cmd_pair, "gif": cmd_gif, "sheet": cmd_sheet, "stl": cmd_stl}
+    specs = {role: args.font for role in FONTS} if args.font else FONTS
+    args.faces = {role: font_file(spec) for role, spec in specs.items()}
+    commands = {
+        "pair": cmd_pair,
+        "gif": cmd_gif,
+        "sheet": cmd_sheet,
+        "stl": cmd_stl,
+        "drawing": cmd_drawing,
+        "pdf": cmd_pdf,
+    }
     with tempfile.TemporaryDirectory() as folder:
         commands[args.cmd](args, folder)
 
