@@ -34,6 +34,8 @@ starting point. If it is stricter than this skill, follow the repo guidance.
 | Users do something new, or the change adds an animation or a new flow. Example: a new control, a new step, a new gesture, a new animation. | A gif that shows the new behavior or animation. |
 | New screen | A gif that shows how a user reaches the screen, what the user does on it, and what happens next. |
 | Spatial object: a 3D model, an STL, a CAD part, or code that makes one | A contact sheet (section 5). |
+| Drawing file (SVG or DXF) that code writes. Example: a cut file changes. | A drawing sheet (`drawing` command). |
+| PDF that code writes. Example: a print template changes. | A PDF page sheet (`pdf` command). |
 
 ## 3. Capture before and after
 
@@ -104,7 +106,7 @@ starting point. If it is stricter than this skill, follow the repo guidance.
 The scripts are in `scripts/`, next to this file. In the examples, `$SKILL` is
 this skill's folder. In the lupin repo it is `skills/visual-evidence`. Run the
 examples from the repo root, in the repo's dev shell (`nix develop -c`). The
-shell has ffmpeg, ffprobe, node, fontconfig (fc-match), and the DejaVu faces.
+shell has ffmpeg, ffprobe, node, fontconfig (fc-match), the DejaVu faces, rsvg-convert (librsvg), and pdftoppm (poppler).
 
 Each command prints one line: `wrote PATH WIDTHxHEIGHT bytes=N`. Open the file
 and check it. The scripts do not judge the picture. Then attach the file to the
@@ -112,8 +114,8 @@ pull request (section 7).
 
 ### Rules for every command
 
-- `--out` must end in the type the command writes. `pair`, `sheet`, and `stl`
-  write `.png`. `gif` writes `.gif`. Another name stops the command before it
+- `--out` must end in the type the command writes. `pair`, `sheet`, `stl`,
+  `drawing`, and `pdf` write `.png`. `gif` writes `.gif`. Another name stops the command before it
   writes a file.
 - Text is measured with the font that draws it. A word too wide for one line is
   cut at the line edge, and the rest goes on the next line.
@@ -121,11 +123,11 @@ pull request (section 7).
   `text needs more than 4 lines at this width. Shorten it.` Shorten the text.
   Do not make the font smaller.
 - `--caption` is for `pair` and `gif`. A caption says what changed.
-  `--title` is for `pair`, `sheet`, and `stl`. A title names the whole picture.
+  `--title` is for `pair`, `sheet`, `stl`, `drawing`, and `pdf`. A title names the whole picture.
   Keep them separate.
 - Placement: `pair` puts the title at the top, then the caption, then the Before
-  and After labels. `gif` puts the caption at the bottom. `sheet` and `stl` put
-  the title at the top. A title has a hairline under it. Labels sit above their
+  and After labels. `gif` puts the caption at the bottom. `sheet`, `stl`, `drawing`, and
+  `pdf` put the title at the top. A title has a hairline under it. Labels sit above their
   image, never on it.
 - Text sizes are fixed in every command: title 44 px, caption 34 px, label 24 px.
   `--size` sets the caption size only.
@@ -140,6 +142,8 @@ pull request (section 7).
 | `gif` | A video or gif | `.gif` | `--caption` | `--width` px (480), `--size` caption px (34), `--fps` (10) |
 | `sheet` | Two or more PNG images | `.png` | `--title` | `--cols` (3), `--tile-width` px (the first image's width) |
 | `stl` | A binary STL. `--before` takes the old STL. | `.png` | `--title` | `--tile-width` px (240), `--palette` NAME (`rainbow`) or `--palette-file` FILE |
+| `drawing` | An SVG or DXF file. `--before` takes the old file. | `.png` | `--title` | `--tile-width` px (800) |
+| `pdf` | A PDF. `--before` takes the old PDF. | `.png` | `--title` | `--tile-width` px (600) |
 
 Titles use DejaVu Serif Bold, captions DejaVu Serif, and labels DejaVu Sans Mono Bold.
 Every command takes `--font` to set one face for all text: a fontconfig name, or
@@ -222,6 +226,55 @@ twice. Name the files `before.gif` and `after.gif`. Attach both (section 3).
    meets a farther one. It tints each part of the surface with a colour from the
    chosen palette, by its place in the part, so a spot keeps its colour from every view. Small detail such as an engraving can still be hard to see.
    Say so in the report if the detail does not show.
+
+### Drawing (SVG or DXF)
+
+Use this for a 2D drawing that code writes, such as a cut file.
+
+1. Give the command the new file. For a change, also pass the old file with
+   `--before`:
+
+   ```sh
+   nix develop -c python3 $SKILL/scripts/visual_evidence.py drawing \
+     cut-after.dxf --before cut-before.dxf --title "Cut pattern, before and after" --out drawing.png
+   ```
+
+- Both files use one scale. A size change shows.
+- The file must end in `.svg` or `.dxf`. Another type stops the command.
+- An SVG needs a `viewBox`. Without one, the command stops.
+- A DXF can contain only `LINE` and `LWPOLYLINE` entities. Another entity, such
+  as an arc or a circle, stops the command and names it.
+- DXF layers are drawn as follows:
+  - `CUT`: solid, in the title colour.
+  - `SEAM`: dashed, in the caption colour.
+  - `FOLD`: dotted, in the label colour.
+  - `LABELS`: solid, in the cut colour.
+  - Other layers, such as `ENGRAVE`: solid, in the caption colour.
+- Roundsmith writes these files with `writeDxf` in `src/core/export/dxf.ts`.
+- Without `--before`, the sheet has one tile. The tile is labeled with the file name.
+
+### PDF pages
+
+Use this for a PDF that code writes, such as a print template.
+
+1. Give the command the new PDF. For a change, also pass the old PDF with
+   `--before`:
+
+   ```sh
+   nix develop -c python3 $SKILL/scripts/visual_evidence.py pdf \
+     print-after.pdf --before print-before.pdf --title "Print template, before and after" --out pdf.png
+   ```
+
+- The command draws each page at 150 dpi. Each page is one tile, labeled
+  `Page 1`, `Page 2`, and so on.
+- Before and after need the same page count. Otherwise the command stops and
+  shows both counts.
+- Roundsmith keeps each page at its own size. The command pads each page to the
+  largest page size, from the top-left corner. So every page keeps its true
+  scale. Empty space at the right or bottom of a smaller page is padding, not
+  content.
+- Each PDF is one row, with the heading Before or After. Without `--before`, the
+  sheet has one row and no heading.
 
 ### Several views that are not STL (sheet)
 

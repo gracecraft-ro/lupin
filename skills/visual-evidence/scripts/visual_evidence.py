@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Add captions and layouts to visual evidence. Needs ffmpeg and ffprobe.
 
-Run it in the dev shell. It puts ffmpeg, fontconfig (fc-match), node, and the DejaVu faces on PATH:
+Run it in the dev shell. It puts ffmpeg, fontconfig (fc-match), node, rsvg-convert, and the DejaVu faces on PATH:
 
   nix develop -c python3 scripts/visual_evidence.py pair \
     before.png after.png --title "Save button" \
@@ -16,13 +16,21 @@ Run it in the dev shell. It puts ffmpeg, fontconfig (fc-match), node, and the De
   nix develop -c python3 scripts/visual_evidence.py stl \
     part-after.stl --before part-before.stl --title "Part, before and after" --out part.png
 
+  nix develop -c python3 scripts/visual_evidence.py drawing \
+    cut-after.dxf --before cut-before.dxf --title "Cut sheet, before and after" --out drawing.png
+
+  nix develop -c python3 scripts/visual_evidence.py pdf \
+    after.pdf --before before.pdf --title "Print, before and after" --out pdf.png
+
 Each command prints one line: wrote PATH WIDTHxHEIGHT bytes=N
 Open the file and check it. The script does not judge the picture.
 """
 
 import argparse
+import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -412,7 +420,8 @@ def make_sheet(items, args, out, folder, row_heads=None):
         for index in range(len(items))
     )
     tiles = "".join(f"[t{index}]" for index in range(len(items)))
-    body = f"{tiles}xstack=inputs={len(items)}:layout={layout}:fill={CANVAS}"
+    # xstack needs two or more inputs. One tile passes through.
+    body = f"{tiles}xstack=inputs={len(items)}:layout={layout}:fill={CANVAS}" if len(items) > 1 else f"{tiles}null"
     chains.append(",".join([body, canvas_pad(top), *head]))
     inputs = [arg for path, _ in items for arg in ("-i", path)]
     run_ffmpeg(inputs, output_args(";".join(chains), out, args.fps), folder)
@@ -441,6 +450,136 @@ def render_views(stl, folder, frame=None, palette=None, palette_file=None, theme
     return [(os.path.join(folder, f"{stem}-{name}.png"), label) for name, label in STL_VIEWS]
 
 
+# Roundsmith writes LINE and LWPOLYLINE. Any other entity stops the command.
+DXF_ENTITIES = ("LINE", "LWPOLYLINE")
+# layer: (theme colour key, dash pattern). Other layers use the caption colour, solid.
+DXF_STYLE = {"CUT": ("title", None), "SEAM": ("caption", "6 4"), "FOLD": ("label", "2 3"), "LABELS": ("cut", None)}
+DRAWING_PAD = 0.05  # margin round a drawing, as a share of its size
+SVG_ROOT = re.compile(r"<svg\b[^>]*>")
+
+
+def dxf_entities(path):
+    """Return (type, [(code, value), ...]) for each entity in the ENTITIES section."""
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        lines = handle.read().splitlines()
+    entities, section, name_next = [], None, False
+    for i in range(0, len(lines) - 1, 2):
+        code, value = lines[i].strip(), lines[i + 1].strip()
+        if code == "0":
+            name_next = value == "SECTION"
+            if value == "ENDSEC":
+                section = None
+            elif value == "EOF":
+                break
+            elif section == "ENTITIES":
+                entities.append((value, []))
+        elif code == "2" and name_next:
+            section, name_next = value, False
+        elif section == "ENTITIES" and entities:
+            entities[-1][1].append((code, value))
+    return entities
+
+
+def dxf_paths(path):
+    """Return (layer, points, closed) for each LINE or LWPOLYLINE in a DXF."""
+    paths = []
+    for kind, data in dxf_entities(path):
+        if kind not in DXF_ENTITIES:
+            die(f"DXF entity {kind} is not supported. Supported: {', '.join(DXF_ENTITIES)}")
+        layer = next((value for code, value in data if code == "8"), "0")
+        if kind == "LINE":
+            coords = {code: float(value) for code, value in data if code in ("10", "20", "11", "21")}
+            paths.append((layer, [(coords["10"], coords["20"]), (coords["11"], coords["21"])], False))
+        else:
+            xs = [float(value) for code, value in data if code == "10"]
+            ys = [float(value) for code, value in data if code == "20"]
+            closed = bool(int(next((value for code, value in data if code == "70"), "0")) & 1)
+            paths.append((layer, list(zip(xs, ys)), closed))
+    return paths
+
+
+def dxf_svg(path, theme):
+    """Return an SVG of a DXF. DXF is y up, so the drawing is flipped to the SVG's y down."""
+    paths = dxf_paths(path)
+    if not paths:
+        die("the DXF has no LINE or LWPOLYLINE entities")
+    xs = [x for _, points, _ in paths for x, _ in points]
+    ys = [-y for _, points, _ in paths for _, y in points]
+    span = max(max(xs) - min(xs), max(ys) - min(ys)) or 1
+    pad = span * DRAWING_PAD
+    view = " ".join(f"{v:.4f}" for v in (min(xs) - pad, min(ys) - pad,
+                                         max(xs) - min(xs) + 2 * pad, max(ys) - min(ys) + 2 * pad))
+    by_layer = {}
+    for layer, points, closed in paths:
+        d = "M" + " L".join(f"{x:.4f} {-y:.4f}" for x, y in points) + (" Z" if closed else "")
+        by_layer.setdefault(layer, []).append(d)
+    shapes = []
+    for layer, ds in by_layer.items():
+        key, dash = DXF_STYLE.get(layer, ("caption", None))
+        dash_attr = f' stroke-dasharray="{dash}"' if dash else ""
+        shapes.append(f'<path fill="none" stroke="{theme[key]}" stroke-width="{span / 500:.4f}"'
+                      f'{dash_attr} d="{" ".join(ds)}"/>')
+    return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{view}">' + "".join(shapes) + "</svg>"
+
+
+def drawing_svg(path, theme):
+    """Return the SVG text of a .svg or .dxf file."""
+    if path.lower().endswith(".dxf"):
+        return dxf_svg(path, theme)
+    if path.lower().endswith(".svg"):
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    die("drawing takes an .svg or a .dxf file")
+
+
+def svg_view(text):
+    """Return the viewBox of an SVG as (x, y, width, height)."""
+    root = SVG_ROOT.search(text)
+    match = re.search(r'viewBox="([^"]*)"', root.group(0)) if root else None
+    if not match:
+        die("the SVG has no viewBox. Add one, so its scale is known.")
+    return tuple(float(value) for value in re.split(r"[\s,]+", match.group(1).strip()))
+
+
+def fit_view(text, view):
+    """Return the SVG with the shared viewBox and no width or height, so every file has one scale."""
+    root = SVG_ROOT.search(text)
+    tag = re.sub(r'\s(?:width|height|viewBox)="[^"]*"', "", root.group(0))
+    return text[:root.start()] + tag.replace("<svg", f'<svg viewBox="{view}"', 1) + text[root.end():]
+
+
+def cmd_drawing(args, folder):
+    need("rsvg-convert")
+    out = checked_out(args.out, ".png")
+    theme = THEMES[args.theme]
+    if args.before:
+        inputs = [(checked_input(args.before), "Before"), (checked_input(args.file), "After")]
+    else:
+        inputs = [(checked_input(args.file), os.path.basename(args.file))]
+    texts = [drawing_svg(path, theme) for path, _ in inputs]
+    views = [svg_view(text) for text in texts]
+    left = min(v[0] for v in views)
+    top = min(v[1] for v in views)
+    right = max(v[0] + v[2] for v in views)
+    bottom = max(v[1] + v[3] for v in views)
+    view = " ".join(f"{v:.4f}" for v in (left, top, right - left, bottom - top))  # one viewBox, one scale
+    items = []
+    for index, (text, (_, label)) in enumerate(zip(texts, inputs)):
+        svg = os.path.join(folder, f"drawing{index}.svg")
+        png = os.path.join(folder, f"drawing{index}.png")
+        with open(svg, "w", encoding="utf-8") as handle:
+            handle.write(fit_view(text, view))
+        result = subprocess.run(["rsvg-convert", "--width", str(args.tile_width),
+                                 "--background-color", theme["canvas"], "--output", png, svg],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            die("rsvg-convert failed:\n" + result.stderr.strip())
+        items.append((png, label))
+    sheet = argparse.Namespace(title=args.title, cols=len(items), tile_width=args.tile_width,
+                               faces=args.faces, fps=args.fps)
+    make_sheet(items, sheet, out, folder)
+
+
 def cmd_stl(args, folder):
     need("node")
     new = checked_input(args.stl)
@@ -462,6 +601,44 @@ def cmd_stl(args, folder):
     sheet = argparse.Namespace(title=args.title, cols=8, tile_width=args.tile_width,
                                faces=args.faces, fps=args.fps)
     make_sheet(items, sheet, out, folder, row_heads=["Before", "After"] if args.before else None)
+
+
+def pdf_pages(path, folder, name):
+    """Render each page of a PDF at 150 dpi. Return the PNG paths in page order."""
+    prefix = os.path.join(folder, name)
+    result = subprocess.run(["pdftoppm", "-r", "150", "-png", path, prefix], capture_output=True, text=True)
+    if result.returncode != 0:
+        die("pdftoppm failed:\n" + result.stderr.strip())
+    pages = glob.glob(glob.escape(prefix) + "-*.png")
+    return sorted(pages, key=lambda page: int(re.search(r"-(\d+)\.png$", page).group(1)))
+
+
+def cmd_pdf(args, folder):
+    need("pdftoppm")
+    out = checked_out(args.out, ".png")
+    if args.before:
+        inputs = [("Before", checked_input(args.before)), ("After", checked_input(args.file))]
+    else:
+        inputs = [(None, checked_input(args.file))]
+    rows = [(heading, pdf_pages(path, folder, f"row{index}")) for index, (heading, path) in enumerate(inputs)]
+    counts = [len(pages) for _, pages in rows]
+    if 0 in counts:
+        die("a PDF has no pages")
+    if len(set(counts)) > 1:
+        die(f"the PDFs have different page counts {counts}. Use the same number of pages.")
+    # Roundsmith keeps each page at its own size. Pad every page to the largest, top-left, so each keeps its
+    # true scale when the sheet scales the tiles.
+    sizes = [probe(page) for _, pages in rows for page in pages]
+    width, height = max(w for w, _ in sizes), max(h for _, h in sizes)
+    items = []
+    for index, (_, pages) in enumerate(rows):
+        for number, page in enumerate(pages, start=1):
+            padded = os.path.join(folder, f"pad{index}-{number}.png")
+            run_ffmpeg(["-i", page], ["-vf", f"pad={width}:{height}:0:0:{CANVAS}", "-frames:v", "1", padded], folder)
+            items.append((padded, f"Page {number}"))
+    sheet = argparse.Namespace(title=args.title, cols=counts[0], tile_width=args.tile_width,
+                               faces=args.faces, fps=args.fps)
+    make_sheet(items, sheet, out, folder, row_heads=[heading for heading, _ in rows] if args.before else None)
 
 
 def build_parser():
@@ -508,6 +685,19 @@ def build_parser():
                           "Default: the theme's own")
     stl.add_argument("--palette-file",
                      help="your own colours: JSON with 3 hex anchors and an optional base colour")
+
+    drawing = sub.add_parser("drawing", parents=[common],
+                             help="SVG or DXF drawing, before and after, at one scale")
+    drawing.add_argument("file", help="the drawing after the change, as .svg or .dxf")
+    drawing.add_argument("--before", help="the drawing before the change, as .svg or .dxf. Adds a Before tile.")
+    drawing.add_argument("--title", required=True)
+    drawing.add_argument("--tile-width", type=int, default=800, help="tile width in px")
+
+    pdf = sub.add_parser("pdf", parents=[common], help="PDF pages, before and after, at one scale")
+    pdf.add_argument("file", help="the PDF after the change")
+    pdf.add_argument("--before", help="the PDF before the change. Adds a Before row.")
+    pdf.add_argument("--title", required=True)
+    pdf.add_argument("--tile-width", type=int, default=600, help="tile width in px")
     return parser
 
 
@@ -518,7 +708,7 @@ def main(argv=None):
     need("ffprobe")
     specs = {role: args.font for role in FONTS} if args.font else FONTS
     args.faces = {role: font_file(spec) for role, spec in specs.items()}
-    commands = {"pair": cmd_pair, "gif": cmd_gif, "sheet": cmd_sheet, "stl": cmd_stl}
+    commands = {"pair": cmd_pair, "gif": cmd_gif, "sheet": cmd_sheet, "stl": cmd_stl, "drawing": cmd_drawing, "pdf": cmd_pdf}
     with tempfile.TemporaryDirectory() as folder:
         commands[args.cmd](args, folder)
 

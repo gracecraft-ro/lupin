@@ -25,6 +25,8 @@ CUT_FACE = (236, 166, 112)  # the renderer's colour for the inside of a cut
 
 HAVE_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 HAVE_NODE = shutil.which("node") is not None
+HAVE_RSVG = shutil.which("rsvg-convert") is not None
+HAVE_PDFTOPPM = shutil.which("pdftoppm") is not None
 
 spec = importlib.util.spec_from_file_location("visual_evidence", TOOL)
 ve = importlib.util.module_from_spec(spec)
@@ -508,6 +510,132 @@ class RenderLookTests(unittest.TestCase):
 
         self.assertEqual(darker("cube"), 0)
         self.assertGreater(darker("boss"), 100)
+
+
+def write_dxf(path, entities):
+    """Write a DXF whose ENTITIES section holds entities, one code or value per list item."""
+    lines = ["0", "SECTION", "2", "ENTITIES", *entities, "0", "ENDSEC", "0", "EOF"]
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+    return path
+
+
+def rect_entities(width):
+    """LINE entities for a width x 50 rectangle on the CUT layer."""
+    corners = [(0, 0), (width, 0), (width, 50), (0, 50)]
+    out = []
+    for (x1, y1), (x2, y2) in zip(corners, corners[1:] + corners[:1]):
+        out += ["0", "LINE", "8", "CUT", "10", str(x1), "20", str(y1), "11", str(x2), "21", str(y2)]
+    return out
+
+
+class DrawingTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.folder)
+
+    def test_closed_polyline_keeps_its_layer_and_closed_flag(self):
+        path = write_dxf(os.path.join(self.folder, "poly.dxf"), [
+            "0", "LWPOLYLINE", "8", "LABELS", "90", "3", "70", "1",
+            "10", "0", "20", "0", "10", "5", "20", "0", "10", "0", "20", "5"])
+        ((layer, points, closed),) = ve.dxf_paths(path)
+        self.assertEqual((layer, len(points), closed), ("LABELS", 3, True))
+
+    def test_unsupported_dxf_entity_stops_with_its_name(self):
+        path = write_dxf(os.path.join(self.folder, "circle.dxf"),
+                         ["0", "CIRCLE", "8", "CUT", "10", "0", "20", "0", "40", "5"])
+        with self.assertRaises(SystemExit) as caught:
+            ve.dxf_paths(path)
+        self.assertIn("DXF entity CIRCLE is not supported", str(caught.exception))
+
+    def test_svg_without_viewbox_stops(self):
+        with self.assertRaises(SystemExit) as caught:
+            ve.svg_view('<svg width="10" height="10"></svg>')
+        self.assertIn("no viewBox", str(caught.exception))
+
+    def test_fit_view_gives_one_viewbox_and_no_size(self):
+        text = '<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="50mm" viewBox="0 0 100 50"></svg>'
+        self.assertEqual(ve.svg_view(text), (0.0, 0.0, 100.0, 50.0))
+        fitted = ve.fit_view(text, "0 0 120 50")
+        self.assertIn('viewBox="0 0 120 50"', fitted)
+        self.assertNotIn("mm", fitted)
+
+    @unittest.skipUnless(HAVE_RSVG and HAVE_FFMPEG, "needs rsvg-convert and ffmpeg")
+    def test_dxf_pair_is_two_tiles_at_one_scale(self):
+        before = write_dxf(os.path.join(self.folder, "before.dxf"), rect_entities(100))
+        after = write_dxf(os.path.join(self.folder, "after.dxf"), rect_entities(120))
+        out = os.path.join(self.folder, "drawing.png")
+        result = run_tool("drawing", after, "--before", before, "--title", "Rect",
+                          "--tile-width", "300", "--out", out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Two 302 px frames (300 px tile + border), 24 px apart, with 24 px margins: 302*2 + 24 + 48 = 676.
+        self.assertEqual(ve.probe(out)[0], 676)
+
+
+def write_pdf(path, sizes):
+    """Write a PDF with one page per (width, height) in points. Each page has a black square."""
+    kids = " ".join(f"{3 + 2 * i} 0 R" for i in range(len(sizes)))
+    objects = ["<< /Type /Catalog /Pages 2 0 R >>", f"<< /Type /Pages /Kids [{kids}] /Count {len(sizes)} >>"]
+    for i, (width, height) in enumerate(sizes):
+        content = f"0 0 0 rg 20 20 {width - 40} {height - 40} re f"
+        objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] /Contents {4 + 2 * i} 0 R >>")
+        objects.append(f"<< /Length {len(content)} >>\nstream\n{content}\nendstream")
+    data = b"%PDF-1.4\n"
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(data))
+        data += f"{number} 0 obj\n{body}\nendobj\n".encode()
+    xref = len(data)
+    data += f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode()
+    data += "".join(f"{offset:010d} 00000 n \n" for offset in offsets).encode()
+    data += f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    with open(path, "wb") as handle:
+        handle.write(data)
+    return path
+
+
+@unittest.skipUnless(HAVE_PDFTOPPM and HAVE_FFMPEG, "needs pdftoppm and ffmpeg")
+class PdfTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.folder)
+
+    def test_pdf_pages_are_one_tile_each(self):
+        after = write_pdf(os.path.join(self.folder, "after.pdf"), [(300, 200), (300, 200)])
+        out = os.path.join(self.folder, "pdf.png")
+        result = run_tool("pdf", after, "--title", "Print", "--tile-width", "300", "--out", out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Two 302 px frames, 24 px apart, with 24 px margins: 302*2 + 24 + 48 = 676.
+        self.assertEqual(ve.probe(out)[0], 676)
+
+    def test_pdf_pair_with_different_page_sizes_is_one_row_each(self):
+        before = write_pdf(os.path.join(self.folder, "before.pdf"), [(300, 200)])
+        after = write_pdf(os.path.join(self.folder, "after.pdf"), [(400, 200)])
+        out = os.path.join(self.folder, "pdf.png")
+        result = run_tool("pdf", after, "--before", before, "--title", "Print", "--tile-width", "300", "--out", out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # One page per row. Pages are padded to the larger size, so one 302 px frame: 302 + 48 = 350.
+        self.assertEqual(ve.probe(out)[0], 350)
+
+    def test_one_page_pdf_without_before_renders(self):
+        after = write_pdf(os.path.join(self.folder, "after.pdf"), [(300, 200)])
+        out = os.path.join(self.folder, "pdf.png")
+        result = run_tool("pdf", after, "--title", "Print", "--tile-width", "300", "--out", out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # One 302 px frame with 24 px margins: 302 + 48 = 350.
+        self.assertEqual(ve.probe(out)[0], 350)
+
+    def test_pdf_page_counts_must_match(self):
+        before = write_pdf(os.path.join(self.folder, "before.pdf"), [(300, 200)])
+        after = write_pdf(os.path.join(self.folder, "after.pdf"), [(300, 200), (300, 200)])
+        result = run_tool("pdf", after, "--before", before, "--title", "Print",
+                          "--out", os.path.join(self.folder, "pdf.png"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("different page counts", result.stderr)
 
 
 if __name__ == "__main__":
