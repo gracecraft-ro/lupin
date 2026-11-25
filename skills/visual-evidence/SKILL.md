@@ -6,7 +6,7 @@ description: >-
   before and after, and how to review the evidence. Use when a change affects
   anything a person can see, when you capture evidence for a pull request, and
   when you review that evidence.
-compatibility: Needs the repo's own capture tools. The upload steps are in the ship skill.
+compatibility: Needs the repo's own capture tools. The gate needs GitHub CLI. The upload steps are in the ship skill.
 ---
 
 # Visual evidence
@@ -15,6 +15,35 @@ Use this skill with `ship` (upload steps) and `code-review` (review checks).
 
 If the repo has screenshot or gif guidance, read it first. Use it as the
 starting point. If it is stricter than this skill, follow the repo guidance.
+
+## Gate the pull request
+
+A visual pull request carries its pictures in a comment on the pull request. A
+picture on the linked issue does not count. The reader must not need a second
+tab.
+
+- The pull request body starts with one `User impact:` line. It says what a
+  user now sees or does differently, in one sentence. A pull request with no
+  user-visible change says why.
+- Run the checker before a review, and after each new head:
+
+```sh
+$SKILL/scripts/pr-evidence-check.sh --repo OWNER/REPO [PR ...]
+```
+
+- It prints `ok`, `FAIL`, or `n/a` for each pull request. Exit 1 means at
+  least one pull request failed.
+- The checker reads the commits of the pull request, not its whole diff. It
+  prints `n/a` when no file that those commits change is visual. A stacked pull
+  request therefore passes on its own work, not on its base. No sentence in the
+  body can exempt a pull request. When a base pull request owns the pictures,
+  say which one in the body; the stacked pull request still needs its own
+  pictures when its own commits change a visual file.
+- A repository with other visual paths passes `--visual-glob REGEX`, one per
+  path group. The default covers common web paths and the .svelte, .vue, .css,
+  .scss, and .html files.
+- A `FAIL` line is a BLOCKING finding in a review, and an order back to the
+  author in a loop cycle.
 
 ## 1. Decide if the change is visual
 
@@ -85,6 +114,10 @@ starting point. If it is stricter than this skill, follow the repo guidance.
 
 - Attach each file to the pull request. Do not give only a local path. The
   reader may not be able to open a scratch folder or a `/tmp` path.
+- GitHub accepts these attachments: png, jpg, jpeg, gif, webp, svg, mp4, mov,
+  and webm. It refuses `.html`. For a page preview, put the built HTML in a
+  collapsed block of a comment, or in a gist, and label the screenshots as the
+  reference.
 - Post each visual change to the pull request when it happens. Use one comment
   per change. Say what changed and why.
 - List each file and what it shows.
@@ -111,6 +144,11 @@ shell has ffmpeg, ffprobe, node, fontconfig (fc-match), the DejaVu faces, rsvg-c
 Each command prints one line: `wrote PATH WIDTHxHEIGHT bytes=N`. Open the file
 and check it. The scripts do not judge the picture. Then attach the file to the
 pull request (section 7).
+
+`pr-evidence-check.sh` is the one exception. It is the gate: it reads the GitHub
+state of a pull request and prints `ok`, `FAIL`, or `n/a`. It writes no file.
+It needs GitHub CLI, and `GH_TOKEN` or `GH_TOKEN_FILE`. See "Gate the pull
+request" above.
 
 ### Rules for every command
 

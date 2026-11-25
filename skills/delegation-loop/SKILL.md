@@ -2,12 +2,13 @@
 name: delegation-loop
 description: >-
   Orchestrate task execution loops using Lupin. Use this skill when starting or
-continuing an issue loop, selecting work for agents, watching a fleet, or
+  continuing an issue loop, selecting work for agents, watching a fleet, or
   handing off a loop run.
 compatibility: >-
   Requires Lupin, GitHub CLI, an agent runner, and the `delegation-loop`,
   `triage`, `ship`, `code-review`, `handoff`, and `ui-pressure-test` skills on
-  each worker host. Redis is required for fleet claims.
+  each worker host. Redis is required for fleet claims. The scripts in
+  `scripts/` need GitHub CLI and Python 3.
 ---
 
 # Run a Lupin delegation loop
@@ -40,6 +41,24 @@ handoff record. For a worker in a Herdr pane, also record its agent name,
 workspace ID, pane ID, tab ID, and cwd (`herdr agent list` shows them).
 
 Use your tokens as efficiently as possible and control your context; have economical subagents do any tangential investigations or code changes.
+
+## Owner asks come first
+
+An owner ask is a comment, review, or inline comment by the owner that no later
+`Loop:` comment cites. A sync merge does not answer an ask: an ask stays open
+until a commit answers it.
+
+Run the checker each cycle:
+
+```sh
+python3 <checkout>/skills/delegation-loop/scripts/owner-asks.py \
+  --repo OWNER/REPO --owner LOGIN
+```
+
+It prints one `UNANSWERED` line per ask and exits 1. Dispatch a fixer for each
+line in the same cycle. The fix posts one `Loop:` comment that cites the owner
+comment id and names the commit that answers it. A reply with no commit does not
+count. Report each open ask in the hourly report.
 
 ## Pull requests come first
 
@@ -212,6 +231,19 @@ may differ.
 
 ## Claim and label work
 
+### Before a start
+
+Do not start work on an issue that has any of these. Check each one and paste
+both searches in the brief:
+
+- An open pull request that names it:
+  `gh pr list --repo OWNER/REPO --state open --search <N>`.
+- A merged fix.
+- The `claimed` label: `gh issue view N --repo OWNER/REPO --json labels`.
+
+A claimed issue belongs to its claimant. If no honest candidate remains, spend
+the time on reviews and gates. Duplicate work costs more than unused quota.
+
 Use the same target and holder to claim, renew, and release work. The target is
 always `OWNER/REPO#N` with the full repo name. Never pass a bare number. Claim
 an issue when a worker starts its implementation. The orchestrator claims a PR
@@ -290,6 +322,11 @@ See "Attach screenshots to the PR" in the `ship` skill. Tell implementation
 workers to follow `/ship` and `AGENTS.md`, rule 1 under "Pull requests, review,
 and handoff". Do not repeat the `/ship` implementation checklist.
 
+A brief never states a verdict. Do not write "approve unless" or "expect an
+approval". The reviewer decides. Findings are BLOCKING or FOLLOW-UP. A BLOCKING
+finding names an input, the output it gives, and the output it must give. Only
+BLOCKING findings go to a fixer.
+
 When an issue makes a major change to a web app's user interface or key user
 journey, and a preview is ready, dispatch a separate QA task with
 `ui-pressure-test`. Keep the test agent read-only for source code, with its own
@@ -313,10 +350,40 @@ worker, it then runs `herdr worktree open --path PATH --cwd "$PWD"`.
 `--trust-repository` gives Git trust for one command. Use it only after the
 owner verified the repository. Do not use it to retry a failed worktree command.
 
+## Shared dependency directory
+
+Read-only workers can share one dependency directory by symlink. A shared
+directory saves time and disk. It is also easy to destroy:
+
+- Remove a link only after you prove it is a link:
+  `test -L node_modules && unlink node_modules`.
+- Never run `rm -rf` on the link. `rm -rf node_modules/` with a trailing slash
+  deletes the shared directory that every other worker uses.
+- Never run the package manager install through the link. Run the install in a
+  worktree that has a real directory.
+- When a pane closes and its pull request has no pending work, remove the
+  directory in that worktree only: `rm -rf <worktree>/node_modules`.
+- Keep a copy of the shared directory. Copy it back only after you confirm the
+  directory is short of files.
+
 ## Communicate with workers
 
 Use the agent runner's prompt and message tools for its own workers. Lupin's
 remote commands control loops. They do not send free-form messages.
+
+### Fleet roles
+
+A loop starts five kinds of agent:
+
+- lens: reviews one pull request head.
+- build: implements an issue or a fix.
+- sync: merges the upstream branch into a pull request.
+- fix: answers one round of review findings.
+- persist: copies loop rules into a skill.
+
+A purposes file gives each one a short purpose. The key is a number or an agent
+name, and the purpose follows it on the line. The `herdr` skill holds the pane
+and name rules, and the format of that file.
 
 ### Talk to an agent in a Herdr pane
 
@@ -361,7 +428,10 @@ herdr pane read <pane_id> --source recent-unwrapped --lines 120
 ```
 
 Address panes by pane ID, or with `--current` for your own pane. Never use
-another client's focused pane. To start a worker in a Herdr pane, make the pane
+another client's focused pane. Place and name worker panes as the `herdr` skill
+says.
+
+To start a worker in a Herdr pane, make the pane
 first, then start the agent in it. `agent start` needs a shell that waits at its
 prompt. It never makes, splits, or moves a pane:
 
@@ -396,6 +466,25 @@ loop with the session name:
 ```sh
 herdr --session lupin-loops agent list
 ```
+
+## Inspect your own workers
+
+Never report a worker summary as a fact. Check the artifact:
+
+- A push: read the head SHA and the diff.
+- A test count: run one scoped command again.
+- A picture or video: open it, and run `cmp` on each before and after pair.
+- A review: run the review lint from the `code-review` skill.
+
+Read the transcript tail when a worker stops: the last real output, the errors,
+and the git state. A count of tool calls shows no progress.
+
+Each cycle, pick one finished worker at random, not the newest. Re-check one
+claim of its report from scratch. Record the worker, the claim, and the result
+in the status block. A claim that fails goes back to the worker as a fix.
+
+Cancel or re-brief a worker that loops, stalls for 30 minutes, or claims what
+the artifact does not show. Say so in the report.
 
 ## Delegate PR review
 
@@ -658,6 +747,26 @@ true:
 Then run `/handoff`. State the exact next action and any missing owner input.
 Before that, do not ask the owner whether to go on. Never write "tell me if you
 want me to continue" or "if you want me to".
+
+## Scripts
+
+`$SKILL` is this skill's folder (`skills/delegation-loop`). The scripts take a
+repository and a path as arguments. They print a line per result and exit
+nonzero on a failure.
+
+| Script | Job |
+| --- | --- |
+| `$SKILL/scripts/owner-asks.py --repo OWNER/REPO --owner LOGIN` | List owner comments that no `Loop:` comment cites. Exit 1 when one is open. |
+| `$SKILL/scripts/quota-check.sh` | Print SPEND, HOLD, STOP, PACE, and MEM lines. |
+| `$SKILL/scripts/spend-log.sh` | Append one quota sample and print the burn per hour. |
+| `$SKILL/scripts/pr-watch.sh --repo OWNER/REPO` | Print a line when a head or its newest review changes. |
+| `$SKILL/scripts/reap-vite.sh --keep PATH` | Kill leaked dev servers older than 6 hours. Use `--dry-run` first. |
+
+Every script that calls GitHub reads the token from `GH_TOKEN`, or from the file
+named by `GH_TOKEN_FILE`. Pass `--help` for the other flags. Before you start a
+new worker, run `quota-check.sh` and check the memory and disk lines. Stop new
+starts when the memory line says LOW or the disk is short of the repository's
+stated floor.
 
 ## Superloop
 
