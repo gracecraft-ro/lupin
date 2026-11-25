@@ -83,12 +83,16 @@ unavailable. Then the roadmap shows no ledger annotations and a warning. The
 roadmap ignores `.loop/loop-state.json`.
 
 `review-route --prefetch` fetches the body and comments of an issue or PR. For a
-PR, it also fetches the reviews and a diff stat (files, additions, deletions; no
-diff text). It prints one `brief_markdown` section per item. `--json` keeps only
-the fields a worker reads. Comments keep `author.login`, `createdAt`, and
-`body`. Reviews keep `author.login`, `state`, `submittedAt`, and `body`. The
-item keeps `kind`, `body`, and `diff_stat`. A number that is neither an issue
-nor a PR gets `{"error": ...}` in its own slot.
+PR, it also fetches the title, the head commit (the full ID of the newest
+commit), the CI checks, the reviews, and a diff stat (files, additions,
+deletions; no diff text). It prints one `brief_markdown` section per item.
+`--json` keeps only the fields a worker reads. Comments keep `author.login`,
+`createdAt`, and `body`. Reviews keep `author.login`, `state`, `submittedAt`,
+and `body`. Checks keep `name` and `state`, and only the newest run of each
+name. A PR item keeps `kind`, `title`, `head_sha`, `body`, `comments`,
+`reviews`, `diff_stat`, and `checks`. An issue item keeps `kind`, `body`, and
+`comments`. A number that is neither an issue nor a PR gets `{"error": ...}` in
+its own slot.
 
 `dispatch OWNER/REPO#N` claims the item. It writes a markdown brief under the
 loop state directory's `notes/`. The brief has the body and every comment. For a
@@ -516,7 +520,6 @@ does not appear. The serving user must be able to read each checkout. If another
 user owns a checkout, Git reports "dubious ownership", and the page shows no
 issues. Add the checkout to Git's `safe.directory` list.
 
-
 ## Dashboard mockups
 
 `docs/ui.dc.html` has the dashboard mockups. Read the matching section before
@@ -597,9 +600,11 @@ merges on `origin`. The loop policy is in `docs/delegation-loop.md`.
    fork branch as head:
 
    <!-- markdownlint-disable MD013 -->
+
    ```sh
    gh pr create --repo OWNER/REPO --base main --head FORK_OWNER:<branch> --title "<title>" --body "Closes #N"
    ```
+
    <!-- markdownlint-enable MD013 -->
 
    The PR body has one line per issue. Use `Closes #N` when the PR completes the
@@ -612,7 +617,8 @@ merges on `origin`. The loop policy is in `docs/delegation-loop.md`.
 
    Stage every file you change before you commit it. If you edit a file after
    `git add`, run `git add FILE` again. After the commit, run `git diff --stat
-   HEAD`. It must print nothing.
+HEAD`. It must print nothing.
+
 2. A reviewer who is not the author runs `/code-review`. A PR is ready for
    production when its latest formal review approves the current head SHA
    (`commit_id`). The repo's full gate, as its `AGENTS.md` defines it, must also
@@ -653,9 +659,9 @@ sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
 - Never bind to `0.0.0.0`. To bind is to choose the address a server listens on.
 - Do not point the preview at the fleet Redis. Start a scratch Redis, for
   example `nix develop --command redis-server --port 6399 --bind 127.0.0.1
-  --save ""`. Check that port `6399` is free with `ss -ltn` before you start it.
+--save ""`. Check that port `6399` is free with `ss -ltn` before you start it.
   Redis is not on the PATH outside the dev shell, so run it through `nix
-  develop`. The start command replaces inherited `LUPIN_REDIS_*` values with
+develop`. The start command replaces inherited `LUPIN_REDIS_*` values with
   scratch ones.
 - Do not use the start, stop, or run controls on this dashboard. New runs use
   the `lupin-loops` session. Older loops may use an old session until they stop.
@@ -673,10 +679,12 @@ sys.exit(main(["serve", "--bind", "127.0.0.1", "--port", "8789"]))
    for that one command only. Do not run `unset GH_TOKEN`:
 
    <!-- markdownlint-disable MD013 -->
+
    ```sh
    env -u GH_TOKEN git push -u fork <branch>
    env -u GH_TOKEN gh pr create --repo OWNER/REPO --base main --head FORK_OWNER:<branch> --title "<title>" --body-file <file>
    ```
+
    <!-- markdownlint-enable MD013 -->
 
 4. **Do not run `rm` with a glob.** A glob is a pattern such as `*`. Give each
