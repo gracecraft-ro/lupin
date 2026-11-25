@@ -50,10 +50,14 @@ def gh_env(args):
 
 
 def make_gh(env):
+    """Run gh. A failed read is fatal: a clean board must never hide a failed read."""
+
     def gh(*a):
         result = subprocess.run(["gh", *a], capture_output=True, text=True, env=env)
         if result.returncode != 0:
-            print(result.stderr.strip(), file=sys.stderr)
+            detail = result.stderr.strip() or result.stdout.strip() or "no output"
+            print(f"owner-asks.py: gh {' '.join(a)} failed: {detail}", file=sys.stderr)
+            raise SystemExit(2)
         return result.stdout
 
     return gh
@@ -67,7 +71,7 @@ def paged(gh, path):
         return json.loads(out)
     except json.JSONDecodeError:
         print(f"owner-asks.py: cannot read {path}", file=sys.stderr)
-        sys.exit(2)
+        raise SystemExit(2)
 
 
 def own_text(body):

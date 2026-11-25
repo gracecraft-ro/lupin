@@ -111,6 +111,15 @@ for n in "${prs[@]}"; do
   body=$(gh pr view "$n" --repo "$repo" --json body --jq .body) || body=""
   issue_only=$(printf '%s' "$body" | grep -ciE 'attached (in|on) the issue|issue comment')
   impact=$(printf '%s' "$body" | grep -ciE '^User impact:')
+  # Exemption: a pull request stacked on another pull request. Its body says the
+  # visual files in the diff come from the base, it names the user impact, and it
+  # adds no picture of its own.
+  if printf '%s' "$body" | grep -qiE 'visual files in the diff (come from|are)|^Evidence: not needed'; then
+    if [ "$impact" -ge 1 ] && [ "$cnt" -lt "$min_pictures" ]; then
+      echo "exempt #$n (stacked: body says the visual files come from the base)"
+      continue
+    fi
+  fi
   msg=""
   [ "$cnt" -lt "$min_pictures" ] && msg="$msg pictures-on-the-PR=$cnt(need $min_pictures)"
   [ "$issue_only" -gt 0 ] && msg="$msg body-says-pictures-are-on-the-issue"
