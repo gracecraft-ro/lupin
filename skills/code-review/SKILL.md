@@ -47,7 +47,7 @@ Use a full independent review process. You may dispatch subagents to check sourc
 Also:
 
 - Identify docs that the change makes wrong.
-  Check visual evidence against the `visual-evidence` skill, section 8. For spatial-object changes, inspect the contact sheet.
+  Check visual, spatial, and gif evidence against the `visual-evidence` skill, section 8. For spatial-object changes, inspect the contact sheet.
 - An owner comment that names a problem is a finding. A PR comment is never an
   approval.
 - A `shortcut:` comment that names its limit is a decision. Report it only if

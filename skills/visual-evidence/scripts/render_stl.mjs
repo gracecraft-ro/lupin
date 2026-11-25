@@ -8,7 +8,7 @@
 // and after, give each side the other as --frame. A size change then shows.
 // iso-cutaway removes the half of the part nearest the iso camera, cut through
 // the centre. The cut face is drawn in a warm colour, so wall thickness shows.
-// Each part of the surface has a pastel colour set by its place in the part,
+// Each part of the surface takes a colour from its palette, by its place in the part,
 // so a spot keeps its colour from every view.
 // Then tile the views with visual_evidence.py sheet, which adds the captions.
 
@@ -22,13 +22,14 @@ const CREASE_COS = Math.cos((30 * Math.PI) / 180); // no smoothing across sharpe
 
 // Colours are 0 to 255, except RIM and the light colours, which are linear (0 to 1).
 // Light is summed in linear values, then compressed to display values.
-const BG_CENTRE = [251, 250, 247]; // the ground is lighter at the centre...
-const BG_EDGE = [234, 231, 225]; // ...and warmer toward the corners
-const CUT_FACE = [236, 166, 112];
-// Part colour is a pastel set by place in the part (sRGB, 0 to 1). Each axis sets one
-// channel: x red, y green, z blue. A spot keeps its colour from every view.
-const PASTEL_LOW = [0.62, 0.62, 0.62];
-const PASTEL_HIGH = [0.98, 0.98, 0.98];
+// Ground colours per theme, from themes.json. The file is shared with visual_evidence.py.
+const THEMES = JSON.parse(readFileSync(new URL("./themes.json", import.meta.url), "utf8"));
+let ground = null; // { centre, edge } as 0 to 255. main sets it from --theme.
+let cutFace = null; // cut face colour as 0 to 255. main sets it from --theme.
+// Part colour comes from a palette: a centre colour (base) and three anchor colours, one per
+// axis. A spot's colour follows its place in the part, so a spot keeps its colour from every view.
+const DEFAULT_BASE = "#D6D6D6"; // light grey centre, used when a palette has no base
+const PALETTE_SPREAD = 1.9; // how far an anchor pulls the colour from the centre
 const EXPOSURE = 2.2; // scales the summed light before the roll-off
 const SKY_LIGHT = [0.7, 0.72, 0.76]; // ambient light from above
 const GROUND_LIGHT = [0.5, 0.44, 0.38]; // warm bounce from below
@@ -167,13 +168,57 @@ function basis(fwd, up) {
   return [right, trueUp];
 }
 
-// Linear albedo at a point. The pastel runs from PASTEL_LOW to PASTEL_HIGH across the bounds.
-function albedoAt(p, bounds) {
-  return [0, 1, 2].map((k) => {
+// Linear albedo at a point. Each axis pulls the colour toward its hue, by how far the point
+// sits along that axis across the bounds.
+function albedoAt(p, bounds, palette) {
+  const t = [0, 1, 2].map((k) => {
     const span = bounds.hi[k] - bounds.lo[k];
-    const t = span > 0 ? (p[k] - bounds.lo[k]) / span : 0.5;
-    return (PASTEL_LOW[k] + (PASTEL_HIGH[k] - PASTEL_LOW[k]) * t) ** 2.2;
+    return span > 0 ? (p[k] - bounds.lo[k]) / span : 0.5;
   });
+  return [0, 1, 2].map((c) => {
+    let v = palette.base[c];
+    for (let k = 0; k < 3; k++) v += (t[k] - 0.5) * PALETTE_SPREAD * (palette.hues[k][c] - palette.base[c]);
+    return Math.max(0, Math.min(1, v)) ** 2.2;
+  });
+}
+
+// Named palettes. Colours are hex sRGB. anchors are x, y, z. base is the centre colour.
+const PALETTES = {
+  rainbow: { anchors: ["#F2A3B3", "#A8E0CC", "#A9C6F0"] },
+  sunset: { anchors: ["#F8B57C", "#F29B9B", "#BBA7E3"] },
+  sea: { anchors: ["#7FD3CF", "#9CC8EE", "#EED9A4"] },
+  meadow: { anchors: ["#B3D49A", "#F5E08E", "#8CC7A1"] },
+  berry: { anchors: ["#C3A8E0", "#F4BCD0", "#D9A3C8"] },
+  emerald: { base: "#4F5F57", anchors: ["#136B4E", "#D9B44A", "#A7D3B5"] },
+  orchard: { base: "#5C6150", anchors: ["#1F5C34", "#E8C866", "#C7E08E"] },
+  pine: { base: "#3E4F4A", anchors: ["#0E3A2F", "#D8B45A", "#7DB39C"] },
+  straw: { base: "#5C6150", anchors: ["#D9B44A", "#F3E3A6", "#B8C98A"] },
+};
+
+const HEX = /^#[0-9A-Fa-f]{6}$/;
+
+// sRGB 0 to 1 from a hex colour.
+function hexToRgb(hex) {
+  return [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+}
+
+// Palette from a spec: { anchors: [3 hex colours], base?: hex colour }.
+function paletteOf(spec) {
+  return { base: hexToRgb(spec.base ?? DEFAULT_BASE), hues: spec.anchors.map(hexToRgb) };
+}
+
+// Read a palette file. Stops with a message if the file is not a valid spec.
+function loadPaletteFile(path) {
+  let spec = null;
+  try {
+    spec = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    die(`--palette-file needs a JSON file: ${err.message}`);
+  }
+  const valid = spec && Array.isArray(spec.anchors) && spec.anchors.length === 3
+    && spec.anchors.every((hex) => HEX.test(hex)) && (spec.base === undefined || HEX.test(spec.base));
+  if (!valid) die('--palette-file needs {"anchors": [3 hex colours], "base": optional hex colour}');
+  return spec;
 }
 
 // Screen-space box of the vertices. Used to fit the part in the frame.
@@ -309,7 +354,7 @@ function clamp255(v) {
 function backgroundAt(x, y, size) {
   const t = Math.min(1, Math.hypot(x + 0.5 - size / 2, y + 0.5 - size / 2) / (size * Math.SQRT1_2));
   const s = t * t * (3 - 2 * t); // smoothstep: flat near the centre, eased toward the corners
-  return [0, 1, 2].map((c) => Math.round(BG_CENTRE[c] + (BG_EDGE[c] - BG_CENTRE[c]) * s));
+  return [0, 1, 2].map((c) => Math.round(ground.centre[c] + (ground.edge[c] - ground.centre[c]) * s));
 }
 
 // 1 where a pixel borders a much nearer or farther surface, or the background.
@@ -352,7 +397,7 @@ function litColour(n, upCam, ao, edge, albedo) {
   });
 }
 
-function renderView(tris, normals, fwd, up, size, frame, cutDepth, bounds) {
+function renderView(tris, normals, fwd, up, size, frame, cutDepth, bounds, palette) {
   const toCam = [-fwd[0], -fwd[1], -fwd[2]];
   const [right, trueUp] = basis(fwd, up);
   const b = screenBounds(tris, right, trueUp);
@@ -390,7 +435,7 @@ function renderView(tris, normals, fwd, up, size, frame, cutDepth, bounds) {
       v.map((p) => size / 2 - (dot(p, trueUp) - cy) * scale),
       v.map((p) => dot(p, fwd)), // smaller is nearer the camera
       n.map((q) => [dot(q, right), dot(q, trueUp), dot(q, toCam)]),
-      v.map((p) => albedoAt(p, bounds)),
+      v.map((p) => albedoAt(p, bounds, palette)),
       back,
     );
   }
@@ -410,7 +455,7 @@ function renderView(tris, normals, fwd, up, size, frame, cutDepth, bounds) {
     if (buf.depth[i] === Infinity) {
       rgb.set(backgroundAt(i % size, Math.floor(i / size), size), o);
     } else if (cutDepth !== null && buf.back[i]) {
-      rgb.set(CUT_FACE, o);
+      rgb.set(cutFace.map(Math.round), o);
     } else {
       let n = normalize([buf.nx[i], buf.ny[i], buf.nz[i]]);
       if (n[2] < 0) n = [-n[0], -n[1], -n[2]]; // face the camera
@@ -492,6 +537,9 @@ function parseArgs(argv) {
   const positional = [];
   let size = 800;
   let frameFile = null;
+  let palette = null; // null: use the theme's own palette
+  let paletteFile = null;
+  let theme = "paper";
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--size") {
       size = Number(argv[++i]);
@@ -499,18 +547,36 @@ function parseArgs(argv) {
     } else if (argv[i] === "--frame") {
       frameFile = argv[++i];
       if (!frameFile) die("--frame needs a file path");
+    } else if (argv[i] === "--palette") {
+      palette = argv[++i];
+      if (!Object.hasOwn(PALETTES, palette)) {
+        die(`--palette needs one of: ${Object.keys(PALETTES).join(", ")}`);
+      }
+    } else if (argv[i] === "--theme") {
+      theme = argv[++i];
+      if (!Object.hasOwn(THEMES, theme)) die(`--theme needs one of: ${Object.keys(THEMES).join(", ")}`);
+    } else if (argv[i] === "--palette-file") {
+      paletteFile = argv[++i];
+      if (!paletteFile) die("--palette-file needs a file path");
     } else {
       positional.push(argv[i]);
     }
   }
   if (positional.length !== 2) {
-    die("usage: node render_stl.mjs FILE.stl OUTDIR [--size 800] [--frame OTHER.stl]");
+    die("usage: node render_stl.mjs FILE.stl OUTDIR [--size 800] [--frame OTHER.stl] [--palette NAME | --palette-file FILE] [--theme NAME]");
   }
-  return { file: positional[0], outDir: positional[1], size, frameFile };
+  return { file: positional[0], outDir: positional[1], size, frameFile, palette, paletteFile, theme };
 }
 
 function main() {
-  const { file, outDir, size, frameFile } = parseArgs(process.argv.slice(2));
+  const { file, outDir, size, frameFile, palette: name, paletteFile, theme } = parseArgs(process.argv.slice(2));
+  const palette = paletteFile ? paletteOf(loadPaletteFile(paletteFile))
+    : paletteOf(PALETTES[name ?? THEMES[theme].palette]);
+  ground = {
+    centre: hexToRgb(THEMES[theme].ground_centre).map((v) => v * 255),
+    edge: hexToRgb(THEMES[theme].ground_edge).map((v) => v * 255),
+  };
+  cutFace = hexToRgb(THEMES[theme].cut).map((v) => v * 255);
   const tris = readBinarySTL(readFileSync(file));
   orientOutward(tris);
   const frame = frameFile ? readBinarySTL(readFileSync(frameFile)) : null;
@@ -528,7 +594,7 @@ function main() {
     if (name === "iso") jobs.push(["iso-cutaway", fwd, up, cutDepth]);
   }
   for (const [name, fwd, up, cut] of jobs) {
-    const big = renderView(tris, normals, normalize(fwd), up, size * SUPERSAMPLE, frame, cut, bounds);
+    const big = renderView(tris, normals, normalize(fwd), up, size * SUPERSAMPLE, frame, cut, bounds, palette);
     const rgb = downsample(big, size);
     const path = join(outDir, `${stem}-${name}.png`);
     writeFileSync(path, encodePNG(size, size, rgb));

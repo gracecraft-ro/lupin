@@ -21,6 +21,7 @@ Open the file and check it. The script does not judge the picture.
 """
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -31,7 +32,7 @@ import tempfile
 FONTS = {
     "title": "DejaVu Serif:bold",
     "caption": "DejaVu Serif",
-    "label": "DejaVu Sans:bold",
+    "label": "DejaVu Sans Mono:bold",
 }
 PAD = 8  # px of padding used when measuring text
 LINE_GAP = 6  # px between text lines
@@ -43,12 +44,24 @@ TITLE_GAP = 14  # px between a title and the hairline under it, and from the hai
 CAPTION_GAP = 26  # px between a caption and the image labels
 LABEL_PAD = 8  # px between a label and the top or bottom of its label strip
 MIN_LABEL = 9  # px. A label shrinks no further than this to fit its image
-CANVAS = "0xf6f4f0"  # warm off-white ground, not pure white
-FRAME = "0xcdc7bd"  # 1 px frame around each image
-RULE = "0xd9d4cb"  # hairline under a title
-TITLE_INK = "0x1f2733"  # dark slate, not black
-CAPTION_INK = "0x3f4858"
-LABEL_INK = "0x6b7383"  # muted, so labels do not compete with the image
+TITLE_PX = 44  # title size in px. Fixed, so captions and labels match across commands
+CAPTION_PX = 34  # caption size in px, unless --size sets it
+LABEL_PX = 24  # label size in px, before fit_label_size shrinks a long one
+# Ground and ink colours per theme, from themes.json. The renderer reads the same file.
+THEMES = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "themes.json"),
+                        encoding="utf-8"))
+CANVAS = FRAME = RULE = TITLE_INK = CAPTION_INK = LABEL_INK = ""
+
+
+def apply_theme(name):
+    """Set the ground and ink colours from THEMES[name]. Values become ffmpeg colours."""
+    global CANVAS, FRAME, RULE, TITLE_INK, CAPTION_INK, LABEL_INK
+    colour = {key: "0x" + value[1:] for key, value in THEMES[name].items() if value.startswith("#")}
+    CANVAS, FRAME, RULE = colour["canvas"], colour["frame"], colour["rule"]
+    TITLE_INK, CAPTION_INK, LABEL_INK = colour["title"], colour["caption"], colour["label"]
+
+
+apply_theme("paper")
 RENDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "render_stl.mjs")
 STL_SIZE = 800  # px per rendered view, before tiling
 STL_VIEWS = [("iso", "ISO"), ("iso-cutaway", "ISO CUT"), ("plus-x", "+X"), ("minus-x", "-X"),
@@ -224,18 +237,12 @@ def report(out):
     print(f"wrote {out} {width}x{height} bytes={os.path.getsize(out)}")
 
 
-def type_sizes(canvas_w, caption=None):
-    """Return (title, caption, label) sizes in px. They grow with the canvas width.
+def type_sizes(caption=None):
+    """Return (title, caption, label) sizes in px. The sizes are fixed, so every command matches.
 
-    caption is the size from --size. None means use the scale.
+    caption is the size from --size. None means use CAPTION_PX.
     """
-    base = min(32, max(16, round(canvas_w / 72)))
-    return round(base * 1.35), caption or base, round(base * 0.75)
-
-
-def label_size_for(panel_w, label_max):
-    """Nominal label size for an image this wide. The strip height comes from this size."""
-    return min(label_max, max(12, round(panel_w / 14)))
+    return TITLE_PX, caption or CAPTION_PX, LABEL_PX
 
 
 def label_band(nominal):
@@ -309,7 +316,7 @@ def panel_chain(height, label, size, nominal, font):
     band = label_band(nominal)
     return (f"pad=iw+2:ih+2:1:1:{FRAME},pad=iw:{height + 2}:0:0:{CANVAS},"
             f"pad=iw:ih+{band}:0:{band}:{CANVAS},"
-            f"drawtext={font_option(font)}:text={label}:x=0:y={LABEL_PAD}:"
+            f"drawtext={font_option(font)}:text={label}:x=0:y={LABEL_PAD}:y_align=font:"
             f"fontsize={size}:fontcolor={LABEL_INK}")
 
 
@@ -322,15 +329,14 @@ def cmd_pair(args, folder):
     height = max(h1, h2)  # nothing is scaled; the shorter panel gets canvas below it
     row_w = (w1 + 2) + PAIR_GAP + (w2 + 2)  # +2 for each 1 px frame
     canvas_w = row_w + 2 * MARGIN
-    title_size, caption_size, label_max = type_sizes(canvas_w, args.size)
+    title_size, caption_size, nominal = type_sizes(args.size)
     panel_w = min(w1, w2)
-    nominal = label_size_for(panel_w, label_max)
-    size = fit_label_size(["BEFORE", "AFTER"], panel_w, nominal, args.faces["label"], folder)
+    size = fit_label_size(["Before", "After"], panel_w, nominal, args.faces["label"], folder)
     top, head = header(args.faces, canvas_w, args.title, args.caption, title_size, caption_size, folder)
     crop_part = crop_filter(crop)
     chain = (
-        f"[0:v]{crop_part}{panel_chain(height, 'BEFORE', size, nominal, args.faces['label'])}[a];"
-        f"[1:v]{crop_part}{panel_chain(height, 'AFTER', size, nominal, args.faces['label'])}[b];"
+        f"[0:v]{crop_part}{panel_chain(height, 'Before', size, nominal, args.faces['label'])}[a];"
+        f"[1:v]{crop_part}{panel_chain(height, 'After', size, nominal, args.faces['label'])}[b];"
         f"[a]pad=iw+{PAIR_GAP}:ih:0:0:{CANVAS}[a2];"
         f"[a2][b]hstack=inputs=2"
     )
@@ -342,8 +348,7 @@ def cmd_pair(args, folder):
 def cmd_gif(args, folder):
     src = checked_input(args.input)
     out = checked_out(args.out, ".gif")
-    canvas_w = args.width + 2 * MARGIN
-    _, caption_size, _ = type_sizes(canvas_w, args.size)
+    _, caption_size, _ = type_sizes(args.size)
     lines = wrap(args.caption, args.width, args.faces["caption"], caption_size, folder)
     band = text_height(len(lines), caption_size) + 2 * MARGIN
     name = write_text(folder, "caption.txt", "\n".join(lines))
@@ -367,7 +372,7 @@ def cmd_sheet(args, folder):
     make_sheet(items, args, checked_out(args.out, ".png"), folder)
 
 
-def make_sheet(items, args, out, folder):
+def make_sheet(items, args, out, folder, row_heads=None):
     first_w, first_h = probe(items[0][0])
     tile_w = args.tile_width or first_w  # the first image's width unless --tile-width is given
     tile_h = round(tile_w * first_h / first_w) // 2 * 2
@@ -375,23 +380,32 @@ def make_sheet(items, args, out, folder):
     cols = min(args.cols, len(items))
     grid_w = cols * frame_w + (cols - 1) * SHEET_GAP
     canvas_w = grid_w + 2 * MARGIN
-    title_size, _, label_max = type_sizes(canvas_w)
+    title_size, _, nominal = type_sizes()
     labels = [label for _, label in items]
-    nominal = label_size_for(frame_w, label_max)
+    heads = row_heads or []
     size = fit_label_size(labels, frame_w, nominal, args.faces["label"], folder)
     band = label_band(nominal)
-    cell_h = band + frame_h
+    head_band = text_height(1, title_size) + 2 * TITLE_GAP + 1 if heads else 0  # heading, gap, hairline, gap
+    cell_h = head_band + band + frame_h
     top, head = header(args.faces, canvas_w, args.title, None, title_size, None, folder)
+    for row, text in enumerate(heads):  # each heading is in the title face, with a hairline under it
+        y = top + row * (cell_h + SHEET_GAP)
+        name = write_text(folder, f"head{row}.txt", text)
+        head.append(caption_draw(args.faces["title"], name, title_size, MARGIN, y, TITLE_INK))
+        head.append(f"drawbox=x={MARGIN}:y={y + text_height(1, title_size) + TITLE_GAP}:w=iw-{2 * MARGIN}:h=1:color={RULE}:t=fill")
     chains = []
     for index, label in enumerate(labels):
         name = write_text(folder, f"tile{index}.txt", label)
+        # y_align=font puts every label on one baseline. The default aligns each string's own ink top,
+        # so a label with no ascenders, such as "sea", sat high.
+        texts = [f"drawtext={font_option(args.faces['label'])}:textfile={name}:x=0:y={head_band + LABEL_PAD}:y_align=font:"
+                 f"fontsize={size}:fontcolor={LABEL_INK}"]
         chains.append(
             f"[{index}:v]scale={tile_w}:{tile_h}:force_original_aspect_ratio=decrease,"
             f"pad={tile_w}:{tile_h}:(ow-iw)/2:(oh-ih)/2:{CANVAS},"
             f"pad={frame_w}:{frame_h}:1:1:{FRAME},"
-            f"pad=iw:ih+{band}:0:{band}:{CANVAS},"
-            f"drawtext={font_option(args.faces['label'])}:textfile={name}:x=0:y={LABEL_PAD}:"
-            f"fontsize={size}:fontcolor={LABEL_INK}[t{index}]"
+            f"pad=iw:ih+{band + head_band}:0:{band + head_band}:{CANVAS},"
+            + ",".join(texts) + f"[t{index}]"
         )
     layout = "|".join(
         f"{(index % cols) * (frame_w + SHEET_GAP)}_{(index // cols) * (cell_h + SHEET_GAP)}"
@@ -405,15 +419,21 @@ def make_sheet(items, args, out, folder):
     report(out)
 
 
-def render_views(stl, folder, frame=None):
+def render_views(stl, folder, frame=None, palette=None, palette_file=None, theme="paper"):
     """Render the eight views of stl. Return (path, label) pairs in STL_VIEWS order.
 
     frame is another STL. Both files then share one scale and centre, so a size change shows.
+    palette is a palette name, or palette_file is a JSON palette. None for both uses the default.
     """
     os.makedirs(folder, exist_ok=True)
     cmd = ["node", RENDER, stl, folder, "--size", str(STL_SIZE)]
     if frame:
         cmd += ["--frame", frame]
+    if palette_file:
+        cmd += ["--palette-file", palette_file]
+    elif palette is not None:
+        cmd += ["--palette", palette]
+    cmd += ["--theme", theme]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         die("render_stl failed:\n" + result.stderr.strip())
@@ -425,18 +445,23 @@ def cmd_stl(args, folder):
     need("node")
     new = checked_input(args.stl)
     out = checked_out(args.out, ".png")
+    if args.palette and args.palette_file:
+        die("use --palette or --palette-file, not both")
+    palette_file = checked_input(args.palette_file) if args.palette_file else None
     if args.before:
         before = checked_input(args.before)
-        before_views = render_views(before, os.path.join(folder, "before"), frame=new)
-        after_views = render_views(new, os.path.join(folder, "after"), frame=before)
-        items = ([(path, f"BEFORE {label}") for path, label in before_views]
-                 + [(path, f"AFTER {label}") for path, label in after_views])
+        before_views = render_views(before, os.path.join(folder, "before"), frame=new,
+                                    palette=args.palette, palette_file=palette_file, theme=args.theme)
+        after_views = render_views(new, os.path.join(folder, "after"), frame=before,
+                                   palette=args.palette, palette_file=palette_file, theme=args.theme)
+        items = before_views + after_views
     else:
-        items = render_views(new, os.path.join(folder, "new"))
+        items = render_views(new, os.path.join(folder, "new"), palette=args.palette,
+                             palette_file=palette_file, theme=args.theme)
     # One row for one part. Two rows, before then after, when --before is given.
     sheet = argparse.Namespace(title=args.title, cols=8, tile_width=args.tile_width,
                                faces=args.faces, fps=args.fps)
-    make_sheet(items, sheet, out, folder)
+    make_sheet(items, sheet, out, folder, row_heads=["Before", "After"] if args.before else None)
 
 
 def build_parser():
@@ -445,6 +470,8 @@ def build_parser():
                                        "(default: serif titles and captions, bold sans labels)")
     common.add_argument("--fps", type=int, default=10, help="frame rate for gif output")
     common.add_argument("--out", required=True, help="output .png or .gif")
+    common.add_argument("--theme", default="paper", choices=sorted(THEMES),
+                        help="ground, ink, cut face, and default palette. Names are in themes.json")
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -455,13 +482,13 @@ def build_parser():
     pair.add_argument("--title", help="names the whole picture, above the caption")
     pair.add_argument("--caption", required=True, help="says what changed")
     pair.add_argument("--crop", help="W:H:X:Y in px, applied to both panels, for a close-up")
-    pair.add_argument("--size", type=int, help="caption font size in px (default: from the width)")
+    pair.add_argument("--size", type=int, help=f"caption font size in px (default: {CAPTION_PX})")
 
     gif = sub.add_parser("gif", parents=[common], help="caption bar on a video or gif")
     gif.add_argument("input")
     gif.add_argument("--caption", required=True)
     gif.add_argument("--width", type=int, default=480, help="output width in px")
-    gif.add_argument("--size", type=int, help="caption font size in px (default: from the width)")
+    gif.add_argument("--size", type=int, help=f"caption font size in px (default: {CAPTION_PX})")
 
     sheet = sub.add_parser("sheet", parents=[common], help="labelled grid of views")
     sheet.add_argument("views", nargs="+", help="PATH or PATH=LABEL, one per tile")
@@ -473,14 +500,20 @@ def build_parser():
     stl = sub.add_parser("stl", parents=[common],
                          help="STL rendered to six sides, iso, and iso cutaway, with labels")
     stl.add_argument("stl", help="the part, as a binary STL")
-    stl.add_argument("--before", help="the part before the change. Adds a BEFORE row.")
+    stl.add_argument("--before", help="the part before the change. Adds a Before row.")
     stl.add_argument("--title", required=True)
     stl.add_argument("--tile-width", type=int, default=240, help="tile width in px")
+    stl.add_argument("--palette",
+                     help="colour set: rainbow, sunset, sea, meadow, berry, emerald, orchard, pine, or straw. "
+                          "Default: the theme's own")
+    stl.add_argument("--palette-file",
+                     help="your own colours: JSON with 3 hex anchors and an optional base colour")
     return parser
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    apply_theme(args.theme)
     need("ffmpeg")
     need("ffprobe")
     specs = {role: args.font for role in FONTS} if args.font else FONTS

@@ -92,9 +92,10 @@ class VisualEvidenceTests(unittest.TestCase):
         result = run_tool("pair", before, after, "--caption", "OK", "--out", out)
         self.assertEqual(result.returncode, 0, result.stderr)
         # Panels framed: 66 and 34 px, 32 px apart: 132. Canvas margin 24 each side: 180.
-        # Caption at y 24, one 16 px line, 26 px gap: the content starts at y 66.
-        # Label strip 28 px, then the 42 px frame: 70. Bottom margin 24: 66 + 70 + 24 = 160.
-        self.assertEqual(ve.probe(out), (180, 160))
+        # Caption at y 24, one 34 px line, 26 px gap: the content starts at y 84.
+        # Label strip 40 px (24 px label, 8 px pad each side), then the 42 px frame: 82.
+        # Bottom margin 24: 84 + 82 + 24 = 190.
+        self.assertEqual(ve.probe(out), (180, 190))
 
     def test_pair_title_sits_above_caption(self):
         before = make_png(self.folder, "before.png", 64, 40, "red")
@@ -102,9 +103,9 @@ class VisualEvidenceTests(unittest.TestCase):
         out = os.path.join(self.folder, "pair.png")
         result = run_tool("pair", before, after, "--title", "T", "--caption", "OK", "--out", out)
         self.assertEqual(result.returncode, 0, result.stderr)
-        # Title 22 px, hairline, 14 px gaps: 22 + 14 + 1 + 14 = 51. Caption at y 75, then 16 + 26.
-        # Content starts at y 117. Row 70. Bottom margin 24: 117 + 70 + 24 = 211.
-        self.assertEqual(ve.probe(out), (180, 211))
+        # Title 44 px, hairline, 14 px gaps: 24 + 44 + 14 + 1 + 14 = 97. Caption at y 97, 34 px line,
+        # 26 px gap: content starts at y 157. Row 82. Bottom margin 24: 157 + 82 + 24 = 263.
+        self.assertEqual(ve.probe(out), (180, 263))
 
     def test_pair_crop_takes_the_same_region_from_both_panels(self):
         before = make_png(self.folder, "before.png", 64, 40, "red")
@@ -113,8 +114,9 @@ class VisualEvidenceTests(unittest.TestCase):
         result = run_tool("pair", before, after, "--crop", "40:30:4:5", "--caption", "OK", "--out", out)
         self.assertEqual(result.returncode, 0, result.stderr)
         # Each crop is 40 x 30, framed 42 x 32. 42 + 32 + 42 = 116. Canvas 164 wide.
-        # Content starts at y 66. Row 28 px label strip + 32 px frame = 60. Bottom 24: 150.
-        self.assertEqual(ve.probe(out), (164, 150))
+        # Caption line 34 px: content starts at y 84. Label strip 40 px + 32 px frame = 72.
+        # Bottom 24: 84 + 72 + 24 = 180.
+        self.assertEqual(ve.probe(out), (164, 180))
 
     def test_crop_outside_the_image_stops_with_message(self):
         before = make_png(self.folder, "before.png", 64, 40, "red")
@@ -131,8 +133,9 @@ class VisualEvidenceTests(unittest.TestCase):
         result = run_tool("gif", src, "--caption", "Tap Save", "--width", "120", "--out", out)
         self.assertEqual(result.returncode, 0, result.stderr)
         # 120 wide scales to 60 high. Canvas margin 24 each side: 168 wide, 24 px above the image.
-        # One caption line at 16 px: a band of 16 + 2 * 24 = 64. Total 24 + 60 + 64 = 148.
-        self.assertEqual(ve.probe(out), (168, 148))
+        # At 34 px, "Tap Save" is wider than 120 px, so it wraps to two lines: 2 * 34 + 6 = 74.
+        # Band 74 + 2 * 24 = 122. Total 24 + 60 + 122 = 206.
+        self.assertEqual(ve.probe(out), (168, 206))
 
     def test_sheet_grid_and_title_band(self):
         views = [make_png(self.folder, f"v{i}.png", 60, 40, "gray") for i in range(4)]
@@ -140,10 +143,10 @@ class VisualEvidenceTests(unittest.TestCase):
         result = run_tool("sheet", *views, "--title", "Part", "--cols", "2",
                           "--tile-width", "60", "--out", out)
         self.assertEqual(result.returncode, 0, result.stderr)
-        # Tiles of 60 x 40 framed: 62 x 42. Label strip 28 px above each: cell 70.
-        # Two across, 24 px apart: 148. Two down, 24 px apart: 164. Canvas margin 24: 196 wide.
-        # Title 22 px, hairline, gaps: content starts at y 75. Bottom 24: 75 + 164 + 24 = 263.
-        self.assertEqual(ve.probe(out), (196, 263))
+        # Tiles of 60 x 40 framed: 62 x 42. Label strip 40 px above each: cell 82.
+        # Two across, 24 px apart: 148. Two down, 24 px apart: 188. Canvas margin 24: 196 wide.
+        # Title 44 px, hairline, gaps: content starts at y 97. Bottom 24: 97 + 188 + 24 = 309.
+        self.assertEqual(ve.probe(out), (196, 309))
 
     def test_sheet_defaults_to_the_first_image_width(self):
         views = [make_png(self.folder, f"v{i}.png", 60, 40, "gray") for i in range(4)]
@@ -152,7 +155,7 @@ class VisualEvidenceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         # No --tile-width: the tiles keep the 60 px width of the first image, so the size matches
         # the explicit --tile-width test above.
-        self.assertEqual(ve.probe(out), (196, 263))
+        self.assertEqual(ve.probe(out), (196, 309))
 
     @unittest.skipUnless(HAVE_NODE, "needs node")
     def test_stl_before_and_after_sheet_is_two_rows_of_eight(self):
@@ -165,10 +168,71 @@ class VisualEvidenceTests(unittest.TestCase):
                           "--tile-width", "120", "--out", out)
         self.assertEqual(result.returncode, 0, result.stderr)
         # Eight 122 px frames (120 px tile + border), 24 px apart: 8*122 + 7*24 = 1144.
-        # Canvas margin 24 each side: 1192. Label strip 28 px, so each row is 150 px.
-        # Two rows 24 px apart: 324. Title, hairline and gaps: content starts at y 76.
-        # Bottom margin 24: 76 + 324 + 24 = 424.
-        self.assertEqual(ve.probe(out), (1192, 424))
+        # Canvas margin 24 each side: 1192. Each row is a 73 px heading band (44 px heading,
+        # 14 px gap, hairline, 14 px gap), a 40 px label strip and a 122 px frame: 235 px.
+        # Two rows 24 px apart: 494. Title 44 px, hairline and gaps: content starts at y 97.
+        # Bottom margin 24: 97 + 494 + 24 = 615.
+        self.assertEqual(ve.probe(out), (1192, 615))
+
+    @unittest.skipUnless(HAVE_NODE, "needs node")
+    def test_palette_repeats_its_colours_and_differs_from_another(self):
+        part = os.path.join(self.folder, "part.stl")
+        write_stl(part, box(0, 10, 0, 10, 0, 10))
+
+        def render(palette, name):
+            out = os.path.join(self.folder, name)
+            result = run_tool("stl", part, "--palette", palette, "--title", "Box",
+                              "--tile-width", "60", "--out", out)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(out, "rb") as handle:
+                return handle.read()
+
+        # Same palette, same file. Another palette, so the bytes differ.
+        self.assertEqual(render("sea", "a.png"), render("sea", "b.png"))
+        self.assertNotEqual(render("sea", "c.png"), render("sunset", "d.png"))
+
+    @unittest.skipUnless(HAVE_NODE, "needs node")
+    def test_unknown_palette_stops_and_lists_the_names(self):
+        part = os.path.join(self.folder, "part.stl")
+        write_stl(part, box(0, 10, 0, 10, 0, 10))
+        result = run_tool("stl", part, "--palette", "neon", "--title", "Box",
+                          "--out", os.path.join(self.folder, "x.png"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("rainbow, sunset, sea, meadow, berry, emerald, orchard, pine, straw", result.stderr)
+
+    @unittest.skipUnless(HAVE_NODE, "needs node")
+    def test_palette_file_with_the_sea_colours_matches_the_sea_palette(self):
+        part = os.path.join(self.folder, "part.stl")
+        write_stl(part, box(0, 10, 0, 10, 0, 10))
+        spec = os.path.join(self.folder, "sea.json")
+        with open(spec, "w", encoding="utf-8") as handle:
+            handle.write('{"anchors": ["#7FD3CF", "#9CC8EE", "#EED9A4"]}')
+
+        def render(args, name):
+            out = os.path.join(self.folder, name)
+            result = run_tool("stl", part, *args, "--title", "Box", "--tile-width", "60", "--out", out)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            with open(out, "rb") as handle:
+                return handle.read()
+
+        self.assertEqual(render(["--palette-file", spec], "a.png"), render(["--palette", "sea"], "b.png"))
+
+    @unittest.skipUnless(HAVE_NODE, "needs node")
+    def test_bad_palette_file_and_both_flags_stop(self):
+        part = os.path.join(self.folder, "part.stl")
+        write_stl(part, box(0, 10, 0, 10, 0, 10))
+        spec = os.path.join(self.folder, "two.json")
+        with open(spec, "w", encoding="utf-8") as handle:
+            handle.write('{"anchors": ["#FFF", "#000"]}')
+        out = os.path.join(self.folder, "x.png")
+
+        bad = run_tool("stl", part, "--palette-file", spec, "--title", "Box", "--out", out)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn('"anchors": [3 hex colours]', bad.stderr)
+
+        both = run_tool("stl", part, "--palette", "sea", "--palette-file", spec, "--title", "Box", "--out", out)
+        self.assertNotEqual(both.returncode, 0)
+        self.assertIn("not both", both.stderr)
 
     def test_missing_input_stops_with_message(self):
         result = run_tool("gif", os.path.join(self.folder, "nope.mp4"),
@@ -201,6 +265,38 @@ class VisualEvidenceTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Shorten it", result.stderr)
         self.assertFalse(os.path.exists(out))
+
+    @unittest.skipUnless(HAVE_NODE, "needs node")
+    def test_every_theme_renders_and_changes_the_sheet(self):
+        part = os.path.join(self.folder, "part.stl")
+        write_stl(part, box(0, 10, 0, 10, 0, 10))
+        sheets = {}
+        for name in ve.THEMES:
+            with self.subTest(theme=name):
+                out = os.path.join(self.folder, f"{name}.png")
+                result = run_tool("stl", part, "--theme", name, "--title", "Box",
+                                  "--tile-width", "60", "--out", out)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                with open(out, "rb") as handle:
+                    sheets[name] = handle.read()
+        # Each theme changes the ground, ink, cut face or palette, so no two sheets match.
+        self.assertEqual(len(set(sheets.values())), len(ve.THEMES))
+
+
+class ThemeTests(unittest.TestCase):
+    PALETTES = {"rainbow", "sunset", "sea", "meadow", "berry", "emerald", "orchard", "pine", "straw"}
+
+    def test_every_theme_has_every_colour_and_a_known_palette(self):
+        keys = {"canvas", "frame", "rule", "title", "caption", "label",
+                "ground_centre", "ground_edge", "cut", "palette"}
+        self.assertIn("paper", ve.THEMES)
+        for name, theme in ve.THEMES.items():
+            with self.subTest(theme=name):
+                self.assertEqual(set(theme), keys)
+                self.assertIn(theme["palette"], self.PALETTES)
+                for key, value in theme.items():
+                    if key != "palette":
+                        self.assertRegex(value, r"^#[0-9a-fA-F]{6}$")
 
 
 def box(x0, x1, y0, y1, z0, z1):

@@ -1,0 +1,7 @@
+{
+  "paper": {"canvas": "#f6f4f0", "frame": "#cdc7bd", "rule": "#d9d4cb", "title": "#1f2733", "caption": "#3f4858", "label": "#6b7383", "ground_centre": "#fbfaf7", "ground_edge": "#eae7e1", "cut": "#eca670", "palette": "rainbow"},
+  "roundsmith": {"canvas": "#fafcfb", "frame": "#cdd0cf", "rule": "#e6e8e8", "title": "#0f1211", "caption": "#3f4342", "label": "#5b5e5d", "ground_centre": "#fafcfb", "ground_edge": "#e9eceb", "cut": "#d9bf6a", "palette": "emerald"},
+  "roundsmith-night": {"canvas": "#050d0a", "frame": "#25312d", "rule": "#18221e", "title": "#e6edea", "caption": "#9faba7", "label": "#94a29d", "ground_centre": "#0a1411", "ground_edge": "#010403", "cut": "#e6ad29", "palette": "emerald"},
+  "roundsmith-band": {"canvas": "#0f1211", "frame": "#2e3532", "rule": "#1f2624", "title": "#fafcfb", "caption": "#c4cbc8", "label": "#94a29d", "ground_centre": "#1a201e", "ground_edge": "#000201", "cut": "#fac547", "palette": "straw"},
+  "roundsmith-straw": {"canvas": "#f5edd8", "frame": "#cdbd8a", "rule": "#e5dcc2", "title": "#0f1211", "caption": "#3f4342", "label": "#6b6346", "ground_centre": "#f8f2e2", "ground_edge": "#e9dcb4", "cut": "#7d5f26", "palette": "pine"}
+}

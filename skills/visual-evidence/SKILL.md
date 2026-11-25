@@ -31,7 +31,7 @@ starting point. If it is stricter than this skill, follow the repo guidance.
 | Change | Evidence |
 | --- | --- |
 | Appearance only. Users do the same steps. Example: a button color changes. | Screenshots, before and after. |
-| Users do something new. Example: a new control, a new step, a new gesture. | A gif that shows the new behavior. |
+| Users do something new, or the change adds an animation or a new flow. Example: a new control, a new step, a new gesture, a new animation. | A gif that shows the new behavior or animation. |
 | New screen | A gif that shows how a user reaches the screen, what the user does on it, and what happens next. |
 | Spatial object: a 3D model, an STL, a CAD part, or code that makes one | A contact sheet (section 5). |
 
@@ -81,6 +81,10 @@ starting point. If it is stricter than this skill, follow the repo guidance.
 
 ## 7. Report
 
+- Attach each file to the pull request. Do not give only a local path. The
+  reader may not be able to open a scratch folder or a `/tmp` path.
+- Post each visual change to the pull request when it happens. Use one comment
+  per change. Say what changed and why.
 - List each file and what it shows.
 - State what you did not capture, and why.
 
@@ -103,7 +107,8 @@ examples from the repo root, in the repo's dev shell (`nix develop -c`). The
 shell has ffmpeg, ffprobe, node, fontconfig (fc-match), and the DejaVu faces.
 
 Each command prints one line: `wrote PATH WIDTHxHEIGHT bytes=N`. Open the file
-and check it. The scripts do not judge the picture.
+and check it. The scripts do not judge the picture. Then attach the file to the
+pull request (section 7).
 
 ### Rules for every command
 
@@ -122,17 +127,21 @@ and check it. The scripts do not judge the picture.
   and After labels. `gif` puts the caption at the bottom. `sheet` and `stl` put
   the title at the top. A title has a hairline under it. Labels sit above their
   image, never on it.
-- Text size grows with the width of the output. `--size` sets the caption size
-  only.
+- Text sizes are fixed in every command: title 44 px, caption 34 px, label 24 px.
+  `--size` sets the caption size only.
+- `--theme NAME` sets the ground, frame, ink, cut face, and default palette in every
+  command. Names: `paper` (default), `roundsmith` (white UI), `roundsmith-night`
+  (dark UI), `roundsmith-band` (marketing dark band), and `roundsmith-straw` (straw
+  sheet). The colours are in `scripts/themes.json`.
 
 | Command | Input | Writes | Text | Other options (default) |
 | --- | --- | --- | --- | --- |
-| `pair` | Two PNG screenshots | `.png` | `--title` (optional), `--caption` | `--crop W:H:X:Y` px, applied to both panels. `--size` caption px (from the width) |
-| `gif` | A video or gif | `.gif` | `--caption` | `--width` px (480), `--size` caption px (from the width), `--fps` (10) |
+| `pair` | Two PNG screenshots | `.png` | `--title` (optional), `--caption` | `--crop W:H:X:Y` px, applied to both panels. `--size` caption px (34) |
+| `gif` | A video or gif | `.gif` | `--caption` | `--width` px (480), `--size` caption px (34), `--fps` (10) |
 | `sheet` | Two or more PNG images | `.png` | `--title` | `--cols` (3), `--tile-width` px (the first image's width) |
-| `stl` | A binary STL. `--before` takes the old STL. | `.png` | `--title` | `--tile-width` px (240) |
+| `stl` | A binary STL. `--before` takes the old STL. | `.png` | `--title` | `--tile-width` px (240), `--palette` NAME (`rainbow`) or `--palette-file` FILE |
 
-Titles use DejaVu Serif Bold, captions DejaVu Serif, and labels DejaVu Sans Bold.
+Titles use DejaVu Serif Bold, captions DejaVu Serif, and labels DejaVu Sans Mono Bold.
 Every command takes `--font` to set one face for all text: a fontconfig name, or
 a `.ttf` path.
 
@@ -173,12 +182,16 @@ The crop must lie inside the image. Otherwise the command stops with
      demo.mp4 --caption "Tap Save to confirm" --out demo.gif
    ```
 
+The `gif` command runs ffmpeg. It writes frames at `--fps`, builds a palette
+from them, and writes the gif with that palette.
+
 `pair` takes still images only. To show before and after as gifs, run `gif`
 twice. Name the files `before.gif` and `after.gif`. Attach both (section 3).
 
 ### Spatial object (STL)
 
-1. Export the part as a binary STL. The renderer does not read ASCII STL.
+1. Export the part as a binary STL. The renderer does not read ASCII STL, SVG,
+   or DXF. It ignores layers and other file metadata.
 2. For a change, pass the old file with `--before`:
 
    ```sh
@@ -186,11 +199,16 @@ twice. Name the files `before.gif` and `after.gif`. Attach both (section 3).
      part-after.stl --before part-before.stl --title "Part, before and after" --out sheet.png
    ```
 
-   With `--before`, the sheet has two rows of eight tiles. The first row is
-   BEFORE and the second is AFTER. Each row shows ISO, ISO CUT, +X, -X, +Y, -Y,
+   With `--before`, the sheet has two rows of eight tiles. Each row has its own
+   heading, Before or After, in the title face with a hairline under it. Each row shows ISO, ISO CUT, +X, -X, +Y, -Y,
    +Z, and -Z, in that order. ISO CUT removes the half nearest the camera. The
    inside of the far walls shows in orange, so wall thickness is visible. Both rows use one scale, so a size change shows.
    Without `--before`, the sheet has one row.
+   `--palette NAME` picks a colour set. Without it, the theme's default palette is used
+   (set per theme in `scripts/themes.json`): `rainbow`, `sunset`, `sea`, `meadow`,
+   `berry`, `emerald`, `orchard`, `pine`, or `straw`. `--palette-file FILE` takes your own colours:
+   JSON with three hex `anchors` and an optional `base`. Use a different palette for each
+   review round, and put its name in the title, so rounds look different.
 3. For a close-up, `stl` does not make one. Render the view larger, then crop
    it. `crop=WIDTH:HEIGHT:X:Y` counts pixels from the top-left corner:
 
@@ -201,8 +219,8 @@ twice. Name the files `before.gif` and `after.gif`. Attach both (section 3).
 
    Open the crop and check that it shows the changed area. The renderer lights the part
    from several sides, darkens crevices, and draws a thin ink line where a surface
-   meets a farther one. It tints each part of the surface with a pastel colour from
-   its place in the part, so a spot keeps its colour from every view. Small detail such as an engraving can still be hard to see.
+   meets a farther one. It tints each part of the surface with a colour from the
+   chosen palette, by its place in the part, so a spot keeps its colour from every view. Small detail such as an engraving can still be hard to see.
    Say so in the report if the detail does not show.
 
 ### Several views that are not STL (sheet)
