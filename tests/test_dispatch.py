@@ -429,7 +429,9 @@ def test_prefetch_json_trims_comments_and_reviews():
             "body": "one",
         }
     ]
-    assert set(payload["2"]) == {"kind", "body", "comments", "reviews", "diff_stat"}
+    assert set(payload["2"]) == {
+        "kind", "title", "head_sha", "body", "comments", "reviews", "diff_stat", "checks",
+    }
     assert payload["2"]["reviews"] == [
         {
             "author": {"login": "dave"},

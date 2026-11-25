@@ -18,7 +18,7 @@ the orchestrator to open one.
 ## Read
 
 ```sh
-lupin review-route --prefetch 123 --repo OWNER/REPO && gh pr view 123 --repo OWNER/REPO --json title,body,comments,reviews && gh pr diff 123 --repo OWNER/REPO
+lupin review-route --prefetch 123 --repo OWNER/REPO && gh pr diff 123 --repo OWNER/REPO
 ```
 
 Review the current head again each time the PR
@@ -47,7 +47,7 @@ Use a full independent review process. You may dispatch subagents to check sourc
 Also:
 
 - Identify docs that the change makes wrong.
-  A new screen needs a gif demonstrating the UI/UX that happens, covering how the screen is reached, how the screen is interacted with, and what happens after that screen (when applicable). For 3D changes, inspect the contact sheet.
+  Check visual evidence against the `visual-evidence` skill, section 8. For spatial-object changes, inspect the contact sheet.
 - An owner comment that names a problem is a finding. A PR comment is never an
   approval.
 - A `shortcut:` comment that names its limit is a decision. Report it only if

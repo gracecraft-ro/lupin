@@ -141,10 +141,17 @@ def _fake_run_gh_json(args, *, repo=None, timeout=60):
         if item == "2":
             return (
                 {
+                    "title": "add review fields",
+                    "headRefOid": "abc123",
                     "body": "pr body",
                     "comments": [],
                     "reviews": [],
                     "files": [{"path": "a.py", "additions": 3, "deletions": 1}],
+                    "statusCheckRollup": [
+                        {"workflowName": "ci", "name": "test", "conclusion": "FAILURE", "startedAt": "2026-01-01T00:00:00Z"},
+                        {"workflowName": "ci", "name": "test", "conclusion": "SUCCESS", "startedAt": "2026-01-02T00:00:00Z"},
+                        {"workflowName": "ci", "name": "lint", "conclusion": "", "status": "IN_PROGRESS"},
+                    ],
                 },
                 None,
             )
@@ -160,7 +167,7 @@ class PrefetchTests(unittest.TestCase):
         self.assertEqual(result["1"]["body"], "issue body")
         self.assertEqual(len(result["1"]["comments"]), 1)
 
-    def test_pr_number_returns_body_comments_reviews_and_diff_stat_only(self):
+    def test_pr_number_returns_body_reviews_and_diff_stat(self):
         with mock.patch.object(review_dispatch, "_run_gh_json", side_effect=_fake_run_gh_json):
             result = review_dispatch.prefetch(["2"])
         self.assertEqual(result["2"]["kind"], "pr")
@@ -172,6 +179,27 @@ class PrefetchTests(unittest.TestCase):
         # "files" is the raw gh field name; it's renamed to diff_stat, not
         # duplicated, and never carries full diff text either way.
         self.assertNotIn("files", result["2"])
+
+    def test_pr_number_returns_title_head_commit_and_latest_check_per_name(self):
+        with mock.patch.object(review_dispatch, "_run_gh_json", side_effect=_fake_run_gh_json):
+            result = review_dispatch.prefetch(["2"])
+        self.assertEqual(result["2"]["title"], "add review fields")
+        self.assertEqual(result["2"]["head_sha"], "abc123")
+        # The older FAILURE of "test" is dropped; only its newer run is kept.
+        self.assertEqual(
+            result["2"]["checks"],
+            [
+                {"name": "test", "state": "SUCCESS"},
+                {"name": "lint", "state": "IN_PROGRESS"},
+            ],
+        )
+
+    def test_brief_markdown_shows_title_head_commit_and_checks(self):
+        with mock.patch.object(review_dispatch, "_run_gh_json", side_effect=_fake_run_gh_json):
+            result = review_dispatch.prefetch(["2"])
+        text = review_dispatch.brief_markdown("o/r#2", result["2"])
+        self.assertIn("Title: add review fields\nHead commit: abc123\n", text)
+        self.assertIn("## Checks (2)\n- test: SUCCESS\n- lint: IN_PROGRESS\n", text)
 
     def test_mixed_issue_and_pr_numbers(self):
         with mock.patch.object(review_dispatch, "_run_gh_json", side_effect=_fake_run_gh_json):

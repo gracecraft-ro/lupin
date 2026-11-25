@@ -86,12 +86,15 @@ unavailable. The Roadmap page then shows a warning and no ledger notes. The
 roadmap ignores `.loop/loop-state.json`.
 
 `review-route --prefetch` fetches the body and comments of each issue or PR.
-For a PR, it also fetches reviews and a diff stat. The stat has file names,
+For a PR, it also fetches the title, the head commit (the full ID of the newest
+commit), the CI checks, the reviews, and a diff stat. The stat has file names,
 additions, and deletions, but no diff text. By default, the command prints one
 Markdown section per item. With `--json`, it prints only the fields a worker
-uses: `kind`, `body`, `comments`, `reviews`, and `diff_stat`. Comments include
-the author, time, and body. Reviews include the author, state, time, and body.
-A number that is not an issue or PR gets an `error` in its own result.
+uses. A PR has `kind`, `title`, `head_sha`, `body`, `comments`, `reviews`,
+`diff_stat`, and `checks`. An issue has `kind`, `body`, and `comments`.
+Comments include the author, time, and body. Reviews include the author, state,
+time, and body. Checks include the name and state of the newest run of each
+check. A number that is not an issue or PR gets an `error` in its own result.
 
 `dispatch OWNER/REPO#N` claims the issue or PR and writes a Markdown brief in
 the loop state directory's `notes/` folder. The brief has its body and every

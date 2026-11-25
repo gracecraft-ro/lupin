@@ -36,6 +36,7 @@ import subprocess
 import sys
 
 from . import classify
+from . import pr_status
 from . import route
 
 # Same redaction as roadmap.py's _run_json: a `gh` error can echo a token
@@ -131,8 +132,16 @@ def _trim_review(review: dict) -> dict:
     }
 
 
+def _trim_check(check: dict) -> dict:
+    """Keep only the name and the result of one CI check."""
+    return {
+        "name": check.get("name") or check.get("context") or "",
+        "state": check.get("conclusion") or check.get("state") or check.get("status") or "",
+    }
+
+
 def _fetch_item(item: str, *, repo: str | None = None) -> dict:
-    """Fetch one issue or PR's text and (for a PR) its diff stat.
+    """Fetch one issue or PR's text and (for a PR) its title, head commit, checks, and diff stat.
 
     An issue and a PR share one number counter in a GitHub repo, so there is
     no way to tell which an item is without asking. Ask `gh pr view` first:
@@ -143,12 +152,22 @@ def _fetch_item(item: str, *, repo: str | None = None) -> dict:
     #1: same cost whether lupin or the dispatched agent fetches it).
     """
     pr_data, pr_error = _run_gh_json(
-        ["pr", "view", item, "--json", "body,comments,reviews,files"], repo=repo
+        [
+            "pr",
+            "view",
+            item,
+            "--json",
+            "title,body,headRefOid,statusCheckRollup,comments,reviews,files",
+        ],
+        repo=repo,
     )
     if pr_data is not None:
         files = pr_data.pop("files", [])
+        checks = pr_status._dedupe_checks(pr_data.pop("statusCheckRollup", None) or [])
         return {
             "kind": "pr",
+            "title": pr_data.get("title") or "",
+            "head_sha": pr_data.get("headRefOid") or "",
             "body": pr_data.get("body") or "",
             "comments": [
                 _trim_comment(comment) for comment in pr_data.get("comments") or []
@@ -164,6 +183,7 @@ def _fetch_item(item: str, *, repo: str | None = None) -> dict:
                 }
                 for f in files
             ],
+            "checks": [_trim_check(check) for check in checks],
         }
 
     issue_data, issue_error = _run_gh_json(
@@ -205,7 +225,14 @@ def brief_markdown(item: str, data: dict) -> str:
         # A batch prefetch keeps a bad item in place instead of losing the
         # rest; show the reason rather than an empty brief.
         return f"# {heading} {item}\n\n{data['error']}\n"
-    parts = [f"# {heading} {item}", "", data.get("body") or ""]
+    parts = [f"# {heading} {item}", ""]
+    if kind == "pr":
+        parts += [
+            f"Title: {data.get('title') or ''}",
+            f"Head commit: {data.get('head_sha') or ''}",
+            "",
+        ]
+    parts.append(data.get("body") or "")
 
     if kind == "pr":
         reviews = data.get("reviews") or []
@@ -224,6 +251,10 @@ def brief_markdown(item: str, data: dict) -> str:
                 f"- {changed['path']} "
                 f"(+{changed.get('additions', 0)} -{changed.get('deletions', 0)})"
             )
+        checks = data.get("checks") or []
+        parts += ["", f"## Checks ({len(checks)})"]
+        for check in checks:
+            parts.append(f"- {check['name']}: {check['state']}")
 
     comments = data.get("comments") or []
     parts += ["", f"## Comments ({len(comments)})"]
