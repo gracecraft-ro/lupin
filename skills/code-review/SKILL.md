@@ -11,10 +11,6 @@ compatibility: Requires GitHub CLI, a pull request, and access to the repository
 Review the pull request (PR), not a local diff. Pass `--repo OWNER/REPO` to every
 command.
 
-The orchestrator holds the Lupin claim for your review. Do not claim the PR. If
-your brief names no claim, stop and ask the orchestrator. If there is no PR, ask
-the orchestrator to open one.
-
 ## Read
 
 ```sh
@@ -47,7 +43,7 @@ Use a full independent review process. You may dispatch subagents to check sourc
 Also:
 
 - Identify docs that the change makes wrong.
-  Check visual, spatial, and gif evidence against the `visual-evidence` skill, section 8. For spatial-object changes, inspect the contact sheet.
+  Check visual, spatial, and gif evidence against the `visual-evidence` skill. _Immediately dispatch an economical subagent to add missing evidence when needed! It is almost entirely pointless to review the PR without a comprehensive evaluation of the visual evidence._
 - An owner comment that names a problem is a finding. A PR comment is never an
   approval.
 - A `shortcut:` comment that names its limit is a decision. Report it only if
@@ -102,30 +98,11 @@ Use `-f event=REQUEST_CHANGES` when the review asks for changes. If your login
 opened the PR, post `COMMENT` and ask the owner for a formal review in a `Loop:`
 PR comment.
 
-- N is 1 more than the N in the latest `Round` review on the PR (1 if none).
-- LEVEL is the next fix worker's LEVEL. Take it, and the stall rule, from "Fix
-  worker models" in the `delegation-loop` skill. Check the stall rule before you
-  post.
-- If the latest `Round` review is already at the current head SHA, do not review
-  again. Start the fix worker with its findings.
-
-Run the cycle only when your brief says the loop owns the PR. Otherwise post the
-verdict, report to the orchestrator, and stop.
-
-1. After a blocking verdict, start a fix worker (your runner's agent tool, or
-   `herdr agent start` in a new pane). Stop and report instead if the stall rule
-   blocks the PR, if LEVEL is `size-l` and you are `size-m`, or if you cannot
-   start an agent.
+1. After a blocking verdict, start a fix subagent. Most tasks can be handled by Luna or Haiku. Be explicit about what level of effort you want.
 2. Give it a brief with the PR, branch, remote, findings, and gate output. Tell
    it to follow `/ship` for the fix, gate, and screenshots. Use the PR-branch
    worktree steps in the `delegation-loop` skill; it pushes to the same branch.
-3. Every 60 seconds, read the head SHA:
-   `gh pr view <number> --repo OWNER/REPO --json headRefOid -q .headRefOid`.
-   Stop waiting when it changes or the fix worker ends. If it ends with no push,
-   follow steps 4 and 5 of "Fix worker models".
-4. When the SHA changes, review it as the next round. Repeat until
-   `Verdict: Ship`.
-5. If the stall rule blocks the PR, post the `Loop:` comment from step 3 of "Fix
-   worker models" and report to the orchestrator.
+3. Watch the process in the background for updates to the branch or a 45 minute timeout. Monitor & intervene when necessary.
+4. If/When the SHA changes, review it as the next round. Repeat until the PR is production-ready.
 
-Report the final verdict to the orchestrator. The owner merges. You never merge.
+Report the final verdict to the orchestrator.
