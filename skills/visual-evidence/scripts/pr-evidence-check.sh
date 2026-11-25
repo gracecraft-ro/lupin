@@ -95,14 +95,34 @@ fi
 bad=0
 for n in "${prs[@]}"; do
   [ -n "$n" ] || continue
-  files=$(gh pr view "$n" --repo "$repo" --json files --jq '.files[].path') || {
-    echo "error #$n: cannot read the changed files" >&2
+  # Count the files that this pull request's own commits change. A stacked
+  # pull request gets its base's files in its diff, and a body phrase is not
+  # proof, so the body cannot exempt it.
+  oids=$(gh api --paginate "repos/$repo/pulls/$n/commits" --jq '.[] | select((.parents|length) < 2) | .sha') || {
+    echo "error #$n: cannot read the commits" >&2
     bad=1
     continue
   }
-  vis=$(printf '%s\n' "$files" | grep -E "$visual_re" | grep -vE '^tests/' | head -1)
+  own=""
+  own_ok=1
+  for oid in $oids; do
+    changed=$(gh api "repos/$repo/commits/$oid" --jq '.files[].filename') || {
+      echo "error #$n: cannot read the files of commit $oid" >&2
+      bad=1
+      own_ok=0
+      break
+    }
+    own="$own$changed"$'\n'
+  done
+  [ "$own_ok" -eq 1 ] || continue
+  if [ -z "$own" ]; then
+    # A pull request always has a commit. When the read gives none, fall back to
+    # the diff so that the gate cannot pass by accident.
+    own=$(gh pr view "$n" --repo "$repo" --json files --jq '.files[].path') || own=""
+  fi
+  vis=$(printf '%s\n' "$own" | grep -E "$visual_re" | grep -vE '^tests/' | head -1)
   if [ -z "$vis" ]; then
-    echo "n/a   #$n (no visual files)"
+    echo "n/a   #$n (no visual files in the PR commits)"
     continue
   fi
   cnt=$(gh api --paginate "repos/$repo/issues/$n/comments" \
@@ -111,15 +131,6 @@ for n in "${prs[@]}"; do
   body=$(gh pr view "$n" --repo "$repo" --json body --jq .body) || body=""
   issue_only=$(printf '%s' "$body" | grep -ciE 'attached (in|on) the issue|issue comment')
   impact=$(printf '%s' "$body" | grep -ciE '^User impact:')
-  # Exemption: a pull request stacked on another pull request. Its body says the
-  # visual files in the diff come from the base, it names the user impact, and it
-  # adds no picture of its own.
-  if printf '%s' "$body" | grep -qiE 'visual files in the diff (come from|are)|^Evidence: not needed'; then
-    if [ "$impact" -ge 1 ] && [ "$cnt" -lt "$min_pictures" ]; then
-      echo "exempt #$n (stacked: body says the visual files come from the base)"
-      continue
-    fi
-  fi
   msg=""
   [ "$cnt" -lt "$min_pictures" ] && msg="$msg pictures-on-the-PR=$cnt(need $min_pictures)"
   [ "$issue_only" -gt 0 ] && msg="$msg body-says-pictures-are-on-the-issue"

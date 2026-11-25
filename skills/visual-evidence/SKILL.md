@@ -31,12 +31,14 @@ tab.
 $SKILL/scripts/pr-evidence-check.sh --repo OWNER/REPO [PR ...]
 ```
 
-- It prints `ok`, `FAIL`, `exempt`, or `n/a` for each pull request. `n/a` means
-  no visual file changed. Exit 1 means at least one pull request failed.
-- A stacked pull request is `exempt`. Its body says the visual files in the
-  diff come from the base pull request (or `Evidence: not needed`), it carries
-  the `User impact:` line, and it adds no picture of its own. Say which base
-  pull request owns the pictures.
+- It prints `ok`, `FAIL`, or `n/a` for each pull request. Exit 1 means at
+  least one pull request failed.
+- The checker reads the commits of the pull request, not its whole diff. It
+  prints `n/a` when no file that those commits change is visual. A stacked pull
+  request therefore passes on its own work, not on its base. No sentence in the
+  body can exempt a pull request. When a base pull request owns the pictures,
+  say which one in the body; the stacked pull request still needs its own
+  pictures when its own commits change a visual file.
 - A repository with other visual paths passes `--visual-glob REGEX`, one per
   path group. The default covers common web paths and the .svelte, .vue, .css,
   .scss, and .html files.
