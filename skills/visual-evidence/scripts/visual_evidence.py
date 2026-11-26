@@ -432,7 +432,8 @@ def cmd_pair(args, folder):
         # Marks use the pixels of the saved image. The crop does not move them.
         x0, y0 = (crop[2], crop[3]) if crop else (0, 0)
         inputs += ["-i", mark_png(marks, (x0, y0, w2, h2), THEMES[args.theme], folder)]
-        after_part = f"[1:v]{crop_part}null[pic];[pic][2:v]overlay=0:0,"
+        # Overlay in RGB. The default YUV round trip shifts colours and drops the frame.
+        after_part = f"[1:v]{crop_part}null[pic];[pic][2:v]overlay=0:0:format=rgb,format=rgb24,"
         legend = [f"{number}. {text}" for number, (_, _, text) in enumerate(marks, start=1)]
         panel_h = height + 2 + label_band(nominal)  # frame and label strip included
         extra = legend_filters(legend, row_w, panel_h, args.faces, folder, caption_size)

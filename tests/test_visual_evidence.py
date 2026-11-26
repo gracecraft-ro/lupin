@@ -229,6 +229,38 @@ class VisualEvidenceTests(unittest.TestCase):
         )
 
     @unittest.skipUnless(HAVE_RSVG, "needs rsvg-convert")
+    def test_pair_mark_leaves_the_after_panel_as_before(self):
+        before = make_png(self.folder, "before.png", 64, 40, "red")
+        after = make_png(self.folder, "after.png", 400, 300, "0x2a6fdb")
+        plain = os.path.join(self.folder, "plain.png")
+        marked = os.path.join(self.folder, "marked.png")
+        self.assertEqual(
+            run_tool("pair", before, after, "--caption", "Box", "--out", plain).returncode,
+            0,
+        )
+        result = run_tool(
+            "pair",
+            before,
+            after,
+            "--caption",
+            "Box",
+            "--mark",
+            "100",
+            "75",
+            "Corner",
+            "--out",
+            marked,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, _, rows = decode_rgb(marked)
+        _, _, plain_rows = decode_rgb(plain)
+        # Rows above the After frame (y 124) hold the caption and the label strip. They must match.
+        self.assertEqual(rows[:124], plain_rows[:124])
+        # Frame corner at (122, 124), and an image pixel away from the mark.
+        self.assertEqual(pixel(rows, 122, 124), pixel(plain_rows, 122, 124))
+        self.assertEqual(pixel(rows, 300, 300), pixel(plain_rows, 300, 300))
+
+    @unittest.skipUnless(HAVE_RSVG, "needs rsvg-convert")
     def test_pair_mark_outside_the_picture_stops_with_its_coordinates(self):
         before = make_png(self.folder, "before.png", 64, 40, "red")
         after = make_png(self.folder, "after.png", 64, 40, "blue")
