@@ -63,6 +63,30 @@ def make_png(folder, name, width, height, color):
     return path
 
 
+def decode_rgb(path):
+    """Decode a PNG that ffmpeg wrote, which read_png cannot. Return (width, height, rows)."""
+    width, height = ve.probe(path)
+    raw = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            path,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+    ).stdout
+    stride = width * 3
+    return width, height, [raw[y * stride : (y + 1) * stride] for y in range(height)]
+
+
 @unittest.skipUnless(HAVE_FFMPEG, "needs ffmpeg and ffprobe")
 class FontTests(unittest.TestCase):
     def test_bold_title_resolves_to_the_bold_file(self):
@@ -167,6 +191,109 @@ class VisualEvidenceTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--crop is outside the 64x40 image", result.stderr)
         self.assertFalse(os.path.exists(out))
+
+    @unittest.skipUnless(HAVE_RSVG, "needs rsvg-convert")
+    def test_pair_mark_draws_on_the_after_panel_and_adds_a_legend(self):
+        before = make_png(self.folder, "before.png", 64, 40, "red")
+        after = make_png(self.folder, "after.png", 400, 300, "0x2a6fdb")
+        plain = os.path.join(self.folder, "plain.png")
+        marked = os.path.join(self.folder, "marked.png")
+        self.assertEqual(
+            run_tool("pair", before, after, "--caption", "Box", "--out", plain).returncode,
+            0,
+        )
+        result = run_tool(
+            "pair",
+            before,
+            after,
+            "--caption",
+            "Box",
+            "--mark",
+            "100",
+            "75",
+            "Corner",
+            "--out",
+            marked,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(ve.probe(marked)[0], ve.probe(plain)[0])
+        self.assertGreater(ve.probe(marked)[1], ve.probe(plain)[1])
+        # Image origin in the output: x = 24 + (64 + 2) + 32 + 1 = 123. y = 24 + 34 + 26 + 40 + 1 = 125.
+        # The dot sits at (100, 75) of the image, so it is at (223, 200). Paper title ink is #1f2733.
+        ink = (31, 39, 51)
+        _, _, rows = decode_rgb(marked)
+        _, _, plain_rows = decode_rgb(plain)
+        self.assertTrue(all(abs(c - k) <= 10 for c, k in zip(pixel(rows, 223, 200), ink)))
+        self.assertFalse(
+            all(abs(c - k) <= 10 for c, k in zip(pixel(plain_rows, 223, 200), ink))
+        )
+
+    @unittest.skipUnless(HAVE_RSVG, "needs rsvg-convert")
+    def test_pair_mark_leaves_the_after_panel_as_before(self):
+        before = make_png(self.folder, "before.png", 64, 40, "red")
+        after = make_png(self.folder, "after.png", 400, 300, "0x2a6fdb")
+        plain = os.path.join(self.folder, "plain.png")
+        marked = os.path.join(self.folder, "marked.png")
+        self.assertEqual(
+            run_tool("pair", before, after, "--caption", "Box", "--out", plain).returncode,
+            0,
+        )
+        result = run_tool(
+            "pair",
+            before,
+            after,
+            "--caption",
+            "Box",
+            "--mark",
+            "100",
+            "75",
+            "Corner",
+            "--out",
+            marked,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        _, _, rows = decode_rgb(marked)
+        _, _, plain_rows = decode_rgb(plain)
+        # Rows above the After frame (y 124) hold the caption and the label strip. They must match.
+        self.assertEqual(rows[:124], plain_rows[:124])
+        # Frame corner at (122, 124), and an image pixel away from the mark.
+        self.assertEqual(pixel(rows, 122, 124), pixel(plain_rows, 122, 124))
+        self.assertEqual(pixel(rows, 300, 300), pixel(plain_rows, 300, 300))
+
+    @unittest.skipUnless(HAVE_RSVG, "needs rsvg-convert")
+    def test_pair_mark_outside_the_picture_stops_with_its_coordinates(self):
+        before = make_png(self.folder, "before.png", 64, 40, "red")
+        after = make_png(self.folder, "after.png", 64, 40, "blue")
+        out = os.path.join(self.folder, "pair.png")
+        result = run_tool(
+            "pair", before, after, "--caption", "OK", "--mark", "100", "10", "Far", "--out", out
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mark 1 at (100, 10) is outside the picture", result.stderr)
+        self.assertFalse(os.path.exists(out))
+
+    @unittest.skipUnless(HAVE_RSVG, "needs rsvg-convert")
+    def test_pair_mark_outside_the_crop_stops(self):
+        before = make_png(self.folder, "before.png", 400, 300, "red")
+        after = make_png(self.folder, "after.png", 400, 300, "blue")
+        out = os.path.join(self.folder, "pair.png")
+        result = run_tool(
+            "pair", before, after, "--caption", "OK", "--crop", "100:80:0:0",
+            "--mark", "150", "40", "Outside", "--out", out,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mark 1 at (150, 40) is outside the picture", result.stderr)
+
+    @unittest.skipUnless(HAVE_RSVG, "needs rsvg-convert")
+    def test_pair_mark_whose_badge_would_pass_the_edge_stops(self):
+        before = make_png(self.folder, "before.png", 64, 40, "red")
+        after = make_png(self.folder, "after.png", 400, 300, "blue")
+        out = os.path.join(self.folder, "pair.png")
+        result = run_tool(
+            "pair", before, after, "--caption", "OK", "--mark", "390", "150", "Edge", "--out", out
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("its badge would pass the edge of the picture", result.stderr)
 
     def test_gif_keeps_width_and_adds_caption_band(self):
         src = make_png(self.folder, "src.png", 240, 120, "green")
@@ -791,6 +918,60 @@ class DrawingTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         # Two 302 px frames (300 px tile + border), 24 px apart, with 24 px margins: 302*2 + 24 + 48 = 676.
         self.assertEqual(ve.probe(out)[0], 676)
+
+    def test_mark_svg_puts_dot_leader_and_badge_on_the_point(self):
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"></svg>'
+        marked = ve.mark_svg(
+            svg, [(40, 50)], (0, 0, 100, 100), ve.THEMES["paper"], flip=False
+        )
+        self.assertIn('<g id="marks">', marked)
+        self.assertIn('cx="40.0000" cy="50.0000"', marked)
+        self.assertEqual(marked.count("<text"), 1)
+        self.assertTrue(marked.endswith("</svg>"))
+
+    def test_mark_svg_negates_y_for_dxf(self):
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -100 100 100"></svg>'
+        marked = ve.mark_svg(
+            svg, [(40, 20)], (0, -100, 100, 100), ve.THEMES["paper"], flip=True
+        )
+        self.assertIn('cx="40.0000" cy="-20.0000"', marked)
+
+    def test_mark_outside_the_drawing_stops_with_its_coordinates(self):
+        with self.assertRaises(SystemExit) as caught:
+            ve.check_marks((0, 0, 100, 100), [(150, 50)], flip=False)
+        self.assertIn("mark 1 at (150, 50) is outside", str(caught.exception))
+
+    def test_mark_view_grows_so_the_badge_fits_past_the_edge(self):
+        left, top, width, height = ve.mark_view((0, 0, 100, 100), [(100, 50)], False)
+        self.assertEqual((left, top), (0, 0))
+        # The room is 0.125 of the span, and the span includes the room:
+        # right = 100 + 0.125 * right, so right = 100 / 0.875.
+        self.assertAlmostEqual(left + width, 100 / 0.875, places=3)
+        self.assertEqual(height, 100)
+
+    @unittest.skipUnless(HAVE_RSVG and HAVE_FFMPEG, "needs rsvg-convert and ffmpeg")
+    def test_marks_add_a_legend_below_at_the_same_width(self):
+        after = write_dxf(os.path.join(self.folder, "after.dxf"), rect_entities(120))
+        plain = os.path.join(self.folder, "plain.png")
+        marked = os.path.join(self.folder, "marked.png")
+        base = ["drawing", after, "--title", "Rect", "--tile-width", "300"]
+        self.assertEqual(run_tool(*base, "--out", plain).returncode, 0)
+        result = run_tool(
+            *base,
+            "--mark",
+            "0",
+            "0",
+            "Corner",
+            "--mark",
+            "120",
+            "50",
+            "Far corner",
+            "--out",
+            marked,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(ve.probe(marked)[0], ve.probe(plain)[0])
+        self.assertGreater(ve.probe(marked)[1], ve.probe(plain)[1])
 
 
 def write_pdf(path, sizes):

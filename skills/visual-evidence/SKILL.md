@@ -176,7 +176,7 @@ request" above.
 
 | Command   | Input                                              | Writes | Text                              | Other options (default)                                                        |
 | --------- | -------------------------------------------------- | ------ | --------------------------------- | ------------------------------------------------------------------------------ |
-| `pair`    | Two PNG screenshots                                | `.png` | `--title` (optional), `--caption` | `--crop W:H:X:Y` px, applied to both panels. `--size` caption px (34)          |
+| `pair`    | Two PNG screenshots                                | `.png` | `--title` (optional), `--caption` | `--crop W:H:X:Y` px, applied to both panels. `--size` caption px (34). `--mark X Y TEXT`, repeatable          |
 | `gif`     | A video or gif                                     | `.gif` | `--caption`                       | `--width` px (480), `--size` caption px (34), `--fps` (10)                     |
 | `sheet`   | Two or more PNG images                             | `.png` | `--title`                         | `--cols` (3), `--tile-width` px (the first image's width)                      |
 | `stl`     | A binary STL. `--before` takes the old STL.        | `.png` | `--title`                         | `--tile-width` px (240), `--palette` NAME (`rainbow`) or `--palette-file` FILE |
@@ -212,6 +212,38 @@ nix develop -c python3 $SKILL/scripts/visual_evidence.py pair \
 
 The crop must lie inside the image. Otherwise the command stops with
 `--crop is outside the WIDTHxHEIGHT image`.
+
+### Point at a change on a screenshot (pair --mark)
+
+Use `--mark` to point at one change on the after picture. Each mark adds a dot, a
+line to a numbered badge, and one legend line under both pictures. Repeat `--mark`
+for each point.
+
+1. Find the point in the saved image. X and Y are pixels from the top-left corner
+   of the file. A crop does not change them.
+2. Run:
+
+   ```sh
+   nix develop -c python3 $SKILL/scripts/visual_evidence.py pair \
+     before.png after.png --caption "Save button moves to the bottom bar" \
+     --mark 880 640 "Save button" --mark 120 90 "Old menu, now removed" --out pair.png
+   ```
+
+3. Open the picture. Check that each dot sits on its change. If a dot is off, fix X
+   or Y and run the command again.
+
+Rules for marks on a screenshot:
+
+- Marks go on the after picture only.
+- Each point must lie inside the image. With `--crop`, it must lie inside the crop.
+  Otherwise the command stops and prints the point, for example
+  `mark 1 at (900, 40) is outside the picture. Check its coordinates.`
+- The badge must fit inside the same area. A point too close to an edge stops the
+  command: `mark 1 at (40, 40): its badge would pass the edge of the picture. Move the point inward.`
+  Unlike a drawing, a screenshot does not grow to fit a badge.
+- The dot and badge are a fixed share of the picture size. A close-up crop gets
+  small marks. A large screenshot gets large marks.
+- The legend uses the caption size. `--size` changes it.
 
 ### New behaviour or new screen (gif)
 
@@ -291,6 +323,37 @@ Use this for a 2D drawing that code writes, such as a cut file.
   - Other layers, such as `ENGRAVE`: solid, in the caption colour.
 - Roundsmith writes these files with `writeDxf` in `src/core/export/dxf.ts`.
 - Without `--before`, the sheet has one tile. The tile is labeled with the file name.
+
+### Mark a curve or part (drawing)
+
+Use `--mark` to explain one curve or part of a drawing. Each mark adds three things to the after tile:
+
+- a dot on the curve,
+- a line from the dot to a badge,
+- a number in the badge.
+
+The legend under the sheet has one line for each mark. The line gives the number and your text.
+
+1. Pick a point on the curve. Use an end point, or a point on the path. A control point of a Bezier curve is not on the curve.
+2. Give X and Y in the drawing's own units. For a DXF, Y points up, as it does in the DXF file.
+
+   ```sh
+   nix develop -c python3 $SKILL/scripts/visual_evidence.py drawing \
+     cut-after.svg --title "Cut pattern" \
+     --mark 35 35 "Dashed S-curve. Seam path, left edge to right edge." \
+     --mark 50 47.5 "Lower arc. Fold line." --out drawing.png
+   ```
+
+3. Open the picture. Check that each dot sits on its curve. If a dot is off, fix the coordinate and run the command again.
+
+Rules for marks:
+
+- Marks go on the after drawing only. The before tile has no marks.
+- Each mark point must be inside the drawing. Otherwise the command stops and prints the point.
+- A badge can sit past the drawing edge. The view grows so the badge fits. Both tiles use the grown view.
+- Each legend line is at most 4 lines long, the same as a caption.
+- The mark numbers use DejaVu Sans Mono bold. `--font` does not change them.
+- The legend uses the caption size (34 px).
 
 ### PDF pages
 
