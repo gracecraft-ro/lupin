@@ -295,6 +295,15 @@ def make_checkout(tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def isolated_xdg_config_home(monkeypatch, tmp_path_factory):
+    """Point `XDG_CONFIG_HOME` at a fresh empty directory for each test.
+
+    A real `lupin/model-tiers.json` preference file must not change results.
+    """
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg-config")))
+
+
+@pytest.fixture(autouse=True)
 def clean_lupin_env(monkeypatch, tmp_path):
     """Remove LUPIN_* settings and keep loop state in this test's directory.
 

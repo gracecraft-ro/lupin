@@ -476,6 +476,12 @@ key wins over the directory.
 
 - **Purpose**: a JSON file with the model tiers for routing.
 - **Default**: the bundled file `src/lupin/model-tiers.json`.
+- **Resolution**: Lupin uses the first source that is available:
+  1. `LUPIN_MODEL_TIERS`.
+  2. `$XDG_CONFIG_HOME/lupin/model-tiers.json` (default
+     `~/.config/lupin/model-tiers.json`). Lupin uses this file only when it
+     exists.
+  3. The bundled file `src/lupin/model-tiers.json`.
 - **Effect**: `route`, `review-route`, the Models page, and the benchmark
   fallback read this file. An empty value is an error:
   `LUPIN_MODEL_TIERS must name a file`. The file format is in `README.md`.
@@ -569,7 +575,12 @@ systemd gives a credential to a service as a file in
 
 ### Model tiers file
 
-- **Path**: `LUPIN_MODEL_TIERS`, or the bundled `src/lupin/model-tiers.json`.
+- **Path**: the first source that is available:
+  1. `LUPIN_MODEL_TIERS`.
+  2. `$XDG_CONFIG_HOME/lupin/model-tiers.json` (default
+     `~/.config/lupin/model-tiers.json`). Lupin uses this file only when it
+     exists.
+  3. The bundled file `src/lupin/model-tiers.json`.
 - **Format**: see "Quick start" in `README.md`.
 
 ### Files in the loop state directory

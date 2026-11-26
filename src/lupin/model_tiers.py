@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from importlib import resources
+from pathlib import Path
 
 SETTING = "LUPIN_MODEL_TIERS"
 TIER_ORDER = ("tier0", "tier1", "tier2")
@@ -19,11 +20,28 @@ def default_path() -> str:
     return str(resources.files("lupin").joinpath("model-tiers.json"))
 
 
+def _config_home() -> Path:
+    """`$XDG_CONFIG_HOME`, or `~/.config` when it is unset or empty."""
+    configured = os.environ.get("XDG_CONFIG_HOME")
+    if configured:
+        return Path(configured)
+    return Path.home() / ".config"
+
+
+def preference_path() -> Path:
+    """The user's model-tier file under the config home. It can be absent."""
+    return _config_home() / "lupin" / "model-tiers.json"
+
+
 def path(default: str | None = None) -> str:
-    """Return the configured file, or the bundled file when unset."""
+    """Return the first source that is set: `LUPIN_MODEL_TIERS`, then the
+    preference file at `preference_path()`, then `default` or the bundled file."""
     configured = os.environ.get(SETTING)
     if configured is not None:
         return configured
+    preference = preference_path()
+    if preference.is_file():
+        return str(preference)
     return default if default is not None else default_path()
 
 

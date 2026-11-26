@@ -50,15 +50,19 @@ $ lupin hold demo --holder me --wait 5 -- echo inside-lease
 ```
 
 The route categories are `coding`, `general`, `frontend-ui`, `translation`,
-`prose`, and `cad-spatial`. If `LUPIN_MODEL_TIERS` is not set, Lupin uses the
-bundled `src/lupin/model-tiers.json` file. To use your own model tiers, set it
-to a JSON file. The file must have the category that `route` selects. A category
-has a `tiers` object with one or more of `tier0`, `tier1`, and `tier2`. Each
-tier is a list of `{model, effort}` choices that Lupin tries in order. Effort
-must be `low`, `medium`, `high`, or `xhigh`. If a route needs an omitted tier,
-Lupin uses the next higher tier. If no higher tier exists, the route reports an
-error. Optional fields are `source`, `last_verified`, and `note`. Lupin ignores
-a top-level key that starts with `_`. The Models page shows the file path.
+`prose`, and `cad-spatial`. Lupin uses the first model-tier source that is
+available: `LUPIN_MODEL_TIERS`, then
+`$XDG_CONFIG_HOME/lupin/model-tiers.json` (default
+`~/.config/lupin/model-tiers.json`) when that file exists, then the bundled
+`src/lupin/model-tiers.json`. To use your own model tiers, set the variable to
+a JSON file or write the preference file. The file must have the category that
+`route` selects. A category has a `tiers` object with one or more of `tier0`,
+`tier1`, and `tier2`. Each tier is a list of `{model, effort}` choices that
+Lupin tries in order. Effort must be `low`, `medium`, `high`, or `xhigh`. If a
+route needs an omitted tier, Lupin uses the next higher tier. If no higher tier
+exists, the route reports an error. Optional fields are `source`,
+`last_verified`, and `note`. Lupin ignores a top-level key that starts with `_`.
+The Models page shows the file path.
 
 ```json
 {
