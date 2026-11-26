@@ -424,15 +424,27 @@ def cmd_pair(args, folder):
         args.faces, canvas_w, args.title, args.caption, title_size, caption_size, folder
     )
     crop_part = crop_filter(crop)
+    inputs = ["-i", before, "-i", after]
+    after_part = f"[1:v]{crop_part}"
+    extra = []  # the legend, under the pair
+    marks = parse_marks(args.mark)
+    if marks:
+        # Marks use the pixels of the saved image. The crop does not move them.
+        x0, y0 = (crop[2], crop[3]) if crop else (0, 0)
+        inputs += ["-i", mark_png(marks, (x0, y0, w2, h2), THEMES[args.theme], folder)]
+        after_part = f"[1:v]{crop_part}null[pic];[pic][2:v]overlay=0:0,"
+        legend = [f"{number}. {text}" for number, (_, _, text) in enumerate(marks, start=1)]
+        panel_h = height + 2 + label_band(nominal)  # frame and label strip included
+        extra = legend_filters(legend, row_w, panel_h, args.faces, folder, caption_size)
     chain = (
         f"[0:v]{crop_part}{panel_chain(height, 'Before', size, nominal, args.faces['label'])}[a];"
-        f"[1:v]{crop_part}{panel_chain(height, 'After', size, nominal, args.faces['label'])}[b];"
+        f"{after_part}{panel_chain(height, 'After', size, nominal, args.faces['label'])}[b];"
         f"[a]pad=iw+{PAIR_GAP}:ih:0:0:{CANVAS}[a2];"
         f"[a2][b]hstack=inputs=2"
     )
     run_ffmpeg(
-        ["-i", before, "-i", after],
-        output_args(",".join([chain, canvas_pad(top), *head]), out, args.fps),
+        inputs,
+        output_args(",".join([chain, *extra, canvas_pad(top), *head]), out, args.fps),
         folder,
     )
     report(out)
@@ -469,12 +481,11 @@ def cmd_sheet(args, folder):
     make_sheet(items, args, checked_out(args.out, ".png"), folder)
 
 
-def legend_filters(lines, width, height, faces, folder):
+def legend_filters(lines, width, height, faces, folder, caption_size=CAPTION_PX):
     """Return the filters that draw a legend under a grid of width x height px.
 
     Each line wraps to width px in the caption face. The next line starts below it.
     """
-    _, caption_size, _ = type_sizes()
     wrapped = [wrap(line, width, faces["caption"], caption_size, folder) for line in lines]
     heights = [text_height(len(entry), caption_size) for entry in wrapped]
     total = sum(heights) + LEGEND_ENTRY_GAP * (len(lines) - 1)
@@ -738,14 +749,25 @@ def parse_marks(raw):
     return marks
 
 
-def check_marks(view, points, flip):
+def check_marks(view, points, flip, what="drawing"):
     """Stop unless every (x, y) point lies on the drawing. flip is True for a DXF, whose y points up."""
     left, top, width, height = view
     for number, (x, given_y) in enumerate(points, start=1):
         y = -given_y if flip else given_y
         if not (left <= x <= left + width and top <= y <= top + height):
             die(
-                f"mark {number} at ({x:g}, {given_y:g}) is outside the drawing. Check its coordinates."
+                f"mark {number} at ({x:g}, {given_y:g}) is outside the {what}. Check its coordinates."
+            )
+
+
+def check_badges(view, points):
+    """Stop unless every badge lies inside the picture. A picture cannot grow past its edge."""
+    left, top, width, height = view
+    reach = max(width, height) * (MARK_OFFSET + MARK_BADGE)  # the badge's far edge, from its point
+    for number, (x, y) in enumerate(points, start=1):
+        if x + reach > left + width or y - reach < top:
+            die(
+                f"mark {number} at ({x:g}, {y:g}): its badge would pass the edge of the picture. Move the point inward."
             )
 
 
@@ -790,6 +812,32 @@ def mark_svg(text, points, view, theme, flip):
     if end < 0:
         die("the SVG has no closing </svg> tag. Marks cannot be added.")
     return text[:end] + '<g id="marks">' + "".join(shapes) + "</g>" + text[end:]
+
+
+def mark_png(marks, region, theme, folder):
+    """Return a PNG of the marks, the size of region, with transparent pixels elsewhere.
+
+    region is (x, y, width, height) in the picture's pixels. Each mark is an (x, y, text) in those pixels.
+    """
+    need("rsvg-convert")
+    points = [(x, y) for x, y, _ in marks]
+    check_marks(region, points, False, what="picture")
+    check_badges(region, points)
+    left, top, width, height = region
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="{left} {top} {width} {height}"></svg>'
+    )
+    svg_path = os.path.join(folder, "marks.svg")
+    png_path = os.path.join(folder, "marks.png")
+    with open(svg_path, "w", encoding="utf-8") as handle:
+        handle.write(mark_svg(svg, points, region, theme, flip=False))
+    result = subprocess.run(
+        ["rsvg-convert", "--output", png_path, svg_path], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        die("rsvg-convert failed:\n" + result.stderr.strip())
+    return png_path
 
 
 def cmd_drawing(args, folder):
@@ -1001,6 +1049,14 @@ def build_parser():
     )
     pair.add_argument(
         "--size", type=int, help=f"caption font size in px (default: {CAPTION_PX})"
+    )
+    pair.add_argument(
+        "--mark",
+        nargs=3,
+        action="append",
+        metavar=("X", "Y", "TEXT"),
+        help="number a point on the after picture and add TEXT to the legend. "
+        "X and Y are pixels from the top-left corner of the saved image. Repeat for each mark.",
     )
 
     gif = sub.add_parser("gif", parents=[common], help="caption bar on a video or gif")

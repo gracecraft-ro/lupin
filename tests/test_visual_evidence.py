@@ -63,6 +63,30 @@ def make_png(folder, name, width, height, color):
     return path
 
 
+def decode_rgb(path):
+    """Decode a PNG that ffmpeg wrote, which read_png cannot. Return (width, height, rows)."""
+    width, height = ve.probe(path)
+    raw = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            path,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+    ).stdout
+    stride = width * 3
+    return width, height, [raw[y * stride : (y + 1) * stride] for y in range(height)]
+
+
 @unittest.skipUnless(HAVE_FFMPEG, "needs ffmpeg and ffprobe")
 class FontTests(unittest.TestCase):
     def test_bold_title_resolves_to_the_bold_file(self):
@@ -167,6 +191,77 @@ class VisualEvidenceTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--crop is outside the 64x40 image", result.stderr)
         self.assertFalse(os.path.exists(out))
+
+    @unittest.skipUnless(HAVE_RSVG, "needs rsvg-convert")
+    def test_pair_mark_draws_on_the_after_panel_and_adds_a_legend(self):
+        before = make_png(self.folder, "before.png", 64, 40, "red")
+        after = make_png(self.folder, "after.png", 400, 300, "0x2a6fdb")
+        plain = os.path.join(self.folder, "plain.png")
+        marked = os.path.join(self.folder, "marked.png")
+        self.assertEqual(
+            run_tool("pair", before, after, "--caption", "Box", "--out", plain).returncode,
+            0,
+        )
+        result = run_tool(
+            "pair",
+            before,
+            after,
+            "--caption",
+            "Box",
+            "--mark",
+            "100",
+            "75",
+            "Corner",
+            "--out",
+            marked,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(ve.probe(marked)[0], ve.probe(plain)[0])
+        self.assertGreater(ve.probe(marked)[1], ve.probe(plain)[1])
+        # Image origin in the output: x = 24 + (64 + 2) + 32 + 1 = 123. y = 24 + 34 + 26 + 40 + 1 = 125.
+        # The dot sits at (100, 75) of the image, so it is at (223, 200). Paper title ink is #1f2733.
+        ink = (31, 39, 51)
+        _, _, rows = decode_rgb(marked)
+        _, _, plain_rows = decode_rgb(plain)
+        self.assertTrue(all(abs(c - k) <= 10 for c, k in zip(pixel(rows, 223, 200), ink)))
+        self.assertFalse(
+            all(abs(c - k) <= 10 for c, k in zip(pixel(plain_rows, 223, 200), ink))
+        )
+
+    @unittest.skipUnless(HAVE_RSVG, "needs rsvg-convert")
+    def test_pair_mark_outside_the_picture_stops_with_its_coordinates(self):
+        before = make_png(self.folder, "before.png", 64, 40, "red")
+        after = make_png(self.folder, "after.png", 64, 40, "blue")
+        out = os.path.join(self.folder, "pair.png")
+        result = run_tool(
+            "pair", before, after, "--caption", "OK", "--mark", "100", "10", "Far", "--out", out
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mark 1 at (100, 10) is outside the picture", result.stderr)
+        self.assertFalse(os.path.exists(out))
+
+    @unittest.skipUnless(HAVE_RSVG, "needs rsvg-convert")
+    def test_pair_mark_outside_the_crop_stops(self):
+        before = make_png(self.folder, "before.png", 400, 300, "red")
+        after = make_png(self.folder, "after.png", 400, 300, "blue")
+        out = os.path.join(self.folder, "pair.png")
+        result = run_tool(
+            "pair", before, after, "--caption", "OK", "--crop", "100:80:0:0",
+            "--mark", "150", "40", "Outside", "--out", out,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("mark 1 at (150, 40) is outside the picture", result.stderr)
+
+    @unittest.skipUnless(HAVE_RSVG, "needs rsvg-convert")
+    def test_pair_mark_whose_badge_would_pass_the_edge_stops(self):
+        before = make_png(self.folder, "before.png", 64, 40, "red")
+        after = make_png(self.folder, "after.png", 400, 300, "blue")
+        out = os.path.join(self.folder, "pair.png")
+        result = run_tool(
+            "pair", before, after, "--caption", "OK", "--mark", "390", "150", "Edge", "--out", out
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("its badge would pass the edge of the picture", result.stderr)
 
     def test_gif_keeps_width_and_adds_caption_band(self):
         src = make_png(self.folder, "src.png", 240, 120, "green")
