@@ -98,7 +98,8 @@ A PR is ready for production when all three are true:
 
 - It is open on upstream, `OWNER/REPO`, with base `main`.
 - Its latest formal review is an approval, and that review's `commit_id` is the
-  current head SHA (`headRefOid`). A review of an older SHA does not count.
+  current head SHA (`headRefOid`). A review of an older SHA does not count. An
+  approval with an empty body is not a review of the head. It does not count.
 - The repo's full gate, as its `AGENTS.md` defines it, passes at that SHA.
 
 It does not need to contain the current `main`. Skip a PR when the latest
@@ -123,14 +124,15 @@ title,body,labels > FILE` for the linked issue, or `gh pr view` with the same
    Run `lupin route CATEGORY LEVEL --no-bmo --json`. Use the `model` and
    `effort` that it gives. If the command fails, or the output has
    `wait_seconds`, the fix worker cannot start now. Stop and report it.
-3. Stall rule ("raise the fix worker one model tier"). At LEVEL `size-m`: when
-   the same finding or failing check is in 3 verdicts in a row, change LEVEL to
-   `size-l`. At LEVEL `size-l`: when the same finding or failing check is in 3
-   verdicts in a row, the PR is blocked on an owner decision. Two `Round`
-   reviews with the same round number at the same head SHA count as one verdict.
-   Count only verdicts after the first `Round` line that says `size-l`, or all
-   verdicts if the PR started at `size-l`. Do not start a fix worker on a
-   blocked PR. Post the reason and the head SHA as a `Loop:` PR comment.
+3. Stall rule ("raise one tier"). When the same finding or failing check is in
+   3 verdicts in a row, the fix is wrong. Raise the fix worker LEVEL and the
+   reviewer LEVEL one tier: `size-m` to `size-l`, then `size-l` to `size-xl`.
+   At `size-xl`, the PR is blocked on an owner decision. That is the final stop.
+   Two `Round` reviews with the same round number at the same head SHA count as
+   one verdict. Count only verdicts after the first `Round` line that shows the
+   current LEVEL, or all verdicts if the PR started at that LEVEL. Do not start
+   a fix worker on a blocked PR. Post the reason and the head SHA as a `Loop:`
+   PR comment.
 4. If there is no push 30 minutes after the fix worker starts, ask it for the
    result (Herdr: `herdr agent prompt NAME "report the result" --wait --timeout
 120000`, with the agent name or its pane ID). If it has none, stop it (Herdr:
@@ -509,6 +511,11 @@ or two PRs. Prefer one tier higher when quota allows, but use frontier models
 sparingly. A reviewer verdict in the last 30 minutes is a result for the worker
 check.
 
+A change to core logic, an export, or a visible screen needs a reviewer at
+`size-l` or higher, and a second reviewer on a different model. The repo's
+`AGENTS.md` names its high-risk surface. If it does not, treat each change to
+shipped code as high-risk.
+
 For a visual PR, check for uploaded screenshots from `user-attachments` before
 dispatch. `/ship` owns screenshot capture and upload. An `evidence/` path is
 not an attachment.
@@ -546,13 +553,13 @@ Check that the latest formal approval matches the current `headRefOid`:
 
 ```sh
 gh api --paginate --slurp repos/OWNER/REPO/pulls/<PR-number>/reviews \
-  --jq '[.[][] | select(.state == "APPROVED"
+  | jq '[.[][] | select(.state == "APPROVED"
     or .state == "CHANGES_REQUESTED")] | last
-    | if .state == "APPROVED" then .commit_id else null end'
+    | if .state == "APPROVED" and (.body | length) > 0 then .commit_id else null end'
 ```
 
-A `null` result means there is no formal approval. `COMMENTED` reviews do not
-count as formal approvals.
+A `null` result means there is no formal approval with a body. `COMMENTED`
+reviews do not count as formal approvals.
 
 Read all new issue and PR comments:
 

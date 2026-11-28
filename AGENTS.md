@@ -714,8 +714,10 @@ develop`. The start command replaces inherited `LUPIN_REDIS_*` values with
 7. **Do not stop after a review.** A review with findings starts the next round.
    Send the findings to a fix worker. Then get a new review at the new head.
    Repeat until the PR is ready for production (see "Pull requests, review, and
-   handoff"). There is no limit on rounds. If the same finding comes back for 3
-   rounds, give the fix worker a model one tier higher.
+   handoff"). If the same finding comes back in 3 verdicts in a row, raise the
+   fix worker and the reviewer one tier. At `size-xl`, the PR is blocked. Post
+   a `Loop:` comment and take the next item. See the stall rule in
+   `delegation-loop`.
 8. **Work the queue until nothing is left.** Nothing is left when all of these
    are true. No open issue that you may take is unclaimed. Every PR you own is
    ready for production. No PR waits for a review. No research, docs, or triage
